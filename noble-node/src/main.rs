@@ -3,6 +3,9 @@
 
 //! NOBLE protocol node binary — orchestrates all subsystems.
 
+#[allow(dead_code)]
+mod config;
+
 fn main() {
     println!("noble-node v{}", env!("CARGO_PKG_VERSION"));
 }

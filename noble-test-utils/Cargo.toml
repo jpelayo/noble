@@ -1,0 +1,17 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-test-utils"
+description = "Shared test utilities, fixture builders and helpers for NOBLE protocol integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noble-core.workspace = true
+noble-crypto.workspace = true
+noble-codec.workspace = true
+tempfile.workspace = true

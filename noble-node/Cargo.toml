@@ -20,5 +20,8 @@ noble-consensus.workspace = true
 noble-network.workspace = true
 noble-api.workspace = true
 noble-wallet.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
+noble-test-utils.workspace = true

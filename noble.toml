@@ -1,0 +1,70 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# NOBLE Protocol Node Configuration
+# Copy this file to your data directory and adjust values as needed.
+
+[network]
+# Address to listen for incoming P2P connections.
+listen_addr = "/ip4/0.0.0.0/tcp/30333"
+
+# Seed nodes to connect to on startup (multiaddr format).
+seeds = []
+
+# Maximum number of connected peers.
+max_peers = 50
+
+# Ban score threshold — peers exceeding this score are disconnected and banned.
+ban_threshold = 100
+
+[storage]
+# Directory where blockchain data (RocksDB) is stored.
+data_dir = "data"
+
+# RocksDB block cache size in megabytes.
+cache_size_mb = 256
+
+# Enable Zstd compression on the blocks column family.
+compression = true
+
+[consensus]
+# Path to the validator's private key file (Ed25519 or secp256k1).
+# Leave empty to run as a non-validating (observer) node.
+validator_key_path = ""
+
+# Path to the local validator list file (one public key per line).
+validator_list_path = "validators.txt"
+
+[api]
+# JSON-RPC HTTP server bind address.
+rpc_addr = "127.0.0.1:9933"
+
+# WebSocket server bind address for subscriptions.
+ws_addr = "127.0.0.1:9944"
+
+# Maximum concurrent RPC connections.
+max_connections = 100
+
+# Rate limit: maximum requests per second per client IP.
+rate_limit = 30
+
+[wallet]
+# Directory where encrypted keystores are stored.
+keystore_path = "keystore"
+
+[logging]
+# Log level: error, warn, info, debug, trace.
+level = "info"
+
+# Log file path. Empty string means stdout only.
+file = ""
+
+# Log file rotation: "daily", "hourly", or "never".
+rotation = "daily"
+
+[metrics]
+# Prometheus metrics endpoint bind address.
+prometheus_addr = "127.0.0.1:9615"
+
+# Enable or disable metrics collection.
+enabled = true

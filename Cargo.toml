@@ -13,6 +13,7 @@ members = [
     "noble-api",
     "noble-wallet",
     "noble-node",
+    "noble-test-utils",
 ]
 resolver = "2"
 
@@ -35,10 +36,13 @@ noble-consensus = { path = "noble-consensus" }
 noble-network = { path = "noble-network" }
 noble-api = { path = "noble-api" }
 noble-wallet = { path = "noble-wallet" }
+noble-test-utils = { path = "noble-test-utils" }
 
 # External dependencies (added as implementation progresses)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tempfile = "3"
 # ciborium = "0.2"
-# serde = { version = "1", features = ["derive"] }
 # sha2 = "0.10"
 # ed25519-dalek = { version = "2", features = ["batch"] }
 # k256 = "0.13"
