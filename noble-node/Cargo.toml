@@ -1,0 +1,24 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-node"
+description = "NOBLE protocol node binary — orchestrates all subsystems"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noble-codec.workspace = true
+noble-crypto.workspace = true
+noble-core.workspace = true
+noble-storage.workspace = true
+noble-mempool.workspace = true
+noble-consensus.workspace = true
+noble-network.workspace = true
+noble-api.workspace = true
+noble-wallet.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,15 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-codec"
+description = "CBOR serialization traits and canonical encoding for the NOBLE protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]

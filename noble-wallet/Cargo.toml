@@ -1,0 +1,17 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-wallet"
+description = "Key storage, transaction builder and fee estimation for the NOBLE protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noble-core.workspace = true
+noble-crypto.workspace = true
+
+[dev-dependencies]

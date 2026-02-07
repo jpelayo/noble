@@ -1,0 +1,20 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-consensus"
+description = "Proof of Reputation cycle engine, vote management and fork tracking for the NOBLE protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noble-core.workspace = true
+noble-crypto.workspace = true
+noble-storage.workspace = true
+noble-mempool.workspace = true
+noble-network.workspace = true
+
+[dev-dependencies]

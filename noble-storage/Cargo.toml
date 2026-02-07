@@ -1,0 +1,16 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-storage"
+description = "RocksDB storage engine with 6 column families for the NOBLE protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+noble-core.workspace = true
+
+[dev-dependencies]
