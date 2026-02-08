@@ -1,0 +1,227 @@
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
+
+//! Property-based tests for NOBLE core types using proptest.
+//!
+//! Verifies fundamental invariants over 10,000+ random inputs:
+//! 1. CBOR roundtrip: from_cbor(to_cbor(x)) == x
+//! 2. Canonical idempotency: canonical(decode(canonical(x))) == canonical(x)
+//! 3. tx_id determinism: same tx → same tx_id
+
+use noble_codec::NobleCbor;
+use noble_core::{MetadataEntry, Transaction, MAINNET_CHAIN_ID};
+use noble_crypto::{
+    ed25519, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+};
+use proptest::prelude::*;
+
+// --- Strategies ---
+
+fn arb_hash256() -> impl Strategy<Value = Hash256> {
+    prop::array::uniform32(any::<u8>()).prop_map(Hash256::from_bytes)
+}
+
+fn arb_metadata_entry() -> impl Strategy<Value = MetadataEntry> {
+    (
+        "[a-z]{1,16}",                              // key: 1-16 ASCII lowercase chars
+        prop::collection::vec(any::<u8>(), 1..=32), // value: 1-32 bytes
+    )
+        .prop_map(|(key, value)| MetadataEntry { key, value })
+}
+
+fn arb_signature_envelope() -> impl Strategy<Value = SignatureEnvelope> {
+    (
+        prop::collection::vec(any::<u8>(), 32..=32), // public_key
+        prop::collection::vec(any::<u8>(), 64..=64), // signature
+    )
+        .prop_map(|(public_key, signature)| SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key,
+            signature,
+        })
+}
+
+fn arb_transaction() -> impl Strategy<Value = Transaction> {
+    (
+        arb_hash256(),                                          // checksum
+        1_600_000_000u64..1_800_000_000u64,                     // timestamp
+        1_000u64..100_000u64,                                   // fee
+        arb_signature_envelope(),                               // publisher_sig
+        prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
+        prop::collection::vec(arb_metadata_entry(), 0..=4),     // metadata
+    )
+        .prop_map(
+            |(checksum, timestamp, fee, publisher_sig, additional_sigs, metadata)| Transaction {
+                version: 1,
+                checksum,
+                timestamp,
+                fee,
+                publisher_sig,
+                additional_sigs,
+                metadata,
+            },
+        )
+}
+
+// --- Property: Hash256 CBOR roundtrip ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn hash256_roundtrip(hash in arb_hash256()) {
+        let bytes = hash.to_cbor().unwrap();
+        let decoded = Hash256::from_cbor(&bytes).unwrap();
+        prop_assert_eq!(hash, decoded);
+    }
+}
+
+// --- Property: Hash256 canonical idempotency ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn hash256_canonical_idempotent(hash in arb_hash256()) {
+        let canonical1 = hash.canonical_bytes().unwrap();
+        let decoded = Hash256::from_cbor(&canonical1).unwrap();
+        let canonical2 = decoded.canonical_bytes().unwrap();
+        prop_assert_eq!(canonical1, canonical2);
+    }
+}
+
+// --- Property: MetadataEntry CBOR roundtrip ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn metadata_entry_roundtrip(entry in arb_metadata_entry()) {
+        let bytes = entry.to_cbor().unwrap();
+        let decoded = MetadataEntry::from_cbor(&bytes).unwrap();
+        prop_assert_eq!(entry, decoded);
+    }
+}
+
+// --- Property: MetadataEntry canonical idempotency ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn metadata_entry_canonical_idempotent(entry in arb_metadata_entry()) {
+        let canonical1 = entry.canonical_bytes().unwrap();
+        let decoded = MetadataEntry::from_cbor(&canonical1).unwrap();
+        let canonical2 = decoded.canonical_bytes().unwrap();
+        prop_assert_eq!(canonical1, canonical2);
+    }
+}
+
+// --- Property: SignatureEnvelope CBOR roundtrip ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn signature_envelope_roundtrip(env in arb_signature_envelope()) {
+        let bytes = env.to_cbor().unwrap();
+        let decoded = SignatureEnvelope::from_cbor(&bytes).unwrap();
+        prop_assert_eq!(env, decoded);
+    }
+}
+
+// --- Property: Transaction CBOR roundtrip ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn transaction_roundtrip(tx in arb_transaction()) {
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
+        prop_assert_eq!(tx, decoded);
+    }
+}
+
+// --- Property: Transaction canonical idempotency ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn transaction_canonical_idempotent(tx in arb_transaction()) {
+        let canonical1 = tx.canonical_bytes().unwrap();
+        let decoded = Transaction::from_cbor(&canonical1).unwrap();
+        let canonical2 = decoded.canonical_bytes().unwrap();
+        prop_assert_eq!(canonical1, canonical2);
+    }
+}
+
+// --- Property: tx_id determinism ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn tx_id_deterministic(tx in arb_transaction()) {
+        let id1 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let id2 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        prop_assert_eq!(id1, id2);
+    }
+}
+
+// --- Property: signing message determinism ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn signing_message_deterministic(tx in arb_transaction()) {
+        let msg1 = tx.compute_signing_message().unwrap();
+        let msg2 = tx.compute_signing_message().unwrap();
+        prop_assert_eq!(msg1, msg2);
+    }
+}
+
+// --- Property: real signed transaction roundtrip with valid signatures ---
+
+#[test]
+fn signed_transaction_roundtrip_100() {
+    let (sk, pk) = ed25519::generate_keypair();
+    let priv_key = NoblePrivateKey::Ed25519(sk);
+
+    for i in 0..100u64 {
+        let checksum = sha256(&i.to_be_bytes());
+        let mut tx = Transaction {
+            version: 1,
+            checksum,
+            timestamp: 1_700_000_000 + i,
+            fee: 1_000 + i,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.clone(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+
+        // Roundtrip through CBOR
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
+        assert_eq!(tx, decoded);
+
+        // Canonical roundtrip
+        let canonical = tx.canonical_bytes().unwrap();
+        let decoded2 = Transaction::from_cbor(&canonical).unwrap();
+        assert_eq!(tx, decoded2);
+
+        // tx_id determinism
+        let id1 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let id2 = decoded.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(id1, id2);
+    }
+}

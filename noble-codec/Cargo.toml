@@ -11,5 +11,9 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+ciborium.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+hex.workspace = true

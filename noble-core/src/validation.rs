@@ -1,0 +1,615 @@
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
+
+//! Transaction (T1-T12) and block (B1-B12) validation pipelines.
+
+use noble_codec::NobleCbor;
+use noble_crypto::{is_recognized_scheme, NoblePublicKey};
+
+use crate::block::{Block, BlockHeader};
+use crate::constants::*;
+use crate::error::ValidationError;
+use crate::merkle::compute_merkle_root;
+use crate::metadata::validate_metadata;
+use crate::transaction::Transaction;
+
+/// Context needed for transaction validation.
+pub struct TxValidationContext {
+    /// Chain ID for tx_id computation.
+    pub chain_id: u32,
+    /// Current wall-clock time (Unix seconds).
+    pub current_time: u64,
+}
+
+/// Context needed for block validation.
+pub struct BlockValidationContext<'a> {
+    /// Chain ID for tx_id computation.
+    pub chain_id: u32,
+    /// Current wall-clock time (Unix seconds).
+    pub current_time: u64,
+    /// Parent block header (None for genesis).
+    pub parent: Option<&'a BlockHeader>,
+    /// The node's local trusted validator list.
+    pub validator_list: &'a [NoblePublicKey],
+}
+
+/// Validate a transaction against rules T1-T12.
+///
+/// Returns Ok(()) if all checks pass, or the first validation error encountered.
+pub fn validate_transaction(
+    tx: &Transaction,
+    claimed_tx_id: &noble_crypto::Hash256,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
+    // T1: Size check
+    let serialized = tx
+        .to_cbor()
+        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    if serialized.len() > MAX_TX_SIZE {
+        return Err(ValidationError::TxTooLarge {
+            size: serialized.len(),
+            max: MAX_TX_SIZE,
+        });
+    }
+
+    // T2: Version check
+    if tx.version != PROTOCOL_VERSION {
+        return Err(ValidationError::UnknownVersion(tx.version));
+    }
+
+    // T3: Checksum is [u8; 32] — enforced at compile time by Hash256
+
+    // T4: Timestamp skew
+    let diff = tx.timestamp.abs_diff(ctx.current_time);
+    if diff > MAX_TX_TIMESTAMP_SKEW {
+        return Err(ValidationError::TimestampOutOfRange {
+            tx_time: tx.timestamp,
+            current_time: ctx.current_time,
+            max_skew: MAX_TX_TIMESTAMP_SKEW,
+        });
+    }
+
+    // T5: Publisher scheme recognized
+    if !is_recognized_scheme(tx.publisher_sig.scheme_id) {
+        return Err(ValidationError::UnrecognizedScheme(
+            tx.publisher_sig.scheme_id,
+        ));
+    }
+
+    // T6: Publisher signature verification
+    let signing_msg = tx
+        .compute_signing_message()
+        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    tx.publisher_sig
+        .verify_standalone(&signing_msg)
+        .map_err(|e| ValidationError::PublisherSigInvalid(e.to_string()))?;
+
+    // T7: Additional signature verification
+    for (i, sig) in tx.additional_sigs.iter().enumerate() {
+        if !is_recognized_scheme(sig.scheme_id) {
+            return Err(ValidationError::AdditionalSigInvalid {
+                index: i,
+                reason: format!("unrecognized scheme {:#04x}", sig.scheme_id),
+            });
+        }
+        sig.verify_standalone(&signing_msg)
+            .map_err(|e| ValidationError::AdditionalSigInvalid {
+                index: i,
+                reason: e.to_string(),
+            })?;
+    }
+
+    // T8 + T9: Metadata validation
+    validate_metadata(&tx.metadata)?;
+
+    // T10: tx_id verification
+    let computed_id = tx
+        .compute_tx_id(ctx.chain_id)
+        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    if computed_id != *claimed_tx_id {
+        return Err(ValidationError::TxIdMismatch {
+            claimed: claimed_tx_id.to_string(),
+            computed: computed_id.to_string(),
+        });
+    }
+
+    // T11: Fee check
+    if tx.fee < MIN_TX_FEE {
+        return Err(ValidationError::FeeTooLow {
+            fee: tx.fee,
+            min_fee: MIN_TX_FEE,
+        });
+    }
+
+    // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
+    // which is called in T6 and T7 above.
+
+    Ok(())
+}
+
+/// Validate a block against rules B1-B12.
+///
+/// Returns Ok(()) if all checks pass, or the first validation error encountered.
+pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(), ValidationError> {
+    let header = &block.header;
+
+    // B1: Size check
+    let serialized = block
+        .to_cbor()
+        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    if serialized.len() > MAX_BLOCK_SIZE {
+        return Err(ValidationError::BlockTooLarge {
+            size: serialized.len(),
+            max: MAX_BLOCK_SIZE,
+        });
+    }
+
+    // B2: prev_block_hash
+    if let Some(parent) = ctx.parent {
+        let parent_hash = parent
+            .compute_block_hash()
+            .map_err(|e| ValidationError::Internal(e.to_string()))?;
+        if header.prev_block_hash != parent_hash {
+            return Err(ValidationError::PrevHashMismatch);
+        }
+
+        // B3: Height
+        if header.height != parent.height + 1 {
+            return Err(ValidationError::HeightMismatch {
+                height: header.height,
+                expected: parent.height + 1,
+            });
+        }
+
+        // B5: Timestamp after parent
+        if header.timestamp <= parent.timestamp {
+            return Err(ValidationError::TimestampNotAfterParent {
+                block_time: header.timestamp,
+                parent_time: parent.timestamp,
+            });
+        }
+    }
+
+    // B4: Merkle root
+    let tx_ids: Result<Vec<_>, _> = block
+        .transactions
+        .iter()
+        .map(|tx| {
+            tx.compute_tx_id(ctx.chain_id)
+                .map_err(|e| ValidationError::Internal(e.to_string()))
+        })
+        .collect();
+    let tx_ids = tx_ids?;
+    let computed_root = compute_merkle_root(&tx_ids);
+    if header.merkle_root != computed_root {
+        return Err(ValidationError::MerkleRootMismatch);
+    }
+
+    // B6: Timestamp skew
+    if header.timestamp > ctx.current_time + MAX_BLOCK_FUTURE_SKEW {
+        return Err(ValidationError::BlockTimestampSkew {
+            block_time: header.timestamp,
+            current_time: ctx.current_time,
+        });
+    }
+    if ctx.current_time > header.timestamp + MAX_BLOCK_PAST_SKEW {
+        return Err(ValidationError::BlockTimestampSkew {
+            block_time: header.timestamp,
+            current_time: ctx.current_time,
+        });
+    }
+
+    // B7: tx_count
+    if header.tx_count != block.transactions.len() as u32 {
+        return Err(ValidationError::TxCountMismatch {
+            claimed: header.tx_count,
+            actual: block.transactions.len() as u32,
+        });
+    }
+
+    // B8: Validator signature
+    let signing_msg = header
+        .compute_signing_message()
+        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    header
+        .validator_id
+        .verify(&signing_msg, &header.validator_sig)
+        .map_err(|e| ValidationError::ValidatorSigInvalid(e.to_string()))?;
+
+    // B9: Validator in list
+    if !ctx.validator_list.contains(&header.validator_id) {
+        return Err(ValidationError::ValidatorNotTrusted);
+    }
+
+    // B10: One block per cycle — deferred to consensus layer (needs cycle state)
+
+    // B11: All transactions valid
+    for (i, tx) in block.transactions.iter().enumerate() {
+        let tx_id = tx
+            .compute_tx_id(ctx.chain_id)
+            .map_err(|e| ValidationError::Internal(e.to_string()))?;
+        let tx_ctx = TxValidationContext {
+            chain_id: ctx.chain_id,
+            current_time: ctx.current_time,
+        };
+        validate_transaction(tx, &tx_id, &tx_ctx).map_err(|e| {
+            ValidationError::InvalidTransaction {
+                index: i,
+                source: Box::new(e),
+            }
+        })?;
+    }
+
+    // B12: Validator scheme recognized
+    if !is_recognized_scheme(header.validator_id.scheme_id()) {
+        return Err(ValidationError::ValidatorSchemeUnrecognized(
+            header.validator_id.scheme_id(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noble_crypto::{
+        ed25519, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+    };
+
+    // --- Test helpers ---
+
+    fn make_signed_tx(sk: &[u8], pk: &[u8]) -> (Transaction, noble_crypto::Hash256) {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let checksum = sha256(b"test document");
+        let timestamp = 1_700_000_000u64;
+        let fee = MIN_TX_FEE;
+
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            checksum,
+            timestamp,
+            fee,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    fn default_tx_ctx() -> TxValidationContext {
+        TxValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+        }
+    }
+
+    // --- T1: Size ---
+
+    #[test]
+    fn t1_valid_size() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx(&sk, &pk);
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    // --- T2: Version ---
+
+    #[test]
+    fn t2_wrong_version() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.version = 99;
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(result, Err(ValidationError::UnknownVersion(99))));
+    }
+
+    // --- T4: Timestamp ---
+
+    #[test]
+    fn t4_timestamp_too_far_future() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW + 1;
+        // Re-sign with new timestamp
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::TimestampOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn t4_timestamp_within_window() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW; // At the boundary
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    // --- T5: Scheme ---
+
+    #[test]
+    fn t5_unknown_scheme() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.publisher_sig.scheme_id = 0xFF;
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::UnrecognizedScheme(0xFF))
+        ));
+    }
+
+    // --- T6: Publisher signature ---
+
+    #[test]
+    fn t6_invalid_publisher_sig() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.publisher_sig.signature = vec![0u8; 64]; // Bad sig
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::PublisherSigInvalid(_))
+        ));
+    }
+
+    // --- T7: Additional signature ---
+
+    #[test]
+    fn t7_invalid_additional_sig() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.additional_sigs.push(SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.to_vec(),
+            signature: vec![0u8; 64], // Bad
+        });
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::AdditionalSigInvalid { index: 0, .. })
+        ));
+    }
+
+    // --- T10: tx_id mismatch ---
+
+    #[test]
+    fn t10_tx_id_mismatch() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, _) = make_signed_tx(&sk, &pk);
+        let wrong_id = Hash256::from_bytes([0xFF; 32]);
+        let result = validate_transaction(&tx, &wrong_id, &default_tx_ctx());
+        assert!(matches!(result, Err(ValidationError::TxIdMismatch { .. })));
+    }
+
+    // --- T11: Fee ---
+
+    #[test]
+    fn t11_fee_too_low() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.fee = MIN_TX_FEE - 1;
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(result, Err(ValidationError::FeeTooLow { .. })));
+    }
+
+    #[test]
+    fn t11_fee_at_minimum() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx(&sk, &pk); // Uses MIN_TX_FEE
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    // --- Block validation helpers ---
+
+    fn make_valid_block(txs: Vec<(Transaction, Hash256)>) -> (Block, NoblePrivateKey) {
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_priv = NoblePrivateKey::Ed25519(val_sk);
+        let val_pub = NoblePublicKey::Ed25519(val_pk.clone());
+
+        let transactions: Vec<Transaction> = txs.iter().map(|(tx, _)| tx.clone()).collect();
+        let tx_ids: Vec<Hash256> = txs.iter().map(|(_, id)| *id).collect();
+        let merkle_root = compute_merkle_root(&tx_ids);
+
+        let mut header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_block_hash: Hash256::ZERO,
+            merkle_root,
+            timestamp: 1_700_000_000,
+            height: 0,
+            tx_count: transactions.len() as u32,
+            validator_id: val_pub,
+            validator_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: val_pk,
+                signature: vec![],
+            },
+        };
+
+        let msg = header.compute_signing_message().unwrap();
+        header.validator_sig = val_priv.sign(&msg).unwrap();
+
+        (
+            Block {
+                header,
+                transactions,
+            },
+            val_priv,
+        )
+    }
+
+    // --- B2: prev_block_hash ---
+
+    #[test]
+    fn b2_prev_hash_mismatch() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (mut block, val_priv) = make_valid_block(vec![tx]);
+
+        // Set up a parent with a different hash
+        let parent_header = block.header.clone();
+        block.header.height = 1;
+        block.header.prev_block_hash = Hash256::from_bytes([0xFF; 32]); // Wrong
+
+        // Re-sign
+        let msg = block.header.compute_signing_message().unwrap();
+        block.header.validator_sig = val_priv.sign(&msg).unwrap();
+
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: Some(&parent_header),
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(matches!(result, Err(ValidationError::PrevHashMismatch)));
+    }
+
+    // --- B7: tx_count ---
+
+    #[test]
+    fn b7_tx_count_mismatch() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (mut block, val_priv) = make_valid_block(vec![tx]);
+        block.header.tx_count = 99; // Wrong
+
+        // Re-sign
+        let msg = block.header.compute_signing_message().unwrap();
+        block.header.validator_sig = val_priv.sign(&msg).unwrap();
+
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(matches!(
+            result,
+            Err(ValidationError::TxCountMismatch { .. })
+        ));
+    }
+
+    // --- B8: Validator signature ---
+
+    #[test]
+    fn b8_invalid_validator_sig() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (mut block, _) = make_valid_block(vec![tx]);
+        block.header.validator_sig.signature = vec![0u8; 64];
+
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(matches!(
+            result,
+            Err(ValidationError::ValidatorSigInvalid(_))
+        ));
+    }
+
+    // --- B9: Validator not trusted ---
+
+    #[test]
+    fn b9_validator_not_in_list() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (block, _) = make_valid_block(vec![tx]);
+
+        // Empty validator list
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(matches!(result, Err(ValidationError::ValidatorNotTrusted)));
+    }
+
+    // --- Valid block ---
+
+    #[test]
+    fn valid_block_with_transaction() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk);
+        let (block, _) = make_valid_block(vec![tx]);
+
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        assert!(validate_block(&block, &ctx).is_ok());
+    }
+
+    #[test]
+    fn valid_empty_block() {
+        let (block, _) = make_valid_block(vec![]);
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        assert!(validate_block(&block, &ctx).is_ok());
+    }
+
+    // --- B11: Invalid transaction in block ---
+
+    #[test]
+    fn b11_invalid_tx_in_block() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.fee = 0; // Invalid fee, but don't re-sign (will fail T11)
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+        let (block, _) = make_valid_block(vec![(tx, tx_id)]);
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(matches!(
+            result,
+            Err(ValidationError::InvalidTransaction { index: 0, .. })
+        ));
+    }
+}

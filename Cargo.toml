@@ -42,13 +42,16 @@ noble-test-utils = { path = "noble-test-utils" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tempfile = "3"
-# ciborium = "0.2"
-# sha2 = "0.10"
-# ed25519-dalek = { version = "2", features = ["batch"] }
-# k256 = "0.13"
-# rocksdb = "0.22"
+ciborium = "0.2"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["batch"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+thiserror = "2"
+hex = "0.4"
+rand = "0.8"
+proptest = "1"
+rocksdb = "0.22"
 # libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "request-response", "kad", "mdns"] }
 # jsonrpsee = { version = "0.24", features = ["server"] }
 # tokio = { version = "1", features = ["full"] }
-# thiserror = "2"
 # tracing = "0.1"

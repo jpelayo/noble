@@ -12,5 +12,12 @@ authors.workspace = true
 
 [dependencies]
 noble-codec.workspace = true
+sha2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+k256.workspace = true
+rand.workspace = true
 
 [dev-dependencies]

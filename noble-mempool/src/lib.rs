@@ -2,3 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transaction pool with 8-step admission, fee ordering and eviction for the NOBLE protocol.
+
+pub mod error;
+pub mod pool;
+pub mod sigcache;
+
+pub use error::MempoolError;
+pub use pool::{ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoChainLookup};
+pub use sigcache::SigCache;

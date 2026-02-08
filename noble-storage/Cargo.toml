@@ -11,6 +11,13 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+noble-codec.workspace = true
 noble-core.workspace = true
+noble-crypto.workspace = true
+rocksdb.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+noble-test-utils.workspace = true
+tempfile.workspace = true

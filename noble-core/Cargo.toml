@@ -13,6 +13,10 @@ authors.workspace = true
 [dependencies]
 noble-codec.workspace = true
 noble-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true
+hex.workspace = true
+proptest.workspace = true

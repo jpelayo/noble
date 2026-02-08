@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOBLE Control Panel</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/themes.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <nav id="sidebar">
+    <div class="logo">NOBLE</div>
+    <ul>
+      <li><a href="#/">Overview</a></li>
+      <li><a href="#/blocks">Blocks</a></li>
+      <li><a href="#/transactions">Transactions</a></li>
+      <li><a href="#/verify">Verify</a></li>
+      <li><a href="#/mempool">Mempool</a></li>
+      <li><a href="#/network">Network</a></li>
+      <li><a href="#/consensus">Consensus</a></li>
+      <li><a href="#/health">Health</a></li>
+    </ul>
+    <button id="theme-toggle" title="Toggle dark/light theme">Theme</button>
+  </nav>
+
+  <!-- Main content area -->
+  <main id="content">
+    <p>Loading...</p>
+  </main>
+
+  <!-- Status bar -->
+  <footer id="status-bar">
+    <span id="kpi-height">--</span> height
+    <span id="kpi-peers">--</span> peers
+    <span id="kpi-mempool">--</span> mempool
+    <span id="kpi-phase">--</span>
+    <span id="status-indicator">Connecting...</span>
+  </footer>
+
+  <!-- ECharts (vendored, loaded before app) -->
+  <!-- <script src="vendor/echarts.min.js"></script> -->
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
