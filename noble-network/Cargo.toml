@@ -13,5 +13,14 @@ authors.workspace = true
 [dependencies]
 noble-core.workspace = true
 noble-crypto.workspace = true
+libp2p.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+noble-test-utils.workspace = true

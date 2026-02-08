@@ -2,3 +2,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! libp2p transport, peer management and chain sync for the NOBLE protocol.
+//!
+//! # Architecture
+//!
+//! `noble-network` is decoupled from storage and mempool via trait abstractions
+//! ([`BlockProvider`], [`TxProvider`]). The node binary wires these together.
+//! Communication between the node and the network layer uses channel-based
+//! [`NetworkCommand`] / [`NetworkEvent`] messages.
+//!
+//! # Modules
+//!
+//! - [`config`] — Network configuration (listen address, peer limits, ban thresholds).
+//! - [`messages`] — Wire message types for sync, transaction, and gossip protocols.
+//! - [`codec`] — CBOR encoding/decoding for GossipSub payloads.
+//! - [`peer_manager`] — Peer reputation, ban scoring, and connection limits.
+//! - [`sync_manager`] — Headers-first chain synchronization state machine.
+//! - [`behaviour`] — Composite libp2p `NetworkBehaviour`.
+//! - [`transport`] — Swarm construction (TCP + Noise + Yamux).
+//! - [`service`] — Main event loop and [`NetworkHandle`].
+
+pub mod behaviour;
+pub mod codec;
+pub mod config;
+pub mod error;
+pub mod messages;
+pub mod peer_manager;
+pub mod service;
+pub mod sync_manager;
+pub mod topics;
+pub mod traits;
+pub mod transport;
+
+// Re-export primary public API types.
+pub use config::NetworkConfig;
+pub use error::NetworkError;
+pub use messages::{NetworkCommand, NetworkEvent};
+pub use peer_manager::{Direction, Misbehavior, PeerManager};
+pub use service::{start_network, NetworkHandle};
+pub use sync_manager::{SyncAction, SyncManager, SyncState};
+pub use traits::{BlockProvider, TxProvider};
