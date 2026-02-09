@@ -1,0 +1,164 @@
+/**
+ * NOBLE Dashboard — Network Page
+ * Peer table + distribution chart + sync status
+ */
+
+import { formatNumber, truncateHash } from '../utils.js';
+
+export function init(root, ctx) {
+  const { rpc, ws } = ctx;
+  const unsubs = [];
+  let peerChart = null;
+
+  root.innerHTML = `
+    <div class="page-header"><h1>Network</h1><p>Connected peers and sync status</p></div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Total Peers</div>
+        <div class="kpi-value" id="net-total">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Inbound</div>
+        <div class="kpi-value" id="net-inbound">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Outbound</div>
+        <div class="kpi-value" id="net-outbound">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Sync Status</div>
+        <div class="kpi-value" id="net-sync">--</div>
+      </div>
+    </div>
+
+    <div class="split-layout">
+      <div class="panel">
+        <div class="panel-header">Peer Distribution</div>
+        <div class="panel-body"><div id="net-chart" class="chart-container small"></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">Sync Progress</div>
+        <div class="panel-body" id="net-sync-detail"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Peer Table</div>
+      <div class="panel-body" style="padding:0">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Peer ID</th>
+              <th>Direction</th>
+              <th>Ban Score</th>
+              <th>Chain Tip</th>
+              <th>Latency</th>
+            </tr>
+          </thead>
+          <tbody id="net-peers"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const netTotal = root.querySelector('#net-total');
+  const netInbound = root.querySelector('#net-inbound');
+  const netOutbound = root.querySelector('#net-outbound');
+  const netSync = root.querySelector('#net-sync');
+  const netSyncDetail = root.querySelector('#net-sync-detail');
+  const peersTbody = root.querySelector('#net-peers');
+
+  async function loadNetwork() {
+    try {
+      const [networkInfo, peers, syncStatus] = await Promise.all([
+        rpc.call('noble_getNetworkInfo'),
+        rpc.call('noble_getPeerInfo'),
+        rpc.call('noble_getSyncStatus'),
+      ]);
+
+      netTotal.textContent = formatNumber(networkInfo.peer_count);
+      netInbound.textContent = formatNumber(networkInfo.inbound);
+      netOutbound.textContent = formatNumber(networkInfo.outbound);
+      netSync.textContent = syncStatus.state;
+
+      // Sync detail
+      netSyncDetail.innerHTML = `
+        <dl class="detail-grid">
+          <dt>State</dt><dd>${syncStatus.state}</dd>
+          <dt>Current Height</dt><dd>${formatNumber(syncStatus.current_height)}</dd>
+          <dt>Highest Known</dt><dd>${formatNumber(syncStatus.highest_known)}</dd>
+          <dt>Progress</dt><dd>${(syncStatus.progress * 100).toFixed(1)}%</dd>
+        </dl>
+      `;
+
+      // Peer table
+      renderPeerTable(peers);
+
+      // Peer distribution chart
+      if (typeof echarts !== 'undefined') {
+        initPeerChart(networkInfo.inbound, networkInfo.outbound);
+      }
+    } catch (e) {
+      console.error('[network] load:', e);
+    }
+  }
+
+  function renderPeerTable(peers) {
+    peersTbody.innerHTML = '';
+    for (const peer of peers) {
+      const tr = document.createElement('tr');
+      const tipHeight = peer.chain_tip ? peer.chain_tip[0] : '?';
+      const dirClass = peer.direction === 'Inbound' ? 'inbound' : 'outbound';
+      tr.innerHTML = `
+        <td class="mono">${truncateHash(peer.peer_id, 8)}</td>
+        <td><span class="badge ${dirClass}">${peer.direction}</span></td>
+        <td>${peer.ban_score}</td>
+        <td>${formatNumber(tipHeight)}</td>
+        <td>${peer.latency_ms}ms</td>
+      `;
+      peersTbody.appendChild(tr);
+    }
+  }
+
+  function initPeerChart(inbound, outbound) {
+    const dom = root.querySelector('#net-chart');
+    if (!dom || typeof echarts === 'undefined') return;
+    peerChart = echarts.init(dom);
+    peerChart.setOption({
+      tooltip: { trigger: 'item' },
+      series: [{
+        type: 'pie',
+        radius: ['45%', '70%'],
+        label: {
+          color: 'var(--text-primary)',
+          formatter: '{b}: {c}',
+        },
+        data: [
+          { value: inbound, name: 'Inbound', itemStyle: { color: '#10b981' } },
+          { value: outbound, name: 'Outbound', itemStyle: { color: '#3b82f6' } },
+        ],
+      }],
+    });
+    const ro = new ResizeObserver(() => peerChart?.resize());
+    ro.observe(dom);
+    unsubs.push(() => { ro.disconnect(); peerChart?.dispose(); });
+  }
+
+  // WS: peer updates
+  ws.subscribe('peerUpdate', async () => {
+    try {
+      const peers = await rpc.call('noble_getPeerInfo');
+      renderPeerTable(peers);
+    } catch { /* ignore */ }
+  });
+  unsubs.push(() => ws.unsubscribe('peerUpdate'));
+
+  loadNetwork();
+
+  return {
+    destroy() {
+      unsubs.forEach(fn => { try { fn(); } catch {} });
+    },
+  };
+}

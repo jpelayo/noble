@@ -13,16 +13,21 @@
   <nav id="sidebar">
     <div class="logo">NOBLE</div>
     <ul>
-      <li><a href="#/">Overview</a></li>
-      <li><a href="#/blocks">Blocks</a></li>
-      <li><a href="#/transactions">Transactions</a></li>
-      <li><a href="#/verify">Verify</a></li>
-      <li><a href="#/mempool">Mempool</a></li>
-      <li><a href="#/network">Network</a></li>
-      <li><a href="#/consensus">Consensus</a></li>
-      <li><a href="#/health">Health</a></li>
+      <li><a href="#/"><span class="nav-icon">&#9673;</span><span class="nav-label">Overview</span></a></li>
+      <li><a href="#/blocks"><span class="nav-icon">&#9638;</span><span class="nav-label">Blocks</span></a></li>
+      <li><a href="#/transactions"><span class="nav-icon">&#8644;</span><span class="nav-label">Transactions</span></a></li>
+      <li><a href="#/verify"><span class="nav-icon">&#10003;</span><span class="nav-label">Verify</span></a></li>
+      <li><a href="#/mempool"><span class="nav-icon">&#9776;</span><span class="nav-label">Mempool</span></a></li>
+      <li><a href="#/network"><span class="nav-icon">&#9700;</span><span class="nav-label">Network</span></a></li>
+      <li><a href="#/consensus"><span class="nav-icon">&#9211;</span><span class="nav-label">Consensus</span></a></li>
+      <li><a href="#/wallet"><span class="nav-icon">&#9671;</span><span class="nav-label">Wallet</span></a></li>
+      <li><a href="#/health"><span class="nav-icon">&#9829;</span><span class="nav-label">Health</span></a></li>
     </ul>
-    <button id="theme-toggle" title="Toggle dark/light theme">Theme</button>
+    <button id="theme-toggle" title="Toggle dark/light theme">Dark</button>
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-text">&copy; 2026 InfiniteContext.com</div>
+      <div class="sidebar-footer-text">License: Apache 2.0</div>
+    </div>
   </nav>
 
   <!-- Main content area -->
@@ -32,15 +37,15 @@
 
   <!-- Status bar -->
   <footer id="status-bar">
-    <span id="kpi-height">--</span> height
-    <span id="kpi-peers">--</span> peers
-    <span id="kpi-mempool">--</span> mempool
-    <span id="kpi-phase">--</span>
-    <span id="status-indicator">Connecting...</span>
+    <span><span id="kpi-height" class="kpi-val">--</span><span class="kpi-label"> height</span></span>
+    <span><span id="kpi-peers" class="kpi-val">--</span><span class="kpi-label"> peers</span></span>
+    <span><span id="kpi-mempool" class="kpi-val">--</span><span class="kpi-label"> mempool</span></span>
+    <span><span id="kpi-phase" class="kpi-val">--</span></span>
+    <span id="status-indicator"><span class="status-dot"></span> Connecting...</span>
   </footer>
 
   <!-- ECharts (vendored, loaded before app) -->
-  <!-- <script src="vendor/echarts.min.js"></script> -->
+  <script src="vendor/echarts.min.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>
