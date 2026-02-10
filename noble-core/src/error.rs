@@ -1,11 +1,11 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Validation error types covering all T1-T12 and B1-B12 rules.
+//! Validation error types covering all T1-T17 and B1-B12 rules.
 
 use thiserror::Error;
 
-/// Errors from transaction validation (T1-T12) and block validation (B1-B12).
+/// Errors from transaction validation (T1-T17) and block validation (B1-B12).
 #[derive(Debug, Error)]
 pub enum ValidationError {
     // --- Transaction validation (T1-T12) ---
@@ -62,6 +62,27 @@ pub enum ValidationError {
     /// T12: secp256k1 signature with high-S value (handled by noble-crypto verify).
     #[error("T12: high-S signature detected")]
     HighSSignature,
+
+    /// T13: Unrecognized transaction type.
+    #[error("T13: unknown tx_type {0:#04x}")]
+    UnknownTxType(u8),
+
+    /// T14: Transfer transaction missing recipient.
+    #[error("T14: transfer tx requires recipient")]
+    TransferMissingRecipient,
+
+    /// T15: Transfer transaction missing or zero amount.
+    #[error("T15: transfer tx requires amount > 0")]
+    TransferInvalidAmount,
+
+    /// T16: Sender balance insufficient for amount + fee.
+    /// (Checked at commit time, not structural validation.)
+    #[error("T16: insufficient balance (need {needed}, have {available})")]
+    InsufficientBalance { needed: u64, available: u64 },
+
+    /// T17: Notarization tx has transfer-only fields set.
+    #[error("T17: notarization tx must not have recipient or amount")]
+    NotarizationHasTransferFields,
 
     // --- Block validation (B1-B12) ---
     /// B1: Serialized block exceeds MAX_BLOCK_SIZE.

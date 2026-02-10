@@ -1,27 +1,33 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! NOBLE transaction type — a notarization claim for document checksums.
+//! NOBLE transaction type — notarization claims and token transfers.
 
 use serde::{Deserialize, Serialize};
 
 use noble_codec::NobleCbor;
-use noble_crypto::{double_sha256, sha256, Hash256, SignatureEnvelope};
+use noble_crypto::{double_sha256, sha256, Hash256, NoblePublicKey, SignatureEnvelope};
 
 use crate::metadata::MetadataEntry;
 
-/// A NOBLE transaction: a notarization claim binding a document checksum
-/// to a publisher identity at a specific time.
+/// A NOBLE transaction: either a notarization claim binding a document checksum
+/// to a publisher identity, or a token transfer between addresses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     /// Protocol version (must match PROTOCOL_VERSION).
     pub version: u16,
+    /// Transaction type: 0x00 = notarization, 0x01 = transfer (GAP-M26).
+    pub tx_type: u8,
     /// SHA-256 checksum of the document being registered.
     pub checksum: Hash256,
     /// Unix timestamp (seconds) of the registration claim.
     pub timestamp: u64,
     /// Fee in atomic units (GAP-C2).
     pub fee: u64,
+    /// Recipient public key (present for transfers only).
+    pub recipient: Option<NoblePublicKey>,
+    /// Transfer amount in atomic units (present for transfers only).
+    pub amount: Option<u64>,
     /// Publisher's signature over the signing payload.
     pub publisher_sig: SignatureEnvelope,
     /// Additional co-signer signatures (accreditation bodies, labs, etc.).
@@ -37,9 +43,12 @@ pub struct Transaction {
 /// signatures are NOT included (they're the things being produced/verified).
 #[derive(Serialize)]
 struct SigningPayload {
+    tx_type: u8,
     checksum: Hash256,
     timestamp: u64,
     fee: u64,
+    recipient: Option<NoblePublicKey>,
+    amount: Option<u64>,
     metadata: Vec<MetadataEntry>,
 }
 
@@ -64,9 +73,12 @@ impl Transaction {
         sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
 
         let payload = SigningPayload {
+            tx_type: self.tx_type,
             checksum: self.checksum,
             timestamp: self.timestamp,
             fee: self.fee,
+            recipient: self.recipient.clone(),
+            amount: self.amount,
             metadata: sorted_metadata,
         };
 
@@ -95,9 +107,12 @@ mod tests {
         // Build a minimal transaction to get the signing message
         let mut tx = Transaction {
             version: 1,
+            tx_type: 0,
             checksum,
             timestamp,
             fee,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk,

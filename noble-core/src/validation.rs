@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transaction (T1-T12) and block (B1-B12) validation pipelines.
+//! Transaction (T1-T17) and block (B1-B12) validation pipelines.
 
 use noble_codec::NobleCbor;
 use noble_crypto::{is_recognized_scheme, NoblePublicKey};
@@ -33,7 +33,7 @@ pub struct BlockValidationContext<'a> {
     pub validator_list: &'a [NoblePublicKey],
 }
 
-/// Validate a transaction against rules T1-T12.
+/// Validate a transaction against rules T1-T17.
 ///
 /// Returns Ok(()) if all checks pass, or the first validation error encountered.
 pub fn validate_transaction(
@@ -123,6 +123,28 @@ pub fn validate_transaction(
 
     // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
     // which is called in T6 and T7 above.
+
+    // T13: tx_type must be recognized
+    if tx.tx_type != TX_TYPE_NOTARIZATION && tx.tx_type != TX_TYPE_TRANSFER {
+        return Err(ValidationError::UnknownTxType(tx.tx_type));
+    }
+
+    // T14: Transfer requires recipient
+    if tx.tx_type == TX_TYPE_TRANSFER && tx.recipient.is_none() {
+        return Err(ValidationError::TransferMissingRecipient);
+    }
+
+    // T15: Transfer requires amount > 0
+    if tx.tx_type == TX_TYPE_TRANSFER && matches!(tx.amount, None | Some(0)) {
+        return Err(ValidationError::TransferInvalidAmount);
+    }
+
+    // T16: Balance check is deferred to commit time (needs chain state)
+
+    // T17: Notarization must NOT have recipient or amount
+    if tx.tx_type == TX_TYPE_NOTARIZATION && (tx.recipient.is_some() || tx.amount.is_some()) {
+        return Err(ValidationError::NotarizationHasTransferFields);
+    }
 
     Ok(())
 }
@@ -267,9 +289,12 @@ mod tests {
 
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
+            tx_type: 0,
             checksum,
             timestamp,
             fee,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -588,6 +613,221 @@ mod tests {
     }
 
     // --- B11: Invalid transaction in block ---
+
+    // --- T13-T17: Transfer type checks ---
+
+    fn make_transfer_tx(
+        sk: &[u8],
+        pk: &[u8],
+        recipient_pk: &[u8],
+    ) -> (Transaction, noble_crypto::Hash256) {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 1,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    #[test]
+    fn t13_unknown_tx_type() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.tx_type = 0xFF;
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(result, Err(ValidationError::UnknownTxType(0xFF))));
+    }
+
+    #[test]
+    fn t13_valid_notarization_type() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx(&sk, &pk);
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    #[test]
+    fn t13_valid_transfer_type() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_transfer_tx(&sk, &pk, &recipient_pk);
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    #[test]
+    fn t14_transfer_missing_recipient() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 1,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::TransferMissingRecipient)
+        ));
+    }
+
+    #[test]
+    fn t15_transfer_missing_amount() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 1,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::TransferInvalidAmount)
+        ));
+    }
+
+    #[test]
+    fn t15_transfer_zero_amount() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 1,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(0),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::TransferInvalidAmount)
+        ));
+    }
+
+    #[test]
+    fn t17_notarization_with_recipient() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum: sha256(b"test document"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::NotarizationHasTransferFields)
+        ));
+    }
+
+    #[test]
+    fn t17_notarization_with_amount() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum: sha256(b"test document"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: Some(100),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::NotarizationHasTransferFields)
+        ));
+    }
 
     #[test]
     fn b11_invalid_tx_in_block() {

@@ -47,9 +47,12 @@ pub fn make_signed_tx(
     let checksum = sha256(doc);
     let mut tx = Transaction {
         version: PROTOCOL_VERSION,
+        tx_type: 0,
         checksum,
         timestamp,
         fee,
+        recipient: None,
+        amount: None,
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: keypair.pk_bytes.clone(),
@@ -75,9 +78,12 @@ pub fn make_signed_tx_with_metadata(
     let checksum = sha256(doc);
     let mut tx = Transaction {
         version: PROTOCOL_VERSION,
+        tx_type: 0,
         checksum,
         timestamp,
         fee,
+        recipient: None,
+        amount: None,
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: keypair.pk_bytes.clone(),
@@ -85,6 +91,38 @@ pub fn make_signed_tx_with_metadata(
         },
         additional_sigs: vec![],
         metadata,
+    };
+    let msg = tx.compute_signing_message().unwrap();
+    tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
+    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+    (tx, tx_id)
+}
+
+/// Build a signed transfer transaction for testing.
+///
+/// Returns the transaction and its computed tx_id.
+pub fn make_signed_transfer_tx(
+    keypair: &TestKeypair,
+    recipient: &NoblePublicKey,
+    amount: u64,
+    fee: u64,
+    timestamp: u64,
+) -> (Transaction, Hash256) {
+    let mut tx = Transaction {
+        version: PROTOCOL_VERSION,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp,
+        fee,
+        recipient: Some(recipient.clone()),
+        amount: Some(amount),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: keypair.pk_bytes.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
@@ -158,6 +196,32 @@ mod tests {
     fn make_signed_tx_is_valid() {
         let kp = TestKeypair::generate();
         let (tx, tx_id) = make_signed_tx(&kp, b"test_doc", MIN_TX_FEE, 1_700_000_000);
+
+        // Verify signature
+        let msg = tx.compute_signing_message().unwrap();
+        assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
+
+        // Verify tx_id
+        let recomputed = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(tx_id, recomputed);
+    }
+
+    #[test]
+    fn make_signed_transfer_tx_is_valid() {
+        let sender = TestKeypair::generate();
+        let recipient = TestKeypair::generate();
+        let (tx, tx_id) = make_signed_transfer_tx(
+            &sender,
+            &recipient.public_key,
+            100_000,
+            MIN_TX_FEE,
+            1_700_000_000,
+        );
+
+        assert_eq!(tx.tx_type, 1);
+        assert_eq!(tx.amount, Some(100_000));
+        assert!(tx.recipient.is_some());
+        assert_eq!(tx.checksum, Hash256::ZERO);
 
         // Verify signature
         let msg = tx.compute_signing_message().unwrap();

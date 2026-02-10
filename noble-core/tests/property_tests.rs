@@ -11,7 +11,8 @@
 use noble_codec::NobleCbor;
 use noble_core::{MetadataEntry, Transaction, MAINNET_CHAIN_ID};
 use noble_crypto::{
-    ed25519, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+    ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+    SCHEME_ED25519,
 };
 use proptest::prelude::*;
 
@@ -53,9 +54,12 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
         .prop_map(
             |(checksum, timestamp, fee, publisher_sig, additional_sigs, metadata)| Transaction {
                 version: 1,
+                tx_type: 0,
                 checksum,
                 timestamp,
                 fee,
+                recipient: None,
+                amount: None,
                 publisher_sig,
                 additional_sigs,
                 metadata,
@@ -183,20 +187,88 @@ proptest! {
     }
 }
 
+// --- Strategy: transfer transaction ---
+
+fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
+    (
+        1_600_000_000u64..1_800_000_000u64, // timestamp
+        1_000u64..100_000u64,               // fee
+        1u64..1_000_000u64,                 // amount (> 0)
+        arb_signature_envelope(),           // publisher_sig
+        prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
+        prop::collection::vec(arb_metadata_entry(), 0..=4), // metadata
+        prop::collection::vec(any::<u8>(), 32..=32), // recipient key bytes
+    )
+        .prop_map(
+            |(
+                timestamp,
+                fee,
+                amount,
+                publisher_sig,
+                additional_sigs,
+                metadata,
+                recipient_bytes,
+            )| {
+                Transaction {
+                    version: 1,
+                    tx_type: 1,
+                    checksum: Hash256::ZERO,
+                    timestamp,
+                    fee,
+                    recipient: Some(NoblePublicKey::Ed25519(recipient_bytes)),
+                    amount: Some(amount),
+                    publisher_sig,
+                    additional_sigs,
+                    metadata,
+                }
+            },
+        )
+}
+
+// --- Property: Transfer transaction CBOR roundtrip ---
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    #[test]
+    fn transfer_tx_roundtrip(tx in arb_transfer_transaction()) {
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
+        prop_assert_eq!(tx, decoded);
+    }
+}
+
 // --- Property: real signed transaction roundtrip with valid signatures ---
 
 #[test]
 fn signed_transaction_roundtrip_100() {
     let (sk, pk) = ed25519::generate_keypair();
+    let (_, recipient_pk) = ed25519::generate_keypair();
     let priv_key = NoblePrivateKey::Ed25519(sk);
 
     for i in 0..100u64 {
-        let checksum = sha256(&i.to_be_bytes());
+        let is_transfer = i >= 70; // ~30 transfer transactions
+        let checksum = if is_transfer {
+            Hash256::ZERO
+        } else {
+            sha256(&i.to_be_bytes())
+        };
         let mut tx = Transaction {
             version: 1,
+            tx_type: if is_transfer { 1 } else { 0 },
             checksum,
             timestamp: 1_700_000_000 + i,
             fee: 1_000 + i,
+            recipient: if is_transfer {
+                Some(NoblePublicKey::Ed25519(recipient_pk.clone()))
+            } else {
+                None
+            },
+            amount: if is_transfer {
+                Some(1_000 * i + 1)
+            } else {
+                None
+            },
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.clone(),
@@ -224,4 +296,155 @@ fn signed_transaction_roundtrip_100() {
         let id2 = decoded.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         assert_eq!(id1, id2);
     }
+}
+
+// --- Property: signing message includes tx_type ---
+
+#[test]
+fn signing_message_includes_tx_type() {
+    let (sk, pk) = ed25519::generate_keypair();
+    let (_, recipient_pk) = ed25519::generate_keypair();
+    let priv_key = NoblePrivateKey::Ed25519(sk);
+
+    // Notarization tx
+    let mut tx0 = Transaction {
+        version: 1,
+        tx_type: 0,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: None,
+        amount: None,
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+    let msg0 = tx0.compute_signing_message().unwrap();
+    tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
+
+    // Transfer tx (same timestamp/fee but different type)
+    let mut tx1 = Transaction {
+        version: 1,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: Some(NoblePublicKey::Ed25519(recipient_pk.clone())),
+        amount: Some(50_000),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+    let msg1 = tx1.compute_signing_message().unwrap();
+    tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
+
+    assert_ne!(msg0, msg1, "signing message must differ between tx types");
+}
+
+// --- Property: signing message includes recipient ---
+
+#[test]
+fn signing_message_includes_recipient() {
+    let (_sk, pk) = ed25519::generate_keypair();
+    let (_, r1_pk) = ed25519::generate_keypair();
+    let (_, r2_pk) = ed25519::generate_keypair();
+
+    let tx1 = Transaction {
+        version: 1,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: Some(NoblePublicKey::Ed25519(r1_pk)),
+        amount: Some(50_000),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+
+    let tx2 = Transaction {
+        version: 1,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: Some(NoblePublicKey::Ed25519(r2_pk)),
+        amount: Some(50_000),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+
+    let msg1 = tx1.compute_signing_message().unwrap();
+    let msg2 = tx2.compute_signing_message().unwrap();
+    assert_ne!(
+        msg1, msg2,
+        "signing message must change when recipient changes"
+    );
+}
+
+// --- Property: signing message includes amount ---
+
+#[test]
+fn signing_message_includes_amount() {
+    let (_sk, pk) = ed25519::generate_keypair();
+    let (_, r_pk) = ed25519::generate_keypair();
+    let recipient = NoblePublicKey::Ed25519(r_pk);
+
+    let tx1 = Transaction {
+        version: 1,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: Some(recipient.clone()),
+        amount: Some(50_000),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+
+    let tx2 = Transaction {
+        version: 1,
+        tx_type: 1,
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_000,
+        fee: 1_000,
+        recipient: Some(recipient),
+        amount: Some(100_000),
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.clone(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+
+    let msg1 = tx1.compute_signing_message().unwrap();
+    let msg2 = tx2.compute_signing_message().unwrap();
+    assert_ne!(
+        msg1, msg2,
+        "signing message must change when amount changes"
+    );
 }

@@ -45,6 +45,28 @@ pub const MAX_BLOCK_PAST_SKEW: u64 = 3_600;
 /// Duration of a consensus cycle in seconds (30 minutes).
 pub const CYCLE_DURATION_SECS: u64 = 1_800;
 
+/// Transaction type: document notarization.
+pub const TX_TYPE_NOTARIZATION: u8 = 0x00;
+
+/// Transaction type: NOBLE token transfer.
+pub const TX_TYPE_TRANSFER: u8 = 0x01;
+
+/// Initial block subsidy in atomic units (50 NOBLE = 50_000_000 with 6 decimals).
+pub const INITIAL_SUBSIDY: u64 = 50_000_000;
+
+/// Number of blocks between halving events (~12 years at 30-min cycles).
+pub const HALVING_INTERVAL: u64 = 210_000;
+
+/// Compute block subsidy at a given height.
+/// Returns 0 when all halvings are exhausted (after 64 halvings).
+pub fn subsidy_at_height(height: u64) -> u64 {
+    let halvings = height / HALVING_INTERVAL;
+    if halvings >= 64 {
+        return 0;
+    }
+    INITIAL_SUBSIDY >> halvings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +88,25 @@ mod tests {
     #[test]
     fn block_size_is_4mb() {
         assert_eq!(MAX_BLOCK_SIZE, 4_194_304);
+    }
+
+    #[test]
+    fn subsidy_at_genesis() {
+        assert_eq!(subsidy_at_height(0), INITIAL_SUBSIDY);
+        assert_eq!(subsidy_at_height(1), INITIAL_SUBSIDY);
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL - 1), INITIAL_SUBSIDY);
+    }
+
+    #[test]
+    fn subsidy_halves_correctly() {
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL), INITIAL_SUBSIDY / 2);
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL * 2), INITIAL_SUBSIDY / 4);
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL * 3), INITIAL_SUBSIDY / 8);
+    }
+
+    #[test]
+    fn subsidy_exhausted_after_64_halvings() {
+        assert_eq!(subsidy_at_height(HALVING_INTERVAL * 64), 0);
+        assert_eq!(subsidy_at_height(u64::MAX), 0);
     }
 }

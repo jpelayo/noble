@@ -424,9 +424,12 @@ mod tests {
         let checksum = sha256(doc);
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
+            tx_type: 0,
             checksum,
             timestamp: 1_700_000_000,
             fee,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -558,9 +561,12 @@ mod tests {
         let checksum = sha256(b"meta_doc");
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
+            tx_type: 0,
             checksum,
             timestamp: 1_700_000_000,
             fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -623,9 +629,12 @@ mod tests {
         let checksum = sha256(b"low_fee_doc");
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
+            tx_type: 0,
             checksum,
             timestamp: 1_700_000_000,
             fee: MIN_TX_FEE - 1,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),

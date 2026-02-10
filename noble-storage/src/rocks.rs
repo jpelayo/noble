@@ -445,9 +445,12 @@ mod tests {
         let checksum = sha256(doc);
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
+            tx_type: 0,
             checksum,
             timestamp,
             fee: 1_000,
+            recipient: None,
+            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
