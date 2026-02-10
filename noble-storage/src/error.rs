@@ -35,6 +35,14 @@ pub enum StorageError {
         count: usize,
         max: usize,
     },
+
+    /// A transfer would leave the sender with a negative balance (GAP-H19).
+    #[error("insufficient balance: address has {available}, need {needed}")]
+    InsufficientBalance { available: u64, needed: u64 },
+
+    /// A credit would overflow the u64 balance (GAP-H19).
+    #[error("balance overflow: current {current}, credit {amount}")]
+    BalanceOverflow { current: u64, amount: u64 },
 }
 
 impl From<noble_codec::CodecError> for StorageError {

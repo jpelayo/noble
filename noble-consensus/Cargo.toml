@@ -11,10 +11,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+noble-codec.workspace = true
 noble-core.workspace = true
 noble-crypto.workspace = true
-noble-storage.workspace = true
-noble-mempool.workspace = true
-noble-network.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+noble-test-utils.workspace = true

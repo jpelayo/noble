@@ -32,6 +32,10 @@ pub enum MempoolError {
     #[error("step 6: signature verification failed: {0}")]
     SignatureInvalid(String),
 
+    /// Step 6.5: Insufficient balance for transfer (amount + fee + pending debits).
+    #[error("step 6.5: insufficient balance (have {have}, need {need})")]
+    InsufficientBalance { have: u64, need: u64 },
+
     /// Step 7: Fee below dynamic minimum.
     #[error("step 7: fee {fee} below minimum {min_fee}")]
     FeeTooLow { fee: u64, min_fee: u64 },

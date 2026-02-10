@@ -8,5 +8,8 @@ pub mod pool;
 pub mod sigcache;
 
 pub use error::MempoolError;
-pub use pool::{ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoChainLookup};
+pub use pool::{
+    BalanceLookup, ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoBalanceLookup,
+    NoChainLookup,
+};
 pub use sigcache::SigCache;

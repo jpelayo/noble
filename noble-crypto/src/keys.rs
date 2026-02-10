@@ -16,7 +16,7 @@ use crate::{ed25519, secp256k1};
 ///
 /// Wire format: `[scheme_id(1 byte) || key_bytes(variable)]` (GAP-H11).
 /// Carries the scheme_id intrinsically — no need for a separate field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NoblePublicKey {
     /// Ed25519 public key (32 bytes).
     Ed25519(Vec<u8>),
@@ -388,5 +388,32 @@ mod tests {
         let bytes = pub_key.to_cbor().unwrap();
         let decoded = NoblePublicKey::from_cbor(&bytes).unwrap();
         assert_eq!(pub_key, decoded);
+    }
+
+    #[test]
+    fn noble_public_key_hash_consistent() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let (_, pk1) = ed25519::generate_keypair();
+        let key1 = NoblePublicKey::Ed25519(pk1);
+
+        // Same key hashes to the same value
+        let mut h1 = DefaultHasher::new();
+        key1.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        key1.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish(), "same key must produce same hash");
+
+        // Different key hashes to a different value (probabilistic but near-certain)
+        let (_, pk2) = ed25519::generate_keypair();
+        let key2 = NoblePublicKey::Ed25519(pk2);
+        let mut h3 = DefaultHasher::new();
+        key2.hash(&mut h3);
+        assert_ne!(
+            h1.finish(),
+            h3.finish(),
+            "different keys should produce different hashes"
+        );
     }
 }

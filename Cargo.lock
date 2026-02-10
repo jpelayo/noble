@@ -2179,11 +2179,12 @@ dependencies = [
 name = "noble-consensus"
 version = "0.1.0"
 dependencies = [
+ "noble-codec",
  "noble-core",
  "noble-crypto",
- "noble-mempool",
- "noble-network",
- "noble-storage",
+ "noble-test-utils",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@
 //! All storage backends (RocksDB, in-memory mock) implement this trait.
 
 use noble_core::{Block, BlockHeader, Transaction};
-use noble_crypto::Hash256;
+use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
 
@@ -57,6 +57,20 @@ pub trait StorageEngine {
 
     /// Get the current chain tip, or None if the chain is empty (pre-genesis).
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError>;
+
+    /// Get the balance of an address in atomic units. Returns 0 for unknown addresses.
+    fn get_balance(&self, pubkey: &NoblePublicKey) -> Result<u64, StorageError>;
+
+    /// Get paginated transaction history for an address.
+    ///
+    /// Returns tx_ids in chronological order (earliest first).
+    /// `page` is 0-indexed, `limit` is the maximum number of entries per page.
+    fn get_address_history(
+        &self,
+        pubkey: &NoblePublicKey,
+        page: u32,
+        limit: u32,
+    ) -> Result<Vec<Hash256>, StorageError>;
 
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.

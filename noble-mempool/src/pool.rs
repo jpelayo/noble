@@ -24,8 +24,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_codec::NobleCbor;
-use noble_core::{Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, MIN_TX_FEE, PROTOCOL_VERSION};
-use noble_crypto::{is_recognized_scheme, Hash256};
+use noble_core::{
+    Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, MIN_TX_FEE, PROTOCOL_VERSION, TX_TYPE_TRANSFER,
+};
+use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey};
 
 use crate::error::MempoolError;
 use crate::sigcache::SigCache;
@@ -96,6 +98,25 @@ impl ChainLookup for NoChainLookup {
     }
 }
 
+/// Callback trait for querying on-chain balances during mempool admission.
+///
+/// Decoupled from `ChainLookup` (SRP) following the project pattern of
+/// one trait per concern (ChainLookup, BlockProvider, TxProvider).
+pub trait BalanceLookup {
+    /// Return the confirmed balance for the given public key (in atomic units).
+    fn get_balance(&self, pubkey: &NoblePublicKey) -> u64;
+}
+
+/// A no-op balance lookup that always returns `u64::MAX`.
+/// Existing tests pass this so balance checks never reject.
+pub struct NoBalanceLookup;
+
+impl BalanceLookup for NoBalanceLookup {
+    fn get_balance(&self, _pubkey: &NoblePublicKey) -> u64 {
+        u64::MAX
+    }
+}
+
 /// The NOBLE transaction mempool.
 pub struct Mempool {
     config: MempoolConfig,
@@ -107,6 +128,8 @@ pub struct Mempool {
     by_checksum: HashMap<Hash256, HashSet<Hash256>>,
     /// Timestamp index: received_at → set of tx_ids (for expiry).
     by_timestamp: BTreeMap<u64, HashSet<Hash256>>,
+    /// Sender index: pubkey wire bytes → set of tx_ids (for pending debit calc).
+    by_sender: HashMap<Vec<u8>, HashSet<Hash256>>,
     /// Signature verification cache.
     sig_cache: SigCache,
     /// Current total serialized size of all transactions.
@@ -123,6 +146,7 @@ impl Mempool {
             by_fee: BTreeMap::new(),
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
+            by_sender: HashMap::new(),
             sig_cache,
             total_size_bytes: 0,
         }
@@ -183,14 +207,16 @@ impl Mempool {
     ///
     /// `current_time` is the wall-clock Unix timestamp for expiry tracking.
     /// `chain` is used for duplicate detection against confirmed transactions.
+    /// `balance` is used for transfer balance-sufficiency checks (step 6.5).
     ///
     /// Returns `Ok(tx_id)` if admitted, or `Err(MempoolError)` with the
     /// specific step that rejected the transaction.
-    pub fn admit<C: ChainLookup>(
+    pub fn admit<C: ChainLookup, B: BalanceLookup>(
         &mut self,
         tx: &Transaction,
         current_time: u64,
         chain: &C,
+        balance: &B,
     ) -> Result<Hash256, MempoolError> {
         // Step 1: Size check
         let tx_bytes = tx
@@ -229,6 +255,20 @@ impl Mempool {
         if !sigs_verified {
             self.verify_signatures(tx)?;
             self.sig_cache.insert(tx_id);
+        }
+
+        // Step 6.5: Balance sufficiency check (transfer transactions only)
+        if tx.tx_type == TX_TYPE_TRANSFER {
+            if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
+                let sender_wire = sender.to_wire_bytes();
+                let amount = tx.amount.unwrap_or(0);
+                let pending = self.pending_debits_for_sender(&sender_wire);
+                let need = amount.saturating_add(tx.fee).saturating_add(pending);
+                let have = balance.get_balance(&sender);
+                if have < need {
+                    return Err(MempoolError::InsufficientBalance { have, need });
+                }
+            }
         }
 
         // Step 7: Fee check
@@ -281,6 +321,17 @@ impl Mempool {
             set.remove(tx_id);
             if set.is_empty() {
                 self.by_timestamp.remove(&entry.received_at);
+            }
+        }
+
+        // Remove from sender index
+        if let Ok(sender) = entry.tx.publisher_sig.to_noble_public_key() {
+            let sender_wire = sender.to_wire_bytes();
+            if let Some(set) = self.by_sender.get_mut(&sender_wire) {
+                set.remove(tx_id);
+                if set.is_empty() {
+                    self.by_sender.remove(&sender_wire);
+                }
             }
         }
 
@@ -374,6 +425,12 @@ impl Mempool {
         let received_at = entry.received_at;
         let size = entry.size_bytes;
 
+        // Populate sender index
+        if let Ok(sender) = entry.tx.publisher_sig.to_noble_public_key() {
+            let sender_wire = sender.to_wire_bytes();
+            self.by_sender.entry(sender_wire).or_default().insert(tx_id);
+        }
+
         self.by_id.insert(tx_id, entry);
         self.by_fee.entry(fee).or_default().insert(tx_id);
         self.by_checksum.entry(checksum).or_default().insert(tx_id);
@@ -382,6 +439,21 @@ impl Mempool {
             .or_default()
             .insert(tx_id);
         self.total_size_bytes += size;
+    }
+
+    /// Sum of `(amount + fee)` for all of sender's in-mempool transfer transactions.
+    fn pending_debits_for_sender(&self, sender_wire: &[u8]) -> u64 {
+        let Some(tx_ids) = self.by_sender.get(sender_wire) else {
+            return 0;
+        };
+        tx_ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
+            .filter(|e| e.tx.tx_type == TX_TYPE_TRANSFER)
+            .fold(0u64, |acc, e| {
+                acc.saturating_add(e.tx.amount.unwrap_or(0))
+                    .saturating_add(e.tx.fee)
+            })
     }
 
     fn evict_if_needed(&mut self, incoming_size: usize) {
@@ -469,7 +541,9 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
-        let tx_id = pool.admit(&tx, 1_700_000_000, &NoChainLookup).unwrap();
+        let tx_id = pool
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&tx_id));
         assert!(pool.get(&tx_id).is_some());
@@ -481,7 +555,9 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
-        let tx_id = pool.admit(&tx, 1_700_000_000, &NoChainLookup).unwrap();
+        let tx_id = pool
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
         assert_eq!(pool.len(), 1);
 
         let entry = pool.remove(&tx_id).unwrap();
@@ -503,8 +579,9 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
-        pool.admit(&tx, 1_700_000_000, &NoChainLookup).unwrap();
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
@@ -523,7 +600,7 @@ mod tests {
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 
         let chain = ConfirmedChain(tx_id);
-        let result = pool.admit(&tx, 1_700_000_000, &chain);
+        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
@@ -536,7 +613,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.version = 99;
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::UnrecognizedVersion(99))));
     }
 
@@ -549,7 +626,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.publisher_sig.scheme_id = 0xFF;
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
@@ -587,7 +664,7 @@ mod tests {
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
@@ -600,7 +677,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.publisher_sig.signature = vec![0u8; 64]; // Corrupt signature
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
@@ -615,7 +692,7 @@ mod tests {
             signature: vec![0u8; 64],
         });
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
@@ -646,7 +723,7 @@ mod tests {
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(matches!(result, Err(MempoolError::FeeTooLow { .. })));
     }
 
@@ -660,8 +737,12 @@ mod tests {
         let tx1 = make_signed_tx(&sk, &pk, b"same_doc", MIN_TX_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"other_doc", MIN_TX_FEE);
 
-        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup).unwrap();
-        let _id2 = pool.admit(&tx2, 1_700_000_000, &NoChainLookup).unwrap();
+        let id1 = pool
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        let _id2 = pool
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
 
         let checksum = sha256(b"same_doc");
         let results = pool.lookup_checksum(&checksum);
@@ -680,9 +761,12 @@ mod tests {
         let tx_mid = make_signed_tx(&sk, &pk, b"mid", MIN_TX_FEE * 5);
         let tx_high = make_signed_tx(&sk, &pk, b"high", MIN_TX_FEE * 10);
 
-        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup).unwrap();
-        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup).unwrap();
-        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup).unwrap();
+        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
 
         let fees: Vec<u64> = pool.iter_by_fee_desc().map(|e| e.fee).collect();
         assert_eq!(fees, vec![MIN_TX_FEE * 10, MIN_TX_FEE * 5, MIN_TX_FEE]);
@@ -702,12 +786,17 @@ mod tests {
         let tx3 = make_signed_tx(&sk, &pk, b"doc3", MIN_TX_FEE * 3);
         let tx4 = make_signed_tx(&sk, &pk, b"doc4", MIN_TX_FEE * 4);
 
-        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup).unwrap();
-        pool.admit(&tx2, 1_700_000_000, &NoChainLookup).unwrap();
-        pool.admit(&tx3, 1_700_000_000, &NoChainLookup).unwrap();
+        let id1 = pool
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        pool.admit(&tx3, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
 
         // tx4 triggers eviction of tx1 (lowest fee)
-        pool.admit(&tx4, 1_700_000_000, &NoChainLookup).unwrap();
+        pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
         assert_eq!(pool.len(), 3);
         assert!(!pool.contains(&id1), "lowest fee tx should be evicted");
     }
@@ -724,8 +813,12 @@ mod tests {
         let tx1 = make_signed_tx(&sk, &pk, b"old", MIN_TX_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"new", MIN_TX_FEE);
 
-        let id1 = pool.admit(&tx1, 1_000, &NoChainLookup).unwrap();
-        let id2 = pool.admit(&tx2, 5_000, &NoChainLookup).unwrap();
+        let id1 = pool
+            .admit(&tx1, 1_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        let id2 = pool
+            .admit(&tx2, 5_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
         assert_eq!(pool.len(), 2);
 
         // Expire at time 4601 (cutoff = 4601 - 3600 = 1001)
@@ -745,7 +838,9 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"cached", MIN_TX_FEE);
 
-        let tx_id = pool.admit(&tx, 1_700_000_000, &NoChainLookup).unwrap();
+        let tx_id = pool
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
 
         // Verify the sig cache has the tx_id
         assert!(pool.sig_cache.contains(&tx_id));
@@ -767,14 +862,173 @@ mod tests {
         let tx2 = make_signed_tx(&sk, &pk, b"c2", MIN_TX_FEE);
         let tx3 = make_signed_tx(&sk, &pk, b"c3", MIN_TX_FEE);
 
-        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup).unwrap();
-        let id2 = pool.admit(&tx2, 1_700_000_000, &NoChainLookup).unwrap();
-        let id3 = pool.admit(&tx3, 1_700_000_000, &NoChainLookup).unwrap();
+        let id1 = pool
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        let id2 = pool
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+        let id3 = pool
+            .admit(&tx3, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
 
         pool.remove_confirmed(&[id1, id3]);
         assert_eq!(pool.len(), 1);
         assert!(!pool.contains(&id1));
         assert!(pool.contains(&id2));
         assert!(!pool.contains(&id3));
+    }
+
+    // --- Step 6.5: Balance sufficiency ---
+
+    /// Fixed-balance lookup for testing balance checks.
+    struct FixedBalanceLookup(u64);
+
+    impl BalanceLookup for FixedBalanceLookup {
+        fn get_balance(&self, _pubkey: &NoblePublicKey) -> u64 {
+            self.0
+        }
+    }
+
+    fn make_signed_transfer(
+        sk: &[u8],
+        pk: &[u8],
+        recipient_pk: &[u8],
+        amount: u64,
+        fee: u64,
+    ) -> Transaction {
+        make_signed_transfer_salt(sk, pk, recipient_pk, amount, fee, b"default")
+    }
+
+    fn make_signed_transfer_salt(
+        sk: &[u8],
+        pk: &[u8],
+        recipient_pk: &[u8],
+        amount: u64,
+        fee: u64,
+        salt: &[u8],
+    ) -> Transaction {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = noble_crypto::NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let checksum = sha256(salt);
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 1,
+            checksum,
+            timestamp: 1_700_000_000,
+            fee,
+            recipient: Some(recipient),
+            amount: Some(amount),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx
+    }
+
+    #[test]
+    fn step65_reject_insufficient_balance() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip) = ed25519::generate_keypair();
+
+        let tx = make_signed_transfer(&sk, &pk, &recip, 500_000, MIN_TX_FEE);
+        // Balance is 100_000, need 500_000 + MIN_TX_FEE = 501_000
+        let bal = FixedBalanceLookup(100_000);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal);
+        assert!(
+            matches!(
+                result,
+                Err(MempoolError::InsufficientBalance { have: 100_000, .. })
+            ),
+            "expected InsufficientBalance, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn step65_accept_sufficient_balance() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip) = ed25519::generate_keypair();
+
+        let tx = make_signed_transfer(&sk, &pk, &recip, 500_000, MIN_TX_FEE);
+        // Balance is exactly amount + fee
+        let bal = FixedBalanceLookup(500_000 + MIN_TX_FEE);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[test]
+    fn step65_skip_for_notarization() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Notarization tx — balance check should be skipped
+        let tx = make_signed_tx(&sk, &pk, b"doc_nota", MIN_TX_FEE);
+        let bal = FixedBalanceLookup(0); // zero balance
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal);
+        assert!(
+            result.is_ok(),
+            "notarization must skip balance check, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn step65_pending_debits_counted() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip) = ed25519::generate_keypair();
+
+        let bal = FixedBalanceLookup(200_000);
+
+        // First transfer: amount=100_000, fee=1_000 → need 101_000, balance 200_000 → OK
+        let tx1 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"tx1");
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &bal)
+            .unwrap();
+
+        // Second transfer: amount=100_000, fee=1_000 → need 101_000 + pending 101_000 = 202_000
+        // but balance is only 200_000 → reject
+        let tx2 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"tx2");
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &bal);
+        assert!(
+            matches!(result, Err(MempoolError::InsufficientBalance { .. })),
+            "second transfer should fail due to pending debits, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn step65_pending_debits_cleared_on_remove() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip) = ed25519::generate_keypair();
+
+        let bal = FixedBalanceLookup(200_000);
+
+        // Admit first transfer
+        let tx1 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"rm1");
+        let id1 = pool
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &bal)
+            .unwrap();
+
+        // Remove it (e.g., confirmed in a block)
+        pool.remove(&id1);
+
+        // Now second transfer should succeed (pending debits are cleared)
+        let tx2 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"rm2");
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &bal);
+        assert!(
+            result.is_ok(),
+            "after remove, second transfer should succeed, got {:?}",
+            result
+        );
     }
 }

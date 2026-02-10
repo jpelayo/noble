@@ -2,3 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Proof of Reputation cycle engine, vote management and fork tracking for the NOBLE protocol.
+
+pub mod candidate;
+pub mod config;
+pub mod cycle;
+pub mod engine;
+pub mod error;
+pub mod event;
+pub mod proposal;
+pub mod validator;
+pub mod vote;
+
+pub use candidate::CandidateTracker;
+pub use config::ConsensusConfig;
+pub use cycle::{CycleManager, CyclePhase};
+pub use engine::{ConsensusStateMachine, CycleEngine};
+pub use error::ConsensusError;
+pub use event::{CycleEvent, CycleIo};
+pub use proposal::propose_block;
+pub use validator::ValidatorList;
+pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteManager};
