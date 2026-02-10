@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use libp2p::PeerId;
+use noble_core::NodeAnnounce;
 
 use crate::config::NetworkConfig;
 
@@ -27,6 +28,7 @@ pub enum Direction {
 /// - ExcessiveConnections: 25
 /// - Unresponsive: 10
 /// - InvalidVote: 20 (GAP-M6: standardized to 20)
+/// - InvalidAnnounce: 15 (low — metadata is self-declared)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Misbehavior {
     InvalidBlock,
@@ -36,6 +38,7 @@ pub enum Misbehavior {
     ExcessiveConnections,
     Unresponsive,
     InvalidVote,
+    InvalidAnnounce,
 }
 
 impl Misbehavior {
@@ -49,6 +52,7 @@ impl Misbehavior {
             Self::ExcessiveConnections => 25,
             Self::Unresponsive => 10,
             Self::InvalidVote => 20,
+            Self::InvalidAnnounce => 15,
         }
     }
 }
@@ -62,6 +66,7 @@ pub struct PeerState {
     pub last_seen: Instant,
     pub chain_tip: Option<(u64, [u8; 32])>,
     pub latency: Option<Duration>,
+    pub announce: Option<Box<NodeAnnounce>>,
 }
 
 /// Manages connected peers, enforces connection limits, and tracks ban scores.
@@ -113,6 +118,7 @@ impl PeerManager {
                 last_seen: now,
                 chain_tip: None,
                 latency: None,
+                announce: None,
             },
         );
         true
@@ -152,6 +158,18 @@ impl PeerManager {
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.latency = Some(latency);
         }
+    }
+
+    /// Store a node identity announcement for a peer.
+    pub fn update_announce(&mut self, peer_id: &PeerId, announce: NodeAnnounce) {
+        if let Some(state) = self.peers.get_mut(peer_id) {
+            state.announce = Some(Box::new(announce));
+        }
+    }
+
+    /// Retrieve the cached node announce for a peer.
+    pub fn get_announce(&self, peer_id: &PeerId) -> Option<&NodeAnnounce> {
+        self.peers.get(peer_id)?.announce.as_deref()
     }
 
     /// Returns peers that are ahead of `our_height`, sorted by height (descending).
@@ -382,5 +400,40 @@ mod tests {
         assert_eq!(Misbehavior::ExcessiveConnections.penalty(), 25);
         assert_eq!(Misbehavior::Unresponsive.penalty(), 10);
         assert_eq!(Misbehavior::InvalidVote.penalty(), 20);
+        assert_eq!(Misbehavior::InvalidAnnounce.penalty(), 15);
+    }
+
+    #[test]
+    fn peer_state_stores_announce() {
+        use noble_core::{NodeRole, OrgType};
+        use noble_crypto::NoblePrivateKey;
+
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        pm.on_connected(p, Direction::Outbound);
+
+        // Initially no announce
+        assert!(pm.get_announce(&p).is_none());
+
+        // Create a signed announce
+        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let pk = sk.public_key();
+        let announce = NodeAnnounce::sign(
+            pk,
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+
+        pm.update_announce(&p, announce.clone());
+        let stored = pm.get_announce(&p).unwrap();
+        assert_eq!(stored.node_name, "test");
     }
 }

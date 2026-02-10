@@ -29,6 +29,9 @@ pub enum NetworkError {
 
     #[error("invalid header chain: {0}")]
     InvalidHeaderChain(String),
+
+    #[error("invalid node announce: {0}")]
+    InvalidAnnounce(String),
 }
 
 #[cfg(test)]

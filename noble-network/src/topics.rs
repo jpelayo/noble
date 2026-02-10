@@ -12,8 +12,16 @@ pub const TOPIC_TX_ANNOUNCE: &str = "noble/tx/announce/1";
 /// Topic for Proof-of-Reputation vote broadcasts.
 pub const TOPIC_POR_VOTE: &str = "noble/porvote/1";
 
+/// Topic for node identity announcements.
+pub const TOPIC_NODE_ANNOUNCE: &str = "noble/node/announce/1";
+
 /// All GossipSub topics that a NOBLE node subscribes to.
-pub const ALL_TOPICS: &[&str] = &[TOPIC_BLOCK_ANNOUNCE, TOPIC_TX_ANNOUNCE, TOPIC_POR_VOTE];
+pub const ALL_TOPICS: &[&str] = &[
+    TOPIC_BLOCK_ANNOUNCE,
+    TOPIC_TX_ANNOUNCE,
+    TOPIC_POR_VOTE,
+    TOPIC_NODE_ANNOUNCE,
+];
 
 /// Protocol identifier for the block/header sync request-response protocol.
 pub const SYNC_PROTOCOL: &str = "/noble/sync/1.0.0";
@@ -33,10 +41,11 @@ mod tests {
 
     #[test]
     fn all_topics_contains_expected() {
-        assert_eq!(ALL_TOPICS.len(), 3);
+        assert_eq!(ALL_TOPICS.len(), 4);
         assert!(ALL_TOPICS.contains(&TOPIC_BLOCK_ANNOUNCE));
         assert!(ALL_TOPICS.contains(&TOPIC_TX_ANNOUNCE));
         assert!(ALL_TOPICS.contains(&TOPIC_POR_VOTE));
+        assert!(ALL_TOPICS.contains(&TOPIC_NODE_ANNOUNCE));
     }
 
     #[test]

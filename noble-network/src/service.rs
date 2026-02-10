@@ -236,6 +236,56 @@ async fn handle_swarm_event(
                             voter_id,
                             signature,
                         }),
+                        GossipMessage::NodeAnnounce {
+                            identity_key,
+                            node_name,
+                            org_type,
+                            org_name,
+                            node_role,
+                            contact_email,
+                            website,
+                            host_address,
+                            timestamp,
+                            signature_scheme,
+                            signature_pubkey,
+                            signature_bytes,
+                        } => {
+                            match convert_and_validate_announce(
+                                &identity_key,
+                                &node_name,
+                                &org_type,
+                                &org_name,
+                                &node_role,
+                                &contact_email,
+                                &website,
+                                &host_address,
+                                timestamp,
+                                signature_scheme,
+                                &signature_pubkey,
+                                &signature_bytes,
+                            ) {
+                                Ok(announce) => {
+                                    peer_manager
+                                        .update_announce(&propagation_source, announce.clone());
+                                    Some(NetworkEvent::NodeAnnounceReceived {
+                                        peer_id: peer_bytes,
+                                        announce: Box::new(announce),
+                                    })
+                                }
+                                Err(reason) => {
+                                    tracing::warn!(
+                                        %propagation_source,
+                                        %reason,
+                                        "invalid node announce"
+                                    );
+                                    peer_manager.record_misbehavior(
+                                        &propagation_source,
+                                        Misbehavior::InvalidAnnounce,
+                                    );
+                                    None
+                                }
+                            }
+                        }
                     };
                     if let Some(evt) = net_event {
                         let _ = event_tx.send(evt).await;
@@ -510,6 +560,29 @@ async fn handle_command(
             }
         }
 
+        NetworkCommand::PublishNodeAnnounce(announce) => {
+            let msg = GossipMessage::NodeAnnounce {
+                identity_key: announce.identity_key.to_wire_bytes(),
+                node_name: announce.node_name.clone(),
+                org_type: format!("{:?}", announce.org_type),
+                org_name: announce.org_name.clone(),
+                node_role: format!("{:?}", announce.node_role),
+                contact_email: announce.contact_email.clone(),
+                website: announce.website.clone(),
+                host_address: announce.host_address.clone(),
+                timestamp: announce.timestamp,
+                signature_scheme: announce.signature.scheme_id,
+                signature_pubkey: announce.signature.public_key.clone(),
+                signature_bytes: announce.signature.signature.clone(),
+            };
+            if let Ok(data) = codec::encode_gossip(&msg) {
+                let topic = IdentTopic::new(topics::TOPIC_NODE_ANNOUNCE);
+                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                    tracing::warn!(err = %e, "failed to publish node announce");
+                }
+            }
+        }
+
         NetworkCommand::BanPeer(peer_bytes) => {
             if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
                 peer_manager.record_misbehavior(&pid, Misbehavior::DuplicateProposal);
@@ -523,6 +596,106 @@ async fn handle_command(
     }
 
     false
+}
+
+fn parse_org_type(s: &str) -> Option<noble_core::OrgType> {
+    use noble_core::OrgType;
+    match s {
+        "Individual" => Some(OrgType::Individual),
+        "IndependentResearcher" => Some(OrgType::IndependentResearcher),
+        "University" => Some(OrgType::University),
+        "ResearchLab" => Some(OrgType::ResearchLab),
+        "NGO" => Some(OrgType::NGO),
+        "Foundation" => Some(OrgType::Foundation),
+        "OpenSourceProject" => Some(OrgType::OpenSourceProject),
+        "Cooperative" => Some(OrgType::Cooperative),
+        "CommunityGroup" => Some(OrgType::CommunityGroup),
+        "ReligiousOrganization" => Some(OrgType::ReligiousOrganization),
+        "Enterprise" => Some(OrgType::Enterprise),
+        "Startup" => Some(OrgType::Startup),
+        "InfrastructureProvider" => Some(OrgType::InfrastructureProvider),
+        "FinancialInstitution" => Some(OrgType::FinancialInstitution),
+        "GovernmentFederal" => Some(OrgType::GovernmentFederal),
+        "GovernmentRegional" => Some(OrgType::GovernmentRegional),
+        "GovernmentMunicipal" => Some(OrgType::GovernmentMunicipal),
+        "MilitaryOrDefense" => Some(OrgType::MilitaryOrDefense),
+        "CentralBank" => Some(OrgType::CentralBank),
+        "Hospital" => Some(OrgType::Hospital),
+        "Museum" => Some(OrgType::Museum),
+        "MediaOutlet" => Some(OrgType::MediaOutlet),
+        _ => None,
+    }
+}
+
+fn parse_node_role(s: &str) -> Option<noble_core::NodeRole> {
+    use noble_core::NodeRole;
+    match s {
+        "FullNode" => Some(NodeRole::FullNode),
+        "Validator" => Some(NodeRole::Validator),
+        "ArchiveNode" => Some(NodeRole::ArchiveNode),
+        "LightClient" => Some(NodeRole::LightClient),
+        "Gateway" => Some(NodeRole::Gateway),
+        _ => None,
+    }
+}
+
+/// Convert wire-format NodeAnnounce fields to a `noble_core::NodeAnnounce`,
+/// then validate signature, field lengths, and timestamp freshness.
+#[allow(clippy::too_many_arguments)]
+fn convert_and_validate_announce(
+    identity_key_bytes: &[u8],
+    node_name: &str,
+    org_type_str: &str,
+    org_name: &Option<String>,
+    node_role_str: &str,
+    contact_email: &Option<String>,
+    website: &Option<String>,
+    host_address: &Option<String>,
+    timestamp: u64,
+    signature_scheme: u8,
+    signature_pubkey: &[u8],
+    signature_bytes: &[u8],
+) -> Result<noble_core::NodeAnnounce, String> {
+    let identity_key = noble_crypto::NoblePublicKey::from_wire_bytes(identity_key_bytes)
+        .map_err(|e| format!("invalid identity key: {e}"))?;
+
+    let org_type =
+        parse_org_type(org_type_str).ok_or_else(|| format!("unknown org_type: {org_type_str}"))?;
+
+    let node_role = parse_node_role(node_role_str)
+        .ok_or_else(|| format!("unknown node_role: {node_role_str}"))?;
+
+    let announce = noble_core::NodeAnnounce {
+        version: noble_core::NODE_ANNOUNCE_VERSION,
+        identity_key,
+        node_name: node_name.to_string(),
+        org_type,
+        org_name: org_name.clone(),
+        node_role,
+        contact_email: contact_email.clone(),
+        website: website.clone(),
+        host_address: host_address.clone(),
+        timestamp,
+        signature: noble_crypto::SignatureEnvelope {
+            scheme_id: signature_scheme,
+            public_key: signature_pubkey.to_vec(),
+            signature: signature_bytes.to_vec(),
+        },
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    announce
+        .validate(now)
+        .map_err(|e| format!("validation: {e}"))?;
+    announce
+        .verify_signature()
+        .map_err(|e| format!("signature: {e}"))?;
+
+    Ok(announce)
 }
 
 #[cfg(test)]

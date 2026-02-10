@@ -68,3 +68,32 @@ prometheus_addr = "127.0.0.1:9615"
 
 # Enable or disable metrics collection.
 enabled = true
+
+[identity]
+# Human-readable name for this node (max 64 chars).
+node_name = ""
+
+# Organization type. One of:
+#   Individual, IndependentResearcher,
+#   University, ResearchLab, NGO, Foundation, OpenSourceProject,
+#   Cooperative, CommunityGroup, ReligiousOrganization,
+#   Enterprise, Startup, InfrastructureProvider, FinancialInstitution,
+#   GovernmentFederal, GovernmentRegional, GovernmentMunicipal,
+#   MilitaryOrDefense, CentralBank,
+#   Hospital, Museum, MediaOutlet
+org_type = "Individual"
+
+# Organization name (optional, max 128 chars).
+org_name = ""
+
+# Node role: FullNode, Validator, ArchiveNode, LightClient, Gateway
+node_role = "FullNode"
+
+# Contact email for the node operator (optional).
+contact_email = ""
+
+# Organization website URL (optional).
+website = ""
+
+# Publicly reachable host address for this node (optional).
+host_address = ""

@@ -729,6 +729,97 @@ export class MockRpcClient {
         return { transactions: txs, total: txs.length };
       }
 
+      case 'noble_getNodeIdentity':
+        return {
+          node_name: 'noble-dev-01',
+          org_type: 'Individual',
+          org_name: '',
+          node_role: 'FullNode',
+          contact_email: '',
+          website: '',
+          host_address: '',
+          governance_class: 'individual',
+        };
+
+      case 'noble_setNodeIdentity':
+        return { success: true };
+
+      case 'noble_getPeerAnnounces':
+        return [
+          {
+            peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
+            node_name: 'MIT Blockchain Lab',
+            org_type: 'University',
+            governance_class: 'non-profit',
+            node_role: 'ArchiveNode',
+            contact_email: 'blockchain@mit.edu',
+            website: 'https://blockchain.mit.edu',
+            host_address: '/ip4/18.4.86.10/tcp/9333',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 120,
+          },
+          {
+            peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
+            node_name: 'Treasury Node Alpha',
+            org_type: 'GovernmentFederal',
+            governance_class: 'government',
+            node_role: 'Validator',
+            contact_email: 'nodes@treasury.gov',
+            website: 'https://treasury.gov/blockchain',
+            host_address: '/ip4/52.1.100.50/tcp/9333',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 300,
+          },
+          {
+            peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
+            node_name: 'Acme Corp Node',
+            org_type: 'Enterprise',
+            governance_class: 'for-profit',
+            node_role: 'FullNode',
+            contact_email: 'infra@acme.com',
+            website: 'https://acme.com',
+            host_address: '/ip4/203.0.113.42/tcp/9333',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 60,
+          },
+          {
+            peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
+            node_name: 'OpenNoble Community',
+            org_type: 'OpenSourceProject',
+            governance_class: 'non-profit',
+            node_role: 'FullNode',
+            contact_email: 'admin@opennoble.org',
+            website: 'https://opennoble.org',
+            host_address: '/ip4/198.51.100.7/tcp/9333',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 45,
+          },
+          {
+            peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
+            node_name: 'City of Barcelona',
+            org_type: 'GovernmentMunicipal',
+            governance_class: 'government',
+            node_role: 'Validator',
+            contact_email: 'blockchain@bcn.cat',
+            website: 'https://ajuntament.barcelona.cat',
+            host_address: '/ip4/85.91.200.12/tcp/9333',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 180,
+          },
+          {
+            peer_id: '12D3KooWF6g7h8i9j0k1l2m3n4o5',
+            node_name: 'National Museum Archive',
+            org_type: 'Museum',
+            governance_class: 'institution',
+            node_role: 'ArchiveNode',
+            contact_email: 'digital@nationalmuseum.org',
+            website: '',
+            host_address: '',
+            identity_key: '00' + randomHex(32),
+            last_seen: Math.floor(Date.now() / 1000) - 600,
+          },
+        ];
+
       default:
         throw { code: -32601, message: `Method not found: ${method}` };
     }

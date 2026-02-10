@@ -57,6 +57,18 @@ pub const INITIAL_SUBSIDY: u64 = 50_000_000;
 /// Number of blocks between halving events (~12 years at 30-min cycles).
 pub const HALVING_INTERVAL: u64 = 210_000;
 
+/// Current NodeAnnounce message version.
+pub const NODE_ANNOUNCE_VERSION: u16 = 1;
+
+/// Maximum length of a node name in a NodeAnnounce (bytes).
+pub const MAX_NODE_NAME_LEN: usize = 64;
+
+/// Maximum length of an organization name in a NodeAnnounce (bytes).
+pub const MAX_ORG_NAME_LEN: usize = 128;
+
+/// Maximum age of a NodeAnnounce before it is considered stale (seconds).
+pub const NODE_ANNOUNCE_MAX_AGE_SECS: u64 = 3_600;
+
 /// Compute block subsidy at a given height.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).
 pub fn subsidy_at_height(height: u64) -> u64 {

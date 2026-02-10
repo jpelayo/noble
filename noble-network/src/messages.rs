@@ -8,7 +8,7 @@
 //! - [`GossipMessage`]: CBOR-encoded payloads published on GossipSub topics.
 //! - [`NetworkCommand`] / [`NetworkEvent`]: channel messages between node and network service.
 
-use noble_core::{Block, BlockHeader, Transaction};
+use noble_core::{Block, BlockHeader, NodeAnnounce, Transaction};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -85,6 +85,21 @@ pub enum GossipMessage {
         voter_id: Vec<u8>,
         signature: Vec<u8>,
     },
+    /// Broadcast a node identity announcement (sent on `TOPIC_NODE_ANNOUNCE`).
+    NodeAnnounce {
+        identity_key: Vec<u8>,
+        node_name: String,
+        org_type: String,
+        org_name: Option<String>,
+        node_role: String,
+        contact_email: Option<String>,
+        website: Option<String>,
+        host_address: Option<String>,
+        timestamp: u64,
+        signature_scheme: u8,
+        signature_pubkey: Vec<u8>,
+        signature_bytes: Vec<u8>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +126,8 @@ pub enum NetworkCommand {
     RequestSync,
     /// Ban a peer by their serialized PeerId bytes.
     BanPeer(Vec<u8>),
+    /// Publish a node identity announcement to the network.
+    PublishNodeAnnounce(Box<NodeAnnounce>),
     /// Shut down the network service.
     Shutdown,
 }
@@ -147,6 +164,11 @@ pub enum NetworkEvent {
     PeerDisconnected { peer_id: Vec<u8> },
     /// A peer was banned for misbehavior.
     PeerBanned { peer_id: Vec<u8>, reason: String },
+    /// A node identity announcement was received from a peer.
+    NodeAnnounceReceived {
+        peer_id: Vec<u8>,
+        announce: Box<NodeAnnounce>,
+    },
 }
 
 #[cfg(test)]
@@ -270,6 +292,28 @@ mod tests {
     #[test]
     fn gossip_tx_announce_roundtrip() {
         let msg = GossipMessage::TxAnnounce { tx_id: [0xEE; 32] };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn gossip_node_announce_roundtrip() {
+        let msg = GossipMessage::NodeAnnounce {
+            identity_key: vec![0x00; 33],
+            node_name: "test-node".into(),
+            org_type: "University".into(),
+            org_name: Some("MIT".into()),
+            node_role: "ArchiveNode".into(),
+            contact_email: Some("test@mit.edu".into()),
+            website: Some("https://mit.edu".into()),
+            host_address: Some("/ip4/1.2.3.4/tcp/9333".into()),
+            timestamp: 1_700_000_000,
+            signature_scheme: 0x00,
+            signature_pubkey: vec![1; 32],
+            signature_bytes: vec![2; 64],
+        };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
         let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();

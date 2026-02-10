@@ -25,6 +25,7 @@ import * as networkPage from './pages/network.js';
 import * as consensusPage from './pages/consensus.js';
 import * as walletPage from './pages/wallet.js';
 import * as healthPage from './pages/health.js';
+import * as identityPage from './pages/identity.js';
 
 // ── Status change handler ──
 function onStatusChange(status) {
@@ -124,6 +125,7 @@ router
   .add('/consensus', consensusPage)
   .add('/wallet', walletPage)
   .add('/health', healthPage)
+  .add('/identity', identityPage)
   .start();
 
 // ── Fetch initial data ──

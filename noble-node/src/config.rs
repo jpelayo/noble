@@ -18,6 +18,7 @@ pub struct NodeConfig {
     pub wallet: WalletConfig,
     pub logging: LoggingConfig,
     pub metrics: MetricsConfig,
+    pub identity: IdentityConfig,
 }
 
 /// P2P networking configuration.
@@ -74,6 +75,18 @@ pub struct MetricsConfig {
     pub enabled: bool,
 }
 
+/// Node identity configuration for PoR self-identification broadcasts.
+#[derive(Debug, Deserialize)]
+pub struct IdentityConfig {
+    pub node_name: String,
+    pub org_type: String,
+    pub org_name: String,
+    pub node_role: String,
+    pub contact_email: String,
+    pub website: String,
+    pub host_address: String,
+}
+
 impl NodeConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -98,5 +111,8 @@ mod tests {
         assert_eq!(config.api.ws_addr, "127.0.0.1:9944");
         assert_eq!(config.logging.level, "info");
         assert!(config.metrics.enabled);
+        assert_eq!(config.identity.org_type, "Individual");
+        assert_eq!(config.identity.node_role, "FullNode");
+        assert!(config.identity.node_name.is_empty());
     }
 }
