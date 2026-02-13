@@ -24,9 +24,12 @@
 pub mod behaviour;
 pub mod codec;
 pub mod config;
+pub mod diversity;
 pub mod error;
 pub mod messages;
 pub mod peer_manager;
+pub mod rate_limiter;
+pub mod seen_cache;
 pub mod service;
 pub mod sync_manager;
 pub mod topics;

@@ -32,6 +32,9 @@ pub enum NetworkError {
 
     #[error("invalid node announce: {0}")]
     InvalidAnnounce(String),
+
+    #[error("kademlia error: {0}")]
+    Kademlia(String),
 }
 
 #[cfg(test)]
@@ -57,6 +60,9 @@ mod tests {
 
         let e = NetworkError::InvalidHeaderChain("broken prev_hash".into());
         assert!(e.to_string().contains("broken prev_hash"));
+
+        let e = NetworkError::Kademlia("routing table full".into());
+        assert!(e.to_string().contains("routing table full"));
     }
 
     #[test]

@@ -85,6 +85,8 @@ pub enum GossipMessage {
         voter_id: Vec<u8>,
         signature: Vec<u8>,
     },
+    /// Exchange known peer addresses (sent on `TOPIC_PEER_EXCHANGE`).
+    PeerExchange { addrs: Vec<String> },
     /// Broadcast a node identity announcement (sent on `TOPIC_NODE_ANNOUNCE`).
     NodeAnnounce {
         identity_key: Vec<u8>,
@@ -122,6 +124,8 @@ pub enum NetworkCommand {
     },
     /// Request a specific block from a peer.
     RequestBlock { peer_id: Vec<u8>, hash: [u8; 32] },
+    /// Request a block by its hash from any connected peer.
+    RequestBlockByHash { hash: [u8; 32] },
     /// Trigger a chain sync check.
     RequestSync,
     /// Ban a peer by their serialized PeerId bytes.
@@ -313,6 +317,20 @@ mod tests {
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],
             signature_bytes: vec![2; 64],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn gossip_peer_exchange_roundtrip() {
+        let msg = GossipMessage::PeerExchange {
+            addrs: vec![
+                "/ip4/1.2.3.4/tcp/9333".to_string(),
+                "/ip4/5.6.7.8/tcp/9333".to_string(),
+            ],
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();

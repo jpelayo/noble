@@ -53,7 +53,7 @@ proptest = "1"
 rocksdb = "0.22"
 libp2p = { version = "0.54", features = [
     "tcp", "noise", "yamux", "gossipsub", "request-response",
-    "identify", "ping", "mdns", "macros", "tokio", "cbor"
+    "identify", "ping", "mdns", "macros", "tokio", "cbor", "kad"
 ] }
 # jsonrpsee = { version = "0.24", features = ["server"] }
 tokio = { version = "1", features = ["full"] }

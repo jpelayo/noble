@@ -29,6 +29,7 @@ pub enum Direction {
 /// - Unresponsive: 10
 /// - InvalidVote: 20 (GAP-M6: standardized to 20)
 /// - InvalidAnnounce: 15 (low — metadata is self-declared)
+/// - TxFlood: 25 (sustained tx relay rate limit violation)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Misbehavior {
     InvalidBlock,
@@ -39,6 +40,7 @@ pub enum Misbehavior {
     Unresponsive,
     InvalidVote,
     InvalidAnnounce,
+    TxFlood,
 }
 
 impl Misbehavior {
@@ -53,6 +55,7 @@ impl Misbehavior {
             Self::Unresponsive => 10,
             Self::InvalidVote => 20,
             Self::InvalidAnnounce => 15,
+            Self::TxFlood => 25,
         }
     }
 }
@@ -67,6 +70,8 @@ pub struct PeerState {
     pub chain_tip: Option<(u64, [u8; 32])>,
     pub latency: Option<Duration>,
     pub announce: Option<Box<NodeAnnounce>>,
+    /// Remote multiaddr string (set on connect or identify).
+    pub addr: Option<String>,
 }
 
 /// Manages connected peers, enforces connection limits, and tracks ban scores.
@@ -119,6 +124,7 @@ impl PeerManager {
                 chain_tip: None,
                 latency: None,
                 announce: None,
+                addr: None,
             },
         );
         true
@@ -170,6 +176,27 @@ impl PeerManager {
     /// Retrieve the cached node announce for a peer.
     pub fn get_announce(&self, peer_id: &PeerId) -> Option<&NodeAnnounce> {
         self.peers.get(peer_id)?.announce.as_deref()
+    }
+
+    /// Update a peer's remote address.
+    pub fn update_addr(&mut self, peer_id: &PeerId, addr: String) {
+        if let Some(state) = self.peers.get_mut(peer_id) {
+            state.addr = Some(addr);
+        }
+    }
+
+    /// Return the addresses of all connected peers that have a known address.
+    pub fn connected_addrs(&self) -> Vec<String> {
+        self.peers.values().filter_map(|s| s.addr.clone()).collect()
+    }
+
+    /// Return outbound peer addresses.
+    pub fn outbound_addrs(&self) -> Vec<String> {
+        self.peers
+            .values()
+            .filter(|s| s.direction == Direction::Outbound)
+            .filter_map(|s| s.addr.clone())
+            .collect()
     }
 
     /// Returns peers that are ahead of `our_height`, sorted by height (descending).
@@ -401,6 +428,35 @@ mod tests {
         assert_eq!(Misbehavior::Unresponsive.penalty(), 10);
         assert_eq!(Misbehavior::InvalidVote.penalty(), 20);
         assert_eq!(Misbehavior::InvalidAnnounce.penalty(), 15);
+        assert_eq!(Misbehavior::TxFlood.penalty(), 25);
+    }
+
+    #[test]
+    fn addr_tracking() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        pm.on_connected(p, Direction::Outbound);
+        assert!(pm.get_peer(&p).unwrap().addr.is_none());
+
+        pm.update_addr(&p, "/ip4/1.2.3.4/tcp/9333".to_string());
+        assert_eq!(
+            pm.get_peer(&p).unwrap().addr.as_deref(),
+            Some("/ip4/1.2.3.4/tcp/9333")
+        );
+    }
+
+    #[test]
+    fn connected_addrs_returns_known() {
+        let mut pm = PeerManager::new(&test_config());
+        let p1 = random_peer();
+        let p2 = random_peer();
+        pm.on_connected(p1, Direction::Outbound);
+        pm.on_connected(p2, Direction::Inbound);
+        pm.update_addr(&p1, "/ip4/1.2.3.4/tcp/9333".to_string());
+        // p2 has no addr — should not appear.
+        let addrs = pm.connected_addrs();
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].contains("1.2.3.4"));
     }
 
     #[test]

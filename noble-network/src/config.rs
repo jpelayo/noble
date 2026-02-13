@@ -49,6 +49,30 @@ pub struct NetworkConfig {
 
     /// Whether to enable mDNS local peer discovery (useful for development).
     pub enable_mdns: bool,
+
+    /// Whether to enable Kademlia DHT for peer discovery.
+    pub enable_kademlia: bool,
+
+    /// Interval in seconds between Kademlia random walks for peer discovery.
+    pub kad_walk_interval_secs: u64,
+
+    /// Maximum transaction relay rate per peer per second (token bucket).
+    pub tx_relay_rate_per_sec: u32,
+
+    /// Burst capacity for the per-peer transaction relay token bucket.
+    pub tx_relay_burst: u32,
+
+    /// Interval in seconds between peer address exchanges via gossip.
+    pub peer_exchange_interval_secs: u64,
+
+    /// Maximum number of addresses to include in a single peer exchange message.
+    pub max_addrs_per_exchange: usize,
+
+    /// Maximum outbound connections allowed to the same /16 subnet.
+    pub max_outbound_per_subnet: usize,
+
+    /// Interval in seconds between peer quality rotation checks.
+    pub peer_rotation_interval_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -63,6 +87,14 @@ impl Default for NetworkConfig {
             chain_id: MAINNET_CHAIN_ID,
             protocol_version: PROTOCOL_VERSION,
             enable_mdns: true,
+            enable_kademlia: true,
+            kad_walk_interval_secs: 300,
+            tx_relay_rate_per_sec: 100,
+            tx_relay_burst: 100,
+            peer_exchange_interval_secs: 1800,
+            max_addrs_per_exchange: 1000,
+            max_outbound_per_subnet: 2,
+            peer_rotation_interval_secs: 600,
         }
     }
 }
@@ -98,6 +130,14 @@ mod tests {
         assert_eq!(cfg.protocol_version, PROTOCOL_VERSION);
         assert!(cfg.enable_mdns);
         assert!(cfg.listen_addr.contains("9333"));
+        assert!(cfg.enable_kademlia);
+        assert_eq!(cfg.kad_walk_interval_secs, 300);
+        assert_eq!(cfg.tx_relay_rate_per_sec, 100);
+        assert_eq!(cfg.tx_relay_burst, 100);
+        assert_eq!(cfg.peer_exchange_interval_secs, 1800);
+        assert_eq!(cfg.max_addrs_per_exchange, 1000);
+        assert_eq!(cfg.max_outbound_per_subnet, 2);
+        assert_eq!(cfg.peer_rotation_interval_secs, 600);
     }
 
     #[test]

@@ -19,8 +19,13 @@ tracing.workspace = true
 serde.workspace = true
 ciborium.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 noble-test-utils.workspace = true
+noble-consensus.workspace = true
+noble-mempool.workspace = true
+noble-storage.workspace = true
+noble-codec.workspace = true

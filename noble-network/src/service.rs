@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libp2p::gossipsub::{self, IdentTopic};
+use libp2p::kad;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identify, ping, request_response};
 use libp2p::{Multiaddr, PeerId, Swarm};
@@ -17,11 +18,14 @@ use tokio::sync::mpsc;
 use crate::behaviour::{NobleBehaviour, NobleBehaviourEvent};
 use crate::codec;
 use crate::config::NetworkConfig;
+use crate::diversity;
 use crate::error::NetworkError;
 use crate::messages::{
     GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxResponse,
 };
 use crate::peer_manager::{Direction, Misbehavior, PeerManager};
+use crate::rate_limiter::TxRateLimiter;
+use crate::seen_cache::{self, SeenCache};
 use crate::topics;
 use crate::traits::{BlockProvider, TxProvider};
 use crate::transport::build_swarm;
@@ -80,12 +84,33 @@ pub async fn start_network(
         .listen_on(listen_addr)
         .map_err(|e| NetworkError::Transport(e.to_string()))?;
 
-    // Dial bootstrap peers.
+    // Dial bootstrap peers and add them to Kademlia routing table.
     for addr_str in &config.bootstrap_peers {
         if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+            // Extract peer ID from multiaddr if present (e.g. /p2p/<peer_id>).
+            let peer_id_from_addr = addr.iter().find_map(|p| {
+                if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
+                    Some(peer_id)
+                } else {
+                    None
+                }
+            });
             if let Err(e) = swarm.dial(addr.clone()) {
                 tracing::warn!(%addr, err = %e, "failed to dial bootstrap peer");
             }
+            // Add to Kademlia routing table for discovery.
+            if config.enable_kademlia {
+                if let Some(pid) = peer_id_from_addr {
+                    swarm.behaviour_mut().kad.add_address(&pid, addr);
+                }
+            }
+        }
+    }
+
+    // Bootstrap Kademlia if enabled and we have bootstrap peers.
+    if config.enable_kademlia && !config.bootstrap_peers.is_empty() {
+        if let Err(e) = swarm.behaviour_mut().kad.bootstrap() {
+            tracing::debug!(err = %e, "kademlia bootstrap (will retry on walk timer)");
         }
     }
 
@@ -111,6 +136,7 @@ pub async fn start_network(
 }
 
 /// Internal event loop.
+#[allow(clippy::too_many_lines)]
 async fn run_event_loop(
     mut swarm: Swarm<NobleBehaviour>,
     config: NetworkConfig,
@@ -122,6 +148,25 @@ async fn run_event_loop(
 ) {
     let mut maintenance_interval =
         tokio::time::interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
+    let mut kad_walk_interval =
+        tokio::time::interval(Duration::from_secs(config.kad_walk_interval_secs));
+    let mut peer_exchange_interval =
+        tokio::time::interval(Duration::from_secs(config.peer_exchange_interval_secs));
+    let mut peer_rotation_interval =
+        tokio::time::interval(Duration::from_secs(config.peer_rotation_interval_secs));
+    // Skip the first immediate tick for periodic timers.
+    kad_walk_interval.reset();
+    peer_exchange_interval.reset();
+    peer_rotation_interval.reset();
+
+    // Gossip dedup caches (GAP-L12).
+    let mut seen_blocks = SeenCache::new(Duration::from_secs(120), 10_000);
+    let mut seen_txs = SeenCache::new(Duration::from_secs(120), 50_000);
+    let mut seen_votes = SeenCache::new(Duration::from_secs(60), 10_000);
+
+    // Per-peer tx relay rate limiter.
+    let mut tx_rate_limiter =
+        TxRateLimiter::new(config.tx_relay_burst, config.tx_relay_rate_per_sec);
 
     loop {
         tokio::select! {
@@ -135,6 +180,10 @@ async fn run_event_loop(
                     &block_provider,
                     &tx_provider,
                     &event_tx,
+                    &mut seen_blocks,
+                    &mut seen_txs,
+                    &mut seen_votes,
+                    &mut tx_rate_limiter,
                 ).await;
             }
 
@@ -152,6 +201,73 @@ async fn run_event_loop(
                 if cleaned > 0 {
                     tracing::debug!(cleaned, "expired bans removed");
                 }
+                // Evict expired cache entries.
+                seen_blocks.evict_expired();
+                seen_txs.evict_expired();
+                seen_votes.evict_expired();
+                // Cleanup stale rate limiter buckets.
+                tx_rate_limiter.cleanup(Duration::from_secs(300));
+            }
+
+            // --- Kademlia random walk for peer discovery ---
+            _ = kad_walk_interval.tick() => {
+                if config.enable_kademlia {
+                    let random_peer = PeerId::random();
+                    swarm.behaviour_mut().kad.get_closest_peers(random_peer);
+                    tracing::debug!("kademlia random walk triggered");
+                }
+            }
+
+            // --- Peer address exchange (GAP-H5) ---
+            _ = peer_exchange_interval.tick() => {
+                let mut addrs = peer_manager.connected_addrs();
+                addrs.truncate(config.max_addrs_per_exchange);
+                if !addrs.is_empty() {
+                    let msg = GossipMessage::PeerExchange { addrs };
+                    if let Ok(data) = codec::encode_gossip(&msg) {
+                        let topic = IdentTopic::new(topics::TOPIC_PEER_EXCHANGE);
+                        if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                            tracing::debug!(err = %e, "failed to publish peer exchange");
+                        }
+                    }
+                }
+            }
+
+            // --- Peer rotation: evict worst outbound and discover replacement ---
+            _ = peer_rotation_interval.tick() => {
+                // Collect outbound peers with addresses for quality scoring.
+                let outbound_peers: Vec<(PeerId, String, f64)> = swarm
+                    .connected_peers()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .filter_map(|pid| {
+                        let state = peer_manager.get_peer(&pid)?;
+                        if state.direction != Direction::Outbound {
+                            return None;
+                        }
+                        let addr = state.addr.clone()?;
+                        let score = diversity::peer_quality_score(state);
+                        Some((pid, addr, score))
+                    })
+                    .collect();
+
+                if outbound_peers.len() > 1 {
+                    if let Some((worst_pid, _, _)) = outbound_peers
+                        .iter()
+                        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                    {
+                        tracing::debug!(%worst_pid, "rotating worst outbound peer");
+                        let _ = swarm.disconnect_peer_id(*worst_pid);
+                        // Trigger Kademlia walk to find a replacement.
+                        if config.enable_kademlia {
+                            swarm
+                                .behaviour_mut()
+                                .kad
+                                .get_closest_peers(PeerId::random());
+                        }
+                    }
+                }
             }
         }
     }
@@ -167,6 +283,10 @@ async fn handle_swarm_event(
     block_provider: &Arc<dyn BlockProvider>,
     tx_provider: &Arc<dyn TxProvider>,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    seen_blocks: &mut SeenCache,
+    seen_txs: &mut SeenCache,
+    seen_votes: &mut SeenCache,
+    tx_rate_limiter: &mut TxRateLimiter,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -177,13 +297,29 @@ async fn handle_swarm_event(
             } else {
                 Direction::Inbound
             };
+            let remote_addr = endpoint.get_remote_address().to_string();
+
+            // Check subnet diversity for outbound connections.
+            if direction == Direction::Outbound {
+                let outbound_addrs = peer_manager.outbound_addrs();
+                if !diversity::check_subnet_diversity(
+                    &outbound_addrs,
+                    &remote_addr,
+                    config.max_outbound_per_subnet,
+                ) {
+                    tracing::debug!(%peer_id, %remote_addr, "rejecting outbound: subnet diversity");
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                }
+            }
 
             if peer_manager.on_connected(peer_id, direction) {
+                peer_manager.update_addr(&peer_id, remote_addr.clone());
                 tracing::debug!(%peer_id, ?direction, "peer connected");
                 let _ = event_tx
                     .send(NetworkEvent::PeerConnected {
                         peer_id: peer_id.to_bytes().to_vec(),
-                        addr: endpoint.get_remote_address().to_string(),
+                        addr: remote_addr,
                         chain_tip: None,
                     })
                     .await;
@@ -195,6 +331,7 @@ async fn handle_swarm_event(
 
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             peer_manager.on_disconnected(&peer_id);
+            tx_rate_limiter.remove_peer(&peer_id);
             let _ = event_tx
                 .send(NetworkEvent::PeerDisconnected {
                     peer_id: peer_id.to_bytes().to_vec(),
@@ -213,29 +350,80 @@ async fn handle_swarm_event(
                     let peer_bytes = propagation_source.to_bytes().to_vec();
                     let net_event = match gossip_msg {
                         GossipMessage::BlockAnnounce { block_hash, height } => {
-                            Some(NetworkEvent::BlockAnnounced {
-                                peer_id: peer_bytes,
-                                hash: block_hash,
-                                height,
-                            })
+                            // Dedup: skip if already seen.
+                            if !seen_blocks.insert_if_new(block_hash) {
+                                None
+                            } else {
+                                // Auto-request full block via sync RPC.
+                                let request = SyncRequest::GetBlocks {
+                                    hashes: vec![block_hash],
+                                };
+                                swarm
+                                    .behaviour_mut()
+                                    .sync_rpc
+                                    .send_request(&propagation_source, request);
+                                Some(NetworkEvent::BlockAnnounced {
+                                    peer_id: peer_bytes,
+                                    hash: block_hash,
+                                    height,
+                                })
+                            }
                         }
                         GossipMessage::TxAnnounce { tx_id } => {
-                            Some(NetworkEvent::TransactionAnnounced {
-                                peer_id: peer_bytes,
-                                tx_id,
-                            })
+                            // Rate limit check.
+                            if !tx_rate_limiter.try_consume(&propagation_source) {
+                                peer_manager
+                                    .record_misbehavior(&propagation_source, Misbehavior::TxFlood);
+                                None
+                            } else if !seen_txs.insert_if_new(tx_id) {
+                                None
+                            } else {
+                                Some(NetworkEvent::TransactionAnnounced {
+                                    peer_id: peer_bytes,
+                                    tx_id,
+                                })
+                            }
                         }
                         GossipMessage::PorVote {
                             cycle,
                             candidate_hash,
                             voter_id,
                             signature,
-                        } => Some(NetworkEvent::VoteReceived {
-                            cycle,
-                            candidate_hash,
-                            voter_id,
-                            signature,
-                        }),
+                        } => {
+                            // Vote dedup (GAP-L12).
+                            let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id);
+                            if !seen_votes.insert_if_new(dedup_key) {
+                                None
+                            } else {
+                                Some(NetworkEvent::VoteReceived {
+                                    cycle,
+                                    candidate_hash,
+                                    voter_id,
+                                    signature,
+                                })
+                            }
+                        }
+                        GossipMessage::PeerExchange { addrs } => {
+                            // Add received addresses to Kademlia routing table.
+                            if config.enable_kademlia {
+                                for addr_str in &addrs {
+                                    if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
+                                        // Extract peer_id from the multiaddr if present.
+                                        let pid = maddr.iter().find_map(|p| {
+                                            if let libp2p::multiaddr::Protocol::P2p(id) = p {
+                                                Some(id)
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                        if let Some(pid) = pid {
+                                            swarm.behaviour_mut().kad.add_address(&pid, maddr);
+                                        }
+                                    }
+                                }
+                            }
+                            None // No NetworkEvent for peer exchange.
+                        }
                         GossipMessage::NodeAnnounce {
                             identity_key,
                             node_name,
@@ -421,7 +609,29 @@ async fn handle_swarm_event(
                 agent = %info.agent_version,
                 "identified peer"
             );
+            // Feed identified peer addresses into Kademlia routing table.
+            if config.enable_kademlia {
+                for addr in &info.listen_addrs {
+                    swarm
+                        .behaviour_mut()
+                        .kad
+                        .add_address(&peer_id, addr.clone());
+                }
+            }
         }
+
+        SwarmEvent::Behaviour(NobleBehaviourEvent::Kad(event)) => match &event {
+            kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+                ..
+            } => {
+                tracing::debug!(peers_found = ok.peers.len(), "kademlia walk found peers");
+            }
+            kad::Event::RoutingUpdated { peer, .. } => {
+                tracing::debug!(%peer, "kademlia routing table updated");
+            }
+            _ => {}
+        },
 
         _ => {}
     }
@@ -580,6 +790,15 @@ async fn handle_command(
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish node announce");
                 }
+            }
+        }
+
+        NetworkCommand::RequestBlockByHash { hash } => {
+            // Request the block from any connected peer.
+            let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+            if let Some(pid) = peers.first() {
+                let request = SyncRequest::GetBlocks { hashes: vec![hash] };
+                swarm.behaviour_mut().sync_rpc.send_request(pid, request);
             }
         }
 
