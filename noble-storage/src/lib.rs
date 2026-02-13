@@ -4,11 +4,13 @@
 //! RocksDB storage engine with 8 column families for the NOBLE protocol.
 
 pub mod error;
+pub mod integrity;
 pub mod memory;
 pub mod rocks;
 pub mod traits;
 
 pub use error::StorageError;
+pub use integrity::{verify_chain_integrity, FindingKind, IntegrityFinding, IntegrityReport};
 pub use memory::MemoryStorage;
 pub use rocks::RocksDbStorage;
 pub use traits::{ChainTip, StorageEngine};

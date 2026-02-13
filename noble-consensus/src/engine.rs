@@ -94,6 +94,15 @@ impl CycleEngine {
         &mut self.validator_list
     }
 
+    /// Update the chain tip (height + block hash).
+    ///
+    /// Used by the node when a rollback or external chain-state change occurs
+    /// (e.g., storage integrity repair).
+    pub fn update_tip(&mut self, height: u64, block_hash: Hash256) {
+        self.tip_height = height;
+        self.tip_hash = block_hash;
+    }
+
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
         let new_cycle = self.cycle_mgr.current_cycle(now);

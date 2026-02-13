@@ -43,6 +43,10 @@ pub enum StorageError {
     /// A credit would overflow the u64 balance (GAP-H19).
     #[error("balance overflow: current {current}, credit {amount}")]
     BalanceOverflow { current: u64, amount: u64 },
+
+    /// Corruption detected at a specific height.
+    #[error("corruption detected at height {height}: {detail}")]
+    CorruptionDetected { height: u64, detail: String },
 }
 
 impl From<noble_codec::CodecError> for StorageError {

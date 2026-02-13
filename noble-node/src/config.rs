@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// Top-level node configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct NodeConfig {
     pub network: NetworkConfig,
     pub storage: StorageConfig,
@@ -93,6 +93,88 @@ impl NodeConfig {
         let contents = std::fs::read_to_string(path)?;
         let config: NodeConfig = toml::from_str(&contents)?;
         Ok(config)
+    }
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: "/ip4/0.0.0.0/tcp/30333".to_string(),
+            seeds: Vec::new(),
+            max_peers: 50,
+            ban_threshold: 100,
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: PathBuf::from("data"),
+            cache_size_mb: 256,
+            compression: true,
+        }
+    }
+}
+
+impl Default for ConsensusConfig {
+    fn default() -> Self {
+        Self {
+            validator_key_path: String::new(),
+            validator_list_path: PathBuf::from("validators.txt"),
+        }
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            rpc_addr: "127.0.0.1:9933".to_string(),
+            ws_addr: "127.0.0.1:9944".to_string(),
+            max_connections: 100,
+            rate_limit: 30,
+        }
+    }
+}
+
+impl Default for WalletConfig {
+    fn default() -> Self {
+        Self {
+            keystore_path: PathBuf::from("keystore"),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            file: String::new(),
+            rotation: "daily".to_string(),
+        }
+    }
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            prometheus_addr: "127.0.0.1:9615".to_string(),
+            enabled: true,
+        }
+    }
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            node_name: String::new(),
+            org_type: "Individual".to_string(),
+            org_name: String::new(),
+            node_role: "FullNode".to_string(),
+            contact_email: String::new(),
+            website: String::new(),
+            host_address: String::new(),
+        }
     }
 }
 

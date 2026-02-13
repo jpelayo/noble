@@ -72,6 +72,15 @@ pub trait StorageEngine {
         limit: u32,
     ) -> Result<Vec<Hash256>, StorageError>;
 
+    /// Roll back the chain to a specific height, removing all blocks above it.
+    /// Recalculates balances by replaying from genesis.
+    /// Returns the new chain tip after rollback.
+    fn rollback_to_height(
+        &self,
+        target_height: u64,
+        chain_id: u32,
+    ) -> Result<ChainTip, StorageError>;
+
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
     fn close(&mut self) -> Result<(), StorageError>;

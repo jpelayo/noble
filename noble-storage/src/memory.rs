@@ -250,6 +250,122 @@ impl StorageEngine for MemoryStorage {
         Ok(inner.chain_tip.clone())
     }
 
+    fn rollback_to_height(
+        &self,
+        target_height: u64,
+        chain_id: u32,
+    ) -> Result<ChainTip, StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+
+        // Find tip
+        let tip = inner
+            .chain_tip
+            .as_ref()
+            .ok_or_else(|| StorageError::Database("no chain tip".into()))?;
+
+        if target_height >= tip.height {
+            return Ok(tip.clone()); // nothing to do
+        }
+
+        // Collect blocks to remove (target_height+1..=tip)
+        let tip_h = tip.height;
+        for h in (target_height + 1)..=tip_h {
+            if let Some(hash) = inner.block_heights.remove(&h) {
+                if let Some(block) = inner.blocks.remove(&hash) {
+                    // Remove transactions and checksum entries
+                    for tx in &block.transactions {
+                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
+                            inner.transactions.remove(&tx_id);
+                            // Remove from checksum index
+                            if let Some(entries) = inner.checksum_index.get_mut(&tx.checksum) {
+                                entries.retain(|id| *id != tx_id);
+                                if entries.is_empty() {
+                                    inner.checksum_index.remove(&tx.checksum);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clear balances and history — replay from genesis
+        inner.balances.clear();
+        inner.address_history.clear();
+
+        // Replay balances from 0..=target_height
+        for h in 0..=target_height {
+            let hash = *inner.block_heights.get(&h).ok_or_else(|| {
+                StorageError::Database(format!("missing block at height {h} during replay"))
+            })?;
+            let block = inner
+                .blocks
+                .get(&hash)
+                .ok_or_else(|| StorageError::Database(format!("missing block data at height {h}")))?
+                .clone();
+
+            // Replay balance logic (same as commit_block)
+            let mut deltas: std::collections::HashMap<NoblePublicKey, i128> =
+                std::collections::HashMap::new();
+            let validator = &block.header.validator_id;
+            let subsidy = subsidy_at_height(h) as i128;
+            let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
+            *deltas.entry(validator.clone()).or_default() += subsidy + total_fees;
+
+            for (offset, tx) in block.transactions.iter().enumerate() {
+                let sender = tx
+                    .publisher_sig
+                    .to_noble_public_key()
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let tx_id = tx
+                    .compute_tx_id(chain_id)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+
+                if tx.tx_type == TX_TYPE_TRANSFER {
+                    let amount = tx.amount.unwrap_or(0) as i128;
+                    let fee = tx.fee as i128;
+                    *deltas.entry(sender.clone()).or_default() -= amount + fee;
+                    if let Some(ref recipient) = tx.recipient {
+                        *deltas.entry(recipient.clone()).or_default() += amount;
+                        // History for recipient
+                        inner
+                            .address_history
+                            .insert((recipient.to_wire_bytes(), h, offset as u32), tx_id);
+                    }
+                } else {
+                    let fee = tx.fee as i128;
+                    *deltas.entry(sender.clone()).or_default() -= fee;
+                }
+                // History for sender
+                let sender_wire = sender.to_wire_bytes();
+                inner
+                    .address_history
+                    .insert((sender_wire, h, offset as u32), tx_id);
+            }
+
+            for (pubkey, delta) in &deltas {
+                let current = *inner.balances.get(pubkey).unwrap_or(&0);
+                let new_balance = current as i128 + delta;
+                if new_balance >= 0 {
+                    inner.balances.insert(pubkey.clone(), new_balance as u64);
+                }
+            }
+        }
+
+        // Update chain tip
+        let new_hash = *inner
+            .block_heights
+            .get(&target_height)
+            .ok_or_else(|| StorageError::Database("missing target height after rollback".into()))?;
+        let new_tip = ChainTip {
+            block_hash: new_hash,
+            height: target_height,
+        };
+        inner.chain_tip = Some(new_tip.clone());
+        Ok(new_tip)
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         inner.closed = true;
@@ -1008,5 +1124,79 @@ mod tests {
             store.get_balance(&sender_pub).unwrap(),
             INITIAL_SUBSIDY - fee
         );
+    }
+
+    // --- Rollback tests ---
+
+    #[test]
+    fn rollback_removes_blocks() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let mut prev = Hash256::ZERO;
+        for h in 0..3u64 {
+            let (b, hash, ids) =
+                make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
+            store.commit_block(&b, &hash, &ids).unwrap();
+            prev = hash;
+        }
+
+        let tip = store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(tip.height, 1);
+        assert!(store.get_block_hash_by_height(2).is_err());
+        let new_tip = store.get_chain_tip().unwrap().unwrap();
+        assert_eq!(new_tip.height, 1);
+    }
+
+    #[test]
+    fn rollback_recalculates_balances() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+
+        let mut prev = Hash256::ZERO;
+        for h in 0..3u64 {
+            let (b, hash, ids) =
+                make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
+            store.commit_block(&b, &hash, &ids).unwrap();
+            prev = hash;
+        }
+
+        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 2);
+    }
+
+    #[test]
+    fn rollback_noop_at_tip() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+        let (b, hash, ids) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b, &hash, &ids).unwrap();
+
+        let tip = store.rollback_to_height(0, MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(tip.height, 0);
+    }
+
+    #[test]
+    fn rollback_clears_tx_index() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Block 0: empty (fund validator)
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: one tx
+        let (tx1, id1) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_001);
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx1, id1)], 1, h0, 1_700_000_001, &sk, &pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        assert!(store.has_transaction(&id1).unwrap());
+        store.rollback_to_height(0, MAINNET_CHAIN_ID).unwrap();
+        assert!(!store.has_transaction(&id1).unwrap());
     }
 }

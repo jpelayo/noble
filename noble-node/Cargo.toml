@@ -22,6 +22,10 @@ noble-api.workspace = true
 noble-wallet.workspace = true
 serde.workspace = true
 toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true
+tempfile.workspace = true

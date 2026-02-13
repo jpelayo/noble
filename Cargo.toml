@@ -55,6 +55,11 @@ libp2p = { version = "0.54", features = [
     "tcp", "noise", "yamux", "gossipsub", "request-response",
     "identify", "ping", "mdns", "macros", "tokio", "cbor", "kad"
 ] }
-# jsonrpsee = { version = "0.24", features = ["server"] }
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }

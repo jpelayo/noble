@@ -11,10 +11,32 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+noble-codec.workspace = true
 noble-core.workspace = true
+noble-crypto.workspace = true
 noble-storage.workspace = true
 noble-mempool.workspace = true
 noble-network.workspace = true
 noble-consensus.workspace = true
+noble-wallet.workspace = true
+jsonrpsee.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+noble-test-utils.workspace = true
+noble-core.workspace = true
+noble-crypto.workspace = true
+noble-storage.workspace = true
+noble-mempool.workspace = true
+noble-consensus.workspace = true
+noble-wallet.workspace = true
+tempfile.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+jsonrpsee = { version = "0.24", features = ["server", "macros", "ws-client"] }

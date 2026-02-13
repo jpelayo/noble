@@ -13,5 +13,14 @@ authors.workspace = true
 [dependencies]
 noble-core.workspace = true
 noble-crypto.workspace = true
+serde.workspace = true
+serde_json = "1"
+rand.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+tempfile.workspace = true

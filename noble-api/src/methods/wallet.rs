@@ -1,0 +1,348 @@
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
+
+//! Wallet-related RPC methods: createAddress, walletUnlock, walletLock,
+//! getWalletInfo, walletSendTransfer, submitDocumentBatch.
+
+use std::sync::Arc;
+
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::types::ErrorObjectOwned;
+
+use noble_core::MIN_TX_FEE;
+use noble_crypto::{sha256, Hash256, NoblePublicKey};
+use noble_mempool::{BalanceLookup, ChainLookup};
+use noble_network::NetworkCommand;
+use noble_storage::StorageEngine;
+use noble_wallet::TransactionBuilder;
+
+use crate::error::ApiError;
+use crate::state::ApiState;
+use crate::types::*;
+
+// ---------------------------------------------------------------------------
+// Adapter structs (same as transaction.rs — duplicated to avoid module coupling)
+// ---------------------------------------------------------------------------
+
+struct StorageChainLookup<'a, S: StorageEngine> {
+    storage: &'a S,
+}
+
+impl<S: StorageEngine> ChainLookup for StorageChainLookup<'_, S> {
+    fn is_confirmed(&self, tx_id: &Hash256) -> bool {
+        self.storage.has_transaction(tx_id).unwrap_or(false)
+    }
+}
+
+struct StorageBalanceLookup<'a, S: StorageEngine> {
+    storage: &'a S,
+}
+
+impl<S: StorageEngine> BalanceLookup for StorageBalanceLookup<'_, S> {
+    fn get_balance(&self, pubkey: &NoblePublicKey) -> u64 {
+        self.storage.get_balance(pubkey).unwrap_or(0)
+    }
+}
+
+#[rpc(server, namespace = "noble")]
+pub trait WalletApi {
+    /// Create a new address (key pair) in the wallet.
+    #[method(name = "createAddress")]
+    async fn create_address(
+        &self,
+        scheme_id: u8,
+        passphrase: String,
+    ) -> Result<CreateAddressResponse, ErrorObjectOwned>;
+
+    /// Unlock the wallet for a given timeout (seconds).
+    #[method(name = "walletUnlock")]
+    async fn wallet_unlock(
+        &self,
+        passphrase: String,
+        timeout_secs: u64,
+    ) -> Result<WalletUnlockResponse, ErrorObjectOwned>;
+
+    /// Lock the wallet immediately.
+    #[method(name = "walletLock")]
+    async fn wallet_lock(&self) -> Result<bool, ErrorObjectOwned>;
+
+    /// Get wallet info: unlock status, expiry, key count.
+    #[method(name = "getWalletInfo")]
+    async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned>;
+
+    /// Build, sign, and submit a transfer transaction.
+    #[method(name = "walletSendTransfer")]
+    async fn wallet_send_transfer(
+        &self,
+        from: String,
+        to: String,
+        amount: u64,
+        fee: Option<u64>,
+        memo: Option<String>,
+    ) -> Result<SubmitTxResponse, ErrorObjectOwned>;
+
+    /// Submit a batch of document checksums for notarization.
+    /// Up to 100 checksums per call. Best-effort: each is processed independently.
+    #[method(name = "submitDocumentBatch")]
+    async fn submit_document_batch(
+        &self,
+        signer: String,
+        checksums: Vec<String>,
+        fee_per_tx: Option<u64>,
+    ) -> Result<SubmitBatchResponse, ErrorObjectOwned>;
+}
+
+#[jsonrpsee::core::async_trait]
+impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<S>> {
+    async fn create_address(
+        &self,
+        scheme_id: u8,
+        passphrase: String,
+    ) -> Result<CreateAddressResponse, ErrorObjectOwned> {
+        let mut keystore = self.wallet_keystore.lock().unwrap();
+        let pubkey = keystore
+            .create_key(scheme_id, &passphrase)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(CreateAddressResponse {
+            address: hex::encode(pubkey.to_wire_bytes()),
+            scheme_id: pubkey.scheme_id(),
+        })
+    }
+
+    async fn wallet_unlock(
+        &self,
+        passphrase: String,
+        timeout_secs: u64,
+    ) -> Result<WalletUnlockResponse, ErrorObjectOwned> {
+        {
+            let mut keystore = self.wallet_keystore.lock().unwrap();
+            keystore.unlock(&passphrase).map_err(|e| match e {
+                noble_wallet::WalletError::InvalidPassphrase => ApiError::InvalidPassphrase,
+                other => ApiError::Internal(other.to_string()),
+            })?;
+        }
+
+        let mut state = self.wallet_state.lock().unwrap();
+        let expires_at = state.unlock(timeout_secs);
+
+        Ok(WalletUnlockResponse {
+            unlocked: true,
+            expires_at,
+        })
+    }
+
+    async fn wallet_lock(&self) -> Result<bool, ErrorObjectOwned> {
+        {
+            let mut keystore = self.wallet_keystore.lock().unwrap();
+            keystore.lock();
+        }
+        {
+            let mut state = self.wallet_state.lock().unwrap();
+            state.lock();
+        }
+        Ok(true)
+    }
+
+    async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned> {
+        let keystore = self.wallet_keystore.lock().unwrap();
+        let state = self.wallet_state.lock().unwrap();
+
+        let key_count = keystore.list_keys().map(|keys| keys.len()).unwrap_or(0);
+
+        Ok(WalletInfoResponse {
+            unlocked: state.is_unlocked(),
+            expires_at: state.expires_at_unix(),
+            key_count,
+        })
+    }
+
+    async fn wallet_send_transfer(
+        &self,
+        from: String,
+        to: String,
+        amount: u64,
+        fee: Option<u64>,
+        memo: Option<String>,
+    ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
+        // Ensure wallet is unlocked
+        {
+            let state = self.wallet_state.lock().unwrap();
+            if !state.is_unlocked() {
+                return Err(ApiError::WalletLocked.into());
+            }
+        }
+
+        // Parse addresses
+        let from_wire = hex::decode(&from)
+            .map_err(|_| ApiError::InvalidAddress("invalid sender hex".into()))?;
+        let sender = NoblePublicKey::from_wire_bytes(&from_wire)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+
+        let to_wire = hex::decode(&to)
+            .map_err(|_| ApiError::InvalidAddress("invalid recipient hex".into()))?;
+        let recipient = NoblePublicKey::from_wire_bytes(&to_wire)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+
+        let fee = fee.unwrap_or(MIN_TX_FEE);
+
+        // Build and sign the transaction
+        let tx = {
+            let keystore = self.wallet_keystore.lock().unwrap();
+            TransactionBuilder::build_transfer(&keystore, &sender, recipient, amount, fee, memo)
+                .map_err(|e| match e {
+                    noble_wallet::WalletError::Locked => ApiError::WalletLocked,
+                    noble_wallet::WalletError::InsufficientBalance { have, need } => {
+                        ApiError::InsufficientBalance(format!("have {have}, need {need}"))
+                    }
+                    other => ApiError::Internal(other.to_string()),
+                })?
+        };
+
+        // Admit to mempool
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let tx_id = {
+            let storage = self.storage.read().unwrap();
+            let chain_lookup = StorageChainLookup { storage: &*storage };
+            let balance_lookup = StorageBalanceLookup { storage: &*storage };
+            let mut mempool = self.mempool.lock().unwrap();
+            mempool
+                .admit(&tx, now, &chain_lookup, &balance_lookup)
+                .map_err(|e| ApiError::TxRejected(e.to_string()))?
+        };
+
+        // Broadcast
+        let _ = self
+            .network_cmd
+            .try_send(NetworkCommand::PublishTransaction(tx));
+
+        Ok(SubmitTxResponse {
+            tx_id: hash_to_hex(&tx_id),
+            accepted: true,
+        })
+    }
+
+    async fn submit_document_batch(
+        &self,
+        signer: String,
+        checksums: Vec<String>,
+        fee_per_tx: Option<u64>,
+    ) -> Result<SubmitBatchResponse, ErrorObjectOwned> {
+        // Limit to 100 checksums
+        if checksums.len() > 100 {
+            return Err(ApiError::TxRejected("batch limited to 100 checksums".into()).into());
+        }
+
+        // Ensure wallet is unlocked
+        {
+            let state = self.wallet_state.lock().unwrap();
+            if !state.is_unlocked() {
+                return Err(ApiError::WalletLocked.into());
+            }
+        }
+
+        // Parse signer address
+        let signer_wire = hex::decode(&signer)
+            .map_err(|_| ApiError::InvalidAddress("invalid signer hex".into()))?;
+        let signer_pk = NoblePublicKey::from_wire_bytes(&signer_wire)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+
+        let fee = fee_per_tx.unwrap_or(MIN_TX_FEE);
+        let mut results = Vec::with_capacity(checksums.len());
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+
+        for checksum_hex in &checksums {
+            let entry = match self.process_single_notarization(&signer_pk, checksum_hex, fee) {
+                Ok((tx_id_hex, _checksum_display)) => {
+                    accepted += 1;
+                    BatchResultEntry {
+                        checksum: checksum_hex.clone(),
+                        tx_id: Some(tx_id_hex),
+                        error: None,
+                    }
+                }
+                Err(err_msg) => {
+                    rejected += 1;
+                    BatchResultEntry {
+                        checksum: checksum_hex.clone(),
+                        tx_id: None,
+                        error: Some(err_msg),
+                    }
+                }
+            };
+            results.push(entry);
+        }
+
+        Ok(SubmitBatchResponse {
+            results,
+            accepted,
+            rejected,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers on ApiState
+// ---------------------------------------------------------------------------
+
+impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
+    /// Process a single notarization in a batch. Returns `Ok((tx_id_hex, checksum_hex))`
+    /// or `Err(error_message)`.
+    fn process_single_notarization(
+        self: &Arc<Self>,
+        signer: &NoblePublicKey,
+        checksum_hex: &str,
+        fee: u64,
+    ) -> Result<(String, String), String> {
+        // Parse checksum: if it's 64 hex chars, treat as raw hash; otherwise hash the input.
+        let checksum = if checksum_hex.len() == 64 {
+            let bytes = hex::decode(checksum_hex).map_err(|e| e.to_string())?;
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
+            Hash256::from_bytes(arr)
+        } else {
+            // Hash the hex string as document content identifier
+            sha256(checksum_hex.as_bytes())
+        };
+
+        // Build transaction
+        let tx = {
+            let keystore = self.wallet_keystore.lock().unwrap();
+            TransactionBuilder::build_notarization(
+                &keystore,
+                signer,
+                checksum,
+                fee,
+                vec![], // no metadata in batch mode
+            )
+            .map_err(|e| e.to_string())?
+        };
+
+        // Admit to mempool
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let tx_id = {
+            let storage = self.storage.read().unwrap();
+            let chain_lookup = StorageChainLookup { storage: &*storage };
+            let balance_lookup = StorageBalanceLookup { storage: &*storage };
+            let mut mempool = self.mempool.lock().unwrap();
+            mempool
+                .admit(&tx, now, &chain_lookup, &balance_lookup)
+                .map_err(|e| e.to_string())?
+        };
+
+        // Broadcast (best-effort)
+        let _ = self
+            .network_cmd
+            .try_send(NetworkCommand::PublishTransaction(tx));
+
+        Ok((hash_to_hex(&tx_id), hash_to_hex(&checksum)))
+    }
+}

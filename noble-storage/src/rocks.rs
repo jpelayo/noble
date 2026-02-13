@@ -222,6 +222,30 @@ impl RocksDbStorage {
     }
 }
 
+impl RocksDbStorage {
+    /// Attempt to repair a corrupt RocksDB.
+    pub fn repair<P: AsRef<Path>>(path: P) -> Result<(), StorageError> {
+        DB::repair(&Options::default(), path)
+            .map_err(|e| StorageError::Database(format!("repair failed: {e}")))
+    }
+
+    /// Open with automatic repair on failure.
+    pub fn open_with_repair<P: AsRef<Path> + Clone>(path: P) -> Result<Self, StorageError> {
+        match Self::open(path.clone()) {
+            Ok(db) => Ok(db),
+            Err(first_err) => {
+                tracing::warn!("DB open failed, attempting repair: {first_err}");
+                Self::repair(path.clone())?;
+                Self::open(path).map_err(|second_err| {
+                    StorageError::Database(format!(
+                        "open failed after repair: first={first_err}, second={second_err}"
+                    ))
+                })
+            }
+        }
+    }
+}
+
 impl StorageEngine for RocksDbStorage {
     fn commit_block(
         &self,
@@ -541,6 +565,152 @@ impl StorageEngine for RocksDbStorage {
                 "corrupt chain state: partial tip data".to_string(),
             )),
         }
+    }
+
+    fn rollback_to_height(
+        &self,
+        target_height: u64,
+        chain_id: u32,
+    ) -> Result<ChainTip, StorageError> {
+        self.check_open()?;
+
+        // Get current tip
+        let tip = self
+            .get_chain_tip()?
+            .ok_or_else(|| StorageError::Database("no chain tip".into()))?;
+
+        if target_height >= tip.height {
+            return Ok(tip);
+        }
+
+        let mut batch = WriteBatch::default();
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
+        let cf_tx = self.cf(CF_TX_INDEX)?;
+
+        // Phase 1: Remove blocks above target_height
+        for h in (target_height + 1)..=tip.height {
+            let height_be = h.to_be_bytes();
+
+            // Get block data to find transactions
+            if let Some(block_bytes) = self
+                .db
+                .get_cf(cf_blocks, height_be)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+            {
+                if let Ok(block) = Block::from_cbor(&block_bytes) {
+                    // Remove tx index entries
+                    for tx in &block.transactions {
+                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
+                            batch.delete_cf(cf_tx, tx_id.as_bytes());
+                        }
+                    }
+
+                    // Remove block hash index
+                    if let Ok(block_hash) = block.header.compute_block_hash() {
+                        batch.delete_cf(cf_hashes, block_hash.as_bytes());
+                    }
+                }
+            }
+
+            // Remove block data
+            batch.delete_cf(cf_blocks, height_be);
+        }
+
+        // Write phase 1 deletions
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        // Phase 2: Clear all balances and history (iterate and delete)
+        let mut clear_batch = WriteBatch::default();
+        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
+        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+
+        let iter = self.db.iterator_cf(cf_balances, IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            clear_batch.delete_cf(cf_balances, &key);
+        }
+
+        let iter = self.db.iterator_cf(cf_history, IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            clear_batch.delete_cf(cf_history, &key);
+        }
+
+        // Phase 3: Update chain tip
+        let cf_state = self.cf(CF_CHAIN_STATE)?;
+        let target_hash = self.get_block_hash_by_height(target_height)?;
+        clear_batch.put_cf(cf_state, KEY_TIP_HASH, target_hash.as_bytes());
+        clear_batch.put_cf(cf_state, KEY_TIP_HEIGHT, target_height.to_be_bytes());
+
+        self.db
+            .write(clear_batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        // Phase 4: Replay balances from 0..=target_height
+        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
+        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+
+        let mut balances: HashMap<Vec<u8>, i128> = HashMap::new();
+        let mut replay_batch = WriteBatch::default();
+
+        for h in 0..=target_height {
+            let hash = self.get_block_hash_by_height(h)?;
+            let block = self.get_block(&hash)?;
+
+            let validator_key = Self::pubkey_key(&block.header.validator_id);
+            let subsidy = subsidy_at_height(h) as i128;
+            let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
+            *balances.entry(validator_key).or_default() += subsidy + total_fees;
+
+            for (offset, tx) in block.transactions.iter().enumerate() {
+                let sender_key = tx
+                    .publisher_sig
+                    .to_noble_public_key()
+                    .map_err(|e| StorageError::Codec(e.to_string()))?
+                    .to_wire_bytes();
+
+                let tx_id = tx
+                    .compute_tx_id(chain_id)
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+
+                if tx.tx_type == TX_TYPE_TRANSFER {
+                    let amount = tx.amount.unwrap_or(0) as i128;
+                    let fee = tx.fee as i128;
+                    *balances.entry(sender_key.clone()).or_default() -= amount + fee;
+                    if let Some(ref recipient) = tx.recipient {
+                        let recip_key = Self::pubkey_key(recipient);
+                        *balances.entry(recip_key.clone()).or_default() += amount;
+                        let hkey = Self::history_key(&recip_key, h, offset as u32);
+                        replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+                    }
+                } else {
+                    let fee = tx.fee as i128;
+                    *balances.entry(sender_key.clone()).or_default() -= fee;
+                }
+
+                let hkey = Self::history_key(&sender_key, h, offset as u32);
+                replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+            }
+        }
+
+        // Write balances
+        for (key, balance) in &balances {
+            if *balance >= 0 {
+                replay_batch.put_cf(cf_balances, key, (*balance as u64).to_be_bytes());
+            }
+        }
+
+        self.db
+            .write(replay_batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        Ok(ChainTip {
+            block_hash: target_hash,
+            height: target_height,
+        })
     }
 
     fn close(&mut self) -> Result<(), StorageError> {
@@ -1490,5 +1660,61 @@ mod tests {
             let db = RocksDbStorage::open(dir.path()).unwrap();
             assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
         }
+    }
+
+    // --- Rollback tests ---
+
+    #[test]
+    fn rollback_removes_blocks() {
+        let (db, _dir) = temp_db();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let mut prev = Hash256::ZERO;
+        for h in 0..3u64 {
+            let (b, hash, ids) =
+                make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
+            db.commit_block(&b, &hash, &ids).unwrap();
+            prev = hash;
+        }
+
+        let tip = db.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(tip.height, 1);
+        assert!(db.get_block_hash_by_height(2).is_err());
+    }
+
+    #[test]
+    fn rollback_recalculates_balances() {
+        let (db, _dir) = temp_db();
+        let (sk, pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+
+        let mut prev = Hash256::ZERO;
+        for h in 0..3u64 {
+            let (b, hash, ids) =
+                make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
+            db.commit_block(&b, &hash, &ids).unwrap();
+            prev = hash;
+        }
+
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        db.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 2);
+    }
+
+    #[test]
+    fn repair_succeeds_on_valid_db() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _db = RocksDbStorage::open(dir.path()).unwrap();
+        }
+        // Repair a valid DB should succeed
+        RocksDbStorage::repair(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn open_with_repair_normal_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open_with_repair(dir.path()).unwrap();
+        assert!(db.get_chain_tip().unwrap().is_none());
     }
 }
