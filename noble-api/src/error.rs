@@ -18,6 +18,7 @@ pub const UNKNOWN_TOPIC: i32 = -32007;
 pub const INVALID_PASSPHRASE: i32 = -32008;
 pub const INSUFFICIENT_BALANCE: i32 = -32009;
 pub const INVALID_ADDRESS: i32 = -32010;
+pub const INVALID_PARAM: i32 = -32011;
 
 /// API error variants.
 #[derive(Debug, Error)]
@@ -55,6 +56,9 @@ pub enum ApiError {
     #[error("invalid address: {0}")]
     InvalidAddress(String),
 
+    #[error("invalid parameter: {0}")]
+    InvalidParam(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 
@@ -76,6 +80,7 @@ impl From<ApiError> for ErrorObjectOwned {
             ApiError::InvalidPassphrase => (INVALID_PASSPHRASE, "invalid passphrase".into()),
             ApiError::InsufficientBalance(m) => (INSUFFICIENT_BALANCE, m.clone()),
             ApiError::InvalidAddress(m) => (INVALID_ADDRESS, m.clone()),
+            ApiError::InvalidParam(m) => (INVALID_PARAM, m.clone()),
             ApiError::Storage(m) => (-32603, m.clone()),
             ApiError::Internal(m) => (-32603, m.clone()),
         };
@@ -115,6 +120,7 @@ mod tests {
                 INSUFFICIENT_BALANCE,
             ),
             (ApiError::InvalidAddress("a".into()), INVALID_ADDRESS),
+            (ApiError::InvalidParam("p".into()), INVALID_PARAM),
             (ApiError::Storage("s".into()), -32603),
             (ApiError::Internal("i".into()), -32603),
         ];

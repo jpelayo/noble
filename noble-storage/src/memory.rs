@@ -14,7 +14,7 @@ use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
-use crate::traits::{ChainTip, StorageEngine};
+use crate::traits::{ChainTip, KeyRotationRecord, StorageEngine};
 use crate::MAX_CHECKSUM_REGISTRATIONS;
 
 /// Shared inner state behind a RwLock for thread-safe testing.
@@ -24,11 +24,16 @@ struct Inner {
     block_heights: HashMap<u64, Hash256>,
     transactions: HashMap<Hash256, Transaction>,
     checksum_index: HashMap<Hash256, Vec<Hash256>>,
+    tx_locations: HashMap<Hash256, (u64, u32)>,
     chain_tip: Option<ChainTip>,
     /// Address balances in atomic units (GAP-H19).
     balances: HashMap<NoblePublicKey, u64>,
     /// Address history: (wire_bytes, height, offset) → tx_id (GAP-H19).
     address_history: BTreeMap<(Vec<u8>, u64, u32), Hash256>,
+    /// Persisted peer bans: peer_id_bytes → banned_until_unix.
+    bans: HashMap<Vec<u8>, u64>,
+    /// Pending key rotations: old_key_wire → (new_key_wire, rotation_cycle).
+    key_rotations: HashMap<Vec<u8>, (Vec<u8>, u64)>,
     closed: bool,
 }
 
@@ -68,9 +73,11 @@ impl StorageEngine for MemoryStorage {
         inner.blocks.insert(*block_hash, block.clone());
         inner.block_heights.insert(block.header.height, *block_hash);
 
-        // Store transactions and checksum index
-        for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
+        // Store transactions, locations, and checksum index
+        let height = block.header.height;
+        for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
             inner.transactions.insert(*tx_id, tx.clone());
+            inner.tx_locations.insert(*tx_id, (height, offset as u32));
 
             let entry = inner.checksum_index.entry(tx.checksum).or_default();
             if entry.len() >= MAX_CHECKSUM_REGISTRATIONS {
@@ -84,8 +91,6 @@ impl StorageEngine for MemoryStorage {
         }
 
         // --- Balance accumulator (GAP-H19) ---
-        let height = block.header.height;
-
         // Phase 1: accumulate deltas as i128 to detect overflows later
         let mut deltas: HashMap<NoblePublicKey, i128> = HashMap::new();
 
@@ -212,6 +217,16 @@ impl StorageEngine for MemoryStorage {
         Ok(inner.transactions.contains_key(tx_id))
     }
 
+    fn get_transaction_location(&self, tx_id: &Hash256) -> Result<(u64, u32), StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        inner
+            .tx_locations
+            .get(tx_id)
+            .copied()
+            .ok_or_else(|| StorageError::TransactionNotFound(tx_id.to_string()))
+    }
+
     fn get_balance(&self, pubkey: &NoblePublicKey) -> Result<u64, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
@@ -277,6 +292,7 @@ impl StorageEngine for MemoryStorage {
                     for tx in &block.transactions {
                         if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
                             inner.transactions.remove(&tx_id);
+                            inner.tx_locations.remove(&tx_id);
                             // Remove from checksum index
                             if let Some(entries) = inner.checksum_index.get_mut(&tx.checksum) {
                                 entries.retain(|id| *id != tx_id);
@@ -364,6 +380,90 @@ impl StorageEngine for MemoryStorage {
         };
         inner.chain_tip = Some(new_tip.clone());
         Ok(new_tip)
+    }
+
+    fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        let tip = match &inner.chain_tip {
+            Some(t) => t.height,
+            None => return Ok(vec![]),
+        };
+        let mut timestamps = Vec::with_capacity(count);
+        let start = tip.saturating_sub(count.saturating_sub(1) as u64);
+        for h in (start..=tip).rev() {
+            if let Some(hash) = inner.block_heights.get(&h) {
+                if let Some(block) = inner.blocks.get(hash) {
+                    timestamps.push(block.header.timestamp);
+                }
+            }
+            if timestamps.len() >= count {
+                break;
+            }
+        }
+        Ok(timestamps)
+    }
+
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.bans.insert(peer_id.to_vec(), banned_until);
+        Ok(())
+    }
+
+    fn remove_ban(&self, peer_id: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.bans.remove(peer_id);
+        Ok(())
+    }
+
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Only return non-expired bans
+        Ok(inner
+            .bans
+            .iter()
+            .filter(|(_, &until)| until > now)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect())
+    }
+
+    fn store_key_rotation(
+        &self,
+        old_key: &NoblePublicKey,
+        new_key: &NoblePublicKey,
+        rotation_cycle: u64,
+    ) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.key_rotations.insert(
+            old_key.to_wire_bytes(),
+            (new_key.to_wire_bytes(), rotation_cycle),
+        );
+        Ok(())
+    }
+
+    fn remove_key_rotation(&self, old_key: &NoblePublicKey) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.key_rotations.remove(&old_key.to_wire_bytes());
+        Ok(())
+    }
+
+    fn load_key_rotations(&self) -> Result<Vec<KeyRotationRecord>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner
+            .key_rotations
+            .iter()
+            .map(|(old_wire, (new_wire, cycle))| (old_wire.clone(), new_wire.clone(), *cycle))
+            .collect())
     }
 
     fn close(&mut self) -> Result<(), StorageError> {
@@ -1198,5 +1298,154 @@ mod tests {
         assert!(store.has_transaction(&id1).unwrap());
         store.rollback_to_height(0, MAINNET_CHAIN_ID).unwrap();
         assert!(!store.has_transaction(&id1).unwrap());
+    }
+
+    #[test]
+    fn get_transaction_location_found() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let (tx1, id1) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
+        let (tx2, id2) = make_signed_tx(&sk, &pk, b"doc2", 1_700_000_000);
+        let (block, hash, ids) = make_block_with_validator(
+            vec![(tx1, id1), (tx2, id2)],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sk,
+            &pk,
+        );
+        store.commit_block(&block, &hash, &ids).unwrap();
+
+        let (h, off) = store.get_transaction_location(&id1).unwrap();
+        assert_eq!(h, 0);
+        assert_eq!(off, 0);
+
+        let (h2, off2) = store.get_transaction_location(&id2).unwrap();
+        assert_eq!(h2, 0);
+        assert_eq!(off2, 1);
+
+        // Unknown tx returns error
+        let missing = Hash256::from_bytes([0xFF; 32]);
+        assert!(store.get_transaction_location(&missing).is_err());
+    }
+
+    // --- Ban persistence tests ---
+
+    #[test]
+    fn store_and_load_ban() {
+        let store = MemoryStorage::new();
+        let peer_id = b"peer_12345678901234567890123456789012";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let banned_until = now + 86400;
+        store.store_ban(peer_id, banned_until).unwrap();
+
+        let bans = store.load_bans().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].0, peer_id.to_vec());
+        assert_eq!(bans[0].1, banned_until);
+    }
+
+    #[test]
+    fn load_bans_filters_expired() {
+        let store = MemoryStorage::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Expired ban
+        store
+            .store_ban(b"expired_peer", now.saturating_sub(100))
+            .unwrap();
+        // Active ban
+        store.store_ban(b"active_peer", now + 86400).unwrap();
+
+        let bans = store.load_bans().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].0, b"active_peer".to_vec());
+    }
+
+    #[test]
+    fn remove_ban() {
+        let store = MemoryStorage::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        store.store_ban(b"peer1", now + 86400).unwrap();
+        store.remove_ban(b"peer1").unwrap();
+
+        let bans = store.load_bans().unwrap();
+        assert!(bans.is_empty());
+    }
+
+    // --- Recent timestamps tests ---
+
+    #[test]
+    fn get_recent_timestamps_empty_chain() {
+        let store = MemoryStorage::new();
+        let ts = store.get_recent_timestamps(11).unwrap();
+        assert!(ts.is_empty());
+    }
+
+    #[test]
+    fn get_recent_timestamps_returns_newest_first() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Commit 3 blocks with distinct timestamps
+        let mut prev_hash = Hash256::ZERO;
+        for h in 0..3u64 {
+            let timestamp = 1_700_000_000 + h * 100;
+            let (tx, tx_id) = make_signed_tx(&sk, &pk, format!("doc{h}").as_bytes(), timestamp);
+            let (block, hash, ids) =
+                make_block_with_validator(vec![(tx, tx_id)], h, prev_hash, timestamp, &sk, &pk);
+            store.commit_block(&block, &hash, &ids).unwrap();
+            prev_hash = hash;
+        }
+
+        let ts = store.get_recent_timestamps(11).unwrap();
+        assert_eq!(ts.len(), 3);
+        // Newest first
+        assert_eq!(ts[0], 1_700_000_200);
+        assert_eq!(ts[1], 1_700_000_100);
+        assert_eq!(ts[2], 1_700_000_000);
+    }
+
+    // --- Key rotation persistence tests ---
+
+    #[test]
+    fn store_and_load_key_rotation() {
+        let store = MemoryStorage::new();
+        let (_, old_pk) = ed25519::generate_keypair();
+        let (_, new_pk) = ed25519::generate_keypair();
+        let old_key = NoblePublicKey::Ed25519(old_pk.to_vec());
+        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+
+        store.store_key_rotation(&old_key, &new_key, 42).unwrap();
+
+        let rotations = store.load_key_rotations().unwrap();
+        assert_eq!(rotations.len(), 1);
+        assert_eq!(rotations[0].0, old_key.to_wire_bytes());
+        assert_eq!(rotations[0].1, new_key.to_wire_bytes());
+        assert_eq!(rotations[0].2, 42);
+    }
+
+    #[test]
+    fn remove_key_rotation() {
+        let store = MemoryStorage::new();
+        let (_, old_pk) = ed25519::generate_keypair();
+        let (_, new_pk) = ed25519::generate_keypair();
+        let old_key = NoblePublicKey::Ed25519(old_pk.to_vec());
+        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+
+        store.store_key_rotation(&old_key, &new_key, 42).unwrap();
+        store.remove_key_rotation(&old_key).unwrap();
+
+        let rotations = store.load_key_rotations().unwrap();
+        assert!(rotations.is_empty());
     }
 }

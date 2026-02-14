@@ -82,6 +82,8 @@ pub struct PeerManager {
     max_inbound: usize,
     ban_threshold: u32,
     ban_duration: Duration,
+    /// Highest software version seen across all peer announcements.
+    max_software_version: String,
 }
 
 impl PeerManager {
@@ -94,6 +96,7 @@ impl PeerManager {
             max_inbound: config.max_inbound,
             ban_threshold: config.ban_threshold,
             ban_duration: Duration::from_secs(config.ban_duration_secs),
+            max_software_version: noble_core::SOFTWARE_VERSION.to_string(),
         }
     }
 
@@ -135,8 +138,9 @@ impl PeerManager {
         self.peers.remove(peer_id);
     }
 
-    /// Record a misbehavior for a peer. Returns `true` if the peer's cumulative
-    /// score has reached the ban threshold and the peer should be disconnected.
+    /// Record a misbehavior for a peer. Returns `Some(banned_until_unix)` if the
+    /// peer's cumulative score has reached the ban threshold and should be banned,
+    /// or `None` if below threshold.
     pub fn record_misbehavior(&mut self, peer_id: &PeerId, misbehavior: Misbehavior) -> bool {
         let penalty = misbehavior.penalty();
 
@@ -149,6 +153,41 @@ impl PeerManager {
             }
         }
         false
+    }
+
+    /// Get the Unix timestamp at which a peer's ban expires (if banned).
+    pub fn get_ban_expiry(&self, peer_id: &PeerId) -> Option<u64> {
+        self.banned.get(peer_id).map(|banned_at| {
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = banned_at.elapsed().as_secs();
+            now_unix + self.ban_duration.as_secs().saturating_sub(elapsed)
+        })
+    }
+
+    /// Load persisted bans from storage at startup.
+    ///
+    /// `bans` is a list of (peer_id_bytes, banned_until_unix) from storage.
+    /// Only non-expired bans are imported.
+    pub fn load_persisted_bans(&mut self, bans: Vec<(Vec<u8>, u64)>) {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for (peer_bytes, banned_until) in bans {
+            if banned_until > now_unix {
+                if let Ok(peer_id) = PeerId::from_bytes(&peer_bytes) {
+                    // Compute the Instant when this ban was placed.
+                    let remaining_secs = banned_until - now_unix;
+                    let ban_duration_secs = self.ban_duration.as_secs();
+                    let elapsed_secs = ban_duration_secs.saturating_sub(remaining_secs);
+                    let banned_at = Instant::now() - Duration::from_secs(elapsed_secs);
+                    self.banned.insert(peer_id, banned_at);
+                }
+            }
+        }
     }
 
     /// Update a peer's reported chain tip.
@@ -167,10 +206,19 @@ impl PeerManager {
     }
 
     /// Store a node identity announcement for a peer.
+    /// Also updates the max software version seen across all peers.
     pub fn update_announce(&mut self, peer_id: &PeerId, announce: NodeAnnounce) {
+        if announce.software_version.as_str() > self.max_software_version.as_str() {
+            self.max_software_version = announce.software_version.clone();
+        }
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.announce = Some(Box::new(announce));
         }
+    }
+
+    /// Returns the highest software version seen across all peer announcements.
+    pub fn max_software_version_seen(&self) -> &str {
+        &self.max_software_version
     }
 
     /// Retrieve the cached node announce for a peer.
@@ -460,6 +508,57 @@ mod tests {
     }
 
     #[test]
+    fn get_ban_expiry_returns_future_timestamp() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        pm.on_connected(p, Direction::Outbound);
+        pm.record_misbehavior(&p, Misbehavior::DuplicateProposal);
+
+        let expiry = pm.get_ban_expiry(&p);
+        assert!(expiry.is_some());
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Expiry should be roughly ban_duration_secs (~86400) in the future.
+        assert!(expiry.unwrap() > now_unix);
+    }
+
+    #[test]
+    fn load_persisted_bans_restores_bans() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        let peer_bytes = p.to_bytes().to_vec();
+
+        // Future ban
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let banned_until = now_unix + 3600; // 1 hour from now
+
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until)]);
+        assert!(pm.is_banned(&p));
+    }
+
+    #[test]
+    fn load_persisted_bans_ignores_expired() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        let peer_bytes = p.to_bytes().to_vec();
+
+        // Expired ban
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let banned_until = now_unix.saturating_sub(100); // 100s ago
+
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until)]);
+        assert!(!pm.is_banned(&p));
+    }
+
+    #[test]
     fn peer_state_stores_announce() {
         use noble_core::{NodeRole, OrgType};
         use noble_crypto::NoblePrivateKey;
@@ -491,5 +590,93 @@ mod tests {
         pm.update_announce(&p, announce.clone());
         let stored = pm.get_announce(&p).unwrap();
         assert_eq!(stored.node_name, "test");
+    }
+
+    #[test]
+    fn max_software_version_starts_at_own() {
+        let pm = PeerManager::new(&test_config());
+        assert_eq!(pm.max_software_version_seen(), noble_core::SOFTWARE_VERSION);
+    }
+
+    #[test]
+    fn max_software_version_updates_on_newer() {
+        use noble_core::{NodeRole, OrgType};
+        use noble_crypto::NoblePrivateKey;
+
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        pm.on_connected(p, Direction::Outbound);
+
+        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let pk = sk.public_key();
+        let mut announce = NodeAnnounce::sign(
+            pk,
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+
+        // Set a newer version
+        announce.software_version = "0.2.0".to_string();
+        pm.update_announce(&p, announce);
+        assert_eq!(pm.max_software_version_seen(), "0.2.0");
+    }
+
+    #[test]
+    fn max_software_version_ignores_older() {
+        use noble_core::{NodeRole, OrgType};
+        use noble_crypto::NoblePrivateKey;
+
+        let mut pm = PeerManager::new(&test_config());
+        let p1 = random_peer();
+        let p2 = random_peer();
+        pm.on_connected(p1, Direction::Outbound);
+        pm.on_connected(p2, Direction::Inbound);
+
+        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let pk = sk.public_key();
+
+        // First announce with newer version
+        let mut a1 = NodeAnnounce::sign(
+            pk.clone(),
+            "n1".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        a1.software_version = "0.3.0".to_string();
+        pm.update_announce(&p1, a1);
+
+        // Second announce with older version — should not downgrade
+        let mut a2 = NodeAnnounce::sign(
+            pk,
+            "n2".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        a2.software_version = "0.1.0".to_string();
+        pm.update_announce(&p2, a2);
+
+        assert_eq!(pm.max_software_version_seen(), "0.3.0");
     }
 }

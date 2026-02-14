@@ -18,6 +18,9 @@ pub const TOPIC_NODE_ANNOUNCE: &str = "noble/node/announce/1";
 /// Topic for peer address exchange.
 pub const TOPIC_PEER_EXCHANGE: &str = "noble/peer/exchange/1";
 
+/// Topic for double-proposal evidence broadcasts.
+pub const TOPIC_EVIDENCE: &str = "noble/evidence/1";
+
 /// All GossipSub topics that a NOBLE node subscribes to.
 pub const ALL_TOPICS: &[&str] = &[
     TOPIC_BLOCK_ANNOUNCE,
@@ -25,6 +28,7 @@ pub const ALL_TOPICS: &[&str] = &[
     TOPIC_POR_VOTE,
     TOPIC_NODE_ANNOUNCE,
     TOPIC_PEER_EXCHANGE,
+    TOPIC_EVIDENCE,
 ];
 
 /// Protocol identifier for the block/header sync request-response protocol.
@@ -48,12 +52,13 @@ mod tests {
 
     #[test]
     fn all_topics_contains_expected() {
-        assert_eq!(ALL_TOPICS.len(), 5);
+        assert_eq!(ALL_TOPICS.len(), 6);
         assert!(ALL_TOPICS.contains(&TOPIC_BLOCK_ANNOUNCE));
         assert!(ALL_TOPICS.contains(&TOPIC_TX_ANNOUNCE));
         assert!(ALL_TOPICS.contains(&TOPIC_POR_VOTE));
         assert!(ALL_TOPICS.contains(&TOPIC_NODE_ANNOUNCE));
         assert!(ALL_TOPICS.contains(&TOPIC_PEER_EXCHANGE));
+        assert!(ALL_TOPICS.contains(&TOPIC_EVIDENCE));
     }
 
     #[test]

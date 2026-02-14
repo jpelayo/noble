@@ -50,6 +50,12 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub chain_id: u32,
     /// Server start time (for uptime reporting).
     pub start_time: Instant,
+    /// Highest software version observed across all peer NodeAnnounce messages.
+    pub max_network_version: Arc<RwLock<String>>,
+    /// RPC rate limiter (per-IP token bucket). None = disabled.
+    pub rate_limiter: Option<Arc<crate::rate_limit::RpcRateLimiter>>,
+    /// TOTP validator for API authentication. None = auth disabled.
+    pub totp_validator: Option<Arc<RwLock<crate::auth::TotpValidator>>>,
 
     // --- Broadcast channels for WebSocket subscriptions ---
     /// New block notifications.

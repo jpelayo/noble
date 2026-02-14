@@ -148,6 +148,7 @@ pub struct NodeAnnounce {
     pub contact_email: Option<String>,
     pub website: Option<String>,
     pub host_address: Option<String>,
+    pub software_version: String,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
 }
@@ -165,6 +166,7 @@ struct AnnounceSigningPayload<'a> {
     contact_email: &'a Option<String>,
     website: &'a Option<String>,
     host_address: &'a Option<String>,
+    software_version: &'a str,
     timestamp: u64,
 }
 
@@ -181,6 +183,7 @@ impl NodeAnnounce {
             contact_email: &self.contact_email,
             website: &self.website,
             host_address: &self.host_address,
+            software_version: &self.software_version,
             timestamp: self.timestamp,
         };
         let cbor = to_canonical_cbor(&payload)?;
@@ -209,6 +212,7 @@ impl NodeAnnounce {
         timestamp: u64,
         signer: &impl NobleSigner,
     ) -> Result<Self, CryptoError> {
+        use crate::constants::SOFTWARE_VERSION;
         // Build a temporary announce with a dummy signature to compute the message.
         let mut announce = Self {
             version: NODE_ANNOUNCE_VERSION,
@@ -220,6 +224,7 @@ impl NodeAnnounce {
             contact_email,
             website,
             host_address,
+            software_version: SOFTWARE_VERSION.to_string(),
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,

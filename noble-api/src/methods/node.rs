@@ -8,7 +8,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_core::PROTOCOL_VERSION;
+use noble_core::{PROTOCOL_VERSION, SOFTWARE_VERSION};
 use noble_storage::StorageEngine;
 
 use crate::state::ApiState;
@@ -25,10 +25,17 @@ pub trait NodeApi {
 impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>> {
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned> {
         let uptime = self.start_time.elapsed().as_secs();
+        let latest_network_version = self
+            .max_network_version
+            .read()
+            .map(|v| v.clone())
+            .unwrap_or_else(|_| SOFTWARE_VERSION.to_string());
         Ok(NodeInfoResponse {
             version: PROTOCOL_VERSION as u32,
             chain_id: self.chain_id,
             uptime_secs: uptime,
+            software_version: SOFTWARE_VERSION.to_string(),
+            latest_network_version,
         })
     }
 }

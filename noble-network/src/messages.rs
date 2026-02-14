@@ -8,7 +8,7 @@
 //! - [`GossipMessage`]: CBOR-encoded payloads published on GossipSub topics.
 //! - [`NetworkCommand`] / [`NetworkEvent`]: channel messages between node and network service.
 
-use noble_core::{Block, BlockHeader, NodeAnnounce, Transaction};
+use noble_core::{Block, BlockHeader, DoubleProposalEvidence, NodeAnnounce, Transaction};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -87,6 +87,11 @@ pub enum GossipMessage {
     },
     /// Exchange known peer addresses (sent on `TOPIC_PEER_EXCHANGE`).
     PeerExchange { addrs: Vec<String> },
+    /// Broadcast double-proposal evidence (sent on `TOPIC_EVIDENCE`).
+    DoubleProposalEvidence {
+        /// CBOR-encoded `DoubleProposalEvidence`.
+        evidence_bytes: Vec<u8>,
+    },
     /// Broadcast a node identity announcement (sent on `TOPIC_NODE_ANNOUNCE`).
     NodeAnnounce {
         identity_key: Vec<u8>,
@@ -97,6 +102,7 @@ pub enum GossipMessage {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        software_version: String,
         timestamp: u64,
         signature_scheme: u8,
         signature_pubkey: Vec<u8>,
@@ -132,6 +138,8 @@ pub enum NetworkCommand {
     BanPeer(Vec<u8>),
     /// Publish a node identity announcement to the network.
     PublishNodeAnnounce(Box<NodeAnnounce>),
+    /// Publish double-proposal evidence to the network.
+    PublishEvidence(Box<DoubleProposalEvidence>),
     /// Shut down the network service.
     Shutdown,
 }
@@ -172,6 +180,11 @@ pub enum NetworkEvent {
     NodeAnnounceReceived {
         peer_id: Vec<u8>,
         announce: Box<NodeAnnounce>,
+    },
+    /// Double-proposal evidence was received from a peer.
+    EvidenceReceived {
+        peer_id: Vec<u8>,
+        evidence: Box<DoubleProposalEvidence>,
     },
 }
 
@@ -313,6 +326,7 @@ mod tests {
             contact_email: Some("test@mit.edu".into()),
             website: Some("https://mit.edu".into()),
             host_address: Some("/ip4/1.2.3.4/tcp/9333".into()),
+            software_version: "0.1.0".into(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],
@@ -331,6 +345,18 @@ mod tests {
                 "/ip4/1.2.3.4/tcp/9333".to_string(),
                 "/ip4/5.6.7.8/tcp/9333".to_string(),
             ],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn gossip_double_proposal_evidence_roundtrip() {
+        let evidence_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF]; // mock CBOR
+        let msg = GossipMessage::DoubleProposalEvidence {
+            evidence_bytes: evidence_bytes.clone(),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();

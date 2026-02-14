@@ -433,6 +433,7 @@ async fn handle_swarm_event(
                             contact_email,
                             website,
                             host_address,
+                            software_version,
                             timestamp,
                             signature_scheme,
                             signature_pubkey,
@@ -447,6 +448,7 @@ async fn handle_swarm_event(
                                 &contact_email,
                                 &website,
                                 &host_address,
+                                &software_version,
                                 timestamp,
                                 signature_scheme,
                                 &signature_pubkey,
@@ -470,6 +472,29 @@ async fn handle_swarm_event(
                                         &propagation_source,
                                         Misbehavior::InvalidAnnounce,
                                     );
+                                    None
+                                }
+                            }
+                        }
+                        GossipMessage::DoubleProposalEvidence { evidence_bytes } => {
+                            match ciborium::from_reader::<noble_core::DoubleProposalEvidence, _>(
+                                &evidence_bytes[..],
+                            ) {
+                                Ok(evidence) => match evidence.verify() {
+                                    Ok(()) => {
+                                        tracing::warn!("valid double-proposal evidence received");
+                                        Some(NetworkEvent::EvidenceReceived {
+                                            peer_id: peer_bytes,
+                                            evidence: Box::new(evidence),
+                                        })
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(%e, "invalid evidence rejected");
+                                        None
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::debug!(%e, "failed to decode evidence CBOR");
                                     None
                                 }
                             }
@@ -780,6 +805,7 @@ async fn handle_command(
                 contact_email: announce.contact_email.clone(),
                 website: announce.website.clone(),
                 host_address: announce.host_address.clone(),
+                software_version: announce.software_version.clone(),
                 timestamp: announce.timestamp,
                 signature_scheme: announce.signature.scheme_id,
                 signature_pubkey: announce.signature.public_key.clone(),
@@ -789,6 +815,19 @@ async fn handle_command(
                 let topic = IdentTopic::new(topics::TOPIC_NODE_ANNOUNCE);
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish node announce");
+                }
+            }
+        }
+
+        NetworkCommand::PublishEvidence(evidence) => {
+            let mut evidence_bytes = Vec::new();
+            if ciborium::into_writer(&*evidence, &mut evidence_bytes).is_ok() {
+                let msg = GossipMessage::DoubleProposalEvidence { evidence_bytes };
+                if let Ok(data) = codec::encode_gossip(&msg) {
+                    let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
+                    if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                        tracing::warn!(err = %e, "failed to publish evidence");
+                    }
                 }
             }
         }
@@ -870,6 +909,7 @@ fn convert_and_validate_announce(
     contact_email: &Option<String>,
     website: &Option<String>,
     host_address: &Option<String>,
+    software_version: &str,
     timestamp: u64,
     signature_scheme: u8,
     signature_pubkey: &[u8],
@@ -894,6 +934,7 @@ fn convert_and_validate_announce(
         contact_email: contact_email.clone(),
         website: website.clone(),
         host_address: host_address.clone(),
+        software_version: software_version.to_string(),
         timestamp,
         signature: noble_crypto::SignatureEnvelope {
             scheme_id: signature_scheme,

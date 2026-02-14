@@ -23,10 +23,27 @@ export class RpcClient {
   #url;
   #timeout;
   #nextId = 1;
+  #authToken = null;
 
   constructor(url, { timeout = 10_000 } = {}) {
     this.#url = url;
     this.#timeout = timeout;
+  }
+
+  /** Set the TOTP auth token (6-digit code). Pass null to clear. */
+  setAuthToken(token) {
+    this.#authToken = token;
+  }
+
+  /** Check whether an auth token is currently set. */
+  hasAuthToken() {
+    return this.#authToken !== null;
+  }
+
+  #buildHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    if (this.#authToken) h['Authorization'] = `Bearer ${this.#authToken}`;
+    return h;
   }
 
   async call(method, params = {}) {
@@ -37,7 +54,7 @@ export class RpcClient {
     try {
       const res = await fetch(this.#url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.#buildHeaders(),
         body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
         signal: controller.signal,
       });
@@ -72,7 +89,7 @@ export class RpcClient {
     try {
       const res = await fetch(this.#url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.#buildHeaders(),
         body: JSON.stringify(requests),
         signal: controller.signal,
       });

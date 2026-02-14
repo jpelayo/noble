@@ -173,16 +173,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             }
         }
 
-        // Parse addresses
-        let from_wire = hex::decode(&from)
-            .map_err(|_| ApiError::InvalidAddress("invalid sender hex".into()))?;
-        let sender = NoblePublicKey::from_wire_bytes(&from_wire)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        // Validate amount > 0
+        if amount == 0 {
+            return Err(ApiError::InvalidParam("transfer amount must be > 0".into()).into());
+        }
 
-        let to_wire = hex::decode(&to)
-            .map_err(|_| ApiError::InvalidAddress("invalid recipient hex".into()))?;
-        let recipient = NoblePublicKey::from_wire_bytes(&to_wire)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        // Parse addresses
+        let sender = parse_pubkey(&from)?;
+        let recipient = parse_pubkey(&to)?;
 
         let fee = fee.unwrap_or(MIN_TX_FEE);
 
@@ -246,10 +244,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         }
 
         // Parse signer address
-        let signer_wire = hex::decode(&signer)
-            .map_err(|_| ApiError::InvalidAddress("invalid signer hex".into()))?;
-        let signer_pk = NoblePublicKey::from_wire_bytes(&signer_wire)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let signer_pk = parse_pubkey(&signer)?;
 
         let fee = fee_per_tx.unwrap_or(MIN_TX_FEE);
         let mut results = Vec::with_capacity(checksums.len());

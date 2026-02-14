@@ -26,6 +26,8 @@ serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+totp-rs.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

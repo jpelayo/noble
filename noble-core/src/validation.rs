@@ -125,7 +125,10 @@ pub fn validate_transaction(
     // which is called in T6 and T7 above.
 
     // T13: tx_type must be recognized
-    if tx.tx_type != TX_TYPE_NOTARIZATION && tx.tx_type != TX_TYPE_TRANSFER {
+    if tx.tx_type != TX_TYPE_NOTARIZATION
+        && tx.tx_type != TX_TYPE_TRANSFER
+        && tx.tx_type != TX_TYPE_KEY_ROTATION
+    {
         return Err(ValidationError::UnknownTxType(tx.tx_type));
     }
 
@@ -144,6 +147,75 @@ pub fn validate_transaction(
     // T17: Notarization must NOT have recipient or amount
     if tx.tx_type == TX_TYPE_NOTARIZATION && (tx.recipient.is_some() || tx.amount.is_some()) {
         return Err(ValidationError::NotarizationHasTransferFields);
+    }
+
+    // T21: Key rotation requires new key in recipient field
+    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.recipient.is_none() {
+        return Err(ValidationError::KeyRotationMissingNewKey);
+    }
+
+    // T18-T20: Validator identity checks deferred to consensus (needs validator list)
+
+    Ok(())
+}
+
+/// Compute the median of a slice of timestamps.
+///
+/// Returns 0 for an empty slice.
+pub fn median_timestamp(timestamps: &[u64]) -> u64 {
+    if timestamps.is_empty() {
+        return 0;
+    }
+    let mut sorted = timestamps.to_vec();
+    sorted.sort_unstable();
+    sorted[sorted.len() / 2]
+}
+
+/// Validate a block's timestamp against B5, B6, and B13 (median-of-11).
+///
+/// This consolidates all timestamp checks into one function for the consensus layer:
+/// - Monotonicity (B5): `block_timestamp > parent_timestamp`
+/// - Median-of-11 (B13): `block_timestamp >= median(recent_timestamps)`
+/// - Future skew (B6): `block_timestamp <= now + MAX_BLOCK_FUTURE_SKEW`
+/// - Past skew (B6): `now <= block_timestamp + MAX_BLOCK_PAST_SKEW`
+pub fn validate_block_timestamp(
+    block_timestamp: u64,
+    parent_timestamp: u64,
+    recent_timestamps: &[u64],
+    current_time: u64,
+) -> Result<(), ValidationError> {
+    // B5: Monotonicity
+    if block_timestamp <= parent_timestamp {
+        return Err(ValidationError::TimestampNotAfterParent {
+            block_time: block_timestamp,
+            parent_time: parent_timestamp,
+        });
+    }
+
+    // B13: Median-of-11 (only if we have recent timestamps)
+    if !recent_timestamps.is_empty() {
+        let median = median_timestamp(recent_timestamps);
+        if block_timestamp < median {
+            return Err(ValidationError::BlockTimestampBeforeMedian {
+                block_time: block_timestamp,
+                median,
+            });
+        }
+    }
+
+    // B6: Future skew
+    if block_timestamp > current_time + MAX_BLOCK_FUTURE_SKEW {
+        return Err(ValidationError::BlockTimestampSkew {
+            block_time: block_timestamp,
+            current_time,
+        });
+    }
+    // B6: Past skew
+    if current_time > block_timestamp + MAX_BLOCK_PAST_SKEW {
+        return Err(ValidationError::BlockTimestampSkew {
+            block_time: block_timestamp,
+            current_time,
+        });
     }
 
     Ok(())
@@ -827,6 +899,78 @@ mod tests {
             result,
             Err(ValidationError::NotarizationHasTransferFields)
         ));
+    }
+
+    // --- validate_block_timestamp (B5/B6/B13) ---
+
+    #[test]
+    fn b5_block_timestamp_before_parent_rejected() {
+        let result = validate_block_timestamp(
+            999,   // block timestamp
+            1_000, // parent timestamp (higher)
+            &[],
+            1_700_000_000,
+        );
+        assert!(matches!(
+            result,
+            Err(ValidationError::TimestampNotAfterParent { .. })
+        ));
+    }
+
+    #[test]
+    fn b13_block_timestamp_before_median_rejected() {
+        // Median of [100, 200, 300, 400, 500] = 300
+        let recent = vec![100, 200, 300, 400, 500];
+        let result = validate_block_timestamp(
+            250, // below median of 300
+            200, // parent (ok, 250 > 200)
+            &recent,
+            1_700_000_000,
+        );
+        assert!(matches!(
+            result,
+            Err(ValidationError::BlockTimestampBeforeMedian { .. })
+        ));
+    }
+
+    #[test]
+    fn b6_block_timestamp_too_far_future() {
+        let now = 1_700_000_000;
+        let result = validate_block_timestamp(now + MAX_BLOCK_FUTURE_SKEW + 1, now, &[], now);
+        assert!(matches!(
+            result,
+            Err(ValidationError::BlockTimestampSkew { .. })
+        ));
+    }
+
+    #[test]
+    fn valid_block_timestamp_passes_all_checks() {
+        let now = 1_700_000_000;
+        let recent = vec![now - 100, now - 90, now - 80, now - 70, now - 60];
+        let result = validate_block_timestamp(
+            now + 10, // slightly in the future
+            now,      // parent
+            &recent,
+            now + 10,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn median_timestamp_odd_count() {
+        assert_eq!(median_timestamp(&[3, 1, 2]), 2);
+        assert_eq!(median_timestamp(&[10, 30, 20, 40, 50]), 30);
+    }
+
+    #[test]
+    fn median_timestamp_even_count() {
+        // For even count, picks the upper-middle element
+        assert_eq!(median_timestamp(&[1, 2, 3, 4]), 3);
+    }
+
+    #[test]
+    fn median_timestamp_empty() {
+        assert_eq!(median_timestamp(&[]), 0);
     }
 
     #[test]

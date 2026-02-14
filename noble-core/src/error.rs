@@ -137,6 +137,26 @@ pub enum ValidationError {
     #[error("B12: validator scheme unrecognized: {0:#04x}")]
     ValidatorSchemeUnrecognized(u8),
 
+    /// B13: Block timestamp is before median of recent block timestamps.
+    #[error("B13: block timestamp {block_time} before median {median}")]
+    BlockTimestampBeforeMedian { block_time: u64, median: u64 },
+
+    /// T18: Key rotation signer is not a current validator.
+    #[error("T18: signer is not a current validator")]
+    NotValidator,
+
+    /// T19: Key rotation new key is invalid or has unrecognized scheme.
+    #[error("T19: invalid new validator key: {0}")]
+    InvalidNewKey(String),
+
+    /// T20: Key rotation too frequent (within grace period).
+    #[error("T20: key rotation too frequent (last rotation at cycle {0})")]
+    RotationTooFrequent(u64),
+
+    /// T21: Key rotation transaction missing new key in recipient field.
+    #[error("T21: key rotation tx requires new key in recipient field")]
+    KeyRotationMissingNewKey,
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

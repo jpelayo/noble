@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! RocksDB-backed storage engine with 8 column families.
+//! RocksDB-backed storage engine with 9 column families.
 //!
 //! Column families:
 //! - `blocks`: height (u64 BE) → serialized Block
@@ -12,6 +12,7 @@
 //! - `validator_state`: validator_pubkey → reputation data (reserved for Sprint 4+)
 //! - `address_balances`: pubkey_wire → u64 BE balance (GAP-H19)
 //! - `address_history`: pubkey_wire+height(8B BE)+offset(4B BE) → tx_id(32B) (GAP-H19)
+//! - `bans`: peer_id bytes → banned_until (u64 BE)
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +28,7 @@ use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
-use crate::traits::{ChainTip, StorageEngine};
+use crate::traits::{ChainTip, KeyRotationRecord, StorageEngine};
 use crate::MAX_CHECKSUM_REGISTRATIONS;
 
 // --- Column family names ---
@@ -40,6 +41,7 @@ const CF_CHAIN_STATE: &str = "chain_state";
 const CF_VALIDATOR_STATE: &str = "validator_state";
 const CF_ADDRESS_BALANCES: &str = "address_balances";
 const CF_ADDRESS_HISTORY: &str = "address_history";
+const CF_BANS: &str = "bans";
 
 // --- Chain state keys ---
 
@@ -100,6 +102,7 @@ impl RocksDbStorage {
             Self::cf_validator_state(),
             Self::cf_address_balances(config),
             Self::cf_address_history(config),
+            Self::cf_bans(),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cfs)
@@ -169,6 +172,10 @@ impl RocksDbStorage {
         table_opts.set_bloom_filter(config.bloom_filter_bits as f64, false);
         opts.set_block_based_table_factory(&table_opts);
         ColumnFamilyDescriptor::new(CF_ADDRESS_HISTORY, opts)
+    }
+
+    fn cf_bans() -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor::new(CF_BANS, Options::default())
     }
 
     // --- Helpers ---
@@ -410,6 +417,34 @@ impl StorageEngine for RocksDbStorage {
     }
 
     fn get_transaction(&self, tx_id: &Hash256) -> Result<Transaction, StorageError> {
+        let (height, offset) = self.get_transaction_location(tx_id)?;
+
+        // Fetch the block at this height
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        let height_be = height.to_be_bytes();
+        let block_bytes = self
+            .db
+            .get_cf(cf_blocks, height_be)
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                StorageError::TransactionNotFound(format!(
+                    "block at height {height} not found for tx {tx_id}",
+                ))
+            })?;
+
+        let block = Block::from_cbor(&block_bytes)?;
+        block
+            .transactions
+            .into_iter()
+            .nth(offset as usize)
+            .ok_or_else(|| {
+                StorageError::TransactionNotFound(format!(
+                    "tx offset {offset} out of range in block at height {height}",
+                ))
+            })
+    }
+
+    fn get_transaction_location(&self, tx_id: &Hash256) -> Result<(u64, u32), StorageError> {
         self.check_open()?;
 
         let cf_tx = self.cf(CF_TX_INDEX)?;
@@ -426,30 +461,9 @@ impl StorageEngine for RocksDbStorage {
             )));
         }
 
-        let height_be: [u8; 8] = location[..8].try_into().unwrap();
-        let offset = u32::from_be_bytes(location[8..12].try_into().unwrap()) as usize;
-
-        // Fetch the block at this height
-        let cf_blocks = self.cf(CF_BLOCKS)?;
-        let block_bytes = self
-            .db
-            .get_cf(cf_blocks, height_be)
-            .map_err(|e| StorageError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                StorageError::TransactionNotFound(format!(
-                    "block at height {} not found for tx {}",
-                    u64::from_be_bytes(height_be),
-                    tx_id
-                ))
-            })?;
-
-        let block = Block::from_cbor(&block_bytes)?;
-        block.transactions.into_iter().nth(offset).ok_or_else(|| {
-            StorageError::TransactionNotFound(format!(
-                "tx offset {offset} out of range in block at height {}",
-                u64::from_be_bytes(height_be)
-            ))
-        })
+        let height = u64::from_be_bytes(location[..8].try_into().unwrap());
+        let offset = u32::from_be_bytes(location[8..12].try_into().unwrap());
+        Ok((height, offset))
     }
 
     fn lookup_checksum(&self, checksum: &Hash256) -> Result<Vec<Hash256>, StorageError> {
@@ -711,6 +725,110 @@ impl StorageEngine for RocksDbStorage {
             block_hash: target_hash,
             height: target_height,
         })
+    }
+
+    fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
+        self.check_open()?;
+        let tip = match self.get_chain_tip()? {
+            Some(t) => t.height,
+            None => return Ok(vec![]),
+        };
+        let mut timestamps = Vec::with_capacity(count);
+        let start = tip.saturating_sub(count.saturating_sub(1) as u64);
+        for h in (start..=tip).rev() {
+            let hash = self.get_block_hash_by_height(h)?;
+            let header = self.get_block_header(&hash)?;
+            timestamps.push(header.timestamp);
+            if timestamps.len() >= count {
+                break;
+            }
+        }
+        Ok(timestamps)
+    }
+
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BANS)?;
+        self.db
+            .put_cf(cf, peer_id, banned_until.to_be_bytes())
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn remove_ban(&self, peer_id: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BANS)?;
+        self.db
+            .delete_cf(cf, peer_id)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BANS)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut bans = Vec::new();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if value.len() == 8 {
+                let banned_until = u64::from_be_bytes(value[..8].try_into().unwrap());
+                if banned_until > now {
+                    bans.push((key.to_vec(), banned_until));
+                }
+            }
+        }
+        Ok(bans)
+    }
+
+    fn store_key_rotation(
+        &self,
+        old_key: &NoblePublicKey,
+        new_key: &NoblePublicKey,
+        rotation_cycle: u64,
+    ) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_VALIDATOR_STATE)?;
+        let key = old_key.to_wire_bytes();
+        // Value: new_key_wire_len(4B BE) + new_key_wire + rotation_cycle(8B BE)
+        let new_wire = new_key.to_wire_bytes();
+        let mut value = Vec::with_capacity(4 + new_wire.len() + 8);
+        value.extend_from_slice(&(new_wire.len() as u32).to_be_bytes());
+        value.extend_from_slice(&new_wire);
+        value.extend_from_slice(&rotation_cycle.to_be_bytes());
+        self.db
+            .put_cf(cf, &key, &value)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn remove_key_rotation(&self, old_key: &NoblePublicKey) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_VALIDATOR_STATE)?;
+        let key = old_key.to_wire_bytes();
+        self.db
+            .delete_cf(cf, &key)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn load_key_rotations(&self) -> Result<Vec<KeyRotationRecord>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_VALIDATOR_STATE)?;
+        let mut rotations = Vec::new();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if value.len() >= 12 {
+                let new_wire_len = u32::from_be_bytes(value[..4].try_into().unwrap()) as usize;
+                if value.len() == 4 + new_wire_len + 8 {
+                    let new_wire = value[4..4 + new_wire_len].to_vec();
+                    let cycle = u64::from_be_bytes(value[4 + new_wire_len..].try_into().unwrap());
+                    rotations.push((key.to_vec(), new_wire, cycle));
+                }
+            }
+        }
+        Ok(rotations)
     }
 
     fn close(&mut self) -> Result<(), StorageError> {

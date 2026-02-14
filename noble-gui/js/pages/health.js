@@ -60,7 +60,12 @@ export function init(root, ctx) {
       const info = await rpc.call('noble_getNodeInfo');
       const syncStatus = await rpc.call('noble_getSyncStatus');
 
-      hVersion.textContent = `v${info.version}`;
+      const swVer = info.software_version || `${info.version}`;
+      hVersion.textContent = `v${swVer}`;
+      // Upgrade notice if a newer version was seen on the network
+      if (info.latest_network_version && info.latest_network_version > swVer) {
+        hVersion.innerHTML = `v${swVer} <span class="badge warning">Update available: v${info.latest_network_version}</span>`;
+      }
       hUptime.textContent = formatDuration(info.uptime_secs);
       hStorage.textContent = formatBytes(info.storage_bytes);
 
@@ -71,8 +76,9 @@ export function init(root, ctx) {
 
       // Details grid
       hDetails.innerHTML = `
-        <dt>Version</dt><dd>v${info.version}</dd>
-        <dt>Protocol</dt><dd>${info.protocol_version}</dd>
+        <dt>Software</dt><dd>v${info.software_version || info.version}</dd>
+        <dt>Network Latest</dt><dd>v${info.latest_network_version || '—'}</dd>
+        <dt>Protocol</dt><dd>${info.protocol_version || info.version}</dd>
         <dt>Chain ID</dt><dd>0x${info.chain_id.toString(16).toUpperCase()}</dd>
         <dt>Uptime</dt><dd>${formatDuration(info.uptime_secs)}</dd>
         <dt>Storage</dt><dd>${formatBytes(info.storage_bytes)} / ${formatBytes(info.storage_capacity_bytes)}</dd>

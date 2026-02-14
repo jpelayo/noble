@@ -20,5 +20,5 @@ pub use engine::{ConsensusStateMachine, CycleEngine};
 pub use error::ConsensusError;
 pub use event::{CycleEvent, CycleIo};
 pub use proposal::propose_block;
-pub use validator::ValidatorList;
+pub use validator::{PendingRotation, ValidatorList};
 pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteManager};

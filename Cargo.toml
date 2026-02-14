@@ -63,3 +63,4 @@ serde_json = "1"
 argon2 = "0.5"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
+totp-rs = { version = "5", features = ["gen_secret"] }

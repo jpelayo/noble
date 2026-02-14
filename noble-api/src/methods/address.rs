@@ -47,10 +47,7 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         &self,
         address: String,
     ) -> Result<AddressBalanceResponse, ErrorObjectOwned> {
-        let wire_bytes =
-            hex::decode(&address).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let pubkey = NoblePublicKey::from_wire_bytes(&wire_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let pubkey = parse_pubkey(&address)?;
 
         let storage = self.storage.read().unwrap();
         let balance = storage.get_balance(&pubkey).map_err(ApiError::from)?;
@@ -64,10 +61,7 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         page: u32,
         limit: u32,
     ) -> Result<AddressHistoryResponse, ErrorObjectOwned> {
-        let wire_bytes =
-            hex::decode(&address).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let pubkey = NoblePublicKey::from_wire_bytes(&wire_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let pubkey = parse_pubkey(&address)?;
 
         let clamped_limit = limit.min(100);
         let storage = self.storage.read().unwrap();

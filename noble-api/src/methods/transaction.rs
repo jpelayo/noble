@@ -66,6 +66,13 @@ pub trait TransactionApi {
         &self,
         tx_id: String,
     ) -> Result<TransactionStatusResponse, ErrorObjectOwned>;
+
+    /// Get a full receipt for a transaction including block location and confirmations.
+    #[method(name = "getTransactionReceipt")]
+    async fn get_transaction_receipt(
+        &self,
+        tx_id: String,
+    ) -> Result<TransactionReceiptResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -163,6 +170,52 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         Ok(TransactionStatusResponse {
             tx_id,
             status: "unknown".to_string(),
+        })
+    }
+
+    async fn get_transaction_receipt(
+        &self,
+        tx_id: String,
+    ) -> Result<TransactionReceiptResponse, ErrorObjectOwned> {
+        let tx_id_hash = parse_hash(&tx_id)?;
+
+        // Check mempool first — pending transactions have no block info
+        {
+            let mempool = self.mempool.lock().unwrap();
+            if let Some(entry) = mempool.get(&tx_id_hash) {
+                return Ok(TransactionReceiptResponse {
+                    transaction: tx_to_response(&entry.tx, &tx_id),
+                    status: "pending".to_string(),
+                    block_height: None,
+                    block_hash: None,
+                    tx_index: None,
+                    confirmations: None,
+                });
+            }
+        }
+
+        // Look up on-chain location
+        let storage = self.storage.read().unwrap();
+        let (height, offset) = storage
+            .get_transaction_location(&tx_id_hash)
+            .map_err(ApiError::from)?;
+        let tx = storage
+            .get_transaction(&tx_id_hash)
+            .map_err(ApiError::from)?;
+        let block_hash = storage
+            .get_block_hash_by_height(height)
+            .map_err(ApiError::from)?;
+        let tip = storage.get_chain_tip().map_err(ApiError::from)?;
+
+        let confirmations = tip.map(|t| t.height - height + 1);
+
+        Ok(TransactionReceiptResponse {
+            transaction: tx_to_response(&tx, &tx_id),
+            status: "confirmed".to_string(),
+            block_height: Some(height),
+            block_hash: Some(hash_to_hex(&block_hash)),
+            tx_index: Some(offset),
+            confirmations,
         })
     }
 }

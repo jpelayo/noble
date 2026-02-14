@@ -7,7 +7,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use serde::Serialize;
 
 use noble_core::{Block, Transaction};
-use noble_crypto::Hash256;
+use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::ApiError;
 
@@ -18,6 +18,14 @@ use crate::error::ApiError;
 /// Convert a `Hash256` to a lowercase hex string.
 pub fn hash_to_hex(h: &Hash256) -> String {
     hex::encode(h.as_bytes())
+}
+
+/// Parse a hex-encoded wire-format public key, returning a JSON-RPC error on failure.
+pub fn parse_pubkey(hex_str: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
+    let bytes =
+        hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
+    NoblePublicKey::from_wire_bytes(&bytes)
+        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
 }
 
 /// Parse a hex string into a `Hash256`, returning a JSON-RPC error on failure.
@@ -254,6 +262,8 @@ pub struct NodeInfoResponse {
     pub version: u32,
     pub chain_id: u32,
     pub uptime_secs: u64,
+    pub software_version: String,
+    pub latest_network_version: String,
 }
 
 /// Response for `noble_createAddress`.
@@ -298,6 +308,17 @@ pub struct ValidateAddressResponse {
 pub struct TransactionStatusResponse {
     pub tx_id: String,
     pub status: String,
+}
+
+/// Response for `noble_getTransactionReceipt`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransactionReceiptResponse {
+    pub transaction: TransactionResponse,
+    pub status: String,
+    pub block_height: Option<u64>,
+    pub block_hash: Option<String>,
+    pub tx_index: Option<u32>,
+    pub confirmations: Option<u64>,
 }
 
 /// Response for `noble_verifyDocument`.
@@ -346,6 +367,29 @@ mod tests {
         assert!(result.is_ok());
         let h = result.unwrap();
         assert_eq!(h.as_bytes(), &[0xab; 32]);
+    }
+
+    #[test]
+    fn parse_pubkey_valid_ed25519() {
+        // Generate a valid ed25519 pubkey hex via wire format: scheme_id(1) + 32 bytes
+        let mut wire = vec![0x01]; // Ed25519 scheme_id
+        wire.extend_from_slice(&[0xAB; 32]);
+        let hex_str = hex::encode(&wire);
+        let result = parse_pubkey(&hex_str);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_pubkey_invalid_hex() {
+        let result = parse_pubkey("not_valid_hex!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_pubkey_invalid_wire_bytes() {
+        // Valid hex but not a valid public key encoding
+        let result = parse_pubkey("0102");
+        assert!(result.is_err());
     }
 
     #[test]

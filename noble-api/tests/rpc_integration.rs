@@ -86,6 +86,9 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         network_stats,
         chain_id: MAINNET_CHAIN_ID,
         start_time: Instant::now(),
+        max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
+        rate_limiter: None,   // disabled in tests
+        totp_validator: None, // auth disabled in tests
         new_block_tx,
         new_tx_tx,
         cycle_phase_tx,
@@ -409,4 +412,114 @@ async fn get_network_info() {
     assert_eq!(resp["peer_count"], 0);
     assert_eq!(resp["inbound"], 0);
     assert_eq!(resp["outbound"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// Transaction receipt methods
+// ---------------------------------------------------------------------------
+
+/// Commit a block with one transaction on top of genesis, return (block_hash, tx_id).
+fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
+    use noble_core::{Block, BlockHeader, Transaction, PROTOCOL_VERSION};
+    use noble_crypto::{
+        ed25519, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+        SCHEME_ED25519,
+    };
+
+    let (sk, pk) = ed25519::generate_keypair();
+    let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+
+    // Create a notarization tx
+    let checksum = sha256(b"test_document");
+    let mut tx = Transaction {
+        version: PROTOCOL_VERSION,
+        tx_type: 0,
+        checksum,
+        timestamp: 1_700_000_001,
+        fee: 0, // zero fee so no balance needed
+        recipient: None,
+        amount: None,
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.to_vec(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+    };
+    let msg = tx.compute_signing_message().unwrap();
+    tx.publisher_sig = priv_key.sign(&msg).unwrap();
+    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+    // Get genesis hash for prev_block_hash
+    let storage = state.storage.read().unwrap();
+    let tip = storage.get_chain_tip().unwrap().unwrap();
+    let prev_hash = tip.block_hash;
+
+    let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+    let tx_ids = vec![tx_id];
+    let merkle_root = noble_core::compute_merkle_root(&tx_ids);
+
+    let mut header = BlockHeader {
+        version: PROTOCOL_VERSION,
+        prev_block_hash: prev_hash,
+        merkle_root,
+        timestamp: 1_700_000_001,
+        height: 1,
+        tx_count: 1,
+        validator_id: val_pub,
+        validator_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: pk.to_vec(),
+            signature: vec![],
+        },
+    };
+    let hmsg = header.compute_signing_message().unwrap();
+    header.validator_sig = priv_key.sign(&hmsg).unwrap();
+    let block_hash = header.compute_block_hash().unwrap();
+
+    let block = Block {
+        header,
+        transactions: vec![tx],
+    };
+    storage.commit_block(&block, &block_hash, &tx_ids).unwrap();
+
+    (
+        noble_api::types::hash_to_hex(&block_hash),
+        noble_api::types::hash_to_hex(&tx_id),
+    )
+}
+
+#[tokio::test]
+async fn get_transaction_receipt_confirmed() {
+    let (state, _dir) = make_test_state();
+    let (block_hash, tx_id) = commit_block_with_tx(&state);
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getTransactionReceipt", rpc_params![&tx_id])
+        .await
+        .unwrap();
+
+    assert_eq!(resp["status"], "confirmed");
+    assert_eq!(resp["block_height"], 1);
+    assert_eq!(resp["block_hash"].as_str().unwrap(), block_hash);
+    assert_eq!(resp["tx_index"], 0);
+    assert_eq!(resp["confirmations"], 1);
+    assert_eq!(resp["transaction"]["tx_id"].as_str().unwrap(), tx_id);
+}
+
+#[tokio::test]
+async fn get_transaction_receipt_not_found() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let fake_tx_id = "ff".repeat(32);
+    let result: Result<serde_json::Value, _> = client
+        .request("noble_getTransactionReceipt", rpc_params![&fake_tx_id])
+        .await;
+
+    assert!(result.is_err());
 }

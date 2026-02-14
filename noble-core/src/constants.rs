@@ -51,11 +51,21 @@ pub const TX_TYPE_NOTARIZATION: u8 = 0x00;
 /// Transaction type: NOBLE token transfer.
 pub const TX_TYPE_TRANSFER: u8 = 0x01;
 
+/// Transaction type: validator key rotation.
+pub const TX_TYPE_KEY_ROTATION: u8 = 0x02;
+
+/// Grace period (in cycles) during which both old and new keys are valid.
+/// 48 cycles = 24 hours at 30-min cycles.
+pub const KEY_ROTATION_GRACE_CYCLES: u64 = 48;
+
 /// Initial block subsidy in atomic units (50 NOBLE = 50_000_000 with 6 decimals).
 pub const INITIAL_SUBSIDY: u64 = 50_000_000;
 
 /// Number of blocks between halving events (~12 years at 30-min cycles).
 pub const HALVING_INTERVAL: u64 = 210_000;
+
+/// Human-readable software version string.
+pub const SOFTWARE_VERSION: &str = "0.1.0";
 
 /// Current NodeAnnounce message version.
 pub const NODE_ANNOUNCE_VERSION: u16 = 1;

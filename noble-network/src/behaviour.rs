@@ -182,9 +182,9 @@ mod tests {
         let keypair = Keypair::generate_ed25519();
         let config = NetworkConfig::testnet();
         let behaviour = NobleBehaviour::new(&keypair, &config).unwrap();
-        // GossipSub should have 5 subscribed topics.
+        // GossipSub should have 6 subscribed topics.
         let topics_list = behaviour.gossip.topics().collect::<Vec<_>>();
-        assert_eq!(topics_list.len(), 5);
+        assert_eq!(topics_list.len(), 6);
     }
 
     #[test]

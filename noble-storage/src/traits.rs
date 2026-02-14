@@ -10,6 +10,9 @@ use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
 
+/// Pending key rotation record: `(old_key_wire, new_key_wire, rotation_cycle)`.
+pub type KeyRotationRecord = (Vec<u8>, Vec<u8>, u64);
+
 /// Chain tip metadata persisted in the `chain_state` column family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainTip {
@@ -55,6 +58,9 @@ pub trait StorageEngine {
     /// Check whether a transaction exists in the store.
     fn has_transaction(&self, tx_id: &Hash256) -> Result<bool, StorageError>;
 
+    /// Get the block location of a confirmed transaction: (height, offset_in_block).
+    fn get_transaction_location(&self, tx_id: &Hash256) -> Result<(u64, u32), StorageError>;
+
     /// Get the current chain tip, or None if the chain is empty (pre-genesis).
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError>;
 
@@ -72,6 +78,20 @@ pub trait StorageEngine {
         limit: u32,
     ) -> Result<Vec<Hash256>, StorageError>;
 
+    /// Get the timestamps of the most recent `count` blocks (newest first).
+    ///
+    /// Used for median-of-11 timestamp validation (B13).
+    fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError>;
+
+    /// Store a peer ban (peer_id bytes → banned_until unix timestamp).
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64) -> Result<(), StorageError>;
+
+    /// Remove a peer ban.
+    fn remove_ban(&self, peer_id: &[u8]) -> Result<(), StorageError>;
+
+    /// Load all persisted bans. Returns (peer_id_bytes, banned_until_unix).
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError>;
+
     /// Roll back the chain to a specific height, removing all blocks above it.
     /// Recalculates balances by replaying from genesis.
     /// Returns the new chain tip after rollback.
@@ -80,6 +100,22 @@ pub trait StorageEngine {
         target_height: u64,
         chain_id: u32,
     ) -> Result<ChainTip, StorageError>;
+
+    /// Store a pending key rotation.
+    ///
+    /// Key: old_key wire bytes, Value: CBOR(new_key_wire, rotation_cycle).
+    fn store_key_rotation(
+        &self,
+        old_key: &NoblePublicKey,
+        new_key: &NoblePublicKey,
+        rotation_cycle: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Remove a pending key rotation (after grace period expires).
+    fn remove_key_rotation(&self, old_key: &NoblePublicKey) -> Result<(), StorageError>;
+
+    /// Load all pending key rotations.
+    fn load_key_rotations(&self) -> Result<Vec<KeyRotationRecord>, StorageError>;
 
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
