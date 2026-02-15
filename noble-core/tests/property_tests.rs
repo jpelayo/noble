@@ -63,6 +63,8 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 publisher_sig,
                 additional_sigs,
                 metadata,
+                encrypted_locator: None,
+                external_attestations: vec![],
             },
         )
 }
@@ -220,6 +222,8 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     publisher_sig,
                     additional_sigs,
                     metadata,
+                    encrypted_locator: None,
+                    external_attestations: vec![],
                 }
             },
         )
@@ -276,6 +280,8 @@ fn signed_transaction_roundtrip_100() {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
 
         let msg = tx.compute_signing_message().unwrap();
@@ -322,6 +328,8 @@ fn signing_message_includes_tx_type() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
     let msg0 = tx0.compute_signing_message().unwrap();
     tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
@@ -342,6 +350,8 @@ fn signing_message_includes_tx_type() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
     let msg1 = tx1.compute_signing_message().unwrap();
     tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
@@ -372,6 +382,8 @@ fn signing_message_includes_recipient() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
 
     let tx2 = Transaction {
@@ -389,6 +401,8 @@ fn signing_message_includes_recipient() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
 
     let msg1 = tx1.compute_signing_message().unwrap();
@@ -422,6 +436,8 @@ fn signing_message_includes_amount() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
 
     let tx2 = Transaction {
@@ -439,6 +455,8 @@ fn signing_message_includes_amount() {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
 
     let msg1 = tx1.compute_signing_message().unwrap();

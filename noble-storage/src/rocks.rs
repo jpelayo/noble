@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! RocksDB-backed storage engine with 9 column families.
+//! RocksDB-backed storage engine with 10 column families.
 //!
 //! Column families:
 //! - `blocks`: height (u64 BE) → serialized Block
@@ -13,6 +13,7 @@
 //! - `address_balances`: pubkey_wire → u64 BE balance (GAP-H19)
 //! - `address_history`: pubkey_wire+height(8B BE)+offset(4B BE) → tx_id(32B) (GAP-H19)
 //! - `bans`: peer_id bytes → banned_until (u64 BE)
+//! - `peer_memory`: identity_key wire → CBOR-encoded PeerRecord
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,7 +25,7 @@ use rocksdb::{
 
 use noble_codec::NobleCbor;
 use noble_core::constants::{subsidy_at_height, TX_TYPE_TRANSFER};
-use noble_core::{Block, BlockHeader, Transaction};
+use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -42,6 +43,7 @@ const CF_VALIDATOR_STATE: &str = "validator_state";
 const CF_ADDRESS_BALANCES: &str = "address_balances";
 const CF_ADDRESS_HISTORY: &str = "address_history";
 const CF_BANS: &str = "bans";
+const CF_PEER_MEMORY: &str = "peer_memory";
 
 // --- Chain state keys ---
 
@@ -103,6 +105,7 @@ impl RocksDbStorage {
             Self::cf_address_balances(config),
             Self::cf_address_history(config),
             Self::cf_bans(),
+            Self::cf_peer_memory(),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cfs)
@@ -176,6 +179,10 @@ impl RocksDbStorage {
 
     fn cf_bans() -> ColumnFamilyDescriptor {
         ColumnFamilyDescriptor::new(CF_BANS, Options::default())
+    }
+
+    fn cf_peer_memory() -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor::new(CF_PEER_MEMORY, Options::default())
     }
 
     // --- Helpers ---
@@ -831,6 +838,71 @@ impl StorageEngine for RocksDbStorage {
         Ok(rotations)
     }
 
+    fn store_peer_record(&self, record: &PeerRecord) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_PEER_MEMORY)?;
+        let mut buf = Vec::new();
+        ciborium::into_writer(record, &mut buf).map_err(|e| StorageError::Codec(e.to_string()))?;
+        self.db
+            .put_cf(&cf, &record.identity_key, &buf)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn get_peer_record(&self, identity_key: &[u8]) -> Result<PeerRecord, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_PEER_MEMORY)?;
+        let bytes = self
+            .db
+            .get_cf(&cf, identity_key)
+            .map_err(|e| StorageError::Database(e.to_string()))?
+            .ok_or(StorageError::NotFound)?;
+        ciborium::from_reader(&bytes[..]).map_err(|e| StorageError::Codec(e.to_string()))
+    }
+
+    fn list_peer_records(&self) -> Result<Vec<PeerRecord>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_PEER_MEMORY)?;
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
+        let mut records = Vec::new();
+        for item in iter {
+            let (_key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            let rec: PeerRecord =
+                ciborium::from_reader(&val[..]).map_err(|e| StorageError::Codec(e.to_string()))?;
+            records.push(rec);
+        }
+        Ok(records)
+    }
+
+    fn remove_peer_record(&self, identity_key: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_PEER_MEMORY)?;
+        self.db
+            .delete_cf(&cf, identity_key)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn prune_peer_records(&self, now: u64, max_age_secs: u64) -> Result<u32, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_PEER_MEMORY)?;
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
+        let mut to_delete = Vec::new();
+        for item in iter {
+            let (key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            let rec: PeerRecord =
+                ciborium::from_reader(&val[..]).map_err(|e| StorageError::Codec(e.to_string()))?;
+            if rec.is_stale(now, max_age_secs) {
+                to_delete.push(key.to_vec());
+            }
+        }
+        let count = to_delete.len() as u32;
+        for key in &to_delete {
+            self.db
+                .delete_cf(&cf, key)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+        Ok(count)
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())
@@ -924,6 +996,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -956,6 +1030,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1834,5 +1910,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = RocksDbStorage::open_with_repair(dir.path()).unwrap();
         assert!(db.get_chain_tip().unwrap().is_none());
+    }
+
+    // ── Peer Record Tests ──
+
+    #[test]
+    fn rocks_peer_record_store_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open(dir.path()).unwrap();
+
+        let rec = PeerRecord::new(vec![0xAA; 32], vec![0xBB; 38], 1_700_000_000);
+        db.store_peer_record(&rec).unwrap();
+
+        let loaded = db.get_peer_record(&[0xAA; 32]).unwrap();
+        assert_eq!(loaded, rec);
+    }
+
+    #[test]
+    fn rocks_peer_record_list_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open(dir.path()).unwrap();
+
+        db.store_peer_record(&PeerRecord::new(vec![1], vec![10], 100))
+            .unwrap();
+        db.store_peer_record(&PeerRecord::new(vec![2], vec![20], 200))
+            .unwrap();
+
+        let records = db.list_peer_records().unwrap();
+        assert_eq!(records.len(), 2);
+
+        db.remove_peer_record(&[1]).unwrap();
+        let records = db.list_peer_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].identity_key, vec![2]);
+    }
+
+    #[test]
+    fn rocks_peer_record_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open(dir.path()).unwrap();
+
+        db.store_peer_record(&PeerRecord::new(vec![1], vec![10], 1000))
+            .unwrap();
+        db.store_peer_record(&PeerRecord::new(vec![2], vec![20], 5000))
+            .unwrap();
+        db.store_peer_record(&PeerRecord::new(vec![3], vec![30], 9000))
+            .unwrap();
+
+        // At time 10000, max_age 3000 → records older than 7000 are stale
+        let pruned = db.prune_peer_records(10000, 3000).unwrap();
+        assert_eq!(pruned, 2);
+        let remaining = db.list_peer_records().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].identity_key, vec![3]);
+    }
+
+    #[test]
+    fn rocks_peer_record_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open(dir.path()).unwrap();
+        assert!(matches!(
+            db.get_peer_record(&[99]),
+            Err(StorageError::NotFound)
+        ));
     }
 }

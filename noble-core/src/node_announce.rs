@@ -149,6 +149,12 @@ pub struct NodeAnnounce {
     pub website: Option<String>,
     pub host_address: Option<String>,
     pub software_version: String,
+    /// Operator declares intent to produce blocks.
+    #[serde(default)]
+    pub wants_to_validate: bool,
+    /// Operator declares intent to cast consensus votes.
+    #[serde(default)]
+    pub wants_to_vote: bool,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
 }
@@ -167,6 +173,8 @@ struct AnnounceSigningPayload<'a> {
     website: &'a Option<String>,
     host_address: &'a Option<String>,
     software_version: &'a str,
+    wants_to_validate: bool,
+    wants_to_vote: bool,
     timestamp: u64,
 }
 
@@ -184,6 +192,8 @@ impl NodeAnnounce {
             website: &self.website,
             host_address: &self.host_address,
             software_version: &self.software_version,
+            wants_to_validate: self.wants_to_validate,
+            wants_to_vote: self.wants_to_vote,
             timestamp: self.timestamp,
         };
         let cbor = to_canonical_cbor(&payload)?;
@@ -209,6 +219,8 @@ impl NodeAnnounce {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        wants_to_validate: bool,
+        wants_to_vote: bool,
         timestamp: u64,
         signer: &impl NobleSigner,
     ) -> Result<Self, CryptoError> {
@@ -225,6 +237,8 @@ impl NodeAnnounce {
             website,
             host_address,
             software_version: SOFTWARE_VERSION.to_string(),
+            wants_to_validate,
+            wants_to_vote,
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,
@@ -284,6 +298,8 @@ mod tests {
             Some("test@example.com".to_string()),
             Some("https://example.com".to_string()),
             Some("/ip4/1.2.3.4/tcp/9333".to_string()),
+            false,
+            false,
             timestamp,
             sk,
         )
@@ -431,6 +447,97 @@ mod tests {
             let bytes = role.to_cbor().unwrap();
             let decoded = NodeRole::from_cbor(&bytes).unwrap();
             assert_eq!(*role, decoded);
+        }
+    }
+
+    #[test]
+    fn participation_flags_in_cbor_roundtrip() {
+        let (sk, pk) = make_ed25519_keypair();
+        let announce = NodeAnnounce::sign(
+            pk.clone(),
+            "validator-node".to_string(),
+            OrgType::Enterprise,
+            None,
+            NodeRole::Validator,
+            None,
+            None,
+            None,
+            true,
+            true,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        assert!(announce.wants_to_validate);
+        assert!(announce.wants_to_vote);
+
+        let bytes = announce.to_cbor().unwrap();
+        let decoded = NodeAnnounce::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.wants_to_validate, true);
+        assert_eq!(decoded.wants_to_vote, true);
+    }
+
+    #[test]
+    fn participation_flags_included_in_signing_message() {
+        let (sk, pk) = make_ed25519_keypair();
+        let a1 = NodeAnnounce::sign(
+            pk.clone(),
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        let a2 = NodeAnnounce::sign(
+            pk.clone(),
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            true,
+            true,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        // Different participation flags must produce different signing messages.
+        let msg1 = a1.compute_signing_message().unwrap();
+        let msg2 = a2.compute_signing_message().unwrap();
+        assert_ne!(msg1, msg2);
+    }
+
+    #[test]
+    fn all_participation_combinations_valid() {
+        let (sk, pk) = make_ed25519_keypair();
+        for (v, vote) in [(false, false), (true, false), (false, true), (true, true)] {
+            let a = NodeAnnounce::sign(
+                pk.clone(),
+                "test".to_string(),
+                OrgType::Individual,
+                None,
+                NodeRole::FullNode,
+                None,
+                None,
+                None,
+                v,
+                vote,
+                1_700_000_000,
+                &sk,
+            )
+            .unwrap();
+            assert!(a.verify_signature().is_ok());
+            assert_eq!(a.wants_to_validate, v);
+            assert_eq!(a.wants_to_vote, vote);
         }
     }
 

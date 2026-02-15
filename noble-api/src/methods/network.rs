@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Network-related RPC methods: getPeerInfo, getNetworkInfo, getSyncStatus.
+//! Network-related RPC methods: getPeerInfo, getNetworkInfo, getSyncStatus, peer memory.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use noble_consensus::ConsensusStateMachine;
 use noble_storage::StorageEngine;
 
+use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
 
@@ -27,14 +28,29 @@ pub trait NetworkApi {
     /// Get current sync status.
     #[method(name = "getSyncStatus")]
     async fn get_sync_status(&self) -> Result<SyncStatusResponse, ErrorObjectOwned>;
+
+    /// Get persistent peer memory records.
+    #[method(name = "getPeerMemory")]
+    async fn get_peer_memory(&self) -> Result<Vec<PeerRecordResponse>, ErrorObjectOwned>;
+
+    /// Remove a specific peer record by identity key (hex-encoded).
+    #[method(name = "removePeerRecord")]
+    async fn remove_peer_record(
+        &self,
+        identity_key: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prune stale peer records older than `max_age_secs` seconds.
+    #[method(name = "pruneStalePeers")]
+    async fn prune_stale_peers(
+        &self,
+        max_age_secs: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState<S>> {
     async fn get_peer_info(&self) -> Result<Vec<PeerInfoResponse>, ErrorObjectOwned> {
-        // Detailed per-peer info is not currently tracked in ApiState.
-        // Return an empty list; the node event loop would populate a peer registry
-        // in a future sprint.
         Ok(vec![])
     }
 
@@ -51,11 +67,64 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let consensus = self.consensus.read().unwrap();
         let (height, _hash) = consensus.chain_tip();
 
-        // Simple heuristic: consider synced if height > 0 or chain is fresh.
-        // A real implementation would compare with the best-known peer height.
         Ok(SyncStatusResponse {
             synced: true,
             current_height: height,
         })
+    }
+
+    async fn get_peer_memory(&self) -> Result<Vec<PeerRecordResponse>, ErrorObjectOwned> {
+        let storage = self.storage.read().unwrap();
+        let records = storage
+            .list_peer_records()
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(records
+            .into_iter()
+            .map(|rec| {
+                let announce = rec.last_announce.as_ref();
+                PeerRecordResponse {
+                    identity_key: hex::encode(&rec.identity_key),
+                    first_seen: rec.first_seen,
+                    last_seen: rec.last_seen,
+                    connection_count: rec.connection_count,
+                    peer_id: hex::encode(&rec.peer_id_bytes),
+                    last_addr: rec.last_addr.clone(),
+                    node_name: announce.map(|a| a.node_name.clone()),
+                    org_type: announce.map(|a| format!("{:?}", a.org_type)),
+                    node_role: announce.map(|a| format!("{:?}", a.node_role)),
+                    wants_to_validate: announce.is_some_and(|a| a.wants_to_validate),
+                    wants_to_vote: announce.is_some_and(|a| a.wants_to_vote),
+                }
+            })
+            .collect())
+    }
+
+    async fn remove_peer_record(
+        &self,
+        identity_key: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key_bytes = hex::decode(&identity_key)
+            .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+        let storage = self.storage.read().unwrap();
+        storage
+            .remove_peer_record(&key_bytes)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn prune_stale_peers(
+        &self,
+        max_age_secs: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let storage = self.storage.read().unwrap();
+        let pruned = storage
+            .prune_peer_records(now, max_age_secs)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        Ok(serde_json::json!({ "pruned": pruned }))
     }
 }

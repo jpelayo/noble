@@ -3,6 +3,7 @@
  */
 
 import { formatTimestamp, formatFee, formatScheme, bytesToHex, truncateHash } from '../utils.js';
+import { renderMetadataWithSchema } from '../schema-parser.js';
 
 export function init(root, ctx) {
   const { rpc, params } = ctx;
@@ -90,35 +91,28 @@ export function init(root, ctx) {
       root.appendChild(addSigPanel);
     }
 
-    // Metadata
+    // Metadata (schema-aware rendering)
     if (tx.metadata.length > 0) {
+      // Convert metadata entries to the format expected by schema-parser:
+      // { key: string, value: hex-encoded string }
+      const metadataEntries = tx.metadata.map(m => ({
+        key: m.key,
+        value: Array.isArray(m.value)
+          ? m.value.map(b => b.toString(16).padStart(2, '0')).join('')
+          : m.value,
+      }));
+
       const metaPanel = document.createElement('div');
       metaPanel.className = 'panel';
-      let metaHtml = '<div class="panel-header">Metadata (' + tx.metadata.length + ' entries)</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>';
-      for (const entry of tx.metadata) {
-        const valueStr = tryUtf8(entry.value);
-        metaHtml += `<tr><td><strong>${escapeHtml(entry.key)}</strong></td><td class="mono">${escapeHtml(valueStr)}</td></tr>`;
-      }
-      metaHtml += '</tbody></table></div>';
-      metaPanel.innerHTML = metaHtml;
+      metaPanel.innerHTML =
+        '<div class="panel-header">Metadata (' + tx.metadata.length + ' entries)</div>' +
+        '<div class="panel-body" style="padding:0">' +
+        renderMetadataWithSchema(metadataEntries) +
+        '</div>';
       root.appendChild(metaPanel);
     }
   }
 
   load();
   return { destroy() {} };
-}
-
-function tryUtf8(bytes) {
-  try {
-    const arr = new Uint8Array(bytes);
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(arr);
-    // Check if printable
-    if (/^[\x20-\x7E\t\n\r]+$/.test(decoded)) return decoded;
-  } catch { /* not valid UTF-8 */ }
-  return bytesToHex(bytes);
-}
-
-function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

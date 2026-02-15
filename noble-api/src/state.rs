@@ -56,6 +56,8 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub rate_limiter: Option<Arc<crate::rate_limit::RpcRateLimiter>>,
     /// TOTP validator for API authentication. None = auth disabled.
     pub totp_validator: Option<Arc<RwLock<crate::auth::TotpValidator>>>,
+    /// Path to the TOTP secret file (for rotation persistence). None = not configured.
+    pub totp_secret_path: Option<std::path::PathBuf>,
 
     // --- Broadcast channels for WebSocket subscriptions ---
     /// New block notifications.

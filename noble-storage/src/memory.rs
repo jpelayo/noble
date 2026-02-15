@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 use noble_core::constants::{subsidy_at_height, TX_TYPE_TRANSFER};
-use noble_core::{Block, BlockHeader, Transaction};
+use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -34,6 +34,8 @@ struct Inner {
     bans: HashMap<Vec<u8>, u64>,
     /// Pending key rotations: old_key_wire → (new_key_wire, rotation_cycle).
     key_rotations: HashMap<Vec<u8>, (Vec<u8>, u64)>,
+    /// Peer memory: identity_key_wire → PeerRecord.
+    peer_records: HashMap<Vec<u8>, PeerRecord>,
     closed: bool,
 }
 
@@ -466,6 +468,48 @@ impl StorageEngine for MemoryStorage {
             .collect())
     }
 
+    fn store_peer_record(&self, record: &PeerRecord) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner
+            .peer_records
+            .insert(record.identity_key.clone(), record.clone());
+        Ok(())
+    }
+
+    fn get_peer_record(&self, identity_key: &[u8]) -> Result<PeerRecord, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        inner
+            .peer_records
+            .get(identity_key)
+            .cloned()
+            .ok_or(StorageError::NotFound)
+    }
+
+    fn list_peer_records(&self) -> Result<Vec<PeerRecord>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.peer_records.values().cloned().collect())
+    }
+
+    fn remove_peer_record(&self, identity_key: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.peer_records.remove(identity_key);
+        Ok(())
+    }
+
+    fn prune_peer_records(&self, now: u64, max_age_secs: u64) -> Result<u32, StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        let before = inner.peer_records.len();
+        inner
+            .peer_records
+            .retain(|_, rec| !rec.is_stale(now, max_age_secs));
+        Ok((before - inner.peer_records.len()) as u32)
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         inner.closed = true;
@@ -501,6 +545,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -533,6 +579,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1447,5 +1495,98 @@ mod tests {
 
         let rotations = store.load_key_rotations().unwrap();
         assert!(rotations.is_empty());
+    }
+
+    // ── Peer Record Tests ──
+
+    #[test]
+    fn store_and_get_peer_record() {
+        let store = MemoryStorage::new();
+        let rec = PeerRecord::new(vec![0xAA; 32], vec![0xBB; 38], 1_700_000_000);
+        store.store_peer_record(&rec).unwrap();
+
+        let loaded = store.get_peer_record(&[0xAA; 32]).unwrap();
+        assert_eq!(loaded, rec);
+    }
+
+    #[test]
+    fn update_existing_peer_record() {
+        let store = MemoryStorage::new();
+        let mut rec = PeerRecord::new(vec![1, 2, 3], vec![4, 5, 6], 1000);
+        store.store_peer_record(&rec).unwrap();
+
+        rec.on_connected(2000);
+        rec.last_addr = Some("/ip4/1.2.3.4/tcp/9333".into());
+        store.store_peer_record(&rec).unwrap();
+
+        let loaded = store.get_peer_record(&[1, 2, 3]).unwrap();
+        assert_eq!(loaded.connection_count, 2);
+        assert_eq!(loaded.last_seen, 2000);
+        assert_eq!(loaded.last_addr.as_deref(), Some("/ip4/1.2.3.4/tcp/9333"));
+    }
+
+    #[test]
+    fn list_peer_records() {
+        let store = MemoryStorage::new();
+        store
+            .store_peer_record(&PeerRecord::new(vec![1], vec![10], 100))
+            .unwrap();
+        store
+            .store_peer_record(&PeerRecord::new(vec![2], vec![20], 200))
+            .unwrap();
+        store
+            .store_peer_record(&PeerRecord::new(vec![3], vec![30], 300))
+            .unwrap();
+
+        let records = store.list_peer_records().unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn remove_peer_record() {
+        let store = MemoryStorage::new();
+        store
+            .store_peer_record(&PeerRecord::new(vec![1], vec![10], 100))
+            .unwrap();
+        store
+            .store_peer_record(&PeerRecord::new(vec![2], vec![20], 200))
+            .unwrap();
+
+        store.remove_peer_record(&[1]).unwrap();
+        assert!(store.get_peer_record(&[1]).is_err());
+        assert!(store.get_peer_record(&[2]).is_ok());
+    }
+
+    #[test]
+    fn prune_stale_peer_records() {
+        let store = MemoryStorage::new();
+        // Record at time 1000
+        store
+            .store_peer_record(&PeerRecord::new(vec![1], vec![10], 1000))
+            .unwrap();
+        // Record at time 5000
+        store
+            .store_peer_record(&PeerRecord::new(vec![2], vec![20], 5000))
+            .unwrap();
+        // Record at time 9000
+        store
+            .store_peer_record(&PeerRecord::new(vec![3], vec![30], 9000))
+            .unwrap();
+
+        // Prune at time 10000 with max_age 3000 — records older than 7000 are stale
+        let pruned = store.prune_peer_records(10000, 3000).unwrap();
+        assert_eq!(pruned, 2); // records 1 (age=9000) and 2 (age=5000) pruned
+        let remaining = store.list_peer_records().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].identity_key, vec![3]);
+    }
+
+    #[test]
+    fn get_nonexistent_peer_record_returns_error() {
+        let store = MemoryStorage::new();
+        assert!(matches!(
+            store.get_peer_record(&[99]),
+            Err(StorageError::NotFound)
+        ));
     }
 }

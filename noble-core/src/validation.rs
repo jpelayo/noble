@@ -149,6 +149,16 @@ pub fn validate_transaction(
         return Err(ValidationError::NotarizationHasTransferFields);
     }
 
+    // T22: encrypted_locator only allowed on notarization
+    if tx.tx_type != TX_TYPE_NOTARIZATION && tx.encrypted_locator.is_some() {
+        return Err(ValidationError::LocatorOnNonNotarization);
+    }
+
+    // T23: external_attestations only allowed on notarization
+    if tx.tx_type != TX_TYPE_NOTARIZATION && !tx.external_attestations.is_empty() {
+        return Err(ValidationError::AttestationsOnNonNotarization);
+    }
+
     // T21: Key rotation requires new key in recipient field
     if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.recipient.is_none() {
         return Err(ValidationError::KeyRotationMissingNewKey);
@@ -374,6 +384,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
 
         let msg = tx.compute_signing_message().unwrap();
@@ -710,6 +722,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -764,6 +778,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -796,6 +812,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -828,6 +846,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -860,6 +880,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -890,6 +912,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -971,6 +995,192 @@ mod tests {
     #[test]
     fn median_timestamp_empty() {
         assert_eq!(median_timestamp(&[]), 0);
+    }
+
+    // --- T22: Encrypted locator on non-notarization ---
+
+    #[test]
+    fn t22_locator_on_transfer_rejected() {
+        use crate::encrypted_locator::{EncryptedLocator, LocatorRecipient};
+
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let locator = EncryptedLocator {
+            ciphertext: vec![0u8; 48],
+            nonce: [0u8; 12],
+            recipients: vec![LocatorRecipient {
+                recipient: NoblePublicKey::Ed25519(pk.to_vec()),
+                ephemeral_pubkey: vec![0u8; 32],
+                encrypted_key: vec![0u8; 48],
+                key_nonce: [0u8; 12],
+            }],
+        };
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: Some(locator),
+            external_attestations: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::LocatorOnNonNotarization)
+        ));
+    }
+
+    #[test]
+    fn t22_locator_on_notarization_accepted() {
+        use crate::encrypted_locator::{EncryptedLocator, LocatorRecipient};
+
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let locator = EncryptedLocator {
+            ciphertext: vec![0u8; 48],
+            nonce: [0u8; 12],
+            recipients: vec![LocatorRecipient {
+                recipient: NoblePublicKey::Ed25519(pk.to_vec()),
+                ephemeral_pubkey: vec![0u8; 32],
+                encrypted_key: vec![0u8; 48],
+                key_nonce: [0u8; 12],
+            }],
+        };
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_NOTARIZATION,
+            checksum: sha256(b"test document"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: Some(locator),
+            external_attestations: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    // --- T23: External attestations on non-notarization ---
+
+    #[test]
+    fn t23_attestations_on_transfer_rejected() {
+        use crate::encrypted_locator::ExternalAttestation;
+
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let attestation = ExternalAttestation {
+            scheme: "pkcs7".into(),
+            scope: "hash".into(),
+            signer_fingerprint: [0xAA; 32],
+            signature_data: vec![0u8; 128],
+        };
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![attestation],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::AttestationsOnNonNotarization)
+        ));
+    }
+
+    #[test]
+    fn t23_attestations_on_notarization_accepted() {
+        use crate::encrypted_locator::ExternalAttestation;
+
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let attestation = ExternalAttestation {
+            scheme: "smime".into(),
+            scope: "both".into(),
+            signer_fingerprint: [0xBB; 32],
+            signature_data: vec![0u8; 256],
+        };
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_NOTARIZATION,
+            checksum: sha256(b"attested document"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![attestation],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    // --- CBOR backward compatibility ---
+
+    #[test]
+    fn tx_without_locator_deserializes() {
+        // Transaction without encrypted_locator/external_attestations (backward compat)
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, _) = make_signed_tx(&sk, &pk);
+        assert!(tx.encrypted_locator.is_none());
+        assert!(tx.external_attestations.is_empty());
+
+        // CBOR roundtrip preserves defaults
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
+        assert_eq!(tx, decoded);
+        assert!(decoded.encrypted_locator.is_none());
+        assert!(decoded.external_attestations.is_empty());
     }
 
     #[test]

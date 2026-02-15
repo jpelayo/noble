@@ -103,6 +103,10 @@ pub enum GossipMessage {
         website: Option<String>,
         host_address: Option<String>,
         software_version: String,
+        #[serde(default)]
+        wants_to_validate: bool,
+        #[serde(default)]
+        wants_to_vote: bool,
         timestamp: u64,
         signature_scheme: u8,
         signature_pubkey: Vec<u8>,
@@ -327,6 +331,8 @@ mod tests {
             website: Some("https://mit.edu".into()),
             host_address: Some("/ip4/1.2.3.4/tcp/9333".into()),
             software_version: "0.1.0".into(),
+            wants_to_validate: true,
+            wants_to_vote: false,
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],

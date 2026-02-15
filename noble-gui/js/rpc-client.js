@@ -30,9 +30,20 @@ export class RpcClient {
     this.#timeout = timeout;
   }
 
-  /** Set the TOTP auth token (6-digit code). Pass null to clear. */
-  setAuthToken(token) {
-    this.#authToken = token;
+  /**
+   * Set the TOTP auth token by hashing a 6-digit code with SHA-256.
+   * The server expects `Bearer <64-char hex SHA-256 hash>`.
+   * Pass null to clear.
+   */
+  async setAuthToken(code) {
+    if (!code) {
+      this.#authToken = null;
+      return;
+    }
+    const encoded = new TextEncoder().encode(code);
+    const hashBuf = await crypto.subtle.digest('SHA-256', encoded);
+    const hashArr = Array.from(new Uint8Array(hashBuf));
+    this.#authToken = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   /** Check whether an auth token is currently set. */

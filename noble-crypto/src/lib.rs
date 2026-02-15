@@ -10,6 +10,7 @@
 //! - **secp256k1**: Digital signatures via the [`secp256k1`] module (Step 4)
 //! - **Multi-scheme keys**: Unified key types via the [`keys`] module (Step 5)
 
+pub mod ecies;
 pub mod ed25519;
 pub mod error;
 pub mod hash;

@@ -79,6 +79,13 @@ pub const MAX_ORG_NAME_LEN: usize = 128;
 /// Maximum age of a NodeAnnounce before it is considered stale (seconds).
 pub const NODE_ANNOUNCE_MAX_AGE_SECS: u64 = 3_600;
 
+/// Validator liveness: considered alive if last seen within 3 cycles (1.5h).
+pub const VALIDATOR_ALIVE_THRESHOLD_SECS: u64 = 5_400;
+
+/// Validator liveness: considered stale if last seen within 12 cycles (6h).
+/// Beyond this threshold, the validator is considered unreachable.
+pub const VALIDATOR_STALE_THRESHOLD_SECS: u64 = 21_600;
+
 /// Compute block subsidy at a given height.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).
 pub fn subsidy_at_height(height: u64) -> u64 {

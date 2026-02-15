@@ -509,6 +509,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -660,6 +662,8 @@ mod tests {
                     value: b"v2".to_vec(),
                 },
             ],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -719,6 +723,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -926,6 +932,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();

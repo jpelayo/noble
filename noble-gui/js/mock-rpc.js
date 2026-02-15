@@ -69,17 +69,98 @@ function makeMetadataEntry(docType) {
   };
 }
 
+/** Build a schema-described metadata set (slot 0 = schema descriptor). */
+function makeSchemaMetadata(seed) {
+  const templates = [
+    // Template A: public description + public URL
+    {
+      schema: '0:pub:utf8:opt:schema\n1:pub:utf8:opt:description\n2:pub:utf8:opt:doc_url',
+      slots: [
+        { key: 'description', value: `Certificate of Completion — Course ${seed % 100}` },
+        { key: 'doc_url', value: `https://docs.example.com/certs/${seed}.pdf` },
+      ],
+    },
+    // Template B: description + DER cert + encrypted URL
+    {
+      schema: '0:pub:utf8:opt:schema\n1:pub:b64:opt:description\n2:pub:der:opt:cert_pubkey\n3:priv:ecies:opt:doc_url_enc',
+      slots: [
+        { key: 'description', value: btoa(`Notarized contract #${seed}`) },
+        { key: 'cert_pubkey', value: 'der-placeholder' },
+        { key: 'doc_url_enc', value: 'ecies-placeholder' },
+      ],
+    },
+    // Template C: multiple public + hex field
+    {
+      schema: '0:pub:utf8:opt:schema\n1:pub:utf8:opt:title\n2:pub:utf8:opt:issuer\n3:pub:hex:opt:fingerprint',
+      slots: [
+        { key: 'title', value: `Patent Application ${2024 + (seed % 5)}-${seed % 10000}` },
+        { key: 'issuer', value: ['WIPO', 'USPTO', 'EPO', 'CNIPA'][seed % 4] },
+        { key: 'fingerprint', value: 'hex-placeholder' },
+      ],
+    },
+  ];
+
+  const tpl = templates[seed % templates.length];
+  const enc = new TextEncoder();
+
+  // Slot 0: schema descriptor (always UTF-8 bytes → byte array)
+  const entries = [
+    { key: 'schema', value: Array.from(enc.encode(tpl.schema)) },
+  ];
+
+  for (const slot of tpl.slots) {
+    let value;
+    if (slot.value === 'der-placeholder') {
+      // Mock DER: 128 random-looking bytes
+      value = [];
+      for (let i = 0; i < 128; i++) value.push((seed * 7 + i * 13) % 256);
+    } else if (slot.value === 'ecies-placeholder') {
+      // Mock encrypted: 64 random-looking bytes
+      value = [];
+      for (let i = 0; i < 64; i++) value.push((seed * 11 + i * 3) % 256);
+    } else if (slot.value === 'hex-placeholder') {
+      // Mock hex fingerprint: 32 bytes
+      value = [];
+      for (let i = 0; i < 32; i++) value.push((seed * 5 + i * 17) % 256);
+    } else {
+      value = Array.from(enc.encode(slot.value));
+    }
+    entries.push({ key: slot.key, value });
+  }
+
+  return entries;
+}
+
 function makeTransaction(seed, timestamp) {
   const fee = MIN_TX_FEE + Math.floor(Math.abs(Math.sin(seed)) * 50000);
-  const docTypes = ['certificate', 'diploma', 'contract', 'invoice', 'receipt', 'deed', 'license', 'patent'];
-  const metadata = [makeMetadataEntry(docTypes[seed % docTypes.length])];
 
-  if (seed % 3 === 0) {
-    metadata.push({
-      key: 'issuer',
-      value: Array.from(new TextEncoder().encode(`org-${seed % 100}`)),
-    });
+  // ~15% of transactions use schema-described metadata
+  let metadata;
+  if (seed % 7 === 0) {
+    metadata = makeSchemaMetadata(seed);
+  } else {
+    const docTypes = ['certificate', 'diploma', 'contract', 'invoice', 'receipt', 'deed', 'license', 'patent'];
+    metadata = [makeMetadataEntry(docTypes[seed % docTypes.length])];
+
+    if (seed % 3 === 0) {
+      metadata.push({
+        key: 'issuer',
+        value: Array.from(new TextEncoder().encode(`org-${seed % 100}`)),
+      });
+    }
   }
+
+  // ~20% of transactions have encrypted locators
+  const hasLocator = seed % 5 === 0;
+  // ~10% have external attestations
+  const hasAttestations = seed % 10 === 0;
+
+  const attestations = hasAttestations ? [{
+    scheme: ['pkcs7', 'smime', 'pgp', 'x509'][seed % 4],
+    scope: ['hash', 'locator', 'both'][seed % 3],
+    signer_fingerprint: deterministicHash(seed * 43),
+    signature_size: 128 + (seed % 384),
+  }] : [];
 
   return {
     version: PROTOCOL_VERSION,
@@ -89,6 +170,10 @@ function makeTransaction(seed, timestamp) {
     publisher_sig: makeSignatureEnvelope(seed),
     additional_sigs: seed % 4 === 0 ? [makeSignatureEnvelope(seed + 1000)] : [],
     metadata,
+    has_encrypted_locator: hasLocator,
+    locator_recipient_count: hasLocator ? 1 + (seed % 3) : 0,
+    attestation_count: attestations.length,
+    attestations,
   };
 }
 
@@ -194,6 +279,10 @@ function generateChain(numBlocks) {
         block_height: h,
         tx_id: txId,
         timestamp: tx.timestamp,
+        has_encrypted_locator: tx.has_encrypted_locator,
+        locator_recipient_count: tx.locator_recipient_count,
+        attestation_count: tx.attestation_count,
+        attestations: tx.attestations,
       });
     }
 
@@ -235,6 +324,9 @@ export class MockRpcClient {
   #validators;
   #latencyMin;
   #latencyMax;
+  #authEnabled = false;
+  #authToken = null;
+  #totpSecret = null;
 
   constructor({ latencyMin = 50, latencyMax = 150 } = {}) {
     const { blocks, txIndex, checksumIndex } = generateChain(100);
@@ -246,6 +338,21 @@ export class MockRpcClient {
     this.#latencyMax = latencyMax;
   }
 
+  /** Enable/disable mock auth. When enabled, setAuthToken must be called first. */
+  setMockAuthEnabled(enabled) { this.#authEnabled = enabled; }
+
+  /** Mock setAuthToken — stores the hash for validation. */
+  async setAuthToken(code) {
+    if (!code) { this.#authToken = null; return; }
+    const encoded = new TextEncoder().encode(code);
+    const hashBuf = await crypto.subtle.digest('SHA-256', encoded);
+    const hashArr = Array.from(new Uint8Array(hashBuf));
+    this.#authToken = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /** Check whether an auth token is currently set. */
+  hasAuthToken() { return this.#authToken !== null; }
+
   get chainHeight() {
     return this.#chain.blocks.length - 1;
   }
@@ -255,6 +362,11 @@ export class MockRpcClient {
     await new Promise(r =>
       setTimeout(r, this.#latencyMin + Math.random() * (this.#latencyMax - this.#latencyMin))
     );
+
+    // Mock auth check
+    if (this.#authEnabled && !this.#authToken) {
+      throw { code: -32012, message: 'authentication required' };
+    }
 
     switch (method) {
       case 'noble_getLatestBlock': {
@@ -344,6 +456,17 @@ export class MockRpcClient {
       case 'noble_getDocumentHistory': {
         const records = this.#chain.checksumIndex.get(params.checksum);
         return { checksum: params.checksum, history: records || [] };
+      }
+
+      case 'noble_decryptLocator': {
+        const entry = this.#chain.txIndex.get(params.tx_id);
+        if (!entry) throw { code: -32602, message: 'Transaction not found' };
+        if (!entry.tx.has_encrypted_locator) {
+          throw { code: -32602, message: 'Transaction has no encrypted locator' };
+        }
+        // Mock: return a deterministic URL based on the checksum
+        const mockUrl = `https://storage.example.com/docs/${entry.tx.checksum.slice(0, 16)}.pdf`;
+        return { tx_id: params.tx_id, plaintext: mockUrl };
       }
 
       case 'noble_estimateFee':
@@ -739,6 +862,8 @@ export class MockRpcClient {
           website: '',
           host_address: '',
           governance_class: 'individual',
+          wants_to_validate: false,
+          wants_to_vote: false,
         };
 
       case 'noble_setNodeIdentity':
@@ -757,6 +882,8 @@ export class MockRpcClient {
             host_address: '/ip4/18.4.86.10/tcp/9333',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 120,
+            wants_to_validate: false,
+            wants_to_vote: true,
           },
           {
             peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
@@ -769,6 +896,8 @@ export class MockRpcClient {
             host_address: '/ip4/52.1.100.50/tcp/9333',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 300,
+            wants_to_validate: true,
+            wants_to_vote: true,
           },
           {
             peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
@@ -781,6 +910,8 @@ export class MockRpcClient {
             host_address: '/ip4/203.0.113.42/tcp/9333',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 60,
+            wants_to_validate: false,
+            wants_to_vote: false,
           },
           {
             peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
@@ -793,6 +924,8 @@ export class MockRpcClient {
             host_address: '/ip4/198.51.100.7/tcp/9333',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 45,
+            wants_to_validate: true,
+            wants_to_vote: false,
           },
           {
             peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
@@ -805,6 +938,8 @@ export class MockRpcClient {
             host_address: '/ip4/85.91.200.12/tcp/9333',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 180,
+            wants_to_validate: true,
+            wants_to_vote: true,
           },
           {
             peer_id: '12D3KooWF6g7h8i9j0k1l2m3n4o5',
@@ -817,8 +952,112 @@ export class MockRpcClient {
             host_address: '',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 600,
+            wants_to_validate: false,
+            wants_to_vote: true,
           },
         ];
+
+      case 'noble_getPeerMemory': {
+        const now = Math.floor(Date.now() / 1000);
+        return [
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 10,
+            last_seen: now - 120,
+            connection_count: 47,
+            peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
+            last_addr: '/ip4/18.4.86.10/tcp/9333',
+            node_name: 'MIT Blockchain Lab',
+            org_type: 'University',
+            node_role: 'ArchiveNode',
+            wants_to_validate: false,
+            wants_to_vote: true,
+          },
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 30,
+            last_seen: now - 300,
+            connection_count: 120,
+            peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
+            last_addr: '/ip4/52.1.100.50/tcp/9333',
+            node_name: 'Treasury Node Alpha',
+            org_type: 'GovernmentFederal',
+            node_role: 'Validator',
+            wants_to_validate: true,
+            wants_to_vote: true,
+          },
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 5,
+            last_seen: now - 60,
+            connection_count: 12,
+            peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
+            last_addr: '/ip4/203.0.113.42/tcp/9333',
+            node_name: 'Acme Corp Node',
+            org_type: 'Enterprise',
+            node_role: 'FullNode',
+            wants_to_validate: false,
+            wants_to_vote: false,
+          },
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 60,
+            last_seen: now - 86400 * 8,
+            connection_count: 3,
+            peer_id: '12D3KooWG7h8i9j0k1l2m3n4o5p6',
+            last_addr: '/ip4/10.0.0.1/tcp/9333',
+            node_name: 'Stale Observer',
+            org_type: 'Individual',
+            node_role: 'LightClient',
+            wants_to_validate: false,
+            wants_to_vote: false,
+          },
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 15,
+            last_seen: now - 45,
+            connection_count: 34,
+            peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
+            last_addr: '/ip4/198.51.100.7/tcp/9333',
+            node_name: 'OpenNoble Community',
+            org_type: 'OpenSourceProject',
+            node_role: 'FullNode',
+            wants_to_validate: true,
+            wants_to_vote: false,
+          },
+          {
+            identity_key: randomHex(32),
+            first_seen: now - 86400 * 20,
+            last_seen: now - 180,
+            connection_count: 67,
+            peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
+            last_addr: '/ip4/85.91.200.12/tcp/9333',
+            node_name: 'City of Barcelona',
+            org_type: 'GovernmentMunicipal',
+            node_role: 'Validator',
+            wants_to_validate: true,
+            wants_to_vote: true,
+          },
+        ];
+      }
+
+      case 'noble_removePeerRecord':
+        return { success: true };
+
+      case 'noble_pruneStalePeers':
+        return { pruned: 1 };
+
+      case 'noble_rotateTotpSecret': {
+        if (!params.current_code_hash || params.current_code_hash.length !== 64) {
+          throw { code: -32012, message: 'authentication required' };
+        }
+        const newSecret = randomHex(20).toUpperCase();
+        this.#totpSecret = newSecret;
+        return {
+          secret_base32: newSecret,
+          otpauth_uri: `otpauth://totp/NOBLE:NOBLE%20Node?secret=${newSecret}&issuer=NOBLE&algorithm=SHA1&digits=6&period=30`,
+        };
+      }
 
       default:
         throw { code: -32601, message: `Method not found: ${method}` };

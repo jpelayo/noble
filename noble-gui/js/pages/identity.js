@@ -88,8 +88,9 @@ export function init(root, ctx) {
               <select id="id-node-role"></select>
             </div>
             <div class="form-group">
-              <label for="id-email">Contact Email</label>
+              <label for="id-email">Contact Email (optional)</label>
               <input type="email" id="id-email" placeholder="Optional">
+              <small class="form-hint warning-hint">This email will be publicly broadcast to all network peers via GossipSub. Consider using an alias or generic address (e.g. nodes@yourdomain.com).</small>
             </div>
             <div class="form-group">
               <label for="id-website">Website</label>
@@ -99,6 +100,18 @@ export function init(root, ctx) {
               <label for="id-host">Host Address</label>
               <input type="text" id="id-host" placeholder="e.g. /ip4/1.2.3.4/tcp/9333">
             </div>
+            <fieldset class="form-group participation-fieldset">
+              <legend>Consensus Participation</legend>
+              <label class="checkbox-label">
+                <input type="checkbox" id="id-wants-validate">
+                <span>I want to produce blocks (validate)</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="id-wants-vote">
+                <span>I want to cast consensus votes</span>
+              </label>
+              <div id="id-participation-badge" class="participation-badge"></div>
+            </fieldset>
             <button type="submit" class="btn btn-primary" id="id-save">Save &amp; Broadcast</button>
             <span id="id-status" class="form-status"></span>
           </form>
@@ -116,6 +129,7 @@ export function init(root, ctx) {
                 <th>Org Type</th>
                 <th>Gov. Class</th>
                 <th>Role</th>
+                <th>Participation</th>
                 <th>Last Seen</th>
               </tr>
             </thead>
@@ -141,13 +155,29 @@ export function init(root, ctx) {
   const peersBody = root.querySelector('#id-peers');
   const peerDetail = root.querySelector('#id-peer-detail');
   const peerDl = root.querySelector('#id-peer-dl');
+  const wantsValidateEl = root.querySelector('#id-wants-validate');
+  const wantsVoteEl = root.querySelector('#id-wants-vote');
+  const participationBadge = root.querySelector('#id-participation-badge');
 
   function updateGovBadge() {
     const cls = govClassForOrgType(orgTypeSelect.value);
     govBadgeEl.innerHTML = govBadge(cls);
   }
 
+  function updateParticipationBadge() {
+    const v = wantsValidateEl.checked;
+    const vo = wantsVoteEl.checked;
+    let label, color;
+    if (v && vo) { label = 'Full Validator'; color = 'var(--success)'; }
+    else if (v) { label = 'Block Producer'; color = 'var(--warning)'; }
+    else if (vo) { label = 'Voter Only'; color = 'var(--info, #3b82f6)'; }
+    else { label = 'Watcher / Observer'; color = 'var(--text-secondary)'; }
+    participationBadge.innerHTML = `<span class="participation-tag" style="border-color:${color};color:${color}">${label}</span>`;
+  }
+
   orgTypeSelect.addEventListener('change', updateGovBadge);
+  wantsValidateEl.addEventListener('change', updateParticipationBadge);
+  wantsVoteEl.addEventListener('change', updateParticipationBadge);
 
   // Load current identity
   async function loadIdentity() {
@@ -160,12 +190,16 @@ export function init(root, ctx) {
       root.querySelector('#id-email').value = identity.contact_email || '';
       root.querySelector('#id-website').value = identity.website || '';
       root.querySelector('#id-host').value = identity.host_address || '';
+      wantsValidateEl.checked = !!identity.wants_to_validate;
+      wantsVoteEl.checked = !!identity.wants_to_vote;
       updateGovBadge();
+      updateParticipationBadge();
     } catch (e) {
       console.error('[identity] load:', e);
       orgTypeSelect.innerHTML = buildOrgTypeOptions('Individual');
       nodeRoleSelect.innerHTML = buildNodeRoleOptions('FullNode');
       updateGovBadge();
+      updateParticipationBadge();
     }
   }
 
@@ -174,7 +208,7 @@ export function init(root, ctx) {
     try {
       const peers = await rpc.call('noble_getPeerAnnounces');
       if (!peers || peers.length === 0) {
-        peersBody.innerHTML = '<tr><td colspan="6" class="empty-state">No peer identity data available</td></tr>';
+        peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">No peer identity data available</td></tr>';
         return;
       }
       peersBody.innerHTML = peers.map((p, i) => {
@@ -183,12 +217,14 @@ export function init(root, ctx) {
         const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago / 60)}m ago` : `${Math.floor(ago / 3600)}h ago`;
         const orgDisplay = (p.org_type || '').replace(/([A-Z])/g, ' $1').trim();
         const roleDisplay = (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
+        const pLabel = participationLabel(p.wants_to_validate, p.wants_to_vote);
         return `<tr class="clickable-row" data-idx="${i}">
           <td class="mono">${truncatePeerId(p.peer_id)}</td>
           <td>${esc(p.node_name)}</td>
           <td>${orgDisplay}</td>
           <td>${govBadge(cls)}</td>
           <td>${roleDisplay}</td>
+          <td>${pLabel}</td>
           <td>${agoStr}</td>
         </tr>`;
       }).join('');
@@ -199,12 +235,14 @@ export function init(root, ctx) {
           const idx = parseInt(row.dataset.idx, 10);
           const p = peers[idx];
           if (!p) return;
+          const pLabel = participationLabel(p.wants_to_validate, p.wants_to_vote);
           peerDl.innerHTML = `
             <dt>Peer ID</dt><dd class="mono">${esc(p.peer_id)}</dd>
             <dt>Node Name</dt><dd>${esc(p.node_name)}</dd>
             <dt>Org Type</dt><dd>${(p.org_type || '').replace(/([A-Z])/g, ' $1').trim()}</dd>
             <dt>Governance</dt><dd>${govBadge(p.governance_class || govClassForOrgType(p.org_type))}</dd>
             <dt>Role</dt><dd>${(p.node_role || '').replace(/([A-Z])/g, ' $1').trim()}</dd>
+            <dt>Participation</dt><dd>${pLabel}</dd>
             <dt>Contact</dt><dd>${esc(p.contact_email || 'N/A')}</dd>
             <dt>Website</dt><dd>${p.website ? `<a href="${esc(p.website)}" target="_blank">${esc(p.website)}</a>` : 'N/A'}</dd>
             <dt>Host Address</dt><dd class="mono">${esc(p.host_address || 'N/A')}</dd>
@@ -216,7 +254,7 @@ export function init(root, ctx) {
       });
     } catch (e) {
       console.error('[identity] peers:', e);
-      peersBody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load peer data</td></tr>';
+      peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load peer data</td></tr>';
     }
   }
 
@@ -234,6 +272,8 @@ export function init(root, ctx) {
         contact_email: root.querySelector('#id-email').value,
         website: root.querySelector('#id-website').value,
         host_address: root.querySelector('#id-host').value,
+        wants_to_validate: wantsValidateEl.checked,
+        wants_to_vote: wantsVoteEl.checked,
       });
       statusEl.textContent = 'Saved & broadcast!';
       statusEl.style.color = 'var(--success)';
@@ -256,6 +296,13 @@ export function init(root, ctx) {
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };
+}
+
+function participationLabel(wantsValidate, wantsVote) {
+  if (wantsValidate && wantsVote) return '<span class="participation-tag" style="border-color:var(--success);color:var(--success)">Full Validator</span>';
+  if (wantsValidate) return '<span class="participation-tag" style="border-color:var(--warning);color:var(--warning)">Block Producer</span>';
+  if (wantsVote) return '<span class="participation-tag" style="border-color:var(--info, #3b82f6);color:var(--info, #3b82f6)">Voter Only</span>';
+  return '<span class="participation-tag" style="border-color:var(--text-secondary);color:var(--text-secondary)">Watcher</span>';
 }
 
 function truncatePeerId(pid) {

@@ -3,7 +3,7 @@
 
 [package]
 name = "noble-storage"
-description = "RocksDB storage engine with 8 column families for the NOBLE protocol"
+description = "RocksDB storage engine with 10 column families for the NOBLE protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+ciborium.workspace = true
 noble-codec.workspace = true
 noble-core.workspace = true
 noble-crypto.workspace = true

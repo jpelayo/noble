@@ -24,6 +24,10 @@ pub enum StorageError {
     #[error("codec error: {0}")]
     Codec(String),
 
+    /// Generic record not found (peer records, etc.).
+    #[error("record not found")]
+    NotFound,
+
     /// The database is not open or has been closed.
     #[error("database not open")]
     NotOpen,

@@ -7,8 +7,10 @@
 //! wallet, and network stats. It is initialized from a `NodeConfig` and provides
 //! the foundation for the async event loop (to be wired in a future sprint).
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
+use noble_api::auth::TotpValidator;
 use noble_api::NetworkStats;
 use noble_consensus::{ConsensusConfig as CConsensusConfig, CycleEngine, ValidatorList};
 use noble_core::MAINNET_CHAIN_ID;
@@ -159,6 +161,65 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     }
 }
 
+/// Result of TOTP validator initialization.
+type TotpInitResult = (
+    Option<Arc<RwLock<TotpValidator>>>,
+    Option<std::path::PathBuf>,
+);
+
+/// Initialize TOTP authentication from the node configuration.
+///
+/// - If `totp_enabled` is false, returns `(None, None)`.
+/// - If `totp_secret_file` is non-empty and exists, loads the secret.
+/// - If `totp_secret_file` is non-empty but missing, generates a new secret
+///   and writes it to the file.
+/// - If `totp_secret_file` is empty and `totp_enabled` is true, generates
+///   a secret and writes it to `"totp_secret.txt"` in the data directory.
+pub fn init_totp_validator(
+    config: &crate::config::NodeConfig,
+) -> Result<TotpInitResult, Box<dyn std::error::Error>> {
+    if !config.api.totp_enabled {
+        return Ok((None, None));
+    }
+
+    let secret_path = if config.api.totp_secret_file.is_empty() {
+        config.storage.data_dir.join("totp_secret.txt")
+    } else {
+        std::path::PathBuf::from(&config.api.totp_secret_file)
+    };
+
+    let (validator, base32) = if secret_path.exists() {
+        let base32 = std::fs::read_to_string(&secret_path)?.trim().to_string();
+        let v = TotpValidator::from_base32(&base32)?;
+        tracing::info!("TOTP auth loaded from {}", secret_path.display());
+        (v, base32)
+    } else {
+        let (v, base32) = TotpValidator::generate()?;
+        atomic_write_file(&secret_path, base32.as_bytes())?;
+        tracing::info!(
+            "TOTP auth: new secret generated at {}",
+            secret_path.display()
+        );
+        tracing::info!("TOTP secret (base32): {}", base32);
+        tracing::info!("otpauth URI: {}", v.otpauth_uri("NOBLE Node"));
+        (v, base32)
+    };
+
+    let _ = base32; // used only for logging/file write above
+    Ok((Some(Arc::new(RwLock::new(validator))), Some(secret_path)))
+}
+
+/// Write `data` to `path` atomically (write to temp, then rename).
+pub fn atomic_write_file(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = path.with_extension("tmp");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +336,40 @@ mod tests {
 
         let node = Node::init_memory(&config).unwrap();
         assert_eq!(node.chain_id, MAINNET_CHAIN_ID);
+    }
+
+    #[test]
+    fn init_totp_disabled_returns_none() {
+        let config = NodeConfig::default();
+        assert!(!config.api.totp_enabled);
+        let (validator, path) = init_totp_validator(&config).unwrap();
+        assert!(validator.is_none());
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn init_totp_generates_secret_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.api.totp_enabled = true;
+        config.api.totp_secret_file = dir.path().join("totp.txt").to_str().unwrap().to_string();
+
+        let (validator, path) = init_totp_validator(&config).unwrap();
+        assert!(validator.is_some());
+        assert!(path.is_some());
+
+        let secret_path = path.unwrap();
+        assert!(secret_path.exists(), "secret file should be created");
+
+        // Re-init should load from the existing file.
+        let (v2, _) = init_totp_validator(&config).unwrap();
+        assert!(v2.is_some());
+
+        // Both should accept the same code.
+        let v1 = validator.unwrap();
+        let v1_locked = v1.read().unwrap();
+        let v2_locked = v2.unwrap();
+        let v2_locked = v2_locked.read().unwrap();
+        assert_eq!(v1_locked.secret_base32(), v2_locked.secret_base32());
     }
 }

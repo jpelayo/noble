@@ -28,6 +28,11 @@ thiserror.workspace = true
 tracing.workspace = true
 totp-rs.workspace = true
 rand.workspace = true
+tower.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

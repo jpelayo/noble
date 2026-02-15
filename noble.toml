@@ -48,6 +48,14 @@ max_connections = 100
 # Rate limit: maximum requests per second per client IP.
 rate_limit = 30
 
+# Enable TOTP-based authentication for all RPC methods.
+# When enabled, clients must include `Authorization: Bearer <SHA-256 hex of TOTP code>`.
+totp_enabled = false
+
+# Path to the TOTP shared secret file (base32-encoded).
+# If empty and totp_enabled is true, a secret is auto-generated on first startup.
+totp_secret_file = ""
+
 [wallet]
 # Directory where encrypted keystores are stored.
 keystore_path = "keystore"
@@ -89,7 +97,14 @@ org_name = ""
 # Node role: FullNode, Validator, ArchiveNode, LightClient, Gateway
 node_role = "FullNode"
 
+# Whether this node wants to produce blocks (consensus participation).
+wants_to_validate = false
+
+# Whether this node wants to cast consensus votes.
+wants_to_vote = false
+
 # Contact email for the node operator (optional).
+# WARNING: This email is broadcast publicly to all network peers via GossipSub.
 contact_email = ""
 
 # Organization website URL (optional).

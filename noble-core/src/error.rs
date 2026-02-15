@@ -157,6 +157,14 @@ pub enum ValidationError {
     #[error("T21: key rotation tx requires new key in recipient field")]
     KeyRotationMissingNewKey,
 
+    /// T22: Encrypted locator present on a non-notarization transaction.
+    #[error("T22: encrypted_locator only allowed on notarization tx (tx_type 0x00)")]
+    LocatorOnNonNotarization,
+
+    /// T23: External attestations present on a non-notarization transaction.
+    #[error("T23: external_attestations only allowed on notarization tx (tx_type 0x00)")]
+    AttestationsOnNonNotarization,
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

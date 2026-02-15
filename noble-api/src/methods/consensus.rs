@@ -46,16 +46,45 @@ pub trait ConsensusApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiState<S>> {
     async fn get_validator_list(&self) -> Result<ValidatorListResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read().unwrap();
-        let validators = consensus.validator_list().list_validators();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Cross-reference validators with peer memory for last_seen
+        let storage = self.storage.read().unwrap();
+        let peer_records = storage.list_peer_records().unwrap_or_default();
+        drop(storage);
+
+        let mut consensus = self.consensus.write().unwrap();
+        // Update last_seen from peer records
+        for rec in &peer_records {
+            if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
+                if consensus.validator_list().is_validator(&pk) {
+                    consensus
+                        .validator_list_mut()
+                        .update_last_seen(&pk, rec.last_seen);
+                }
+            }
+        }
+
+        let validators = consensus
+            .validator_list()
+            .list_validators_with_liveness(now);
         let count = validators.len();
 
         let entries: Vec<ValidatorEntry> = validators
             .into_iter()
-            .map(|(pk, weight)| ValidatorEntry {
-                pubkey: hex::encode(pk.to_wire_bytes()),
-                weight,
-            })
+            .map(
+                |(pk, weight, liveness, added_at, friendly_name)| ValidatorEntry {
+                    pubkey: hex::encode(pk.to_wire_bytes()),
+                    weight,
+                    liveness: liveness.as_str().to_string(),
+                    last_seen: None, // populated below
+                    added_at,
+                    friendly_name,
+                },
+            )
             .collect();
 
         Ok(ValidatorListResponse {

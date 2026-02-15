@@ -52,6 +52,13 @@ pub struct ApiConfig {
     pub ws_addr: String,
     pub max_connections: u32,
     pub rate_limit: u32,
+    /// Enable TOTP-based authentication for all RPC methods.
+    #[serde(default)]
+    pub totp_enabled: bool,
+    /// Path to the file storing the TOTP shared secret (base32).
+    /// If empty and totp_enabled is true, a secret is auto-generated and written here.
+    #[serde(default)]
+    pub totp_secret_file: String,
 }
 
 /// Wallet keystore configuration.
@@ -82,9 +89,16 @@ pub struct IdentityConfig {
     pub org_type: String,
     pub org_name: String,
     pub node_role: String,
+    /// Optional contact email. WARNING: broadcast publicly to all peers via GossipSub.
     pub contact_email: String,
     pub website: String,
     pub host_address: String,
+    /// Whether this node wants to produce blocks.
+    #[serde(default)]
+    pub wants_to_validate: bool,
+    /// Whether this node wants to cast consensus votes.
+    #[serde(default)]
+    pub wants_to_vote: bool,
 }
 
 impl NodeConfig {
@@ -133,6 +147,8 @@ impl Default for ApiConfig {
             ws_addr: "127.0.0.1:9944".to_string(),
             max_connections: 100,
             rate_limit: 30,
+            totp_enabled: false,
+            totp_secret_file: String::new(),
         }
     }
 }
@@ -174,6 +190,8 @@ impl Default for IdentityConfig {
             contact_email: String::new(),
             website: String::new(),
             host_address: String::new(),
+            wants_to_validate: false,
+            wants_to_vote: false,
         }
     }
 }

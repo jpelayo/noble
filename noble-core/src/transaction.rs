@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use noble_codec::NobleCbor;
 use noble_crypto::{double_sha256, sha256, Hash256, NoblePublicKey, SignatureEnvelope};
 
+use crate::encrypted_locator::{EncryptedLocator, ExternalAttestation};
 use crate::metadata::MetadataEntry;
 
 /// A NOBLE transaction: either a notarization claim binding a document checksum
@@ -34,6 +35,13 @@ pub struct Transaction {
     pub additional_sigs: Vec<SignatureEnvelope>,
     /// Key-value metadata entries.
     pub metadata: Vec<MetadataEntry>,
+    /// Optional encrypted locator for private document sharing (notarization only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_locator: Option<EncryptedLocator>,
+    /// External attestations from non-NOBLE signature schemes (notarization only).
+    /// Protocol-opaque: stored but never validated by the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_attestations: Vec<ExternalAttestation>,
 }
 
 /// Internal struct used to compute the signing message (GAP-C1).
@@ -50,6 +58,10 @@ struct SigningPayload {
     recipient: Option<NoblePublicKey>,
     amount: Option<u64>,
     metadata: Vec<MetadataEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypted_locator: Option<EncryptedLocator>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    external_attestations: Vec<ExternalAttestation>,
 }
 
 impl Transaction {
@@ -80,6 +92,8 @@ impl Transaction {
             recipient: self.recipient.clone(),
             amount: self.amount,
             metadata: sorted_metadata,
+            encrypted_locator: self.encrypted_locator.clone(),
+            external_attestations: self.external_attestations.clone(),
         };
 
         let canonical = noble_codec::to_canonical_cbor(&payload)?;
@@ -120,6 +134,8 @@ mod tests {
             },
             additional_sigs: vec![],
             metadata,
+            encrypted_locator: None,
+            external_attestations: vec![],
         };
 
         // Sign with the actual signing message

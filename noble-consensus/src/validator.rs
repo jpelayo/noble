@@ -8,11 +8,69 @@ use std::collections::HashMap;
 use noble_crypto::NoblePublicKey;
 use serde::{Deserialize, Serialize};
 
+/// Validator liveness status, derived from `last_seen` relative to thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidatorLiveness {
+    /// Last seen within `VALIDATOR_ALIVE_THRESHOLD_SECS` (3 cycles).
+    Alive,
+    /// Last seen between alive and stale thresholds.
+    Stale,
+    /// Last seen beyond `VALIDATOR_STALE_THRESHOLD_SECS` (12 cycles), or never seen.
+    Unreachable,
+}
+
+impl ValidatorLiveness {
+    /// Compute liveness from a `last_seen` timestamp and the current time.
+    pub fn from_last_seen(last_seen: Option<u64>, now: u64) -> Self {
+        match last_seen {
+            None => Self::Unreachable,
+            Some(ts) => {
+                let age = now.saturating_sub(ts);
+                if age <= noble_core::VALIDATOR_ALIVE_THRESHOLD_SECS {
+                    Self::Alive
+                } else if age <= noble_core::VALIDATOR_STALE_THRESHOLD_SECS {
+                    Self::Stale
+                } else {
+                    Self::Unreachable
+                }
+            }
+        }
+    }
+
+    /// String label for API/GUI display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Stale => "stale",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// Tuple returned by `list_validators_with_liveness()`:
+/// (pubkey, weight, liveness, added_at, friendly_name)
+pub type ValidatorWithLiveness = (
+    NoblePublicKey,
+    u64,
+    ValidatorLiveness,
+    Option<u64>,
+    Option<String>,
+);
+
 /// A single validator entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ValidatorEntry {
+pub struct ValidatorEntry {
     pubkey: NoblePublicKey,
     weight: u64,
+    /// Last seen timestamp from peer memory (updated externally).
+    #[serde(default)]
+    last_seen: Option<u64>,
+    /// When the operator added this validator (unix timestamp).
+    #[serde(default)]
+    added_at: Option<u64>,
+    /// Operator-given friendly name.
+    #[serde(default)]
+    friendly_name: Option<String>,
 }
 
 /// A pending key rotation that is within the grace period.
@@ -56,7 +114,65 @@ impl ValidatorList {
     /// If already present, updates the weight.
     pub fn add_validator(&mut self, pubkey: NoblePublicKey, weight: u64) {
         let wire = pubkey.to_wire_bytes();
-        self.entries.insert(wire, ValidatorEntry { pubkey, weight });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.entries.insert(
+            wire,
+            ValidatorEntry {
+                pubkey,
+                weight,
+                last_seen: None,
+                added_at: Some(now),
+                friendly_name: None,
+            },
+        );
+    }
+
+    /// Update the `last_seen` timestamp for a validator (from peer memory).
+    pub fn update_last_seen(&mut self, pubkey: &NoblePublicKey, last_seen: u64) {
+        if let Some(entry) = self.entries.get_mut(&pubkey.to_wire_bytes()) {
+            entry.last_seen = Some(last_seen);
+        }
+    }
+
+    /// Set a friendly name for a validator.
+    pub fn set_friendly_name(&mut self, pubkey: &NoblePublicKey, name: String) {
+        if let Some(entry) = self.entries.get_mut(&pubkey.to_wire_bytes()) {
+            entry.friendly_name = Some(name);
+        }
+    }
+
+    /// Get liveness status for a specific validator.
+    pub fn validator_liveness(&self, pubkey: &NoblePublicKey, now: u64) -> ValidatorLiveness {
+        self.entries
+            .get(&pubkey.to_wire_bytes())
+            .map(|e| ValidatorLiveness::from_last_seen(e.last_seen, now))
+            .unwrap_or(ValidatorLiveness::Unreachable)
+    }
+
+    /// List validators with their liveness and metadata.
+    pub fn list_validators_with_liveness(&self, now: u64) -> Vec<ValidatorWithLiveness> {
+        let mut list: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(wire, entry)| {
+                let liveness = ValidatorLiveness::from_last_seen(entry.last_seen, now);
+                (
+                    wire.clone(),
+                    entry.pubkey.clone(),
+                    entry.weight,
+                    liveness,
+                    entry.added_at,
+                    entry.friendly_name.clone(),
+                )
+            })
+            .collect();
+        list.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        list.into_iter()
+            .map(|(_, pk, w, lv, added, name)| (pk, w, lv, added, name))
+            .collect()
     }
 
     /// Remove a validator. Returns `true` if it was present.
@@ -182,15 +298,20 @@ impl ValidatorList {
         let mut finalized = Vec::new();
         for old_wire in expired {
             if let Some(rotation) = self.pending_rotations.remove(&old_wire) {
-                // Preserve weight from old key
-                let weight = self.entries.get(&old_wire).map(|e| e.weight).unwrap_or(100);
-                self.entries.remove(&old_wire);
+                // Preserve metadata from old key
+                let old_entry = self.entries.remove(&old_wire);
+                let weight = old_entry.as_ref().map(|e| e.weight).unwrap_or(100);
+                let added_at = old_entry.as_ref().and_then(|e| e.added_at);
+                let friendly_name = old_entry.and_then(|e| e.friendly_name);
                 let new_wire = rotation.new_key.to_wire_bytes();
                 self.entries.insert(
                     new_wire,
                     ValidatorEntry {
                         pubkey: rotation.new_key.clone(),
                         weight,
+                        last_seen: None,
+                        added_at,
+                        friendly_name,
                     },
                 );
                 finalized.push(rotation);
@@ -396,5 +517,72 @@ mod tests {
 
         assert_eq!(list.pending_rotations().len(), 1);
         assert!(list.is_valid_validator_key(&new_key, 10, 48));
+    }
+
+    // ── Liveness Tests ──
+
+    #[test]
+    fn validator_alive_within_threshold() {
+        let now = 1_700_000_000;
+        let liveness = ValidatorLiveness::from_last_seen(Some(now - 1000), now);
+        assert_eq!(liveness, ValidatorLiveness::Alive);
+    }
+
+    #[test]
+    fn validator_stale_beyond_alive_threshold() {
+        let now = 1_700_000_000;
+        // 10,000s > 5,400 (alive) but < 21,600 (stale)
+        let liveness = ValidatorLiveness::from_last_seen(Some(now - 10_000), now);
+        assert_eq!(liveness, ValidatorLiveness::Stale);
+    }
+
+    #[test]
+    fn validator_unreachable_beyond_stale_threshold() {
+        let now = 1_700_000_000;
+        let liveness = ValidatorLiveness::from_last_seen(Some(now - 30_000), now);
+        assert_eq!(liveness, ValidatorLiveness::Unreachable);
+    }
+
+    #[test]
+    fn validator_unreachable_when_never_seen() {
+        let now = 1_700_000_000;
+        let liveness = ValidatorLiveness::from_last_seen(None, now);
+        assert_eq!(liveness, ValidatorLiveness::Unreachable);
+    }
+
+    #[test]
+    fn update_last_seen_changes_liveness() {
+        let mut list = ValidatorList::new();
+        let pk = make_pubkey();
+        list.add_validator(pk.clone(), 100);
+
+        let now = 1_700_000_000;
+        // Before update: no last_seen → unreachable
+        assert_eq!(
+            list.validator_liveness(&pk, now),
+            ValidatorLiveness::Unreachable
+        );
+
+        // After update with recent timestamp → alive
+        list.update_last_seen(&pk, now - 100);
+        assert_eq!(list.validator_liveness(&pk, now), ValidatorLiveness::Alive);
+    }
+
+    #[test]
+    fn list_validators_with_liveness_includes_metadata() {
+        let mut list = ValidatorList::new();
+        let pk = make_pubkey();
+        list.add_validator(pk.clone(), 100);
+        list.set_friendly_name(&pk, "test-validator".to_string());
+        list.update_last_seen(&pk, 1_700_000_000);
+
+        let now = 1_700_000_000 + 100;
+        let result = list.list_validators_with_liveness(now);
+        assert_eq!(result.len(), 1);
+        let (_, weight, liveness, added_at, name) = &result[0];
+        assert_eq!(*weight, 100);
+        assert_eq!(*liveness, ValidatorLiveness::Alive);
+        assert!(added_at.is_some());
+        assert_eq!(name.as_deref(), Some("test-validator"));
     }
 }

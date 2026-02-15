@@ -27,4 +27,12 @@ pub enum CryptoError {
     /// Hash computation error.
     #[error("hash error: {0}")]
     HashError(String),
+
+    /// ECIES encryption failed.
+    #[error("ECIES encryption failed: {0}")]
+    EciesEncrypt(String),
+
+    /// ECIES decryption failed.
+    #[error("ECIES decryption failed: {0}")]
+    EciesDecrypt(String),
 }

@@ -71,6 +71,12 @@ pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> 
 
 /// Convert a `Transaction` to a `TransactionResponse`.
 pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
+    let has_locator = tx.encrypted_locator.is_some();
+    let locator_recipients = tx
+        .encrypted_locator
+        .as_ref()
+        .map_or(0, |l| l.recipients.len());
+
     TransactionResponse {
         tx_id: tx_id.to_string(),
         tx_type: tx.tx_type,
@@ -89,6 +95,19 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
             .map(|m| MetadataResponse {
                 key: m.key.clone(),
                 value: hex::encode(&m.value),
+            })
+            .collect(),
+        has_encrypted_locator: has_locator,
+        locator_recipient_count: locator_recipients,
+        attestation_count: tx.external_attestations.len(),
+        attestations: tx
+            .external_attestations
+            .iter()
+            .map(|a| AttestationResponse {
+                scheme: a.scheme.clone(),
+                scope: a.scope.clone(),
+                signer_fingerprint: hex::encode(a.signer_fingerprint),
+                signature_size: a.signature_data.len(),
             })
             .collect(),
     }
@@ -142,6 +161,19 @@ pub struct TransactionResponse {
     pub amount: Option<u64>,
     pub signer: String,
     pub metadata: Vec<MetadataResponse>,
+    pub has_encrypted_locator: bool,
+    pub locator_recipient_count: usize,
+    pub attestation_count: usize,
+    pub attestations: Vec<AttestationResponse>,
+}
+
+/// External attestation response (protocol-opaque, for display only).
+#[derive(Debug, Clone, Serialize)]
+pub struct AttestationResponse {
+    pub scheme: String,
+    pub scope: String,
+    pub signer_fingerprint: String,
+    pub signature_size: usize,
 }
 
 /// Metadata entry response (key + hex-encoded value).
@@ -211,11 +243,31 @@ pub struct SyncStatusResponse {
     pub current_height: u64,
 }
 
+/// A persistent peer record returned by `noble_getPeerMemory`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerRecordResponse {
+    pub identity_key: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub connection_count: u32,
+    pub peer_id: String,
+    pub last_addr: Option<String>,
+    pub node_name: Option<String>,
+    pub org_type: Option<String>,
+    pub node_role: Option<String>,
+    pub wants_to_validate: bool,
+    pub wants_to_vote: bool,
+}
+
 /// A single validator entry in the response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatorEntry {
     pub pubkey: String,
     pub weight: u64,
+    pub liveness: String,
+    pub last_seen: Option<u64>,
+    pub added_at: Option<u64>,
+    pub friendly_name: Option<String>,
 }
 
 /// Response for `noble_getValidatorList`.
@@ -341,6 +393,20 @@ pub struct DocumentHistoryResponse {
 pub struct ReputationScoreResponse {
     pub pubkey: String,
     pub score: u64,
+}
+
+/// Response for `noble_rotateTotpSecret`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RotateTotpResponse {
+    pub secret_base32: String,
+    pub otpauth_uri: String,
+}
+
+/// Response for `noble_decryptLocator`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecryptLocatorResponse {
+    pub tx_id: String,
+    pub plaintext: String,
 }
 
 #[cfg(test)]

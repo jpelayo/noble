@@ -5,7 +5,7 @@
 //!
 //! All storage backends (RocksDB, in-memory mock) implement this trait.
 
-use noble_core::{Block, BlockHeader, Transaction};
+use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -116,6 +116,24 @@ pub trait StorageEngine {
 
     /// Load all pending key rotations.
     fn load_key_rotations(&self) -> Result<Vec<KeyRotationRecord>, StorageError>;
+
+    // ── Peer Memory ──
+
+    /// Store or update a peer record, keyed by identity_key wire bytes.
+    fn store_peer_record(&self, record: &PeerRecord) -> Result<(), StorageError>;
+
+    /// Get a peer record by identity_key wire bytes.
+    fn get_peer_record(&self, identity_key: &[u8]) -> Result<PeerRecord, StorageError>;
+
+    /// List all stored peer records.
+    fn list_peer_records(&self) -> Result<Vec<PeerRecord>, StorageError>;
+
+    /// Remove a specific peer record by identity_key wire bytes.
+    fn remove_peer_record(&self, identity_key: &[u8]) -> Result<(), StorageError>;
+
+    /// Remove all peer records whose `last_seen` is older than `max_age_secs` from `now`.
+    /// Returns the number of pruned records.
+    fn prune_peer_records(&self, now: u64, max_age_secs: u64) -> Result<u32, StorageError>;
 
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.

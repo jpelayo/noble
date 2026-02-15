@@ -6,9 +6,11 @@
 pub mod builder;
 pub mod error;
 pub mod keystore;
+pub mod locator;
 pub mod state;
 
-pub use builder::TransactionBuilder;
+pub use builder::{TransactionBuilder, TypedSlot};
 pub use error::WalletError;
 pub use keystore::KeyStore;
+pub use locator::decrypt_locator;
 pub use state::WalletState;

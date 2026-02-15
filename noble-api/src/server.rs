@@ -20,16 +20,23 @@ use crate::methods::network::NetworkApiServer;
 use crate::methods::node::NodeApiServer;
 use crate::methods::transaction::TransactionApiServer;
 use crate::methods::wallet::WalletApiServer;
+use crate::middleware::AuthLayer;
 use crate::state::ApiState;
 
 /// Start the JSON-RPC server on the given address (e.g. "127.0.0.1:9333").
+///
+/// When `ApiState.totp_validator` is `Some`, all requests require a valid
+/// `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
 ///
 /// Returns a `ServerHandle` that can be used for graceful shutdown.
 pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     state: Arc<ApiState<S>>,
     addr: &str,
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
+    let auth_layer = AuthLayer::new(state.totp_validator.clone());
+
     let server = Server::builder()
+        .set_http_middleware(tower::ServiceBuilder::new().layer(auth_layer))
         .build(addr)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to bind server: {e}")))?;

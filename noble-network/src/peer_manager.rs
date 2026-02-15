@@ -582,6 +582,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             1_700_000_000,
             &sk,
         )
@@ -618,6 +620,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             1_700_000_000,
             &sk,
         )
@@ -653,6 +657,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             1_700_000_000,
             &sk,
         )
@@ -670,6 +676,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             1_700_000_000,
             &sk,
         )

@@ -89,6 +89,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
         rate_limiter: None,   // disabled in tests
         totp_validator: None, // auth disabled in tests
+        totp_secret_path: None,
         new_block_tx,
         new_tx_tx,
         cycle_phase_tx,
@@ -446,6 +447,8 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         },
         additional_sigs: vec![],
         metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();

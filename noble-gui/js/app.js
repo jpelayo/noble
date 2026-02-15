@@ -128,6 +128,78 @@ router
   .add('/identity', identityPage)
   .start();
 
+// ── Auth prompt ──
+
+function showAuthPrompt() {
+  let overlay = document.getElementById('auth-overlay');
+  if (overlay) { overlay.style.display = 'flex'; return; }
+
+  overlay = document.createElement('div');
+  overlay.id = 'auth-overlay';
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6)';
+
+  const card = document.createElement('div');
+  card.style.cssText =
+    'background:var(--bg-primary,#1a1a2e);border:1px solid var(--border,#333);border-radius:8px;padding:2rem;min-width:320px;text-align:center';
+  card.innerHTML = `
+    <h3 style="margin:0 0 0.5rem;color:var(--text-primary,#e0e0e0)">Authentication Required</h3>
+    <p style="margin:0 0 1rem;color:var(--text-secondary,#999);font-size:0.85rem">
+      Enter your 6-digit TOTP code to access the dashboard.
+    </p>
+    <input id="auth-code" type="text" maxlength="6" pattern="[0-9]{6}" inputmode="numeric"
+      placeholder="000000" autocomplete="one-time-code"
+      style="width:100%;padding:0.6rem;text-align:center;font-size:1.4rem;letter-spacing:0.3em;
+        border:1px solid var(--border,#333);border-radius:4px;background:var(--bg-secondary,#16213e);
+        color:var(--text-primary,#e0e0e0);margin-bottom:1rem;box-sizing:border-box">
+    <button id="auth-submit" style="width:100%;padding:0.6rem;border:none;border-radius:4px;
+      background:var(--accent,#0f3460);color:#fff;font-size:0.95rem;cursor:pointer">
+      Authenticate</button>
+    <p id="auth-error" style="margin:0.5rem 0 0;color:#e74c3c;font-size:0.85rem;display:none"></p>
+  `;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  const input = document.getElementById('auth-code');
+  const submit = document.getElementById('auth-submit');
+  const errEl = document.getElementById('auth-error');
+
+  async function doAuth() {
+    const code = input.value.trim();
+    if (!/^\d{6}$/.test(code)) {
+      errEl.textContent = 'Please enter a 6-digit code.';
+      errEl.style.display = 'block';
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Verifying...';
+    errEl.style.display = 'none';
+
+    await rpc.setAuthToken(code);
+    try {
+      await rpc.call('noble_getBlockCount');
+      overlay.style.display = 'none';
+      bootstrap();
+    } catch (e) {
+      if (e.code === -32012) {
+        errEl.textContent = 'Invalid code. Please try again.';
+        errEl.style.display = 'block';
+        await rpc.setAuthToken(null);
+      } else {
+        errEl.textContent = e.message;
+        errEl.style.display = 'block';
+      }
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Authenticate';
+    }
+  }
+
+  submit.addEventListener('click', doAuth);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth(); });
+  input.focus();
+}
+
 // ── Fetch initial data ──
 async function bootstrap() {
   try {
@@ -143,6 +215,10 @@ async function bootstrap() {
     state.mempoolSize = mempoolInfo.count;
     state.cyclePhase = cycleStatus.phase;
   } catch (e) {
+    if (e.code === -32012) {
+      showAuthPrompt();
+      return;
+    }
     console.error('[app] bootstrap error:', e);
   }
 }

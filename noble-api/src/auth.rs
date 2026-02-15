@@ -9,6 +9,15 @@
 
 use totp_rs::{Algorithm, Secret, TOTP};
 
+/// SHA-256 hash a raw TOTP code, returning 64-char lowercase hex.
+///
+/// Clients send `Authorization: Bearer <hash_code(code)>` rather than
+/// the raw 6-digit code, so the code never travels over the wire.
+pub fn hash_code(code: &str) -> String {
+    let hash = noble_crypto::sha256(code.as_bytes());
+    hex::encode(hash.as_bytes())
+}
+
 /// Validates TOTP codes against a stored secret.
 pub struct TotpValidator {
     totp: TOTP,
@@ -39,11 +48,48 @@ impl TotpValidator {
         self.totp.check_current(code).unwrap_or(false)
     }
 
+    /// Validate a SHA-256-hashed TOTP code (64-char hex).
+    ///
+    /// Generates codes for the current ±1 time steps, hashes each,
+    /// and compares against the provided hash (case-insensitive).
+    pub fn validate_hash(&self, hash_hex: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for offset in [-1i64, 0, 1] {
+            let t = (now as i64 + offset * 30) as u64;
+            let code = self.totp.generate(t);
+            let expected = hash_code(&code);
+            if expected.eq_ignore_ascii_case(hash_hex) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Get the base32-encoded secret string.
     pub fn secret_base32(&self) -> String {
         Secret::Raw(self.totp.secret.clone())
             .to_encoded()
             .to_string()
+    }
+
+    /// Generate an `otpauth://` URI for QR code generation.
+    pub fn otpauth_uri(&self, label: &str) -> String {
+        let b32 = self.secret_base32();
+        format!(
+            "otpauth://totp/NOBLE:{label}?secret={b32}&issuer=NOBLE&algorithm=SHA1&digits=6&period=30"
+        )
+    }
+
+    /// Generate a new validator with a fresh secret.
+    /// Returns (new_validator, base32_secret, otpauth_uri).
+    pub fn rotate() -> Result<(Self, String, String), String> {
+        let (validator, base32) = Self::generate()?;
+        let uri = validator.otpauth_uri("NOBLE Node");
+        Ok((validator, base32, uri))
     }
 }
 
@@ -55,7 +101,6 @@ mod tests {
     fn generate_produces_valid_secret() {
         let (validator, secret) = TotpValidator::generate().unwrap();
         assert!(!secret.is_empty());
-        // The current code should validate
         let code = validator.totp.generate_current().unwrap();
         assert!(validator.validate(&code));
     }
@@ -80,13 +125,52 @@ mod tests {
     fn secret_rotation_produces_new_codes() {
         let (v1, _s1) = TotpValidator::generate().unwrap();
         let (v2, _s2) = TotpValidator::generate().unwrap();
-        // New secret should generate different codes (with extremely high probability)
-        let code1 = v1.totp.generate_current().unwrap();
-        // v2 should NOT accept v1's code (statistically)
-        // This is probabilistic but 999999/1000000 chance of being different
-        // so we just check they have different secrets
         assert_ne!(v1.secret_base32(), v2.secret_base32());
-        // code1 validates against v1 but not necessarily v2
+        let code1 = v1.totp.generate_current().unwrap();
         assert!(v1.validate(&code1));
+    }
+
+    // --- Hashed TOTP tests ---
+
+    #[test]
+    fn hash_code_produces_64_char_hex() {
+        let hash = hash_code("123456");
+        assert_eq!(hash.len(), 64, "SHA-256 hex is 64 chars");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn validate_hash_accepts_correct_hash() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let code = validator.totp.generate_current().unwrap();
+        let hash = hash_code(&code);
+        assert!(validator.validate_hash(&hash));
+    }
+
+    #[test]
+    fn validate_hash_rejects_wrong_hash() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        assert!(!validator.validate_hash("00".repeat(32).as_str()));
+        assert!(!validator.validate_hash("not-a-hash"));
+        assert!(!validator.validate_hash(""));
+    }
+
+    #[test]
+    fn validate_hash_case_insensitive() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let code = validator.totp.generate_current().unwrap();
+        let hash = hash_code(&code);
+        assert!(validator.validate_hash(&hash.to_uppercase()));
+    }
+
+    #[test]
+    fn rotate_produces_valid_new_secret() {
+        let (new_validator, base32, uri) = TotpValidator::rotate().unwrap();
+        assert!(!base32.is_empty());
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(uri.contains("NOBLE"));
+        // New validator's own code should validate
+        let code = new_validator.totp.generate_current().unwrap();
+        assert!(new_validator.validate(&code));
     }
 }

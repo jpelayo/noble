@@ -25,7 +25,7 @@ export function init(root, ctx) {
   let countdownInterval = null;
 
   root.innerHTML = `
-    <div class="page-header"><h1>Consensus</h1><p>Proof of Reputation cycle status and accepted validator registry</p></div>
+    <div class="page-header"><h1>Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
 
     <!-- Superposition Timeline -->
     <div class="panel">
@@ -114,6 +114,29 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Network Candidates — Discovered Peers -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Network Candidates &mdash; Discovered Peers</span>
+        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+          <span id="cs-candidate-count" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+          <button class="btn btn-secondary btn-sm" id="cs-prune-stale">Prune Stale</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)">
+          Peers discovered via GossipSub that want to participate in consensus. Add them to your accepted validator list after out-of-band verification.
+        </p>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="data-table">
+          <thead><tr><th>Node Name</th><th>Org Type</th><th>Role</th><th>Participation</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
+          <tbody id="cs-candidates"></tbody>
+        </table>
+      </div>
+      <div id="cs-candidates-empty" class="empty-state" style="display:none;padding:var(--gap-lg)">No candidate peers discovered yet.</div>
+    </div>
+
     <div id="cs-detail-panel"></div>
     <div id="cs-modal-container"></div>
   `;
@@ -138,6 +161,9 @@ export function init(root, ctx) {
   const modalContainer = root.querySelector('#cs-modal-container');
   const validatorsTbody = root.querySelector('#cs-validators');
   const detailPanel = root.querySelector('#cs-detail-panel');
+  const candidatesTbody = root.querySelector('#cs-candidates');
+  const csCandidateCount = root.querySelector('#cs-candidate-count');
+  const candidatesEmpty = root.querySelector('#cs-candidates-empty');
 
   const PHASES = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
 
@@ -613,6 +639,139 @@ export function init(root, ctx) {
     });
   }
 
+  // ══════════════════════════════════════════════
+  // NETWORK CANDIDATES
+  // ══════════════════════════════════════════════
+
+  function candidateParticipation(wantsValidate, wantsVote) {
+    if (wantsValidate && wantsVote) return { label: 'Full Validator', color: 'var(--success)' };
+    if (wantsValidate) return { label: 'Block Producer', color: 'var(--warning)' };
+    if (wantsVote) return { label: 'Voter Only', color: 'var(--info, #3b82f6)' };
+    return { label: 'Watcher', color: 'var(--text-muted)' };
+  }
+
+  function candidateLiveness(lastSeen) {
+    const age = Math.floor(Date.now() / 1000) - lastSeen;
+    if (age <= 5400) return { label: 'alive', color: 'var(--success)' };
+    if (age <= 21600) return { label: 'stale', color: 'var(--warning)' };
+    return { label: 'unreachable', color: 'var(--error)' };
+  }
+
+  async function loadCandidates() {
+    try {
+      const [peers, valResult] = await Promise.all([
+        rpc.call('noble_getPeerMemory'),
+        rpc.call('noble_getValidatorList'),
+      ]);
+
+      // Build set of validator identity keys for exclusion
+      const validatorKeys = new Set(
+        valResult.validators.map(v => {
+          const k = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
+          return k.map(b => b.toString(16).padStart(2, '0')).join('');
+        })
+      );
+
+      // Filter: wants to participate AND not already a validator
+      const candidates = peers.filter(p =>
+        (p.wants_to_validate || p.wants_to_vote) && !validatorKeys.has(p.identity_key)
+      );
+
+      csCandidateCount.textContent = `${candidates.length} candidate${candidates.length !== 1 ? 's' : ''}`;
+
+      if (candidates.length === 0) {
+        candidatesTbody.innerHTML = '';
+        candidatesEmpty.style.display = '';
+        return;
+      }
+      candidatesEmpty.style.display = 'none';
+
+      // Sort: alive first, then by last_seen descending
+      candidates.sort((a, b) => b.last_seen - a.last_seen);
+
+      candidatesTbody.innerHTML = '';
+      for (const peer of candidates) {
+        const part = candidateParticipation(peer.wants_to_validate, peer.wants_to_vote);
+        const live = candidateLiveness(peer.last_seen);
+        const isStale = live.label !== 'alive';
+
+        const tr = document.createElement('tr');
+        if (isStale) tr.style.opacity = '0.6';
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}</div>
+            <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)}</div>
+          </td>
+          <td style="font-size:var(--font-size-xs)">${peer.org_type || '—'}</td>
+          <td style="font-size:var(--font-size-xs)">${peer.node_role || '—'}</td>
+          <td>
+            <span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:var(--font-size-xs);font-weight:600;border:1px solid ${part.color};color:${part.color}">${part.label}</span>
+          </td>
+          <td style="font-size:var(--font-size-xs)">
+            <span style="color:${live.color};font-weight:600">${live.label}</span>
+            <div style="color:var(--text-muted)">${timeAgo(peer.last_seen)}</div>
+          </td>
+          <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${timeAgo(peer.first_seen)}</td>
+          <td style="font-size:var(--font-size-xs);text-align:center">${peer.connection_count}</td>
+          <td>
+            <div style="display:flex;gap:var(--gap-xs)">
+              <button class="btn btn-sm cs-add-candidate" data-key="${peer.identity_key}" data-name="${peer.node_name || ''}" title="Add to validator list">+</button>
+              <button class="btn btn-danger btn-sm cs-remove-candidate" data-key="${peer.identity_key}" title="Remove from peer memory">&#10005;</button>
+            </div>
+          </td>
+        `;
+        candidatesTbody.appendChild(tr);
+      }
+
+      // Action handlers: Add to validator list
+      candidatesTbody.querySelectorAll('.cs-add-candidate').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const key = btn.dataset.key;
+          const name = btn.dataset.name;
+          try {
+            btn.disabled = true;
+            btn.textContent = '...';
+            await rpc.call('noble_addValidator', { public_key: key, name: name || undefined });
+            loadValidators();
+            loadCandidates();
+          } catch (e) {
+            console.error('[consensus] add candidate:', e);
+            btn.disabled = false;
+            btn.textContent = '+';
+          }
+        });
+      });
+
+      // Action handlers: Remove from memory
+      candidatesTbody.querySelectorAll('.cs-remove-candidate').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const key = btn.dataset.key;
+          try {
+            btn.disabled = true;
+            await rpc.call('noble_removePeerRecord', { identity_key: key });
+            loadCandidates();
+          } catch (e) {
+            console.error('[consensus] remove peer:', e);
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (e) {
+      console.error('[consensus] load candidates:', e);
+    }
+  }
+
+  // Prune stale peers (7 days default)
+  root.querySelector('#cs-prune-stale').addEventListener('click', async () => {
+    try {
+      const result = await rpc.call('noble_pruneStalePeers', { max_age_secs: 604800 });
+      console.log('[consensus] pruned', result.pruned, 'stale peers');
+      loadCandidates();
+    } catch (e) {
+      console.error('[consensus] prune stale:', e);
+    }
+  });
+
   // Wire up "Add Validator" button
   root.querySelector('#cs-add-validator').addEventListener('click', showAddValidatorModal);
 
@@ -627,6 +786,7 @@ export function init(root, ctx) {
   loadCycle();
   loadTimeline();
   loadValidators();
+  loadCandidates();
 
   return {
     destroy() {
