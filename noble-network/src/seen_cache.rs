@@ -6,16 +6,18 @@
 //! Used to suppress re-processing of already-seen blocks, transactions, and votes.
 //! Each entry has a time-to-live; expired entries are evicted on demand.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// A cache that remembers recently-seen items by their 32-byte key.
 ///
 /// Items expire after `ttl` and can be bulk-evicted with [`evict_expired`].
 /// The cache also enforces a `max_entries` cap — oldest entries are dropped
-/// when the cap is exceeded during insertion.
+/// in O(1) via an insertion-order queue when the cap is exceeded.
 pub struct SeenCache {
     entries: HashMap<[u8; 32], Instant>,
+    /// Insertion-order queue for O(1) oldest eviction (replaces O(n) min_by_key scan).
+    insertion_order: VecDeque<[u8; 32]>,
     ttl: Duration,
     max_entries: usize,
 }
@@ -25,6 +27,7 @@ impl SeenCache {
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
             ttl,
             max_entries,
         }
@@ -40,6 +43,7 @@ impl SeenCache {
         // Check if already present and still live.
         if let Some(inserted_at) = self.entries.get(&key) {
             if now.duration_since(*inserted_at) < self.ttl {
+                tracing::trace!(task = "seen_cache", "cache hit: message already seen");
                 return false;
             }
         }
@@ -49,19 +53,18 @@ impl SeenCache {
             self.evict_expired();
         }
 
-        // If still at cap after eviction, drop the oldest entry.
-        if self.entries.len() >= self.max_entries {
-            if let Some(oldest_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, ts)| *ts)
-                .map(|(k, _)| *k)
-            {
+        // If still at cap after eviction, drop the oldest entry via O(1) front pop.
+        while self.entries.len() >= self.max_entries {
+            if let Some(oldest_key) = self.insertion_order.pop_front() {
                 self.entries.remove(&oldest_key);
+            } else {
+                break;
             }
         }
 
         self.entries.insert(key, now);
+        self.insertion_order.push_back(key);
+        tracing::trace!(task = "seen_cache", "cache insert, size: {}", self.len());
         true
     }
 
@@ -71,7 +74,13 @@ impl SeenCache {
         let ttl = self.ttl;
         self.entries
             .retain(|_, inserted_at| inserted_at.elapsed() < ttl);
-        before - self.entries.len()
+        let evicted = before - self.entries.len();
+        if evicted > 0 {
+            // Rebuild insertion_order to remove evicted keys.
+            self.insertion_order
+                .retain(|k| self.entries.contains_key(k));
+        }
+        evicted
     }
 
     /// Number of entries currently in the cache.

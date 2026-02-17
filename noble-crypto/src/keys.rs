@@ -7,6 +7,7 @@
 //! use a wire format of `[scheme_id || key_bytes]` (GAP-H11).
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::CryptoError;
 use crate::schemes::{SCHEME_ED25519, SCHEME_SECP256K1};
@@ -25,12 +26,35 @@ pub enum NoblePublicKey {
 }
 
 /// A private key supporting multiple signature schemes.
-#[derive(Clone)]
+///
+/// Key material is zeroized on drop (C-1). Clone is intentionally not derived
+/// to prevent accidental copies of key material (H-clone).
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub enum NoblePrivateKey {
     /// Ed25519 secret key (32 bytes).
     Ed25519(Vec<u8>),
     /// secp256k1 secret key (32 bytes).
     Secp256k1(Vec<u8>),
+}
+
+impl std::fmt::Debug for NoblePrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ed25519(_) => write!(f, "NoblePrivateKey::Ed25519([REDACTED])"),
+            Self::Secp256k1(_) => write!(f, "NoblePrivateKey::Secp256k1([REDACTED])"),
+        }
+    }
+}
+
+impl NoblePrivateKey {
+    /// Create an explicit copy of this private key. Named intentionally to prevent
+    /// accidental cloning — use only in tests and when ownership must be shared.
+    pub fn clone_for_test(&self) -> Self {
+        match self {
+            Self::Ed25519(sk) => Self::Ed25519(sk.clone()),
+            Self::Secp256k1(sk) => Self::Secp256k1(sk.clone()),
+        }
+    }
 }
 
 impl NoblePublicKey {
@@ -186,6 +210,46 @@ pub struct SignatureEnvelope {
 }
 
 impl SignatureEnvelope {
+    /// Validate that the public_key and signature byte lengths match the declared scheme.
+    pub fn validate_lengths(&self) -> Result<(), CryptoError> {
+        match self.scheme_id {
+            SCHEME_ED25519 => {
+                if self.public_key.len() != ed25519::PUBLIC_KEY_LEN {
+                    return Err(CryptoError::InvalidKey(format!(
+                        "Ed25519 public key: expected {} bytes, got {}",
+                        ed25519::PUBLIC_KEY_LEN,
+                        self.public_key.len()
+                    )));
+                }
+                if self.signature.len() != ed25519::SIGNATURE_LEN {
+                    return Err(CryptoError::VerificationFailed(format!(
+                        "Ed25519 signature: expected {} bytes, got {}",
+                        ed25519::SIGNATURE_LEN,
+                        self.signature.len()
+                    )));
+                }
+            }
+            SCHEME_SECP256K1 => {
+                if self.public_key.len() != secp256k1::PUBLIC_KEY_LEN {
+                    return Err(CryptoError::InvalidKey(format!(
+                        "secp256k1 public key: expected {} bytes, got {}",
+                        secp256k1::PUBLIC_KEY_LEN,
+                        self.public_key.len()
+                    )));
+                }
+                if self.signature.len() != secp256k1::SIGNATURE_LEN {
+                    return Err(CryptoError::VerificationFailed(format!(
+                        "secp256k1 signature: expected {} bytes, got {}",
+                        secp256k1::SIGNATURE_LEN,
+                        self.signature.len()
+                    )));
+                }
+            }
+            _ => return Err(CryptoError::UnknownScheme(self.scheme_id)),
+        }
+        Ok(())
+    }
+
     /// Verify this signature against the provided message, using the embedded public key.
     pub fn verify_standalone(&self, message: &[u8]) -> Result<(), CryptoError> {
         match self.scheme_id {
@@ -388,6 +452,76 @@ mod tests {
         let bytes = pub_key.to_cbor().unwrap();
         let decoded = NoblePublicKey::from_cbor(&bytes).unwrap();
         assert_eq!(pub_key, decoded);
+    }
+
+    // --- Phase 1 audit remediation tests ---
+
+    #[test]
+    fn private_key_debug_redacted() {
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let debug_str = format!("{:?}", priv_key);
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug must not expose key bytes"
+        );
+        assert!(
+            !debug_str.contains("0x"),
+            "Debug must not contain hex bytes"
+        );
+    }
+
+    #[test]
+    fn private_key_clone_for_test() {
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let cloned = priv_key.clone_for_test();
+        // Both can derive the same public key
+        assert_eq!(priv_key.public_key(), cloned.public_key());
+    }
+
+    #[test]
+    fn signature_envelope_validate_lengths_ed25519() {
+        let envelope = SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: vec![0u8; 32],
+            signature: vec![0u8; 64],
+        };
+        assert!(envelope.validate_lengths().is_ok());
+
+        let bad_pk = SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: vec![0u8; 16], // wrong length
+            signature: vec![0u8; 64],
+        };
+        assert!(bad_pk.validate_lengths().is_err());
+
+        let bad_sig = SignatureEnvelope {
+            scheme_id: SCHEME_ED25519,
+            public_key: vec![0u8; 32],
+            signature: vec![0u8; 32], // wrong length
+        };
+        assert!(bad_sig.validate_lengths().is_err());
+    }
+
+    #[test]
+    fn signature_envelope_validate_lengths_secp256k1() {
+        let envelope = SignatureEnvelope {
+            scheme_id: SCHEME_SECP256K1,
+            public_key: vec![0x02; 33],
+            signature: vec![0u8; 64],
+        };
+        assert!(envelope.validate_lengths().is_ok());
+    }
+
+    #[test]
+    fn signature_envelope_validate_lengths_unknown_scheme() {
+        let envelope = SignatureEnvelope {
+            scheme_id: 0xFF,
+            public_key: vec![0u8; 32],
+            signature: vec![0u8; 64],
+        };
+        assert!(envelope.validate_lengths().is_err());
     }
 
     #[test]

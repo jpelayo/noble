@@ -6,6 +6,8 @@
 //! GossipSub publishes raw `Vec<u8>`. This module serializes [`GossipMessage`]
 //! to CBOR bytes for publishing and deserializes received bytes back.
 
+use std::io::Read;
+
 use crate::error::NetworkError;
 use crate::messages::GossipMessage;
 
@@ -31,7 +33,9 @@ pub fn decode_gossip(data: &[u8]) -> Result<GossipMessage, NetworkError> {
             MAX_GOSSIP_MESSAGE_SIZE
         )));
     }
-    ciborium::from_reader(data).map_err(|e| NetworkError::Codec(e.to_string()))
+    // Defense-in-depth: limit the reader even though we already checked data.len()
+    let reader = data.take(MAX_GOSSIP_MESSAGE_SIZE as u64);
+    ciborium::from_reader(reader).map_err(|e| NetworkError::Codec(e.to_string()))
 }
 
 #[cfg(test)]

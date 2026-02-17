@@ -33,6 +33,7 @@ http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

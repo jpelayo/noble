@@ -3,6 +3,8 @@
 
 //! Transaction (T1-T17) and block (B1-B12) validation pipelines.
 
+use std::collections::HashSet;
+
 use noble_codec::NobleCbor;
 use noble_crypto::{is_recognized_scheme, NoblePublicKey};
 
@@ -36,11 +38,30 @@ pub struct BlockValidationContext<'a> {
 /// Validate a transaction against rules T1-T17.
 ///
 /// Returns Ok(()) if all checks pass, or the first validation error encountered.
+#[tracing::instrument(skip(tx, ctx), fields(task = "tx_validation"))]
 pub fn validate_transaction(
     tx: &Transaction,
     claimed_tx_id: &noble_crypto::Hash256,
     ctx: &TxValidationContext,
 ) -> Result<(), ValidationError> {
+    // T7b: Limit on additional signatures (C-sigs) — cheap check before serialization
+    if tx.additional_sigs.len() > MAX_ADDITIONAL_SIGS {
+        return Err(ValidationError::TooManyAdditionalSigs {
+            count: tx.additional_sigs.len(),
+            max: MAX_ADDITIONAL_SIGS,
+        });
+    }
+    tracing::trace!("T7b: additional sigs count check passed");
+
+    // T8b: Limit on metadata entries (C-meta) — cheap check before serialization
+    if tx.metadata.len() > MAX_METADATA_ENTRIES {
+        return Err(ValidationError::TooManyMetadataEntries {
+            count: tx.metadata.len(),
+            max: MAX_METADATA_ENTRIES,
+        });
+    }
+    tracing::trace!("T8b: metadata entries count check passed");
+
     // T1: Size check
     let serialized = tx
         .to_cbor()
@@ -51,13 +72,16 @@ pub fn validate_transaction(
             max: MAX_TX_SIZE,
         });
     }
+    tracing::trace!(size = serialized.len(), "T1: size check passed");
 
     // T2: Version check
     if tx.version != PROTOCOL_VERSION {
         return Err(ValidationError::UnknownVersion(tx.version));
     }
+    tracing::trace!("T2: version check passed");
 
     // T3: Checksum is [u8; 32] — enforced at compile time by Hash256
+    tracing::trace!("T3: checksum type enforced at compile time");
 
     // T4: Timestamp skew
     let diff = tx.timestamp.abs_diff(ctx.current_time);
@@ -68,6 +92,7 @@ pub fn validate_transaction(
             max_skew: MAX_TX_TIMESTAMP_SKEW,
         });
     }
+    tracing::trace!(skew = diff, "T4: timestamp skew check passed");
 
     // T5: Publisher scheme recognized
     if !is_recognized_scheme(tx.publisher_sig.scheme_id) {
@@ -75,6 +100,7 @@ pub fn validate_transaction(
             tx.publisher_sig.scheme_id,
         ));
     }
+    tracing::trace!(scheme_id = tx.publisher_sig.scheme_id, "T5: publisher scheme recognized");
 
     // T6: Publisher signature verification
     let signing_msg = tx
@@ -83,6 +109,7 @@ pub fn validate_transaction(
     tx.publisher_sig
         .verify_standalone(&signing_msg)
         .map_err(|e| ValidationError::PublisherSigInvalid(e.to_string()))?;
+    tracing::trace!("T6: publisher signature verified");
 
     // T7: Additional signature verification
     for (i, sig) in tx.additional_sigs.iter().enumerate() {
@@ -98,9 +125,11 @@ pub fn validate_transaction(
                 reason: e.to_string(),
             })?;
     }
+    tracing::trace!(count = tx.additional_sigs.len(), "T7: additional signatures verified");
 
     // T8 + T9: Metadata validation
     validate_metadata(&tx.metadata)?;
+    tracing::trace!("T8/T9: metadata validation passed");
 
     // T10: tx_id verification
     let computed_id = tx
@@ -112,6 +141,7 @@ pub fn validate_transaction(
             computed: computed_id.to_string(),
         });
     }
+    tracing::trace!("T10: tx_id verification passed");
 
     // T11: Fee check
     if tx.fee < MIN_TX_FEE {
@@ -120,6 +150,7 @@ pub fn validate_transaction(
             min_fee: MIN_TX_FEE,
         });
     }
+    tracing::trace!(fee = tx.fee, "T11: fee check passed");
 
     // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
     // which is called in T6 and T7 above.
@@ -131,41 +162,68 @@ pub fn validate_transaction(
     {
         return Err(ValidationError::UnknownTxType(tx.tx_type));
     }
+    tracing::trace!(tx_type = tx.tx_type, "T13: tx_type recognized");
 
     // T14: Transfer requires recipient
     if tx.tx_type == TX_TYPE_TRANSFER && tx.recipient.is_none() {
         return Err(ValidationError::TransferMissingRecipient);
     }
+    tracing::trace!("T14: transfer recipient check passed");
 
     // T15: Transfer requires amount > 0
     if tx.tx_type == TX_TYPE_TRANSFER && matches!(tx.amount, None | Some(0)) {
         return Err(ValidationError::TransferInvalidAmount);
     }
+    tracing::trace!("T15: transfer amount check passed");
 
     // T16: Balance check is deferred to commit time (needs chain state)
+
+    // T24: Self-transfer rejection (C-self) — prevents balance inflation
+    if tx.tx_type == TX_TYPE_TRANSFER {
+        if let Some(ref recipient) = tx.recipient {
+            let sender_pk = tx
+                .publisher_sig
+                .to_noble_public_key()
+                .map_err(|e| ValidationError::Internal(format!("extracting sender key: {e}")))?;
+            if *recipient == sender_pk {
+                return Err(ValidationError::SelfTransfer);
+            }
+        }
+    }
+    tracing::trace!("T24: self-transfer check passed");
 
     // T17: Notarization must NOT have recipient or amount
     if tx.tx_type == TX_TYPE_NOTARIZATION && (tx.recipient.is_some() || tx.amount.is_some()) {
         return Err(ValidationError::NotarizationHasTransferFields);
     }
+    tracing::trace!("T17: notarization transfer-field check passed");
 
     // T22: encrypted_locator only allowed on notarization
     if tx.tx_type != TX_TYPE_NOTARIZATION && tx.encrypted_locator.is_some() {
         return Err(ValidationError::LocatorOnNonNotarization);
     }
+    tracing::trace!("T22: encrypted_locator check passed");
 
     // T23: external_attestations only allowed on notarization
     if tx.tx_type != TX_TYPE_NOTARIZATION && !tx.external_attestations.is_empty() {
         return Err(ValidationError::AttestationsOnNonNotarization);
+    }
+    tracing::trace!("T23: external_attestations check passed");
+
+    // T17b: Key rotation must NOT have amount (prevents spurious fund transfers)
+    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.amount.is_some() {
+        return Err(ValidationError::KeyRotationHasAmount);
     }
 
     // T21: Key rotation requires new key in recipient field
     if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.recipient.is_none() {
         return Err(ValidationError::KeyRotationMissingNewKey);
     }
+    tracing::trace!("T17b/T21: key rotation checks passed");
 
     // T18-T20: Validator identity checks deferred to consensus (needs validator list)
 
+    tracing::debug!("transaction validation passed");
     Ok(())
 }
 
@@ -188,6 +246,7 @@ pub fn median_timestamp(timestamps: &[u64]) -> u64 {
 /// - Median-of-11 (B13): `block_timestamp >= median(recent_timestamps)`
 /// - Future skew (B6): `block_timestamp <= now + MAX_BLOCK_FUTURE_SKEW`
 /// - Past skew (B6): `now <= block_timestamp + MAX_BLOCK_PAST_SKEW`
+#[tracing::instrument(skip(recent_timestamps), fields(task = "block_validation"))]
 pub fn validate_block_timestamp(
     block_timestamp: u64,
     parent_timestamp: u64,
@@ -234,6 +293,7 @@ pub fn validate_block_timestamp(
 /// Validate a block against rules B1-B12.
 ///
 /// Returns Ok(()) if all checks pass, or the first validation error encountered.
+#[tracing::instrument(skip(block, ctx), fields(task = "block_validation", height = block.header.height))]
 pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(), ValidationError> {
     let header = &block.header;
 
@@ -247,6 +307,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             max: MAX_BLOCK_SIZE,
         });
     }
+    tracing::trace!(size = serialized.len(), "B1: block size check passed");
 
     // B2: prev_block_hash
     if let Some(parent) = ctx.parent {
@@ -256,6 +317,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
         if header.prev_block_hash != parent_hash {
             return Err(ValidationError::PrevHashMismatch);
         }
+        tracing::trace!("B2: prev_block_hash matches parent");
 
         // B3: Height
         if header.height != parent.height + 1 {
@@ -264,6 +326,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
                 expected: parent.height + 1,
             });
         }
+        tracing::trace!("B3: height is sequential");
 
         // B5: Timestamp after parent
         if header.timestamp <= parent.timestamp {
@@ -272,6 +335,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
                 parent_time: parent.timestamp,
             });
         }
+        tracing::trace!("B5: timestamp after parent");
     }
 
     // B4: Merkle root
@@ -284,10 +348,25 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
         })
         .collect();
     let tx_ids = tx_ids?;
+
+    // Check for duplicate tx_ids within the block (C-duptx)
+    {
+        let mut seen = HashSet::with_capacity(tx_ids.len());
+        for (i, id) in tx_ids.iter().enumerate() {
+            if !seen.insert(id) {
+                // Find the first occurrence
+                let first = tx_ids.iter().position(|x| x == id).unwrap();
+                return Err(ValidationError::DuplicateTxInBlock { first, second: i });
+            }
+        }
+    }
+    tracing::trace!("C-duptx: no duplicate tx_ids in block");
+
     let computed_root = compute_merkle_root(&tx_ids);
     if header.merkle_root != computed_root {
         return Err(ValidationError::MerkleRootMismatch);
     }
+    tracing::trace!("B4: merkle root verified");
 
     // B6: Timestamp skew
     if header.timestamp > ctx.current_time + MAX_BLOCK_FUTURE_SKEW {
@@ -302,6 +381,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             current_time: ctx.current_time,
         });
     }
+    tracing::trace!("B6: timestamp skew check passed");
 
     // B7: tx_count
     if header.tx_count != block.transactions.len() as u32 {
@@ -310,6 +390,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             actual: block.transactions.len() as u32,
         });
     }
+    tracing::trace!(tx_count = header.tx_count, "B7: tx_count matches");
 
     // B8: Validator signature
     let signing_msg = header
@@ -319,11 +400,13 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
         .validator_id
         .verify(&signing_msg, &header.validator_sig)
         .map_err(|e| ValidationError::ValidatorSigInvalid(e.to_string()))?;
+    tracing::trace!("B8: validator signature verified");
 
     // B9: Validator in list
     if !ctx.validator_list.contains(&header.validator_id) {
         return Err(ValidationError::ValidatorNotTrusted);
     }
+    tracing::trace!("B9: validator is trusted");
 
     // B10: One block per cycle — deferred to consensus layer (needs cycle state)
 
@@ -343,6 +426,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             }
         })?;
     }
+    tracing::trace!(count = block.transactions.len(), "B11: all transactions valid");
 
     // B12: Validator scheme recognized
     if !is_recognized_scheme(header.validator_id.scheme_id()) {
@@ -350,7 +434,9 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             header.validator_id.scheme_id(),
         ));
     }
+    tracing::trace!("B12: validator scheme recognized");
 
+    tracing::debug!(height = header.height, tx_count = header.tx_count, "block validation passed");
     Ok(())
 }
 
@@ -894,6 +980,40 @@ mod tests {
     }
 
     #[test]
+    fn t24_self_transfer_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        // Recipient is the same as the sender
+        let recipient = NoblePublicKey::Ed25519(pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::SelfTransfer)),
+            "self-transfer must be rejected: {result:?}"
+        );
+    }
+
+    #[test]
     fn t17_notarization_with_amount() {
         let (sk, pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
@@ -1181,6 +1301,164 @@ mod tests {
         assert_eq!(tx, decoded);
         assert!(decoded.encrypted_locator.is_none());
         assert!(decoded.external_attestations.is_empty());
+    }
+
+    // --- Phase 2 audit remediation tests ---
+
+    #[test]
+    fn t7b_too_many_additional_sigs() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+
+        // Add MAX_ADDITIONAL_SIGS + 1 valid signatures
+        let msg = tx.compute_signing_message().unwrap();
+        for _ in 0..=MAX_ADDITIONAL_SIGS {
+            let (extra_sk, _) = ed25519::generate_keypair();
+            let extra_priv = NoblePrivateKey::Ed25519(extra_sk);
+            tx.additional_sigs.push(extra_priv.sign(&msg).unwrap());
+        }
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::TooManyAdditionalSigs { .. })),
+            "too many additional sigs: {result:?}"
+        );
+    }
+
+    #[test]
+    fn t8b_too_many_metadata_entries() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+
+        // Add MAX_METADATA_ENTRIES + 1 entries
+        for i in 0..=MAX_METADATA_ENTRIES {
+            tx.metadata.push(crate::metadata::MetadataEntry {
+                key: format!("key{i}"),
+                value: b"val".to_vec(),
+            });
+        }
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::TooManyMetadataEntries { .. })),
+            "too many metadata entries: {result:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_tx_in_block_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx(&sk, &pk);
+
+        // Create a block with the same transaction twice
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_priv = NoblePrivateKey::Ed25519(val_sk);
+        let val_pub = NoblePublicKey::Ed25519(val_pk.clone());
+
+        let transactions = vec![tx.clone(), tx.clone()];
+        let merkle_root = compute_merkle_root(&[tx_id, tx_id]);
+
+        let mut header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_block_hash: Hash256::ZERO,
+            merkle_root,
+            timestamp: 1_700_000_000,
+            height: 0,
+            tx_count: 2,
+            validator_id: val_pub,
+            validator_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: val_pk,
+                signature: vec![],
+            },
+        };
+        let msg = header.compute_signing_message().unwrap();
+        header.validator_sig = val_priv.sign(&msg).unwrap();
+
+        let block = Block {
+            header,
+            transactions,
+        };
+        let ctx = BlockValidationContext {
+            chain_id: MAINNET_CHAIN_ID,
+            current_time: 1_700_000_000,
+            parent: None,
+            validator_list: &[block.header.validator_id.clone()],
+        };
+        let result = validate_block(&block, &ctx);
+        assert!(
+            matches!(result, Err(ValidationError::DuplicateTxInBlock { .. })),
+            "duplicate tx in block: {result:?}"
+        );
+    }
+
+    #[test]
+    fn t17b_key_rotation_with_amount_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, new_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_KEY_ROTATION,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000), // Spurious amount on key rotation
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::KeyRotationHasAmount)),
+            "key rotation with amount must be rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn t17b_key_rotation_without_amount_accepted() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, new_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_KEY_ROTATION,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: None, // No amount — correct for key rotation
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
 
     #[test]

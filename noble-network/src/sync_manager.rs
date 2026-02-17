@@ -92,6 +92,7 @@ impl SyncManager {
             target_height: peer_height,
         };
 
+        tracing::debug!(task = "sync_headers", "requesting headers from height {}", self.local_height);
         Some(SyncRequest::GetHeaders {
             start_hash: self.local_tip_hash,
             max_count: MAX_HEADERS_PER_REQUEST,
@@ -114,6 +115,7 @@ impl SyncManager {
 
         if headers.is_empty() {
             self.state = SyncState::Idle;
+            tracing::info!(task = "sync_complete", "sync complete at height {}", self.local_height);
             return Ok(SyncAction::Complete(self.local_height));
         }
 
@@ -157,6 +159,7 @@ impl SyncManager {
                     let new_height = *next_height - 1;
                     self.local_height = new_height;
                     self.state = SyncState::Idle;
+                    tracing::info!(task = "sync_complete", "sync complete at height {}", new_height);
                     SyncAction::Complete(new_height)
                 } else {
                     SyncAction::None

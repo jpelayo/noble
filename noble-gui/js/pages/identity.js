@@ -129,6 +129,7 @@ export function init(root, ctx) {
                 <th>Org Type</th>
                 <th>Gov. Class</th>
                 <th>Role</th>
+                <th>PKI</th>
                 <th>Participation</th>
                 <th>Last Seen</th>
               </tr>
@@ -208,7 +209,7 @@ export function init(root, ctx) {
     try {
       const peers = await rpc.call('noble_getPeerAnnounces');
       if (!peers || peers.length === 0) {
-        peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">No peer identity data available</td></tr>';
+        peersBody.innerHTML = '<tr><td colspan="8" class="empty-state">No peer identity data available</td></tr>';
         return;
       }
       peersBody.innerHTML = peers.map((p, i) => {
@@ -218,12 +219,14 @@ export function init(root, ctx) {
         const orgDisplay = (p.org_type || '').replace(/([A-Z])/g, ' $1').trim();
         const roleDisplay = (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
         const pLabel = participationLabel(p.wants_to_validate, p.wants_to_vote);
+        const pkiBadge = pkiStatusBadge(p.pki_attestation);
         return `<tr class="clickable-row" data-idx="${i}">
           <td class="mono">${truncatePeerId(p.peer_id)}</td>
           <td>${esc(p.node_name)}</td>
           <td>${orgDisplay}</td>
           <td>${govBadge(cls)}</td>
           <td>${roleDisplay}</td>
+          <td>${pkiBadge}</td>
           <td>${pLabel}</td>
           <td>${agoStr}</td>
         </tr>`;
@@ -236,6 +239,11 @@ export function init(root, ctx) {
           const p = peers[idx];
           if (!p) return;
           const pLabel = participationLabel(p.wants_to_validate, p.wants_to_vote);
+          const pkiDetail = p.pki_attestation
+            ? `<dt>PKI Status</dt><dd>${pkiStatusBadge(p.pki_attestation)}</dd>
+               <dt>PKI Signer</dt><dd>${esc(p.pki_attestation.signer_cn || 'Unknown')}</dd>
+               <dt>PKI Fingerprint</dt><dd class="mono">${esc((p.pki_attestation.signer_fingerprint || '').slice(0, 16))}...</dd>`
+            : `<dt>PKI Status</dt><dd>${pkiStatusBadge(null)}</dd>`;
           peerDl.innerHTML = `
             <dt>Peer ID</dt><dd class="mono">${esc(p.peer_id)}</dd>
             <dt>Node Name</dt><dd>${esc(p.node_name)}</dd>
@@ -243,6 +251,7 @@ export function init(root, ctx) {
             <dt>Governance</dt><dd>${govBadge(p.governance_class || govClassForOrgType(p.org_type))}</dd>
             <dt>Role</dt><dd>${(p.node_role || '').replace(/([A-Z])/g, ' $1').trim()}</dd>
             <dt>Participation</dt><dd>${pLabel}</dd>
+            ${pkiDetail}
             <dt>Contact</dt><dd>${esc(p.contact_email || 'N/A')}</dd>
             <dt>Website</dt><dd>${p.website ? `<a href="${esc(p.website)}" target="_blank">${esc(p.website)}</a>` : 'N/A'}</dd>
             <dt>Host Address</dt><dd class="mono">${esc(p.host_address || 'N/A')}</dd>
@@ -254,7 +263,7 @@ export function init(root, ctx) {
       });
     } catch (e) {
       console.error('[identity] peers:', e);
-      peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load peer data</td></tr>';
+      peersBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load peer data</td></tr>';
     }
   }
 
@@ -303,6 +312,14 @@ function participationLabel(wantsValidate, wantsVote) {
   if (wantsValidate) return '<span class="participation-tag" style="border-color:var(--warning);color:var(--warning)">Block Producer</span>';
   if (wantsVote) return '<span class="participation-tag" style="border-color:var(--info, #3b82f6);color:var(--info, #3b82f6)">Voter Only</span>';
   return '<span class="participation-tag" style="border-color:var(--text-secondary);color:var(--text-secondary)">Watcher</span>';
+}
+
+function pkiStatusBadge(attestation) {
+  if (attestation && attestation.scheme === 'pkcs7') {
+    const cn = attestation.signer_cn || 'Verified';
+    return `<span class="badge-pki-verified" title="${esc(cn)}">Verified</span>`;
+  }
+  return '<span class="badge-pki-none">None</span>';
 }
 
 function truncatePeerId(pid) {

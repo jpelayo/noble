@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors that can occur during CBOR serialization and deserialization.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CodecError {
     /// Failed to serialize a value to CBOR bytes.
     #[error("CBOR serialization failed: {0}")]

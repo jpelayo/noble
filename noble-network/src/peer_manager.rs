@@ -74,6 +74,41 @@ pub struct PeerState {
     pub addr: Option<String>,
 }
 
+/// Maximum length of a software version string in a NodeAnnounce.
+const MAX_SOFTWARE_VERSION_LEN: usize = 32;
+
+/// Parse a semver-style "major.minor.patch" string into a tuple.
+/// Returns `None` if the format is invalid.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ))
+}
+
+/// Compare two semver strings. Returns `true` if `a` is strictly greater than `b`.
+/// Falls back to lexicographic comparison if either string is not valid semver.
+fn is_semver_greater(a: &str, b: &str) -> bool {
+    match (parse_semver(a), parse_semver(b)) {
+        (Some(av), Some(bv)) => av > bv,
+        _ => a > b,
+    }
+}
+
+/// Validate a software version string: max 32 chars, only `[a-zA-Z0-9.\-]`.
+pub fn validate_software_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= MAX_SOFTWARE_VERSION_LEN
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 /// Manages connected peers, enforces connection limits, and tracks ban scores.
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerState>,
@@ -130,12 +165,14 @@ impl PeerManager {
                 addr: None,
             },
         );
+        tracing::info!(task = "peer_connect", peer_id = %peer_id, "peer connected");
         true
     }
 
     /// Handle a peer disconnection.
     pub fn on_disconnected(&mut self, peer_id: &PeerId) {
         self.peers.remove(peer_id);
+        tracing::info!(task = "peer_disconnect", peer_id = %peer_id, "peer disconnected");
     }
 
     /// Record a misbehavior for a peer. Returns `Some(banned_until_unix)` if the
@@ -146,6 +183,7 @@ impl PeerManager {
 
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.ban_score = state.ban_score.saturating_add(penalty);
+            tracing::debug!(task = "peer_ban", "ban score updated for peer: +{}", penalty);
             if state.ban_score >= self.ban_threshold {
                 self.banned.insert(*peer_id, Instant::now());
                 self.peers.remove(peer_id);
@@ -208,7 +246,7 @@ impl PeerManager {
     /// Store a node identity announcement for a peer.
     /// Also updates the max software version seen across all peers.
     pub fn update_announce(&mut self, peer_id: &PeerId, announce: NodeAnnounce) {
-        if announce.software_version.as_str() > self.max_software_version.as_str() {
+        if is_semver_greater(&announce.software_version, &self.max_software_version) {
             self.max_software_version = announce.software_version.clone();
         }
         if let Some(state) = self.peers.get_mut(peer_id) {
@@ -686,5 +724,48 @@ mod tests {
         pm.update_announce(&p2, a2);
 
         assert_eq!(pm.max_software_version_seen(), "0.3.0");
+    }
+
+    #[test]
+    fn semver_comparison_correct() {
+        // Basic ordering
+        assert!(is_semver_greater("0.2.0", "0.1.0"));
+        assert!(is_semver_greater("1.0.0", "0.99.99"));
+        assert!(is_semver_greater("0.10.0", "0.2.0")); // This would fail with lexicographic
+        assert!(!is_semver_greater("0.1.0", "0.2.0"));
+        assert!(!is_semver_greater("0.1.0", "0.1.0")); // Equal
+
+        // Invalid semver falls back to string comparison
+        assert!(is_semver_greater("b", "a"));
+    }
+
+    #[test]
+    fn parse_semver_valid() {
+        assert_eq!(parse_semver("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_semver("10.20.30"), Some((10, 20, 30)));
+    }
+
+    #[test]
+    fn parse_semver_invalid() {
+        assert_eq!(parse_semver(""), None);
+        assert_eq!(parse_semver("1.2"), None);
+        assert_eq!(parse_semver("1.2.3.4"), None);
+        assert_eq!(parse_semver("a.b.c"), None);
+    }
+
+    #[test]
+    fn validate_software_version_rules() {
+        assert!(validate_software_version("0.1.0"));
+        assert!(validate_software_version("1.0.0-beta"));
+        assert!(validate_software_version("noble-v2.3.4"));
+
+        // Empty
+        assert!(!validate_software_version(""));
+        // Too long
+        assert!(!validate_software_version(&"x".repeat(33)));
+        // Invalid chars
+        assert!(!validate_software_version("v1.0 beta"));
+        assert!(!validate_software_version("v1.0@rc1"));
     }
 }

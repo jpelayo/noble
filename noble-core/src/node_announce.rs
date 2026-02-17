@@ -12,8 +12,10 @@ use noble_crypto::{sha256, CryptoError, NoblePublicKey, NobleSigner, SignatureEn
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{
-    MAX_NODE_NAME_LEN, MAX_ORG_NAME_LEN, NODE_ANNOUNCE_MAX_AGE_SECS, NODE_ANNOUNCE_VERSION,
+    MAX_ATTESTATION_DATA_SIZE, MAX_NODE_NAME_LEN, MAX_ORG_NAME_LEN, MAX_SOFTWARE_VERSION_LEN,
+    NODE_ANNOUNCE_MAX_AGE_SECS, NODE_ANNOUNCE_VERSION, PKI_BIND_DOMAIN_TAG,
 };
+use crate::encrypted_locator::ExternalAttestation;
 
 /// Organization taxonomy — makes governance model visible.
 ///
@@ -157,6 +159,15 @@ pub struct NodeAnnounce {
     pub wants_to_vote: bool,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
+    /// Optional PKI identity attestation — an external signature (PKCS#7/CMS)
+    /// binding this NOBLE identity key to an X.509 certificate.
+    ///
+    /// **Not included in `AnnounceSigningPayload`** — the PKI signature and
+    /// the NOBLE signature are independent proofs over different domains.
+    /// The PKI signature covers a stable binding message:
+    /// `sha256(PKI_BIND_DOMAIN_TAG || identity_key_bytes)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_attestation: Option<ExternalAttestation>,
 }
 
 /// Internal payload used to compute the signing message.
@@ -178,7 +189,28 @@ struct AnnounceSigningPayload<'a> {
     timestamp: u64,
 }
 
+/// Compute the PKI binding message for a given identity key (free function).
+///
+/// `sha256(PKI_BIND_DOMAIN_TAG || identity_key_wire_bytes)`
+pub fn compute_pki_binding_message_for_key(identity_key: &NoblePublicKey) -> [u8; 32] {
+    let key_bytes = identity_key.to_wire_bytes();
+    let mut preimage = Vec::with_capacity(PKI_BIND_DOMAIN_TAG.len() + key_bytes.len());
+    preimage.extend_from_slice(PKI_BIND_DOMAIN_TAG);
+    preimage.extend_from_slice(&key_bytes);
+    *sha256(&preimage).as_bytes()
+}
+
 impl NodeAnnounce {
+    /// Compute the 32-byte PKI binding message for this node's identity key.
+    ///
+    /// This is the message that the external PKI certificate signs:
+    /// `sha256(PKI_BIND_DOMAIN_TAG || identity_key_wire_bytes)`.
+    ///
+    /// The binding is permanent and independent of any announce refresh.
+    pub fn compute_pki_binding_message(&self) -> [u8; 32] {
+        compute_pki_binding_message_for_key(&self.identity_key)
+    }
+
     /// Compute the 32-byte signing message: `sha256(canonical_cbor(payload))`.
     pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
         let payload = AnnounceSigningPayload {
@@ -209,6 +241,10 @@ impl NodeAnnounce {
     }
 
     /// Create a signed NodeAnnounce. The signer must correspond to `identity_key`.
+    ///
+    /// `identity_attestation` is an optional pre-existing PKI attestation that
+    /// binds this NOBLE key to an X.509 certificate. It is stored on the
+    /// announce but **not** included in the NOBLE signing payload.
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
         identity_key: NoblePublicKey,
@@ -223,6 +259,40 @@ impl NodeAnnounce {
         wants_to_vote: bool,
         timestamp: u64,
         signer: &impl NobleSigner,
+    ) -> Result<Self, CryptoError> {
+        Self::sign_with_attestation(
+            identity_key,
+            node_name,
+            org_type,
+            org_name,
+            node_role,
+            contact_email,
+            website,
+            host_address,
+            wants_to_validate,
+            wants_to_vote,
+            timestamp,
+            signer,
+            None,
+        )
+    }
+
+    /// Create a signed NodeAnnounce with an optional PKI identity attestation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_with_attestation(
+        identity_key: NoblePublicKey,
+        node_name: String,
+        org_type: OrgType,
+        org_name: Option<String>,
+        node_role: NodeRole,
+        contact_email: Option<String>,
+        website: Option<String>,
+        host_address: Option<String>,
+        wants_to_validate: bool,
+        wants_to_vote: bool,
+        timestamp: u64,
+        signer: &impl NobleSigner,
+        identity_attestation: Option<ExternalAttestation>,
     ) -> Result<Self, CryptoError> {
         use crate::constants::SOFTWARE_VERSION;
         // Build a temporary announce with a dummy signature to compute the message.
@@ -245,6 +315,7 @@ impl NodeAnnounce {
                 public_key: vec![],
                 signature: vec![],
             },
+            identity_attestation,
         };
 
         let msg = announce
@@ -263,6 +334,36 @@ impl NodeAnnounce {
         if let Some(ref name) = self.org_name {
             if name.len() > MAX_ORG_NAME_LEN {
                 return Err(format!("org_name exceeds {} bytes", MAX_ORG_NAME_LEN));
+            }
+        }
+        if self.software_version.len() > MAX_SOFTWARE_VERSION_LEN {
+            return Err(format!(
+                "software_version exceeds {} bytes",
+                MAX_SOFTWARE_VERSION_LEN
+            ));
+        }
+        if !self
+            .software_version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return Err(
+                "software_version contains invalid characters (allowed: [a-zA-Z0-9.\\-])"
+                    .to_string(),
+            );
+        }
+        if let Some(ref att) = self.identity_attestation {
+            if att.signature_data.len() > MAX_ATTESTATION_DATA_SIZE {
+                return Err(format!(
+                    "identity_attestation signature_data exceeds {} bytes",
+                    MAX_ATTESTATION_DATA_SIZE
+                ));
+            }
+            if att.scope != "identity" {
+                return Err(format!(
+                    "identity_attestation scope must be \"identity\", got \"{}\"",
+                    att.scope
+                ));
             }
         }
         if self.timestamp > now {
@@ -560,5 +661,157 @@ mod tests {
                 "unexpected governance class: {class}"
             );
         }
+    }
+
+    // ── PKI Identity Attestation Tests ──
+
+    fn make_test_attestation(scope: &str, data_size: usize) -> ExternalAttestation {
+        use crate::encrypted_locator::ExternalAttestation;
+        ExternalAttestation {
+            scheme: "pkcs7".to_string(),
+            scope: scope.to_string(),
+            signer_fingerprint: [0xAB; 32],
+            signature_data: vec![0xCC; data_size],
+        }
+    }
+
+    #[test]
+    fn pki_binding_message_deterministic() {
+        let (_, pk) = make_ed25519_keypair();
+        let msg1 = compute_pki_binding_message_for_key(&pk);
+        let msg2 = compute_pki_binding_message_for_key(&pk);
+        assert_eq!(msg1, msg2);
+    }
+
+    #[test]
+    fn pki_binding_message_differs_per_key() {
+        let sk1 = NoblePrivateKey::Ed25519([42u8; 32].to_vec());
+        let sk2 = NoblePrivateKey::Ed25519([99u8; 32].to_vec());
+        let msg1 = compute_pki_binding_message_for_key(&sk1.public_key());
+        let msg2 = compute_pki_binding_message_for_key(&sk2.public_key());
+        assert_ne!(msg1, msg2);
+    }
+
+    #[test]
+    fn announce_with_attestation_roundtrip() {
+        let (sk, pk) = make_ed25519_keypair();
+        let att = make_test_attestation("identity", 256);
+        let announce = NodeAnnounce::sign_with_attestation(
+            pk.clone(),
+            "test-node".to_string(),
+            OrgType::Enterprise,
+            Some("Acme Corp".to_string()),
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+            Some(att.clone()),
+        )
+        .unwrap();
+        assert!(announce.identity_attestation.is_some());
+
+        // CBOR roundtrip preserves attestation
+        let bytes = announce.to_cbor().unwrap();
+        let decoded = NodeAnnounce::from_cbor(&bytes).unwrap();
+        assert_eq!(
+            decoded.identity_attestation.as_ref().unwrap().scheme,
+            "pkcs7"
+        );
+        assert_eq!(
+            decoded.identity_attestation.as_ref().unwrap().scope,
+            "identity"
+        );
+        assert_eq!(
+            decoded
+                .identity_attestation
+                .as_ref()
+                .unwrap()
+                .signature_data
+                .len(),
+            256
+        );
+    }
+
+    #[test]
+    fn attestation_not_in_signing_payload() {
+        let (sk, pk) = make_ed25519_keypair();
+        let att = make_test_attestation("identity", 128);
+        // Build identical announces — one with attestation, one without
+        let with = NodeAnnounce::sign_with_attestation(
+            pk.clone(),
+            "test-node".to_string(),
+            OrgType::Individual,
+            Some("Test Org".to_string()),
+            NodeRole::FullNode,
+            Some("test@example.com".to_string()),
+            Some("https://example.com".to_string()),
+            Some("/ip4/1.2.3.4/tcp/9333".to_string()),
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+            Some(att),
+        )
+        .unwrap();
+        let without = make_announce(&sk, &pk, 1_700_000_000);
+
+        // Signing message is the same with or without attestation
+        let msg_with = with.compute_signing_message().unwrap();
+        let msg_without = without.compute_signing_message().unwrap();
+        assert_eq!(msg_with, msg_without);
+    }
+
+    #[test]
+    fn attestation_wrong_scope_rejected() {
+        let (sk, pk) = make_ed25519_keypair();
+        let att = make_test_attestation("hash", 128); // wrong scope
+        let announce = NodeAnnounce::sign_with_attestation(
+            pk.clone(),
+            "test-node".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+            Some(att),
+        )
+        .unwrap();
+        let result = announce.validate(1_700_000_000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("scope must be \"identity\""));
+    }
+
+    #[test]
+    fn attestation_too_large_rejected() {
+        let (sk, pk) = make_ed25519_keypair();
+        let att = make_test_attestation("identity", MAX_ATTESTATION_DATA_SIZE + 1);
+        let announce = NodeAnnounce::sign_with_attestation(
+            pk.clone(),
+            "test-node".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+            Some(att),
+        )
+        .unwrap();
+        let result = announce.validate(1_700_000_000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds"));
     }
 }

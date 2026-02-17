@@ -58,6 +58,12 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub totp_validator: Option<Arc<RwLock<crate::auth::TotpValidator>>>,
     /// Path to the TOTP secret file (for rotation persistence). None = not configured.
     pub totp_secret_path: Option<std::path::PathBuf>,
+    /// Configured RPC port (for getNodeInfo response).
+    pub rpc_port: u16,
+    /// Configured WebSocket port (for getNodeInfo response).
+    pub ws_port: u16,
+    /// Configured P2P port (for getNodeInfo response).
+    pub p2p_port: u16,
 
     // --- Broadcast channels for WebSocket subscriptions ---
     /// New block notifications.
@@ -68,4 +74,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub cycle_phase_tx: broadcast::Sender<serde_json::Value>,
     /// Peer connect/disconnect notifications.
     pub peer_update_tx: broadcast::Sender<serde_json::Value>,
+
+    /// Runtime trace handle for the trace RPC methods. None = tracing not initialized.
+    pub trace_handle: Option<Arc<crate::trace_types::TraceHandle>>,
 }

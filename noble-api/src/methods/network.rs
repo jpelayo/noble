@@ -66,10 +66,22 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     async fn get_sync_status(&self) -> Result<SyncStatusResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read().unwrap();
         let (height, _hash) = consensus.chain_tip();
+        // Until sync manager tracks highest known, report current as highest
+        let highest_known = height;
+        let progress = if highest_known == 0 {
+            1.0
+        } else {
+            height as f64 / highest_known as f64
+        };
+        let synced = height >= highest_known;
+        let state = if synced { "Complete" } else { "Syncing" };
 
         Ok(SyncStatusResponse {
-            synced: true,
+            synced,
             current_height: height,
+            highest_known,
+            progress,
+            state: state.to_string(),
         })
     }
 

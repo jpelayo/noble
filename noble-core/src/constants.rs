@@ -64,6 +64,18 @@ pub const INITIAL_SUBSIDY: u64 = 50_000_000;
 /// Number of blocks between halving events (~12 years at 30-min cycles).
 pub const HALVING_INTERVAL: u64 = 210_000;
 
+/// Maximum total supply in atomic units (21 million NOBLE = 21_000_000_000_000).
+pub const MAX_SUPPLY: u64 = 21_000_000_000_000;
+
+/// Maximum reorg depth allowed (144 blocks ≈ 3 days at 30-min cycles).
+pub const MAX_REORG_DEPTH: u64 = 144;
+
+/// Merkle leaf hash domain-separation prefix.
+pub const MERKLE_LEAF_PREFIX: u8 = 0x00;
+
+/// Merkle internal node hash domain-separation prefix.
+pub const MERKLE_INTERNAL_PREFIX: u8 = 0x01;
+
 /// Human-readable software version string.
 pub const SOFTWARE_VERSION: &str = "0.1.0";
 
@@ -76,6 +88,9 @@ pub const MAX_NODE_NAME_LEN: usize = 64;
 /// Maximum length of an organization name in a NodeAnnounce (bytes).
 pub const MAX_ORG_NAME_LEN: usize = 128;
 
+/// Maximum length of a software version string in a NodeAnnounce (bytes).
+pub const MAX_SOFTWARE_VERSION_LEN: usize = 32;
+
 /// Maximum age of a NodeAnnounce before it is considered stale (seconds).
 pub const NODE_ANNOUNCE_MAX_AGE_SECS: u64 = 3_600;
 
@@ -85,6 +100,17 @@ pub const VALIDATOR_ALIVE_THRESHOLD_SECS: u64 = 5_400;
 /// Validator liveness: considered stale if last seen within 12 cycles (6h).
 /// Beyond this threshold, the validator is considered unreachable.
 pub const VALIDATOR_STALE_THRESHOLD_SECS: u64 = 21_600;
+
+/// Maximum size of an external attestation's signature_data in bytes.
+pub const MAX_ATTESTATION_DATA_SIZE: usize = 8192;
+
+/// Domain separation tag for PKI identity binding messages.
+/// The PKCS#7 signature signs: `sha256(PKI_BIND_DOMAIN_TAG || identity_key_bytes)`.
+pub const PKI_BIND_DOMAIN_TAG: &[u8] = b"NOBLE-PKI-BIND-v1";
+
+/// Known-good block hashes at specific heights for fast initial sync.
+/// Populated after mainnet launch; empty during pre-launch development.
+pub const CHECKPOINTS: &[(u64, &str)] = &[];
 
 /// Compute block subsidy at a given height.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).

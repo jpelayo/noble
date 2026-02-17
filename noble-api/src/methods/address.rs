@@ -52,7 +52,26 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         let storage = self.storage.read().unwrap();
         let balance = storage.get_balance(&pubkey).map_err(ApiError::from)?;
 
-        Ok(AddressBalanceResponse { address, balance })
+        // pending = mempool debits for this address (not yet committed)
+        let pending = {
+            let mempool = self.mempool.lock().unwrap();
+            mempool.pending_debit(&pubkey)
+        };
+        let available = balance.saturating_sub(pending);
+
+        // Count address history entries
+        let tx_count = storage
+            .get_address_history(&pubkey, 0, 0)
+            .map(|ids| ids.len() as u64)
+            .unwrap_or(0);
+
+        Ok(AddressBalanceResponse {
+            public_key: address,
+            balance,
+            available,
+            pending,
+            tx_count,
+        })
     }
 
     async fn get_address_history(
@@ -69,9 +88,16 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             .get_address_history(&pubkey, page, clamped_limit)
             .map_err(ApiError::from)?;
 
+        // Get total count (pass limit 0 to get all for counting, or use a separate method)
+        let total = storage
+            .get_address_history(&pubkey, 0, 0)
+            .map(|ids| ids.len() as u64)
+            .unwrap_or(0);
+
         Ok(AddressHistoryResponse {
-            address,
+            public_key: address,
             transactions: tx_ids.iter().map(hash_to_hex).collect(),
+            total,
             page,
             limit: clamped_limit,
         })

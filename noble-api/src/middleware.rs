@@ -85,6 +85,7 @@ where
         };
 
         // Extract and validate the Bearer token.
+        tracing::debug!(task = "rpc_auth", "authentication attempt");
         let valid = req
             .headers()
             .get(http::header::AUTHORIZATION)
@@ -99,12 +100,14 @@ where
             .unwrap_or(false);
 
         if valid {
+            tracing::info!(task = "rpc_auth", "authentication successful");
             let fut = self.inner.call(req);
             Box::pin(async move {
                 let resp = fut.await?;
                 Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
             })
         } else {
+            tracing::warn!(task = "rpc_auth", "authentication failed");
             Box::pin(async move {
                 let resp = auth_error_response();
                 Ok(resp.map(|b| {

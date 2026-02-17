@@ -1,11 +1,10 @@
 /**
  * NOBLE Dashboard — Application Entry Point
  *
- * To switch from mock to real API, change these imports:
- *   import { RpcClient } from './rpc-client.js';
- *   import { WsManager } from './ws-manager.js';
- *   const rpc = new RpcClient('http://localhost:9332');
- *   const ws = new WsManager('ws://localhost:9334', { onStatusChange });
+ * RPC endpoint is configurable via URL parameter:
+ *   ?rpc=http://localhost:9332&ws=ws://localhost:9334
+ *
+ * If no ?rpc parameter is provided, the mock layer is used.
  */
 
 import { MockRpcClient, MockWsManager } from './mock-rpc.js';
@@ -26,15 +25,31 @@ import * as consensusPage from './pages/consensus.js';
 import * as walletPage from './pages/wallet.js';
 import * as healthPage from './pages/health.js';
 import * as identityPage from './pages/identity.js';
+import * as tracePage from './pages/trace.js';
 
 // ── Status change handler ──
 function onStatusChange(status) {
   store.state.connected = status === 'connected';
 }
 
-// ── Initialize mock layer ──
-const rpc = new MockRpcClient();
-const ws = new MockWsManager(rpc, { onStatusChange });
+// ── Initialize RPC layer (real or mock) ──
+const params = new URLSearchParams(window.location.search);
+const rpcUrl = params.get('rpc');
+const wsUrl = params.get('ws');
+
+let rpc, ws;
+if (rpcUrl) {
+  // Dynamic import for real RPC client (only loaded when needed)
+  const { RpcClient } = await import('./rpc-client.js');
+  const { WsManager } = await import('./ws-manager.js');
+  rpc = new RpcClient(rpcUrl);
+  ws = new WsManager(wsUrl || rpcUrl.replace(/^http/, 'ws').replace(/:\d+/, ':9334'), { onStatusChange });
+  console.info(`[app] Using real RPC: ${rpcUrl}`);
+} else {
+  rpc = new MockRpcClient();
+  ws = new MockWsManager(rpc, { onStatusChange });
+  console.info('[app] Using mock RPC layer');
+}
 
 // ── Reactive state store ──
 const { state, subscribe, getState } = createStore({
@@ -126,6 +141,7 @@ router
   .add('/wallet', walletPage)
   .add('/health', healthPage)
   .add('/identity', identityPage)
+  .add('/trace', tracePage)
   .start();
 
 // ── Auth prompt ──

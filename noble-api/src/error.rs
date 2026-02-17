@@ -7,22 +7,26 @@ use jsonrpsee::types::ErrorObjectOwned;
 use thiserror::Error;
 
 // JSON-RPC error codes (application-specific range: -32000 to -32099)
+// Aligned with Setup/rpc-api-specification.md §Error Codes
 pub const TX_REJECTED: i32 = -32000;
-pub const TX_NOT_FOUND: i32 = -32001;
-pub const BLOCK_NOT_FOUND: i32 = -32002;
+pub const BLOCK_NOT_FOUND: i32 = -32001;
+pub const TX_NOT_FOUND: i32 = -32002;
 pub const CHECKSUM_NOT_FOUND: i32 = -32003;
-pub const PEER_NOT_FOUND: i32 = -32004;
-pub const VALIDATOR_NOT_FOUND: i32 = -32005;
-pub const WALLET_LOCKED: i32 = -32006;
-pub const UNKNOWN_TOPIC: i32 = -32007;
+pub const AUTH_REQUIRED: i32 = -32004;
+pub const RATE_LIMITED: i32 = -32005;
+pub const NODE_SYNCING: i32 = -32006;
+pub const WALLET_LOCKED: i32 = -32007;
 pub const INVALID_PASSPHRASE: i32 = -32008;
 pub const INSUFFICIENT_BALANCE: i32 = -32009;
 pub const INVALID_ADDRESS: i32 = -32010;
 pub const INVALID_PARAM: i32 = -32011;
-pub const AUTH_REQUIRED: i32 = -32012;
+pub const PEER_NOT_FOUND: i32 = -32012;
+pub const VALIDATOR_NOT_FOUND: i32 = -32013;
+pub const UNKNOWN_TOPIC: i32 = -32014;
 
 /// API error variants.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ApiError {
     #[error("transaction rejected: {0}")]
     TxRejected(String),

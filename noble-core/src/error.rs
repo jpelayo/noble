@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors from transaction validation (T1-T17) and block validation (B1-B12).
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ValidationError {
     // --- Transaction validation (T1-T12) ---
     /// T1: Serialized transaction exceeds MAX_TX_SIZE.
@@ -161,9 +162,29 @@ pub enum ValidationError {
     #[error("T22: encrypted_locator only allowed on notarization tx (tx_type 0x00)")]
     LocatorOnNonNotarization,
 
+    /// T24: Transfer to self (recipient == publisher_sig signer) — balance inflation attack.
+    #[error("T24: transfer to self is not allowed")]
+    SelfTransfer,
+
+    /// T7b: Too many additional signatures.
+    #[error("T7b: too many additional sigs ({count}, max {max})")]
+    TooManyAdditionalSigs { count: usize, max: usize },
+
+    /// T8b: Too many metadata entries.
+    #[error("T8b: too many metadata entries ({count}, max {max})")]
+    TooManyMetadataEntries { count: usize, max: usize },
+
+    /// Duplicate transaction ID within a block.
+    #[error("duplicate tx_id in block at indices {first} and {second}")]
+    DuplicateTxInBlock { first: usize, second: usize },
+
     /// T23: External attestations present on a non-notarization transaction.
     #[error("T23: external_attestations only allowed on notarization tx (tx_type 0x00)")]
     AttestationsOnNonNotarization,
+
+    /// T17b: Key rotation transaction has a spurious amount field.
+    #[error("T17b: key rotation tx must not have amount")]
+    KeyRotationHasAmount,
 
     // --- General ---
     /// Codec or crypto error during validation.

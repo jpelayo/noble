@@ -73,6 +73,7 @@ pub struct TxResponse {
 
 /// Messages broadcast via GossipSub topics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::large_enum_variant)] // NodeAnnounce is large by design (many identity fields)
 pub enum GossipMessage {
     /// Announce a new block (sent on `TOPIC_BLOCK_ANNOUNCE`).
     BlockAnnounce { block_hash: [u8; 32], height: u64 },
@@ -111,6 +112,16 @@ pub enum GossipMessage {
         signature_scheme: u8,
         signature_pubkey: Vec<u8>,
         signature_bytes: Vec<u8>,
+        /// Optional PKI attestation fields (flattened for wire compat).
+        /// All four must be present or all absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attestation_scheme: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attestation_scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attestation_fingerprint: Option<Vec<u8>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attestation_data: Option<Vec<u8>>,
     },
 }
 
@@ -337,6 +348,39 @@ mod tests {
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],
             signature_bytes: vec![2; 64],
+            attestation_scheme: None,
+            attestation_scope: None,
+            attestation_fingerprint: None,
+            attestation_data: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn gossip_node_announce_with_attestation_roundtrip() {
+        let msg = GossipMessage::NodeAnnounce {
+            identity_key: vec![0x00; 33],
+            node_name: "test-node".into(),
+            org_type: "Enterprise".into(),
+            org_name: Some("Acme Corp".into()),
+            node_role: "FullNode".into(),
+            contact_email: None,
+            website: None,
+            host_address: None,
+            software_version: "0.1.0".into(),
+            wants_to_validate: false,
+            wants_to_vote: false,
+            timestamp: 1_700_000_000,
+            signature_scheme: 0x01,
+            signature_pubkey: vec![1; 32],
+            signature_bytes: vec![2; 64],
+            attestation_scheme: Some("pkcs7".into()),
+            attestation_scope: Some("identity".into()),
+            attestation_fingerprint: Some(vec![0xAB; 32]),
+            attestation_data: Some(vec![0xCC; 256]),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();

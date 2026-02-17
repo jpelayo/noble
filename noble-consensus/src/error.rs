@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors returned by the consensus engine.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConsensusError {
     /// A validator proposed more than one block in the same cycle.
     #[error("duplicate proposal from validator in cycle {0}")]

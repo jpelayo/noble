@@ -40,6 +40,7 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
 /// Returns the 64-byte signature with low-S normalization applied (GAP-H1).
 /// The S value is guaranteed to be in the lower half of the curve order,
 /// preventing transaction malleability (BIP-62).
+#[tracing::instrument(skip(secret_key, message), fields(task = "crypto_sign"))]
 pub fn sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let signing_key = SigningKey::from_slice(secret_key)
         .map_err(|e| CryptoError::InvalidKey(format!("secp256k1 secret key: {e}")))?;
@@ -55,6 +56,7 @@ pub fn sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
 ///
 /// Rejects high-S signatures (GAP-H1): the S value must be in the lower half
 /// of the curve order to prevent malleability.
+#[tracing::instrument(skip(public_key, message, signature), fields(task = "crypto_verify"))]
 pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
     let verifying_key = VerifyingKey::from_sec1_bytes(public_key)
         .map_err(|e| CryptoError::InvalidKey(format!("secp256k1 public key: {e}")))?;
@@ -71,7 +73,10 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
 
     verifying_key
         .verify(message, &sig)
-        .map_err(|e| CryptoError::VerificationFailed(format!("secp256k1: {e}")))
+        .map_err(|e| CryptoError::VerificationFailed(format!("secp256k1: {e}")))?;
+
+    tracing::trace!("secp256k1 signature verified successfully");
+    Ok(())
 }
 
 #[cfg(test)]

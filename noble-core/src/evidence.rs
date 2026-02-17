@@ -31,6 +31,7 @@ pub struct DoubleProposalEvidence {
 
 /// Errors when verifying double-proposal evidence.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EvidenceError {
     /// The two headers reference different validators.
     DifferentValidators,

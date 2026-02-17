@@ -11,6 +11,9 @@ use std::path::PathBuf;
 /// Top-level node configuration.
 #[derive(Debug, Default, Deserialize)]
 pub struct NodeConfig {
+    /// Node operational mode and network selection.
+    #[serde(default)]
+    pub node: NodeSectionConfig,
     pub network: NetworkConfig,
     pub storage: StorageConfig,
     pub consensus: ConsensusConfig,
@@ -19,6 +22,43 @@ pub struct NodeConfig {
     pub logging: LoggingConfig,
     pub metrics: MetricsConfig,
     pub identity: IdentityConfig,
+    /// Runtime tracing configuration.
+    #[serde(default)]
+    pub trace: TraceConfig,
+}
+
+/// Operational role of the node binary.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationalRole {
+    /// Full validating node that produces blocks and casts votes.
+    Validator,
+    /// Full node that does not produce blocks (default).
+    #[default]
+    Observer,
+    /// Light client (headers only, no full block storage).
+    Light,
+}
+
+/// Network the node connects to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkId {
+    #[default]
+    Mainnet,
+    Testnet,
+    Regtest,
+}
+
+/// `[node]` section — operational mode and network selection.
+#[derive(Debug, Default, Deserialize)]
+pub struct NodeSectionConfig {
+    /// Operational role: validator, observer, or light.
+    #[serde(default)]
+    pub role: OperationalRole,
+    /// Target network: mainnet, testnet, or regtest.
+    #[serde(default)]
+    pub network: NetworkId,
 }
 
 /// P2P networking configuration.
@@ -39,10 +79,26 @@ pub struct StorageConfig {
 }
 
 /// PoR consensus configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ConsensusConfig {
     pub validator_key_path: String,
     pub validator_list_path: PathBuf,
+}
+
+impl std::fmt::Debug for ConsensusConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsensusConfig")
+            .field(
+                "validator_key_path",
+                if self.validator_key_path.is_empty() {
+                    &"<not set>"
+                } else {
+                    &"[REDACTED]"
+                },
+            )
+            .field("validator_list_path", &self.validator_list_path)
+            .finish()
+    }
 }
 
 /// JSON-RPC and WebSocket API configuration.
@@ -82,8 +138,39 @@ pub struct MetricsConfig {
     pub enabled: bool,
 }
 
-/// Node identity configuration for PoR self-identification broadcasts.
+/// Runtime tracing configuration.
 #[derive(Debug, Deserialize)]
+pub struct TraceConfig {
+    /// Maximum number of entries in the RAM ring buffer.
+    #[serde(default = "default_buffer_capacity")]
+    pub buffer_capacity: usize,
+    /// Initial filter directive (e.g. "info", "noble_core=trace").
+    #[serde(default = "default_initial_filter")]
+    pub initial_filter: String,
+    /// Whether to also output traces to stderr (for development).
+    #[serde(default)]
+    pub stderr_enabled: bool,
+}
+
+fn default_buffer_capacity() -> usize {
+    50_000
+}
+fn default_initial_filter() -> String {
+    "info".to_string()
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            buffer_capacity: default_buffer_capacity(),
+            initial_filter: default_initial_filter(),
+            stderr_enabled: false,
+        }
+    }
+}
+
+/// Node identity configuration for PoR self-identification broadcasts.
+#[derive(Deserialize)]
 pub struct IdentityConfig {
     pub node_name: String,
     pub org_type: String,
@@ -99,6 +186,44 @@ pub struct IdentityConfig {
     /// Whether this node wants to cast consensus votes.
     #[serde(default)]
     pub wants_to_vote: bool,
+    /// Path to a PKCS#12 (.p12/.pfx) file for one-time PKI identity binding.
+    /// The private key is used once to create a CMS signature binding the NOBLE
+    /// identity key to the X.509 certificate, then can be removed.
+    #[serde(default)]
+    pub pkcs12_path: String,
+    /// Password for the PKCS#12 file. Redacted in Debug output.
+    #[serde(default)]
+    pub pkcs12_password: String,
+    /// Directory containing trusted CA certificates (PEM/DER) for verifying
+    /// PKI attestations from other nodes. Each node maintains its own trust store.
+    #[serde(default)]
+    pub ca_store_path: String,
+}
+
+impl std::fmt::Debug for IdentityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityConfig")
+            .field("node_name", &self.node_name)
+            .field("org_type", &self.org_type)
+            .field("org_name", &self.org_name)
+            .field("node_role", &self.node_role)
+            .field("contact_email", &self.contact_email)
+            .field("website", &self.website)
+            .field("host_address", &self.host_address)
+            .field("wants_to_validate", &self.wants_to_validate)
+            .field("wants_to_vote", &self.wants_to_vote)
+            .field("pkcs12_path", &self.pkcs12_path)
+            .field(
+                "pkcs12_password",
+                if self.pkcs12_password.is_empty() {
+                    &"<not set>"
+                } else {
+                    &"[REDACTED]"
+                },
+            )
+            .field("ca_store_path", &self.ca_store_path)
+            .finish()
+    }
 }
 
 impl NodeConfig {
@@ -143,8 +268,8 @@ impl Default for ConsensusConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            rpc_addr: "127.0.0.1:9933".to_string(),
-            ws_addr: "127.0.0.1:9944".to_string(),
+            rpc_addr: "127.0.0.1:9332".to_string(),
+            ws_addr: "127.0.0.1:9334".to_string(),
             max_connections: 100,
             rate_limit: 30,
             totp_enabled: false,
@@ -192,6 +317,9 @@ impl Default for IdentityConfig {
             host_address: String::new(),
             wants_to_validate: false,
             wants_to_vote: false,
+            pkcs12_path: String::new(),
+            pkcs12_password: String::new(),
+            ca_store_path: String::new(),
         }
     }
 }
@@ -201,18 +329,122 @@ mod tests {
     use super::*;
 
     #[test]
+    fn consensus_config_debug_redacts_key_path() {
+        let config = ConsensusConfig {
+            validator_key_path: "/secret/validator.key".to_string(),
+            validator_list_path: std::path::PathBuf::from("validators.txt"),
+        };
+        let debug_str = format!("{config:?}");
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED], got: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("/secret/validator.key"),
+            "Debug output should not contain actual key path"
+        );
+    }
+
+    #[test]
+    fn consensus_config_debug_shows_not_set_when_empty() {
+        let config = ConsensusConfig::default();
+        let debug_str = format!("{config:?}");
+        assert!(
+            debug_str.contains("<not set>"),
+            "Debug output should show <not set> for empty path, got: {debug_str}"
+        );
+    }
+
+    #[test]
     fn parse_default_config() {
         let toml_str = include_str!("../../noble.toml");
         let config: NodeConfig = toml::from_str(toml_str).expect("default noble.toml must parse");
+        assert_eq!(config.node.role, OperationalRole::Observer);
+        assert_eq!(config.node.network, NetworkId::Mainnet);
         assert_eq!(config.network.max_peers, 50);
         assert_eq!(config.storage.cache_size_mb, 256);
         assert!(config.storage.compression);
-        assert_eq!(config.api.rpc_addr, "127.0.0.1:9933");
-        assert_eq!(config.api.ws_addr, "127.0.0.1:9944");
+        assert_eq!(config.api.rpc_addr, "127.0.0.1:9332");
+        assert_eq!(config.api.ws_addr, "127.0.0.1:9334");
         assert_eq!(config.logging.level, "info");
         assert!(config.metrics.enabled);
         assert_eq!(config.identity.org_type, "Individual");
         assert_eq!(config.identity.node_role, "FullNode");
         assert!(config.identity.node_name.is_empty());
+    }
+
+    #[test]
+    fn node_section_defaults_when_missing() {
+        // Config without [node] section should use defaults
+        let toml_str = r#"
+            [network]
+            listen_addr = "/ip4/0.0.0.0/tcp/30333"
+            seeds = []
+            max_peers = 50
+            ban_threshold = 100
+
+            [storage]
+            data_dir = "data"
+            cache_size_mb = 256
+            compression = true
+
+            [consensus]
+            validator_key_path = ""
+            validator_list_path = "validators.txt"
+
+            [api]
+            rpc_addr = "127.0.0.1:9332"
+            ws_addr = "127.0.0.1:9334"
+            max_connections = 100
+            rate_limit = 30
+
+            [wallet]
+            keystore_path = "keystore"
+
+            [logging]
+            level = "info"
+            file = ""
+            rotation = "daily"
+
+            [metrics]
+            prometheus_addr = "127.0.0.1:9615"
+            enabled = true
+
+            [identity]
+            node_name = ""
+            org_type = "Individual"
+            org_name = ""
+            node_role = "FullNode"
+            contact_email = ""
+            website = ""
+            host_address = ""
+        "#;
+        let config: NodeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.node.role, OperationalRole::Observer);
+        assert_eq!(config.node.network, NetworkId::Mainnet);
+    }
+
+    #[test]
+    fn node_section_parses_all_variants() {
+        for (role_str, expected_role) in [
+            ("validator", OperationalRole::Validator),
+            ("observer", OperationalRole::Observer),
+            ("light", OperationalRole::Light),
+        ] {
+            let toml_str = format!(
+                r#"[node]
+                role = "{role_str}"
+                network = "testnet"
+                "#
+            );
+            // Parse just the node section
+            #[derive(Deserialize)]
+            struct Partial {
+                node: NodeSectionConfig,
+            }
+            let p: Partial = toml::from_str(&toml_str).unwrap();
+            assert_eq!(p.node.role, expected_role, "role={role_str}");
+            assert_eq!(p.node.network, NetworkId::Testnet);
+        }
     }
 }

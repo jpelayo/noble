@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-use noble_core::constants::{subsidy_at_height, TX_TYPE_TRANSFER};
+use noble_core::constants::{subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, TX_TYPE_TRANSFER};
 use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
@@ -62,6 +62,7 @@ impl MemoryStorage {
 }
 
 impl StorageEngine for MemoryStorage {
+    #[tracing::instrument(skip(self, block, block_hash, tx_ids), fields(task = "memory_storage_commit", height = block.header.height))]
     fn commit_block(
         &self,
         block: &Block,
@@ -160,11 +161,25 @@ impl StorageEngine for MemoryStorage {
             inner.balances.insert(pubkey.clone(), new_balance as u64);
         }
 
+        // Phase 3: MAX_SUPPLY cap enforcement
+        let block_subsidy = subsidy_at_height(height);
+        if block_subsidy > 0 {
+            let cumulative: u64 = inner.balances.values().sum();
+            if cumulative > MAX_SUPPLY {
+                return Err(StorageError::SupplyOverflow {
+                    cumulative,
+                    max: MAX_SUPPLY,
+                });
+            }
+        }
+
         // Update chain tip
         inner.chain_tip = Some(ChainTip {
             block_hash: *block_hash,
             height: block.header.height,
         });
+
+        tracing::debug!("committed block at height {}", block.header.height);
 
         Ok(())
     }
@@ -267,6 +282,7 @@ impl StorageEngine for MemoryStorage {
         Ok(inner.chain_tip.clone())
     }
 
+    #[tracing::instrument(skip(self), fields(task = "memory_storage_rollback", target_height, chain_id))]
     fn rollback_to_height(
         &self,
         target_height: u64,
@@ -274,6 +290,7 @@ impl StorageEngine for MemoryStorage {
     ) -> Result<ChainTip, StorageError> {
         let mut inner = self.inner.write().unwrap();
         Self::check_open(&inner)?;
+        tracing::debug!("rolling back to height {}", target_height);
 
         // Find tip
         let tip = inner
@@ -283,6 +300,15 @@ impl StorageEngine for MemoryStorage {
 
         if target_height >= tip.height {
             return Ok(tip.clone()); // nothing to do
+        }
+
+        // Enforce MAX_REORG_DEPTH
+        let depth = tip.height - target_height;
+        if depth > MAX_REORG_DEPTH {
+            return Err(StorageError::ReorgTooDeep {
+                depth,
+                max: MAX_REORG_DEPTH,
+            });
         }
 
         // Collect blocks to remove (target_height+1..=tip)

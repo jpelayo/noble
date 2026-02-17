@@ -77,17 +77,21 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .into_iter()
             .map(
                 |(pk, weight, liveness, added_at, friendly_name)| ValidatorEntry {
-                    pubkey: hex::encode(pk.to_wire_bytes()),
+                    public_key: hex::encode(pk.to_wire_bytes()),
+                    name: friendly_name,
+                    status: liveness.as_str().to_string(),
                     weight,
-                    liveness: liveness.as_str().to_string(),
-                    last_seen: None, // populated below
-                    added_at,
-                    friendly_name,
+                    reputation_score: 0.0, // placeholder until reputation system is complete
+                    blocks_produced: 0,    // placeholder
+                    cycles_active: 0,      // placeholder
+                    last_active: None,     // populated from peer records when available
+                    joined_cycle: added_at,
                 },
             )
             .collect();
 
         Ok(ValidatorListResponse {
+            selection_policy: "weighted_random".to_string(),
             validators: entries,
             count,
         })
@@ -115,10 +119,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let consensus = self.consensus.read().unwrap();
         let cycle = consensus.current_cycle();
         let phase = consensus.current_phase();
+        let (phase_idx, phase_remaining, cycle_remaining) = consensus.phase_timing();
 
         Ok(CycleStatusResponse {
-            current_cycle: cycle,
-            current_phase: format!("{:?}", phase),
+            cycle_number: cycle,
+            phase: format!("{:?}", phase),
+            phase_index: phase_idx,
+            phase_remaining_secs: phase_remaining,
+            cycle_remaining_secs: cycle_remaining,
         })
     }
 
@@ -128,8 +136,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut consensus = self.consensus.write().unwrap();
-        consensus.validator_list_mut().add_validator(pk, weight);
+        consensus
+            .validator_list_mut()
+            .add_validator(pk, weight, now);
         Ok(true)
     }
 

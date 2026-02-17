@@ -8,6 +8,7 @@
 
 use noble_core::{validate_block, Block, BlockValidationContext};
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
+use tracing::{debug, info};
 
 use crate::candidate::CandidateTracker;
 use crate::config::ConsensusConfig;
@@ -26,6 +27,9 @@ pub trait ConsensusStateMachine {
     fn current_cycle(&self) -> u64;
     /// Return the chain tip (height, block_hash).
     fn chain_tip(&self) -> (u64, Hash256);
+    /// Return phase timing: (phase_index, phase_remaining_secs, cycle_remaining_secs).
+    /// phase_index: 0 = Validation, 1 = Reflection.
+    fn phase_timing(&self) -> (u8, u64, u64);
 }
 
 /// The NOBLE PoR consensus engine.
@@ -111,6 +115,7 @@ impl CycleEngine {
         // Detect cycle boundary
         if new_cycle > self.tracked_cycle {
             let completed = self.tracked_cycle;
+            info!("cycle engine: state transition cycle {} -> {}", completed, new_cycle);
             self.tracked_cycle = new_cycle;
             outputs.extend(self.handle_cycle_boundary(completed));
         }
@@ -135,6 +140,8 @@ impl CycleEngine {
 
     fn handle_phase_transition(&mut self, cycle: u64, phase: CyclePhase) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        let old_phase = self.tracked_phase;
+        info!("cycle engine: state transition {:?} -> {:?}", old_phase, phase);
 
         match phase {
             CyclePhase::Validation => {
@@ -188,13 +195,16 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
+                info!("vote tally complete: winner = {}, strength = {:?}", candidate_hash, strength);
                 if let Some(entry) = self.candidate_tracker.get(&candidate_hash) {
                     let block = entry.block.clone();
                     let new_height = block.header.height;
                     let new_hash = candidate_hash;
 
                     // Collect orphaned txs from losing candidates
-                    let orphans = self.candidate_tracker.collect_orphaned_txs(&candidate_hash);
+                    let orphans = self
+                        .candidate_tracker
+                        .collect_orphaned_txs(&candidate_hash, self.chain_id);
                     if !orphans.is_empty() {
                         outputs.push(CycleIo::ReadmitTransactions(orphans));
                     }
@@ -219,13 +229,15 @@ impl CycleEngine {
                 }
             }
             MigrationResult::Indeterminate => {
+                debug!("cycle {}: vote tally indeterminate, no block committed", completed_cycle);
                 // Re-admit all candidate txs back to mempool
                 let all_txs: Vec<_> = self
                     .candidate_tracker
                     .preferred_candidate()
                     .map(|_| {
                         // Return all txs from all candidates
-                        self.candidate_tracker.collect_orphaned_txs(&Hash256::ZERO)
+                        self.candidate_tracker
+                            .collect_orphaned_txs(&Hash256::ZERO, self.chain_id)
                         // ZERO won't match any candidate
                     })
                     .unwrap_or_default();
@@ -249,6 +261,7 @@ impl CycleEngine {
 
     fn handle_block_proposed(&mut self, block: Box<Block>, from_peer: Vec<u8>) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        debug!("consensus: received block proposal at height {}", block.header.height);
 
         // Only accept block proposals during Validation phase
         if self.tracked_phase != CyclePhase::Validation {
@@ -321,6 +334,7 @@ impl CycleEngine {
 
     fn handle_vote_received(&mut self, vote: PorVote, from_peer: Vec<u8>) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        debug!("consensus: received vote for candidate {}", vote.candidate_hash);
 
         // Only accept votes during Reflection phase
         if self.tracked_phase != CyclePhase::Reflection {
@@ -357,7 +371,9 @@ impl CycleEngine {
 }
 
 impl ConsensusStateMachine for CycleEngine {
+    #[tracing::instrument(skip(self, event), fields(task = "consensus_step", cycle = self.tracked_cycle))]
     fn step(&mut self, event: CycleEvent) -> Vec<CycleIo> {
+        debug!("consensus: processing event {:?}", std::mem::discriminant(&event));
         match event {
             CycleEvent::Tick { now } => self.handle_tick(now),
             CycleEvent::PhaseTransition { cycle, new_phase } => {
@@ -387,6 +403,20 @@ impl ConsensusStateMachine for CycleEngine {
     fn chain_tip(&self) -> (u64, Hash256) {
         (self.tip_height, self.tip_hash)
     }
+
+    fn phase_timing(&self) -> (u8, u64, u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let phase_idx = match self.tracked_phase {
+            CyclePhase::Validation => 0,
+            CyclePhase::Reflection => 1,
+        };
+        let phase_remaining = self.cycle_mgr.seconds_until_phase_change(now);
+        let cycle_remaining = self.cycle_mgr.seconds_until_cycle_boundary(now);
+        (phase_idx, phase_remaining, cycle_remaining)
+    }
 }
 
 #[cfg(test)]
@@ -409,7 +439,7 @@ mod tests {
     ) -> CycleEngine {
         let mut val_list = ValidatorList::new();
         for v in validators {
-            val_list.add_validator(v.clone(), 100);
+            val_list.add_validator(v.clone(), 100, 0);
         }
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),

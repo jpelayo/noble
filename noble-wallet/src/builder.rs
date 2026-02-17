@@ -91,6 +91,7 @@ impl TransactionBuilder {
         fee: u64,
         metadata: Vec<MetadataEntry>,
     ) -> Result<Transaction, WalletError> {
+        tracing::debug!(task = "wallet_build", "building notarization transaction");
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -119,6 +120,7 @@ impl TransactionBuilder {
             .compute_signing_message()
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
         Ok(tx)
     }
 
@@ -131,6 +133,7 @@ impl TransactionBuilder {
         fee: u64,
         memo: Option<String>,
     ) -> Result<Transaction, WalletError> {
+        tracing::debug!(task = "wallet_build", "building transfer transaction, amount: {}", amount);
         if amount == 0 {
             return Err(WalletError::InvalidRecipient("amount must be > 0".into()));
         }
@@ -172,6 +175,7 @@ impl TransactionBuilder {
             .compute_signing_message()
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
         Ok(tx)
     }
 
@@ -316,8 +320,8 @@ mod tests {
     fn setup_keystore() -> (crate::keystore::KeyStore, NoblePublicKey) {
         let dir = tempdir().unwrap();
         let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("test-pass").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass").unwrap();
+        ks.unlock("test-pass-long").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
         (ks, pk)
     }
 

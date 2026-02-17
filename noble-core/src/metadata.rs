@@ -3,6 +3,8 @@
 
 //! Metadata entries for NOBLE transactions.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN};
@@ -55,14 +57,11 @@ pub fn validate_metadata(entries: &[MetadataEntry]) -> Result<(), ValidationErro
         entry.validate()?;
     }
 
-    // T9: check for duplicate keys
-    for i in 0..entries.len() {
-        for j in (i + 1)..entries.len() {
-            if entries[i].key == entries[j].key {
-                return Err(ValidationError::DuplicateMetadataKey(
-                    entries[i].key.clone(),
-                ));
-            }
+    // T9: check for duplicate keys (O(n) via HashSet)
+    let mut seen = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if !seen.insert(&entry.key) {
+            return Err(ValidationError::DuplicateMetadataKey(entry.key.clone()));
         }
     }
 

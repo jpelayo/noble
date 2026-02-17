@@ -90,10 +90,14 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         rate_limiter: None,   // disabled in tests
         totp_validator: None, // auth disabled in tests
         totp_secret_path: None,
+        rpc_port: 9332,
+        ws_port: 9334,
+        p2p_port: 30333,
         new_block_tx,
         new_tx_tx,
         cycle_phase_tx,
         peer_update_tx,
+        trace_handle: None, // trace disabled in tests
     });
 
     (state, dir)
@@ -284,13 +288,13 @@ async fn estimate_fee() {
         .await
         .unwrap();
 
-    // Fee estimates should be positive numbers: low <= medium <= high
-    let low = resp["low"].as_u64().unwrap();
-    let medium = resp["medium"].as_u64().unwrap();
-    let high = resp["high"].as_u64().unwrap();
-    assert!(low > 0);
-    assert!(low <= medium);
-    assert!(medium <= high);
+    // Fee estimates should be positive numbers: min_fee <= recommended_fee <= high_priority_fee
+    let min_fee = resp["min_fee"].as_u64().unwrap();
+    let recommended = resp["recommended_fee"].as_u64().unwrap();
+    let high_priority = resp["high_priority_fee"].as_u64().unwrap();
+    assert!(min_fee > 0);
+    assert!(min_fee <= recommended);
+    assert!(recommended <= high_priority);
 }
 
 #[tokio::test]
@@ -305,7 +309,7 @@ async fn get_mempool_info() {
         .unwrap();
 
     // Empty mempool
-    assert_eq!(resp["size"], 0);
+    assert_eq!(resp["count"], 0);
     assert_eq!(resp["total_bytes"], 0);
 }
 
@@ -369,10 +373,17 @@ async fn get_node_info() {
         .await
         .unwrap();
 
-    assert_eq!(resp["version"], noble_core::PROTOCOL_VERSION as u64);
+    assert_eq!(resp["version"], noble_core::SOFTWARE_VERSION);
+    assert_eq!(
+        resp["protocol_version"],
+        noble_core::PROTOCOL_VERSION as u64
+    );
     assert_eq!(resp["chain_id"], MAINNET_CHAIN_ID);
     // uptime_secs should be a small number (just started)
     assert!(resp["uptime_secs"].as_u64().unwrap() < 60);
+    assert_eq!(resp["rpc_port"], 9332);
+    assert_eq!(resp["ws_port"], 9334);
+    assert_eq!(resp["p2p_port"], 30333);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +424,145 @@ async fn get_network_info() {
     assert_eq!(resp["peer_count"], 0);
     assert_eq!(resp["inbound"], 0);
     assert_eq!(resp["outbound"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// Sync status
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_sync_status_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getSyncStatus", rpc_params![])
+        .await
+        .unwrap();
+
+    assert_eq!(resp["synced"], true);
+    assert_eq!(resp["current_height"], 0);
+    assert!(resp["highest_known"].is_number());
+    assert!(resp["progress"].is_number());
+    assert!(resp["state"].is_string());
+}
+
+// ---------------------------------------------------------------------------
+// Cycle status
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_cycle_status_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getCycleStatus", rpc_params![])
+        .await
+        .unwrap();
+
+    assert!(resp["cycle_number"].is_number());
+    assert!(resp["phase"].is_string());
+    assert!(resp["phase_index"].is_number());
+    assert!(resp["phase_remaining_secs"].is_number());
+    assert!(resp["cycle_remaining_secs"].is_number());
+}
+
+// ---------------------------------------------------------------------------
+// Address balance shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_address_balance_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    // Create a valid ed25519 address
+    let mut wire = vec![0x01u8]; // Ed25519 scheme_id
+    wire.extend_from_slice(&[0xAB; 32]);
+    let addr = hex::encode(&wire);
+
+    let resp: serde_json::Value = client
+        .request("noble_getAddressBalance", rpc_params![&addr])
+        .await
+        .unwrap();
+
+    assert_eq!(resp["public_key"], addr);
+    assert!(resp["balance"].is_number());
+    assert!(resp["available"].is_number());
+    assert!(resp["pending"].is_number());
+    assert!(resp["tx_count"].is_number());
+}
+
+// ---------------------------------------------------------------------------
+// Address history shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_address_history_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let mut wire = vec![0x01u8];
+    wire.extend_from_slice(&[0xAB; 32]);
+    let addr = hex::encode(&wire);
+
+    let resp: serde_json::Value = client
+        .request("noble_getAddressHistory", rpc_params![&addr, 0, 10])
+        .await
+        .unwrap();
+
+    assert_eq!(resp["public_key"], addr);
+    assert!(resp["transactions"].is_array());
+    assert!(resp["total"].is_number());
+    assert_eq!(resp["page"], 0);
+    assert_eq!(resp["limit"], 10);
+}
+
+// ---------------------------------------------------------------------------
+// Wallet info shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_wallet_info_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getWalletInfo", rpc_params![])
+        .await
+        .unwrap();
+
+    assert!(!resp["unlocked"].as_bool().unwrap());
+    assert!(resp["key_count"].is_number());
+    assert!(resp["balance"].is_number());
+    assert!(resp["available"].is_number());
+    assert!(resp["pending"].is_number());
+}
+
+// ---------------------------------------------------------------------------
+// Validator list shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_validator_list_shape() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getValidatorList", rpc_params![])
+        .await
+        .unwrap();
+
+    assert!(resp["selection_policy"].is_string());
+    assert!(resp["validators"].is_array());
+    assert!(resp["count"].is_number());
 }
 
 // ---------------------------------------------------------------------------

@@ -62,8 +62,8 @@ mod tests {
     ) -> Transaction {
         let dir = tempfile::tempdir().unwrap();
         let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("test-pass").unwrap();
-        let signer = ks.create_key(SCHEME_ED25519, "test-pass").unwrap();
+        ks.unlock("test-pass-long").unwrap();
+        let signer = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
 
         crate::builder::TransactionBuilder::build_notarization_with_locator(
             &ks,

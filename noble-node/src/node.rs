@@ -4,22 +4,51 @@
 //! Node orchestrator — ties all subsystems together.
 //!
 //! The `Node` struct owns shared references to storage, mempool, consensus,
-//! wallet, and network stats. It is initialized from a `NodeConfig` and provides
-//! the foundation for the async event loop (to be wired in a future sprint).
+//! wallet, and network stats. It is initialized from a `NodeConfig` and
+//! provides the async event loop that wires network, consensus, and API.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
+use thiserror::Error;
+use tokio::sync::{broadcast, mpsc};
+
 use noble_api::auth::TotpValidator;
+use noble_api::state::ApiState;
 use noble_api::NetworkStats;
-use noble_consensus::{ConsensusConfig as CConsensusConfig, CycleEngine, ValidatorList};
+use noble_consensus::{
+    ConsensusConfig as CConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo,
+    ValidatorList,
+};
 use noble_core::MAINNET_CHAIN_ID;
 use noble_crypto::Hash256;
-use noble_mempool::Mempool;
+use noble_mempool::{BalanceLookup, ChainLookup, Mempool};
+use noble_network::{NetworkCommand, NetworkEvent};
 use noble_storage::{IntegrityReport, MemoryStorage, StorageEngine};
 use noble_wallet::{KeyStore, WalletState};
 
+use crate::bridge;
+use crate::ca_store::CaStore;
 use crate::config::NodeConfig;
+use crate::providers::{StorageBlockProvider, StorageTxProvider};
+
+/// Typed errors for node operations.
+#[derive(Debug, Error)]
+#[allow(dead_code)]
+pub enum NodeError {
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("network error: {0}")]
+    Network(String),
+    #[error("api error: {0}")]
+    Api(String),
+    #[error("config error: {0}")]
+    Config(String),
+    #[error("consensus error: {0}")]
+    Consensus(String),
+    #[error("shutdown signal received")]
+    Shutdown,
+}
 
 /// The running NOBLE node, generic over the storage backend.
 pub struct Node<S: StorageEngine + Send + Sync + 'static> {
@@ -39,6 +68,12 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub chain_id: u32,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
+    /// PKI identity attestation (CMS/PKCS#7 binding), loaded or created at startup.
+    #[allow(dead_code)]
+    pub pki_attestation: Option<noble_core::ExternalAttestation>,
+    /// CA trust store for verifying peer PKI attestations.
+    #[allow(dead_code)]
+    pub ca_store: Option<CaStore>,
 }
 
 impl Node<MemoryStorage> {
@@ -111,6 +146,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         let network_stats = Arc::new(RwLock::new(NetworkStats::default()));
 
+        // --- PKI identity attestation ---
+        let pki_attestation = init_pki_attestation(config);
+
+        // --- CA trust store ---
+        let ca_store = init_ca_store(config);
+
         Ok(Self {
             storage,
             mempool,
@@ -120,6 +161,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             network_stats,
             chain_id: MAINNET_CHAIN_ID,
             start_time: std::time::Instant::now(),
+            pki_attestation,
+            ca_store,
         })
     }
 
@@ -144,6 +187,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
     /// Rollback the chain to the given height, recalculating balances.
     /// Used when corruption is detected.
+    #[allow(dead_code)]
     pub fn rollback_to_height(
         &self,
         target_height: u64,
@@ -159,6 +203,352 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
         Ok(tip)
     }
+
+    /// Run the node event loop.
+    ///
+    /// Starts the P2P network, JSON-RPC server, and runs `tokio::select!`
+    /// processing: network events → consensus → storage, consensus ticks,
+    /// and CTRL+C graceful shutdown.
+    pub async fn run(
+        self,
+        config: &NodeConfig,
+        trace_handle: Option<Arc<noble_api::trace_types::TraceHandle>>,
+    ) -> Result<(), NodeError> {
+        // --- Parse port numbers from config addresses ---
+        let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(9332);
+        let ws_port = parse_port(&config.api.ws_addr).unwrap_or(9334);
+        let p2p_port = parse_p2p_port(&config.network.listen_addr).unwrap_or(30333);
+
+        // --- Start network service ---
+        let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
+        let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone()));
+
+        let mut net_config = noble_network::NetworkConfig::default();
+        net_config.listen_addr = config.network.listen_addr.clone();
+        net_config.bootstrap_peers = config.network.seeds.clone();
+        net_config.max_outbound = (config.network.max_peers as usize / 5).max(4);
+        net_config.max_inbound =
+            (config.network.max_peers as usize).saturating_sub(net_config.max_outbound);
+        net_config.ban_threshold = config.network.ban_threshold;
+        net_config.chain_id = self.chain_id;
+
+        let mut network = noble_network::start_network(net_config, block_provider, tx_provider)
+            .await
+            .map_err(|e| NodeError::Network(e.to_string()))?;
+
+        let network_cmd = network.command_sender();
+        tracing::info!("P2P network started on {}", config.network.listen_addr);
+
+        // --- Initialize TOTP auth ---
+        let (totp_validator, totp_secret_path) =
+            init_totp_validator(config).map_err(|e| NodeError::Config(e.to_string()))?;
+
+        // --- Build broadcast channels for WebSocket subscriptions ---
+        let (new_block_tx, _) = broadcast::channel(64);
+        let (new_tx_tx, _) = broadcast::channel(256);
+        let (cycle_phase_tx, _) = broadcast::channel(16);
+        let (peer_update_tx, _) = broadcast::channel(64);
+
+        // --- Build ApiState ---
+        let api_state = Arc::new(ApiState {
+            storage: self.storage.clone(),
+            mempool: self.mempool.clone(),
+            consensus: self.consensus.clone(),
+            network_cmd: network_cmd.clone(),
+            wallet_keystore: self.wallet_keystore.clone(),
+            wallet_state: self.wallet_state.clone(),
+            network_stats: self.network_stats.clone(),
+            chain_id: self.chain_id,
+            start_time: self.start_time,
+            max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
+            rate_limiter: None,
+            totp_validator,
+            totp_secret_path,
+            rpc_port,
+            ws_port,
+            p2p_port,
+            new_block_tx: new_block_tx.clone(),
+            new_tx_tx: new_tx_tx.clone(),
+            cycle_phase_tx: cycle_phase_tx.clone(),
+            peer_update_tx: peer_update_tx.clone(),
+            trace_handle,
+        });
+
+        // --- Start RPC server ---
+        let rpc_handle = noble_api::server::start_server(api_state, &config.api.rpc_addr)
+            .await
+            .map_err(|e| NodeError::Api(e.to_string()))?;
+
+        tracing::info!("JSON-RPC server listening on {}", config.api.rpc_addr);
+
+        // --- Consensus tick interval ---
+        let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // --- Mempool expiry sweep interval ---
+        let mut expiry_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        expiry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        tracing::info!(
+            "Node event loop started — chain height: {}",
+            self.chain_height()
+        );
+
+        // --- Main event loop ---
+        loop {
+            tokio::select! {
+                // Network events
+                event = network.recv_event() => {
+                    match event {
+                        Some(net_event) => {
+                            self.handle_network_event(
+                                &net_event,
+                                &network_cmd,
+                                &new_block_tx,
+                                &new_tx_tx,
+                                &peer_update_tx,
+                                &cycle_phase_tx,
+                            );
+                        }
+                        None => {
+                            tracing::warn!("Network event channel closed — shutting down");
+                            break;
+                        }
+                    }
+                }
+
+                // Consensus tick
+                _ = tick_interval.tick() => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    let actions = {
+                        let mut engine = self.consensus.write().unwrap();
+                        engine.step(CycleEvent::Tick { now })
+                    };
+                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx);
+                }
+
+                // Mempool expiry sweep
+                _ = expiry_interval.tick() => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let expired = {
+                        let mut mempool = self.mempool.lock().unwrap();
+                        mempool.expire(now)
+                    };
+                    if expired > 0 {
+                        tracing::debug!("Swept {expired} expired mempool transactions");
+                    }
+                }
+
+                // Graceful shutdown on CTRL+C
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received shutdown signal");
+                    break;
+                }
+            }
+        }
+
+        // --- Graceful shutdown ---
+        tracing::info!("Shutting down...");
+        let _ = network_cmd.try_send(NetworkCommand::Shutdown);
+        rpc_handle
+            .stop()
+            .map_err(|e| NodeError::Api(format!("RPC stop: {e}")))?;
+        tracing::info!("Node shutdown complete");
+        Ok(())
+    }
+
+    /// Handle a single network event: route to consensus, update stats, etc.
+    fn handle_network_event(
+        &self,
+        event: &NetworkEvent,
+        network_cmd: &mpsc::Sender<NetworkCommand>,
+        new_block_tx: &broadcast::Sender<serde_json::Value>,
+        new_tx_tx: &broadcast::Sender<serde_json::Value>,
+        peer_update_tx: &broadcast::Sender<serde_json::Value>,
+        cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
+    ) {
+        match event {
+            NetworkEvent::PeerConnected { peer_id, addr, .. } => {
+                if let Ok(mut stats) = self.network_stats.write() {
+                    stats.peer_count += 1;
+                    stats.inbound_count += 1; // simplified; real impl tracks direction
+                }
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "connected",
+                    "peer_id": hex::encode(peer_id),
+                    "addr": addr,
+                }));
+                tracing::debug!("Peer connected: {addr}");
+            }
+            NetworkEvent::PeerDisconnected { peer_id } => {
+                if let Ok(mut stats) = self.network_stats.write() {
+                    stats.peer_count = stats.peer_count.saturating_sub(1);
+                }
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "disconnected",
+                    "peer_id": hex::encode(peer_id),
+                }));
+            }
+            NetworkEvent::PeerBanned { peer_id, reason } => {
+                tracing::warn!("Peer banned: {} — {reason}", hex::encode(peer_id));
+            }
+            NetworkEvent::TransactionAnnounced { tx_id, .. } => {
+                let _ = new_tx_tx.send(serde_json::json!({
+                    "tx_id": hex::encode(tx_id),
+                }));
+            }
+            _ => {
+                // Route to consensus engine
+                if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {
+                    let actions = {
+                        let mut engine = self.consensus.write().unwrap();
+                        engine.step(cycle_event)
+                    };
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx);
+                }
+            }
+        }
+
+        let _ = cycle_phase_tx; // used for phase transition notifications (future)
+    }
+
+    /// Process actions emitted by the consensus engine.
+    fn process_cycle_actions(
+        &self,
+        actions: Vec<CycleIo>,
+        network_cmd: &mpsc::Sender<NetworkCommand>,
+        new_block_tx: &broadcast::Sender<serde_json::Value>,
+    ) {
+        for action in actions {
+            match action {
+                CycleIo::CommitBlock(block) => {
+                    let block_hash = match block.header.compute_block_hash() {
+                        Ok(h) => h,
+                        Err(e) => {
+                            tracing::error!("Failed to compute block hash: {e}");
+                            continue;
+                        }
+                    };
+                    let tx_ids: Vec<_> = block
+                        .transactions
+                        .iter()
+                        .filter_map(|tx| tx.compute_tx_id(self.chain_id).ok())
+                        .collect();
+
+                    if let Ok(storage) = self.storage.read() {
+                        if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
+                            tracing::error!("Failed to commit block {}: {e}", block.header.height);
+                            continue;
+                        }
+                    }
+
+                    // Update consensus tip
+                    if let Ok(mut engine) = self.consensus.write() {
+                        engine.update_tip(block.header.height, block_hash);
+                    }
+
+                    // Remove committed txs from mempool
+                    {
+                        let mut mempool = self.mempool.lock().unwrap();
+                        for tx_id in &tx_ids {
+                            mempool.remove(tx_id);
+                        }
+                    }
+
+                    tracing::info!(
+                        "Block {} committed (hash: {}, txs: {})",
+                        block.header.height,
+                        hex::encode(block_hash.as_bytes()),
+                        tx_ids.len()
+                    );
+
+                    let _ = new_block_tx.send(serde_json::json!({
+                        "height": block.header.height,
+                        "hash": hex::encode(block_hash.as_bytes()),
+                        "tx_count": tx_ids.len(),
+                    }));
+                }
+                CycleIo::ReadmitTransactions(txs) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    let storage = match self.storage.read() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
+                    let balance_lookup = StorageBalanceLookupAdapter { storage: &*storage };
+                    let mut mempool = self.mempool.lock().unwrap();
+                    for tx in txs {
+                        let _ = mempool.admit(&tx, now, &chain_lookup, &balance_lookup);
+                    }
+                }
+                CycleIo::Log(msg) => {
+                    tracing::info!("[consensus] {msg}");
+                }
+                CycleIo::EmitMetric { name, value } => {
+                    tracing::debug!("metric: {name} = {value}");
+                }
+                CycleIo::SetTimer { duration_secs } => {
+                    tracing::debug!("consensus timer: {duration_secs}s (handled by tick interval)");
+                }
+                other => {
+                    // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network
+                    let cmds = bridge::cycle_io_to_network_commands(other);
+                    for cmd in cmds {
+                        let _ = network_cmd.try_send(cmd);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Adapter structs for mempool admit within the event loop
+struct StorageChainLookupAdapter<'a, S: StorageEngine> {
+    storage: &'a S,
+}
+
+impl<S: StorageEngine> ChainLookup for StorageChainLookupAdapter<'_, S> {
+    fn is_confirmed(&self, tx_id: &Hash256) -> bool {
+        self.storage.has_transaction(tx_id).unwrap_or(false)
+    }
+}
+
+struct StorageBalanceLookupAdapter<'a, S: StorageEngine> {
+    storage: &'a S,
+}
+
+impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
+    fn get_balance(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
+        self.storage.get_balance(pubkey).unwrap_or(0)
+    }
+}
+
+/// Parse port number from a "host:port" address string.
+fn parse_port(addr: &str) -> Option<u16> {
+    addr.rsplit(':').next()?.parse().ok()
+}
+
+/// Parse port number from a multiaddr string like "/ip4/0.0.0.0/tcp/30333".
+fn parse_p2p_port(multiaddr: &str) -> Option<u16> {
+    let parts: Vec<&str> = multiaddr.split('/').collect();
+    // Find the segment after "tcp"
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "tcp" {
+            return parts.get(i + 1)?.parse().ok();
+        }
+    }
+    None
 }
 
 /// Result of TOTP validator initialization.
@@ -196,6 +586,12 @@ pub fn init_totp_validator(
     } else {
         let (v, base32) = TotpValidator::generate()?;
         atomic_write_file(&secret_path, base32.as_bytes())?;
+        // Restrict TOTP secret file to owner-only (0o600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         tracing::info!(
             "TOTP auth: new secret generated at {}",
             secret_path.display()
@@ -207,6 +603,94 @@ pub fn init_totp_validator(
 
     let _ = base32; // used only for logging/file write above
     Ok((Some(Arc::new(RwLock::new(validator))), Some(secret_path)))
+}
+
+/// Initialize PKI identity attestation from config.
+///
+/// 1. If a saved attestation file exists, load it.
+/// 2. Else if a PKCS#12 file is configured, sign a binding and save the attestation.
+/// 3. Otherwise, no attestation.
+fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttestation> {
+    let attestation_path = config.storage.data_dir.join("identity_attestation.cbor");
+
+    // Try loading existing attestation
+    if attestation_path.exists() {
+        match crate::pkcs12::load_attestation(&attestation_path) {
+            Ok(att) => {
+                tracing::info!(
+                    "PKI attestation loaded from {} (scheme: {}, scope: {})",
+                    attestation_path.display(),
+                    att.scheme,
+                    att.scope
+                );
+                return Some(att);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load saved PKI attestation: {e}");
+            }
+        }
+    }
+
+    // Try creating attestation from PKCS#12 file
+    if config.identity.pkcs12_path.is_empty() {
+        return None;
+    }
+
+    let p12_path = std::path::Path::new(&config.identity.pkcs12_path);
+    if !p12_path.exists() {
+        tracing::warn!(
+            "PKCS#12 file not found: {} — skipping PKI binding",
+            p12_path.display()
+        );
+        return None;
+    }
+
+    // Load PKCS#12 and create binding
+    let identity = match crate::pkcs12::Pkcs12Identity::from_file(
+        p12_path,
+        &config.identity.pkcs12_password,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Failed to load PKCS#12 file: {e}");
+            return None;
+        }
+    };
+
+    if let Some(cn) = identity.subject_cn() {
+        tracing::info!("PKCS#12 identity loaded: CN={cn}");
+    }
+
+    // We need the node's identity key to create the binding.
+    // For now, use a placeholder — the real key comes from the validator key or wallet.
+    // In practice, the user would configure which key to bind.
+    tracing::info!("PKCS#12 loaded but no identity key configured for binding yet");
+    tracing::info!("To complete PKI binding, set validator_key_path in [consensus] section");
+
+    None
+}
+
+/// Initialize the CA trust store from config.
+fn init_ca_store(config: &NodeConfig) -> Option<CaStore> {
+    if config.identity.ca_store_path.is_empty() {
+        return None;
+    }
+
+    let ca_dir = std::path::Path::new(&config.identity.ca_store_path);
+    match CaStore::from_directory(ca_dir) {
+        Ok(store) => {
+            tracing::info!(
+                "CA trust store loaded: {} certificates from {}",
+                store.cert_count(),
+                ca_dir.display()
+            );
+            Some(store)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load CA trust store: {e}");
+            None
+        }
+    }
 }
 
 /// Write `data` to `path` atomically (write to temp, then rename).
@@ -279,7 +763,7 @@ mod tests {
     fn node_config_default_is_valid() {
         let config = NodeConfig::default();
         assert_eq!(config.network.max_peers, 50);
-        assert_eq!(config.api.rpc_addr, "127.0.0.1:9933");
+        assert_eq!(config.api.rpc_addr, "127.0.0.1:9332");
         assert_eq!(config.logging.level, "info");
         assert!(config.metrics.enabled);
     }
@@ -371,5 +855,146 @@ mod tests {
         let v2_locked = v2.unwrap();
         let v2_locked = v2_locked.read().unwrap();
         assert_eq!(v1_locked.secret_base32(), v2_locked.secret_base32());
+    }
+
+    // --- Phase 8: Event loop helpers ---
+
+    #[test]
+    fn parse_port_from_addr() {
+        assert_eq!(parse_port("127.0.0.1:9332"), Some(9332));
+        assert_eq!(parse_port("0.0.0.0:9334"), Some(9334));
+        assert_eq!(parse_port("127.0.0.1:0"), Some(0));
+        assert_eq!(parse_port("no_colon"), None);
+    }
+
+    #[test]
+    fn parse_p2p_port_from_multiaddr() {
+        assert_eq!(parse_p2p_port("/ip4/0.0.0.0/tcp/30333"), Some(30333));
+        assert_eq!(parse_p2p_port("/ip4/127.0.0.1/tcp/9333"), Some(9333));
+        assert_eq!(parse_p2p_port("/ip4/0.0.0.0/udp/1234"), None);
+        assert_eq!(parse_p2p_port(""), None);
+    }
+
+    #[test]
+    fn node_error_display() {
+        let e = NodeError::Storage("disk full".into());
+        assert_eq!(e.to_string(), "storage error: disk full");
+
+        let e = NodeError::Network("connection refused".into());
+        assert_eq!(e.to_string(), "network error: connection refused");
+
+        let e = NodeError::Api("bind failed".into());
+        assert_eq!(e.to_string(), "api error: bind failed");
+
+        let e = NodeError::Config("missing field".into());
+        assert_eq!(e.to_string(), "config error: missing field");
+
+        let e = NodeError::Consensus("invalid vote".into());
+        assert_eq!(e.to_string(), "consensus error: invalid vote");
+
+        let e = NodeError::Shutdown;
+        assert_eq!(e.to_string(), "shutdown signal received");
+    }
+
+    #[test]
+    fn handle_network_event_updates_peer_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore");
+
+        let node = Node::init_memory(&config).unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let (block_tx, _) = broadcast::channel(16);
+        let (tx_tx, _) = broadcast::channel(16);
+        let (peer_tx, _) = broadcast::channel(16);
+        let (cycle_tx, _) = broadcast::channel(16);
+
+        // Peer connect should increment count
+        let connect_event = NetworkEvent::PeerConnected {
+            peer_id: vec![1, 2, 3],
+            addr: "/ip4/1.2.3.4/tcp/30333".to_string(),
+            chain_tip: None,
+        };
+        node.handle_network_event(&connect_event, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx);
+        assert_eq!(node.network_stats.read().unwrap().peer_count, 1);
+
+        // Peer disconnect should decrement
+        let disconnect_event = NetworkEvent::PeerDisconnected {
+            peer_id: vec![1, 2, 3],
+        };
+        node.handle_network_event(
+            &disconnect_event,
+            &tx,
+            &block_tx,
+            &tx_tx,
+            &peer_tx,
+            &cycle_tx,
+        );
+        assert_eq!(node.network_stats.read().unwrap().peer_count, 0);
+    }
+
+    #[test]
+    fn pki_attestation_none_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore");
+        config.storage.data_dir = dir.path().to_path_buf();
+
+        let node = Node::init_memory(&config).unwrap();
+        assert!(
+            node.pki_attestation.is_none(),
+            "no attestation without PKCS#12 config"
+        );
+        assert!(node.ca_store.is_none(), "no CA store without config");
+    }
+
+    #[test]
+    fn pki_attestation_loads_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore");
+        config.storage.data_dir = dir.path().to_path_buf();
+
+        // Save a mock attestation
+        let att = noble_core::ExternalAttestation {
+            scheme: "pkcs7".to_string(),
+            scope: "identity".to_string(),
+            signer_fingerprint: [0xCC; 32],
+            signature_data: vec![10, 20, 30],
+        };
+        let att_path = dir.path().join("identity_attestation.cbor");
+        crate::pkcs12::save_attestation(&att_path, &att).unwrap();
+
+        let node = Node::init_memory(&config).unwrap();
+        assert!(
+            node.pki_attestation.is_some(),
+            "should load saved attestation"
+        );
+        let loaded = node.pki_attestation.unwrap();
+        assert_eq!(loaded.scheme, "pkcs7");
+        assert_eq!(loaded.signer_fingerprint, [0xCC; 32]);
+    }
+
+    #[test]
+    fn process_cycle_actions_log_and_metric() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore");
+
+        let node = Node::init_memory(&config).unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let (block_tx, _) = broadcast::channel(16);
+
+        // Log and EmitMetric should not panic
+        let actions = vec![
+            CycleIo::Log("test message".to_string()),
+            CycleIo::EmitMetric {
+                name: "test_metric".to_string(),
+                value: 42.0,
+            },
+            CycleIo::SetTimer { duration_secs: 10 },
+        ];
+        node.process_cycle_actions(actions, &tx, &block_tx);
+        // No assertion needed — just verifying no panics
     }
 }

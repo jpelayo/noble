@@ -39,7 +39,11 @@ impl SigCache {
 
     /// Check if a tx_id's signatures have been previously verified.
     pub fn contains(&self, tx_id: &Hash256) -> bool {
-        self.entries.contains_key(tx_id)
+        let hit = self.entries.contains_key(tx_id);
+        if hit {
+            tracing::trace!("sigcache hit for tx");
+        }
+        hit
     }
 
     /// Record that a tx_id's signatures have been verified.
@@ -48,13 +52,18 @@ impl SigCache {
             return; // Already cached
         }
 
-        // Evict oldest if at capacity
-        if self.entries.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
+        // Evict oldest if at capacity, skipping phantom entries
+        while self.entries.len() >= self.capacity {
+            match self.order.pop_front() {
+                Some(oldest) if self.entries.contains_key(&oldest) => {
+                    self.entries.remove(&oldest);
+                }
+                Some(_) => continue, // phantom entry — already removed, skip
+                None => break,
             }
         }
 
+        tracing::trace!("sigcache miss, inserting");
         self.entries.insert(tx_id, ());
         self.order.push_back(tx_id);
     }
@@ -142,5 +151,39 @@ mod tests {
         let cache = SigCache::new(10);
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn phantom_entries_skipped_on_eviction() {
+        // Capacity 2: insert h1, h2, remove h1 (phantom), insert h3, insert h4
+        let mut cache = SigCache::new(2);
+        let h1 = make_hash(1);
+        let h2 = make_hash(2);
+        let h3 = make_hash(3);
+        let h4 = make_hash(4);
+
+        cache.insert(h1);
+        cache.insert(h2);
+        assert_eq!(cache.len(), 2);
+
+        // Remove h1 explicitly (creates phantom in order deque)
+        cache.remove(&h1);
+        assert_eq!(cache.len(), 1); // only h2
+
+        // Insert h3 — no eviction needed (len=1 < capacity=2)
+        cache.insert(h3);
+        assert_eq!(cache.len(), 2); // h2, h3
+
+        // Insert h4 — needs eviction. order is [h1(phantom), h2, h3].
+        // Should skip phantom h1, then evict h2.
+        cache.insert(h4);
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains(&h1));
+        assert!(
+            !cache.contains(&h2),
+            "h2 should be evicted after phantom skip"
+        );
+        assert!(cache.contains(&h3));
+        assert!(cache.contains(&h4));
     }
 }

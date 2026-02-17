@@ -36,6 +36,7 @@ use crate::sigcache::SigCache;
 pub const DEFAULT_MAX_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 pub const DEFAULT_MAX_COUNT: usize = 10_000;
 pub const DEFAULT_EXPIRY_SECS: u64 = 72 * 3600; // 72 hours
+pub const DEFAULT_MAX_PER_SENDER: usize = 64;
 
 /// Configuration for the mempool.
 #[derive(Debug, Clone)]
@@ -50,6 +51,8 @@ pub struct MempoolConfig {
     pub sig_cache_size: usize,
     /// Chain ID for tx_id computation.
     pub chain_id: u32,
+    /// Maximum transactions per sender in the mempool.
+    pub max_per_sender: usize,
 }
 
 impl Default for MempoolConfig {
@@ -60,6 +63,7 @@ impl Default for MempoolConfig {
             expiry_secs: DEFAULT_EXPIRY_SECS,
             sig_cache_size: crate::sigcache::DEFAULT_SIG_CACHE_SIZE,
             chain_id: MAINNET_CHAIN_ID,
+            max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }
 }
@@ -192,6 +196,26 @@ impl Mempool {
             .unwrap_or_default()
     }
 
+    /// Compute fee statistics: (min_fee, max_fee, avg_fee).
+    /// Returns (0, 0, 0) when the mempool is empty.
+    pub fn fee_stats(&self) -> (u64, u64, u64) {
+        if self.by_fee.is_empty() {
+            return (0, 0, 0);
+        }
+        let min_fee = self.by_fee.keys().next().copied().unwrap_or(0);
+        let max_fee = self.by_fee.keys().next_back().copied().unwrap_or(0);
+        let count = self.by_id.len() as u64;
+        let total_fees: u64 = self.by_id.values().map(|e| e.tx.fee).sum();
+        let avg_fee = if count > 0 { total_fees / count } else { 0 };
+        (min_fee, max_fee, avg_fee)
+    }
+
+    /// Sum of `(amount + fee)` for all pending transfer transactions from the given sender.
+    pub fn pending_debit(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
+        let wire = pubkey.to_wire_bytes();
+        self.pending_debits_for_sender(&wire)
+    }
+
     /// Iterate transactions in descending fee order (highest fee first).
     /// Used for block assembly.
     pub fn iter_by_fee_desc(&self) -> impl Iterator<Item = &MempoolEntry> {
@@ -211,6 +235,7 @@ impl Mempool {
     ///
     /// Returns `Ok(tx_id)` if admitted, or `Err(MempoolError)` with the
     /// specific step that rejected the transaction.
+    #[tracing::instrument(skip(self, tx, current_time, chain, balance), fields(task = "mempool_admit"))]
     pub fn admit<C: ChainLookup, B: BalanceLookup>(
         &mut self,
         tx: &Transaction,
@@ -219,6 +244,7 @@ impl Mempool {
         balance: &B,
     ) -> Result<Hash256, MempoolError> {
         // Step 1: Size check
+        tracing::trace!("mempool step 1: size check");
         let tx_bytes = tx
             .to_cbor()
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
@@ -236,28 +262,51 @@ impl Mempool {
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
         // Step 2: Duplicate check
+        tracing::trace!("mempool step 2: duplicate check");
         if self.by_id.contains_key(&tx_id) || chain.is_confirmed(&tx_id) {
             return Err(MempoolError::Duplicate(tx_id.to_string()));
         }
 
+        // Step 2.5: Per-sender rate limit
+        tracing::trace!("mempool step 2.5: per-sender rate limit");
+        if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
+            let sender_wire = sender.to_wire_bytes();
+            let count = self
+                .by_sender
+                .get(&sender_wire)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            if count >= self.config.max_per_sender {
+                return Err(MempoolError::SenderRateLimit {
+                    count,
+                    max: self.config.max_per_sender,
+                });
+            }
+        }
+
         // Step 3: Version check
+        tracing::trace!("mempool step 3: version check");
         if tx.version != PROTOCOL_VERSION {
             return Err(MempoolError::UnrecognizedVersion(tx.version));
         }
 
         // Step 4: Structural validation (T1-T5, T8-T10 — everything except sigs and fee)
+        tracing::trace!("mempool step 4: structural validation");
         self.validate_structure(tx)?;
 
         // Step 5: Signature cache lookup
+        tracing::trace!("mempool step 5: signature cache lookup");
         let sigs_verified = self.sig_cache.contains(&tx_id);
 
         // Step 6: Signature verification (skip if cached)
+        tracing::trace!("mempool step 6: signature verification (cached={})", sigs_verified);
         if !sigs_verified {
             self.verify_signatures(tx)?;
             self.sig_cache.insert(tx_id);
         }
 
         // Step 6.5: Balance sufficiency check (transfer transactions only)
+        tracing::trace!("mempool step 6.5: balance sufficiency check");
         if tx.tx_type == TX_TYPE_TRANSFER {
             if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
                 let sender_wire = sender.to_wire_bytes();
@@ -272,6 +321,7 @@ impl Mempool {
         }
 
         // Step 7: Fee check
+        tracing::trace!("mempool step 7: fee check");
         let min_fee = self.dynamic_min_fee();
         if tx.fee < min_fee {
             return Err(MempoolError::FeeTooLow {
@@ -284,6 +334,7 @@ impl Mempool {
         self.evict_if_needed(size_bytes);
 
         // Step 8: Accept into mempool
+        tracing::trace!("mempool step 8: accept into mempool");
         let entry = MempoolEntry {
             tx: tx.clone(),
             tx_id,
@@ -293,6 +344,7 @@ impl Mempool {
         };
 
         self.insert_entry(entry);
+        tracing::debug!("transaction admitted to mempool, pool size: {}", self.len());
         Ok(tx_id)
     }
 
@@ -478,6 +530,7 @@ impl Mempool {
                 None => break,
             };
 
+            tracing::trace!("mempool eviction: removing lowest-fee tx (fee={})", lowest_fee);
             self.remove(&tx_id);
         }
     }
@@ -524,6 +577,7 @@ mod tests {
             expiry_secs: 3600,
             sig_cache_size: 100,
             chain_id: MAINNET_CHAIN_ID,
+            max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }
 
@@ -1038,5 +1092,94 @@ mod tests {
             "after remove, second transfer should succeed, got {:?}",
             result
         );
+    }
+
+    // --- Per-sender rate limit ---
+
+    #[test]
+    fn sender_rate_limit_enforced() {
+        let mut config = test_config();
+        config.max_per_sender = 3;
+        let mut pool = Mempool::new(config);
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Admit 3 txs (at the limit)
+        for i in 0..3 {
+            let tx = make_signed_tx(&sk, &pk, format!("rate{i}").as_bytes(), MIN_TX_FEE);
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+                .unwrap();
+        }
+
+        // 4th should be rejected
+        let tx4 = make_signed_tx(&sk, &pk, b"rate3", MIN_TX_FEE);
+        let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
+        assert!(
+            matches!(
+                result,
+                Err(MempoolError::SenderRateLimit { count: 3, max: 3 })
+            ),
+            "expected SenderRateLimit, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn sender_rate_limit_per_sender() {
+        let mut config = test_config();
+        config.max_per_sender = 2;
+        let mut pool = Mempool::new(config);
+        let (sk1, pk1) = ed25519::generate_keypair();
+        let (sk2, pk2) = ed25519::generate_keypair();
+
+        // Sender 1: 2 txs (at limit)
+        for i in 0..2 {
+            let tx = make_signed_tx(&sk1, &pk1, format!("s1_{i}").as_bytes(), MIN_TX_FEE);
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+                .unwrap();
+        }
+
+        // Sender 2 should still be able to submit
+        let tx = make_signed_tx(&sk2, &pk2, b"s2_0", MIN_TX_FEE);
+        assert!(
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+                .is_ok(),
+            "different sender should not be rate-limited"
+        );
+    }
+
+    // --- fee_stats ---
+
+    #[test]
+    fn fee_stats_empty_mempool() {
+        let pool = Mempool::new(test_config());
+        assert_eq!(pool.fee_stats(), (0, 0, 0));
+    }
+
+    #[test]
+    fn fee_stats_with_transactions() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let tx1 = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+
+        let tx2 = make_signed_tx(&sk, &pk, b"doc2", MIN_TX_FEE * 3);
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup)
+            .unwrap();
+
+        let (min_f, max_f, avg_f) = pool.fee_stats();
+        assert_eq!(min_f, MIN_TX_FEE);
+        assert_eq!(max_f, MIN_TX_FEE * 3);
+        assert_eq!(avg_f, MIN_TX_FEE * 2); // (1 + 3) / 2 = 2
+    }
+
+    // --- pending_debit ---
+
+    #[test]
+    fn pending_debit_zero_for_unknown_key() {
+        let pool = Mempool::new(test_config());
+        let (_sk, pk) = ed25519::generate_keypair();
+        let pubkey = noble_crypto::NoblePublicKey::Ed25519(pk.to_vec());
+        assert_eq!(pool.pending_debit(&pubkey), 0);
     }
 }

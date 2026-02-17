@@ -5,6 +5,7 @@
 
 /// Errors that can occur in the network layer.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NetworkError {
     #[error("transport error: {0}")]
     Transport(String),

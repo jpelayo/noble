@@ -7,6 +7,7 @@
 //! `Authorization: Bearer <code>` header. The secret is generated on first
 //! setup and can be rotated via the `noble_rotateTotpSecret` RPC method.
 
+use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 /// SHA-256 hash a raw TOTP code, returning 64-char lowercase hex.
@@ -51,22 +52,33 @@ impl TotpValidator {
     /// Validate a SHA-256-hashed TOTP code (64-char hex).
     ///
     /// Generates codes for the current ±1 time steps, hashes each,
-    /// and compares against the provided hash (case-insensitive).
+    /// and compares against the provided hash using constant-time comparison.
+    /// All three time steps are always checked (no early return) to prevent
+    /// timing side-channel attacks.
     pub fn validate_hash(&self, hash_hex: &str) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        // Normalize to lowercase for constant-time comparison
+        let input = hash_hex.to_ascii_lowercase();
+        let input_bytes = input.as_bytes();
+
+        // Always check all 3 time steps — no early return
+        let mut matched: u8 = 0;
         for offset in [-1i64, 0, 1] {
             let t = (now as i64 + offset * 30) as u64;
             let code = self.totp.generate(t);
             let expected = hash_code(&code);
-            if expected.eq_ignore_ascii_case(hash_hex) {
-                return true;
+            let expected_bytes = expected.as_bytes();
+
+            // Constant-time comparison via subtle
+            if input_bytes.len() == expected_bytes.len() {
+                matched |= input_bytes.ct_eq(expected_bytes).unwrap_u8();
             }
         }
-        false
+        matched != 0
     }
 
     /// Get the base32-encoded secret string.
@@ -172,5 +184,26 @@ mod tests {
         // New validator's own code should validate
         let code = new_validator.totp.generate_current().unwrap();
         assert!(new_validator.validate(&code));
+    }
+
+    #[test]
+    fn validate_hash_constant_time_accepts_correct() {
+        // Verify the constant-time implementation still accepts valid codes
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let code = validator.totp.generate_current().unwrap();
+        let hash = hash_code(&code);
+        assert!(
+            validator.validate_hash(&hash),
+            "constant-time validate_hash should accept correct hash"
+        );
+    }
+
+    #[test]
+    fn validate_hash_constant_time_rejects_wrong_length() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        // Wrong length should be rejected (not panic)
+        assert!(!validator.validate_hash("abc"));
+        assert!(!validator.validate_hash(""));
+        assert!(!validator.validate_hash(&"a".repeat(128)));
     }
 }

@@ -13,6 +13,7 @@ use noble_crypto::{
     sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
 };
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::config::ConsensusConfig;
 
@@ -119,6 +120,7 @@ impl VoteManager {
     /// - Verifies the vote signature (GAP-C7).
     /// - Rejects duplicate votes from the same peer_id (GAP-C8).
     /// - Returns `true` if the vote was accepted, `false` if duplicate.
+    #[tracing::instrument(skip(self, vote), fields(task = "consensus_vote"))]
     pub fn record_vote(
         &mut self,
         peer_id: &[u8],
@@ -129,6 +131,7 @@ impl VoteManager {
 
         // GAP-C8: One vote per peer_id
         if self.voted_peers.contains(peer_id) {
+            debug!("duplicate vote from peer (ignored)");
             return Ok(false);
         }
 
@@ -137,6 +140,9 @@ impl VoteManager {
             .entry(vote.candidate_hash)
             .or_default()
             .insert(peer_id.to_vec());
+
+        let count = self.voted_peers.len();
+        debug!("vote received from validator, tally: {} total recorded", count);
         Ok(true)
     }
 
@@ -185,6 +191,7 @@ impl VoteManager {
 
         // Tier 1: Strong majority (> 50%)
         if leader_count * 2 > total_peers {
+            info!("vote tally complete: winner = {}, strength = Strong, votes = {}/{}", winner_hash, leader_count, total_peers);
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
                 strength: ConsensusStrength::Strong,
@@ -194,12 +201,14 @@ impl VoteManager {
         // Tier 2: Plurality floor (≥ total / divisor)
         let floor = total_peers / config.plurality_floor_divisor as usize;
         if leader_count >= floor.max(1) {
+            info!("vote tally complete: winner = {}, strength = Plurality, votes = {}/{}", winner_hash, leader_count, total_peers);
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
                 strength: ConsensusStrength::Plurality,
             };
         }
 
+        debug!("vote tally indeterminate: leader has {}/{} votes, floor = {}", leader_count, total_peers, floor);
         MigrationResult::Indeterminate
     }
 

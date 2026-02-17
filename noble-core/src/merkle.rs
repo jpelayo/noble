@@ -7,22 +7,51 @@ use serde::{Deserialize, Serialize};
 
 use noble_crypto::{sha256, Hash256};
 
+use crate::constants::{MERKLE_INTERNAL_PREFIX, MERKLE_LEAF_PREFIX};
+
+/// Hash a leaf node with domain-separation prefix (C-merkle).
+/// `sha256(0x00 || tx_id)`
+fn hash_leaf(tx_id: &Hash256) -> Hash256 {
+    let mut buf = [0u8; 33];
+    buf[0] = MERKLE_LEAF_PREFIX;
+    buf[1..33].copy_from_slice(tx_id.as_bytes());
+    sha256(&buf)
+}
+
+/// Hash an internal node with domain-separation prefix (C-merkle).
+/// `sha256(0x01 || left || right)`
+fn hash_internal(left: &Hash256, right: &Hash256) -> Hash256 {
+    let mut buf = [0u8; 65];
+    buf[0] = MERKLE_INTERNAL_PREFIX;
+    buf[1..33].copy_from_slice(left.as_bytes());
+    buf[33..65].copy_from_slice(right.as_bytes());
+    sha256(&buf)
+}
+
 /// Compute the Merkle root from a list of transaction IDs.
 ///
+/// Uses domain-separated hashing (C-merkle):
+/// - Leaf nodes: `sha256(0x00 || tx_id)`
+/// - Internal nodes: `sha256(0x01 || left || right)`
 /// - Empty list: SHA-256 of 32 zero bytes
-/// - Single item: the item itself
+/// - Single item: hash_leaf(item)
 /// - Odd count: duplicate the last item
-/// - Pairs are hashed as `sha256(left || right)`
+#[tracing::instrument(skip(tx_ids), fields(task = "merkle", count = tx_ids.len()))]
 pub fn compute_merkle_root(tx_ids: &[Hash256]) -> Hash256 {
     if tx_ids.is_empty() {
+        tracing::trace!("merkle: empty tree, returning hash of zeros");
         return sha256(&[0u8; 32]);
     }
-    if tx_ids.len() == 1 {
-        return tx_ids[0];
+
+    // Hash all leaves with domain-separation prefix
+    let mut level: Vec<Hash256> = tx_ids.iter().map(hash_leaf).collect();
+
+    if level.len() == 1 {
+        tracing::trace!("merkle: single leaf, returning leaf hash");
+        return level[0];
     }
 
-    let mut level: Vec<Hash256> = tx_ids.to_vec();
-
+    let mut tree_level: usize = 0;
     while level.len() > 1 {
         // If odd number, duplicate the last element
         if level.len() % 2 != 0 {
@@ -31,14 +60,14 @@ pub fn compute_merkle_root(tx_ids: &[Hash256]) -> Hash256 {
 
         let mut next_level = Vec::with_capacity(level.len() / 2);
         for chunk in level.chunks_exact(2) {
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(chunk[0].as_bytes());
-            combined[32..].copy_from_slice(chunk[1].as_bytes());
-            next_level.push(sha256(&combined));
+            next_level.push(hash_internal(&chunk[0], &chunk[1]));
         }
+        tracing::trace!(level = tree_level, nodes = level.len(), "merkle level {}: {} nodes", tree_level, level.len());
+        tree_level += 1;
         level = next_level;
     }
 
+    tracing::trace!("merkle root computed");
     level[0]
 }
 
@@ -96,7 +125,8 @@ impl MerkleProof {
 
         let tx_id = tx_ids[index];
         let mut path = Vec::new();
-        let mut level: Vec<Hash256> = tx_ids.to_vec();
+        // Hash all leaves with domain-separation
+        let mut level: Vec<Hash256> = tx_ids.iter().map(hash_leaf).collect();
         let mut current_index = index;
 
         while level.len() > 1 {
@@ -121,13 +151,10 @@ impl MerkleProof {
                 direction,
             });
 
-            // Compute next level
+            // Compute next level with domain-separated internal hashing
             let mut next_level = Vec::with_capacity(level.len() / 2);
             for chunk in level.chunks_exact(2) {
-                let mut combined = [0u8; 64];
-                combined[..32].copy_from_slice(chunk[0].as_bytes());
-                combined[32..].copy_from_slice(chunk[1].as_bytes());
-                next_level.push(sha256(&combined));
+                next_level.push(hash_internal(&chunk[0], &chunk[1]));
             }
 
             current_index /= 2;
@@ -145,21 +172,15 @@ impl MerkleProof {
 
     /// Verify this proof against an expected Merkle root.
     pub fn verify(&self, expected_root: &Hash256) -> Result<(), String> {
-        let mut current = self.tx_id;
+        // Start with the leaf hash (domain-separated)
+        let mut current = hash_leaf(&self.tx_id);
 
         for step in &self.path {
-            let mut combined = [0u8; 64];
-            match step.direction {
-                ProofDirection::Left => {
-                    combined[..32].copy_from_slice(step.hash.as_bytes());
-                    combined[32..].copy_from_slice(current.as_bytes());
-                }
-                ProofDirection::Right => {
-                    combined[..32].copy_from_slice(current.as_bytes());
-                    combined[32..].copy_from_slice(step.hash.as_bytes());
-                }
-            }
-            current = sha256(&combined);
+            // Internal nodes use domain-separated hashing
+            current = match step.direction {
+                ProofDirection::Left => hash_internal(&step.hash, &current),
+                ProofDirection::Right => hash_internal(&current, &step.hash),
+            };
         }
 
         if current == *expected_root {
@@ -193,7 +214,8 @@ mod tests {
     fn merkle_root_single() {
         let h = sha256(b"only one");
         let root = compute_merkle_root(&[h]);
-        assert_eq!(root, h);
+        // Single leaf is domain-separated: sha256(0x00 || tx_id)
+        assert_eq!(root, hash_leaf(&h));
     }
 
     #[test]
@@ -202,10 +224,10 @@ mod tests {
         let b = sha256(b"tx1");
         let root = compute_merkle_root(&[a, b]);
 
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(a.as_bytes());
-        combined[32..].copy_from_slice(b.as_bytes());
-        let expected = sha256(&combined);
+        // Domain-separated: hash_internal(hash_leaf(a), hash_leaf(b))
+        let la = hash_leaf(&a);
+        let lb = hash_leaf(&b);
+        let expected = hash_internal(&la, &lb);
         assert_eq!(root, expected);
     }
 
@@ -214,16 +236,27 @@ mod tests {
         let ids = make_hashes(3);
         let root = compute_merkle_root(&ids);
 
-        // With 3 items, last is duplicated to make 4
-        let a = ids[0];
-        let b = ids[1];
-        let c = ids[2];
-        let d = ids[2]; // duplicate
+        // With 3 items, last leaf hash is duplicated to make 4
+        let la = hash_leaf(&ids[0]);
+        let lb = hash_leaf(&ids[1]);
+        let lc = hash_leaf(&ids[2]);
+        let ld = lc; // duplicate
 
-        let ab = sha256(&[a.0, b.0].concat());
-        let cd = sha256(&[c.0, d.0].concat());
-        let expected = sha256(&[ab.0, cd.0].concat());
+        let ab = hash_internal(&la, &lb);
+        let cd = hash_internal(&lc, &ld);
+        let expected = hash_internal(&ab, &cd);
         assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn merkle_domain_separation_prevents_leaf_internal_collision() {
+        // C-merkle: domain separation prevents second preimage attacks.
+        // A leaf hash sha256(0x00 || data) must never collide with
+        // an internal hash sha256(0x01 || left || right).
+        let tx_id = sha256(b"test tx");
+        let leaf = hash_leaf(&tx_id);
+        let internal = hash_internal(&tx_id, &Hash256::ZERO);
+        assert_ne!(leaf, internal, "leaf and internal hashes must differ");
     }
 
     #[test]

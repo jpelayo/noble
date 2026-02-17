@@ -208,16 +208,19 @@ pub struct ChainStatsResponse {
 /// Response for `noble_estimateFee`.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeeEstimateResponse {
-    pub low: u64,
-    pub medium: u64,
-    pub high: u64,
+    pub min_fee: u64,
+    pub recommended_fee: u64,
+    pub high_priority_fee: u64,
 }
 
 /// Response for `noble_getMempoolInfo`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MempoolInfoResponse {
-    pub size: usize,
+    pub count: usize,
     pub total_bytes: usize,
+    pub min_fee: u64,
+    pub max_fee: u64,
+    pub avg_fee: u64,
 }
 
 /// Individual peer information.
@@ -241,6 +244,9 @@ pub struct NetworkInfoResponse {
 pub struct SyncStatusResponse {
     pub synced: bool,
     pub current_height: u64,
+    pub highest_known: u64,
+    pub progress: f64,
+    pub state: String,
 }
 
 /// A persistent peer record returned by `noble_getPeerMemory`.
@@ -262,17 +268,21 @@ pub struct PeerRecordResponse {
 /// A single validator entry in the response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatorEntry {
-    pub pubkey: String,
+    pub public_key: String,
+    pub name: Option<String>,
+    pub status: String,
     pub weight: u64,
-    pub liveness: String,
-    pub last_seen: Option<u64>,
-    pub added_at: Option<u64>,
-    pub friendly_name: Option<String>,
+    pub reputation_score: f64,
+    pub blocks_produced: u64,
+    pub cycles_active: u64,
+    pub last_active: Option<u64>,
+    pub joined_cycle: Option<u64>,
 }
 
 /// Response for `noble_getValidatorList`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatorListResponse {
+    pub selection_policy: String,
     pub validators: Vec<ValidatorEntry>,
     pub count: usize,
 }
@@ -280,22 +290,29 @@ pub struct ValidatorListResponse {
 /// Response for `noble_getCycleStatus`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CycleStatusResponse {
-    pub current_cycle: u64,
-    pub current_phase: String,
+    pub cycle_number: u64,
+    pub phase: String,
+    pub phase_index: u8,
+    pub phase_remaining_secs: u64,
+    pub cycle_remaining_secs: u64,
 }
 
 /// Response for `noble_getAddressBalance`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddressBalanceResponse {
-    pub address: String,
+    pub public_key: String,
     pub balance: u64,
+    pub available: u64,
+    pub pending: u64,
+    pub tx_count: u64,
 }
 
 /// Response for `noble_getAddressHistory`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddressHistoryResponse {
-    pub address: String,
+    pub public_key: String,
     pub transactions: Vec<String>,
+    pub total: u64,
     pub page: u32,
     pub limit: u32,
 }
@@ -306,16 +323,21 @@ pub struct WalletInfoResponse {
     pub unlocked: bool,
     pub expires_at: Option<u64>,
     pub key_count: usize,
+    pub balance: u64,
+    pub available: u64,
+    pub pending: u64,
 }
 
 /// Response for `noble_getNodeInfo`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfoResponse {
-    pub version: u32,
+    pub version: String,
+    pub protocol_version: u16,
     pub chain_id: u32,
     pub uptime_secs: u64,
-    pub software_version: String,
-    pub latest_network_version: String,
+    pub rpc_port: u16,
+    pub ws_port: u16,
+    pub p2p_port: u16,
 }
 
 /// Response for `noble_createAddress`.

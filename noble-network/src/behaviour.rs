@@ -100,6 +100,7 @@ impl NobleBehaviour {
             .validation_mode(gossipsub::ValidationMode::Strict)
             .duplicate_cache_time(Duration::from_secs(60))
             .message_id_fn(message_id_fn)
+            .max_transmit_size(crate::codec::MAX_GOSSIP_MESSAGE_SIZE)
             .build()
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 

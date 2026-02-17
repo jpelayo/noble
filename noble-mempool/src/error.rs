@@ -10,6 +10,7 @@ use thiserror::Error;
 /// Each variant maps to a specific admission step so callers can identify
 /// exactly where rejection occurred.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum MempoolError {
     /// Step 1: Transaction exceeds maximum size.
     #[error("step 1: transaction too large ({size} bytes, max {max})")]
@@ -39,6 +40,10 @@ pub enum MempoolError {
     /// Step 7: Fee below dynamic minimum.
     #[error("step 7: fee {fee} below minimum {min_fee}")]
     FeeTooLow { fee: u64, min_fee: u64 },
+
+    /// Sender has too many transactions in the mempool.
+    #[error("sender rate limit: {count} txs from sender (max {max})")]
+    SenderRateLimit { count: usize, max: usize },
 
     /// Step 8: Mempool is at capacity (should not normally be returned —
     /// eviction handles this, but included for defensive completeness).

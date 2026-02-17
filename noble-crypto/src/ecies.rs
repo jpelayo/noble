@@ -16,6 +16,7 @@ use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::error::CryptoError;
@@ -27,7 +28,7 @@ const HKDF_INFO: &[u8] = b"noble-locator-v1";
 // ── Types ──
 
 /// An encrypted payload with per-recipient key envelopes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EciesPayload {
     /// AES-256-GCM encrypted data.
     pub ciphertext: Vec<u8>,
@@ -38,7 +39,7 @@ pub struct EciesPayload {
 }
 
 /// A recipient's key envelope containing the encrypted data encryption key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EciesRecipient {
     /// The recipient's public key.
     pub recipient_pubkey: NoblePublicKey,
@@ -53,7 +54,15 @@ pub struct EciesRecipient {
 // ── Internal helpers ──
 
 /// Derive a 32-byte AES key from a shared secret using HKDF-SHA256.
+///
+/// Rejects all-zero shared secrets which indicate a small-order public key attack (H-ecies0).
 fn hkdf_derive(shared_secret: &[u8]) -> Result<[u8; 32], CryptoError> {
+    // H-ecies0: reject all-zero shared secret (small-order point attack)
+    if shared_secret.iter().all(|&b| b == 0) {
+        return Err(CryptoError::EciesEncrypt(
+            "ECDH produced all-zero shared secret (small-order point)".into(),
+        ));
+    }
     let hk = Hkdf::<Sha256>::new(None, shared_secret);
     let mut okm = [0u8; 32];
     hk.expand(HKDF_INFO, &mut okm)
@@ -100,6 +109,7 @@ fn ed25519_pub_to_x25519(ed_pub: &[u8]) -> Result<x25519_dalek::PublicKey, Crypt
 /// Convert an Ed25519 secret key to X25519 for ECDH.
 ///
 /// The Ed25519 seed is hashed with SHA-512; the first 32 bytes become the X25519 scalar.
+/// Explicit clamping is applied before construction (M-clamp) as defense-in-depth.
 fn ed25519_sk_to_x25519(ed_sk: &[u8]) -> Result<x25519_dalek::StaticSecret, CryptoError> {
     let sk_bytes: [u8; 32] = ed_sk
         .try_into()
@@ -108,6 +118,10 @@ fn ed25519_sk_to_x25519(ed_sk: &[u8]) -> Result<x25519_dalek::StaticSecret, Cryp
     let hash = sha2::Sha512::digest(sk_bytes);
     let mut x25519_bytes = [0u8; 32];
     x25519_bytes.copy_from_slice(&hash[..32]);
+    // M-clamp: explicit X25519 clamping (belt-and-suspenders; x25519-dalek also clamps in DH)
+    x25519_bytes[0] &= 248;
+    x25519_bytes[31] &= 127;
+    x25519_bytes[31] |= 64;
     Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
 }
 
@@ -214,6 +228,7 @@ pub fn decrypt_as_recipient(
 ///
 /// Generates a random 32-byte data encryption key (DEK), encrypts the payload
 /// with AES-256-GCM, then encrypts the DEK for each recipient using ECIES.
+#[tracing::instrument(skip(plaintext, recipients), fields(task = "ecies_encrypt"))]
 pub fn ecies_encrypt(
     plaintext: &[u8],
     recipients: &[NoblePublicKey],
@@ -223,6 +238,8 @@ pub fn ecies_encrypt(
             "at least one recipient required".into(),
         ));
     }
+
+    tracing::debug!("ECIES: encrypted {} bytes for recipient", plaintext.len());
 
     // Generate random DEK
     let mut dek = [0u8; 32];
@@ -248,6 +265,7 @@ pub fn ecies_encrypt(
 ///
 /// Finds the matching recipient envelope by comparing public keys,
 /// decrypts the DEK, then decrypts the payload.
+#[tracing::instrument(skip(payload, private_key), fields(task = "ecies_decrypt"))]
 pub fn ecies_decrypt(
     payload: &EciesPayload,
     private_key: &NoblePrivateKey,
@@ -341,6 +359,32 @@ mod tests {
         let dec2 = ecies_decrypt(&payload, &priv2).unwrap();
         assert_eq!(dec1, plaintext);
         assert_eq!(dec2, plaintext);
+    }
+
+    #[test]
+    fn ecies_zero_shared_secret_rejected() {
+        // H-ecies0: all-zero shared secret must be rejected
+        let result = hkdf_derive(&[0u8; 32]);
+        assert!(result.is_err(), "all-zero shared secret must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("all-zero"),
+            "error should mention all-zero: {err}"
+        );
+    }
+
+    #[test]
+    fn ecies_payload_serde_roundtrip() {
+        // H-serde: EciesPayload and EciesRecipient are serializable
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = NoblePublicKey::Ed25519(pk);
+
+        let payload = ecies_encrypt(b"serde test", &[pub_key]).unwrap();
+        let json = serde_json::to_string(&payload).unwrap();
+        let decoded: EciesPayload = serde_json::from_str(&json).unwrap();
+        let decrypted = ecies_decrypt(&decoded, &priv_key).unwrap();
+        assert_eq!(decrypted, b"serde test");
     }
 
     #[test]

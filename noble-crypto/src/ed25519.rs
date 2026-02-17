@@ -35,6 +35,7 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
 /// Sign an arbitrary-length message with an Ed25519 secret key.
 ///
 /// Returns the 64-byte signature.
+#[tracing::instrument(skip(secret_key, message), fields(task = "crypto_sign"))]
 pub fn sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let key_bytes: [u8; SECRET_KEY_LEN] = secret_key.try_into().map_err(|_| {
         CryptoError::InvalidKey(format!(
@@ -53,6 +54,7 @@ pub fn sign(secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
 ///
 /// Uses strict verification (ed25519-dalek v2 default): rejects signatures
 /// from small-order subgroup keys (GAP-M7).
+#[tracing::instrument(skip(public_key, message, signature), fields(task = "crypto_verify"))]
 pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
     let key_bytes: [u8; PUBLIC_KEY_LEN] = public_key.try_into().map_err(|_| {
         CryptoError::InvalidKey(format!(
@@ -77,7 +79,10 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
 
     verifying_key
         .verify(message, &sig)
-        .map_err(|e| CryptoError::VerificationFailed(format!("Ed25519: {e}")))
+        .map_err(|e| CryptoError::VerificationFailed(format!("Ed25519: {e}")))?;
+
+    tracing::trace!("Ed25519 signature verified successfully");
+    Ok(())
 }
 
 /// Batch-verify multiple Ed25519 signatures.

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use noble_core::{Block, Transaction};
 use noble_crypto::Hash256;
+use tracing::{debug, trace};
 
 /// A candidate block proposed during this cycle.
 #[derive(Debug, Clone)]
@@ -65,6 +66,8 @@ impl CandidateTracker {
         let order = self.next_order;
         self.next_order += 1;
 
+        debug!("new candidate block proposed at height {}", block.header.height);
+
         self.by_validator.insert(validator_wire, block_hash);
         self.candidates.insert(
             block_hash,
@@ -75,6 +78,7 @@ impl CandidateTracker {
                 order,
             },
         );
+        trace!("candidate tracker: {} candidates for cycle", self.candidates.len());
         Ok(())
     }
 
@@ -91,10 +95,11 @@ impl CandidateTracker {
     /// Collect transactions from losing candidates that are NOT in the winning block.
     ///
     /// These transactions should be re-admitted to the mempool.
-    /// Uses checksum-based comparison since `Transaction` doesn't implement `Hash`.
-    pub fn collect_orphaned_txs(&self, winner_hash: &Hash256) -> Vec<Transaction> {
-        // Collect checksums from winner block as a dedup set
-        let winner_checksums: HashSet<[u8; 32]> = self
+    /// Uses tx_id for dedup — two different transactions can share a checksum
+    /// (same document, different publishers), so checksum is not sufficient.
+    pub fn collect_orphaned_txs(&self, winner_hash: &Hash256, chain_id: u32) -> Vec<Transaction> {
+        // Collect tx_ids from winner block as a dedup set
+        let winner_tx_ids: HashSet<[u8; 32]> = self
             .candidates
             .get(winner_hash)
             .map(|entry| {
@@ -102,7 +107,7 @@ impl CandidateTracker {
                     .block
                     .transactions
                     .iter()
-                    .map(|tx| tx.checksum.0)
+                    .filter_map(|tx| tx.compute_tx_id(chain_id).ok().map(|h| h.0))
                     .collect()
             })
             .unwrap_or_default();
@@ -115,7 +120,11 @@ impl CandidateTracker {
                     .block
                     .transactions
                     .iter()
-                    .filter(|tx| !winner_checksums.contains(&tx.checksum.0))
+                    .filter(|tx| {
+                        tx.compute_tx_id(chain_id)
+                            .map(|id| !winner_tx_ids.contains(&id.0))
+                            .unwrap_or(true) // keep tx if id computation fails
+                    })
                     .cloned()
             })
             .collect()
@@ -244,7 +253,7 @@ mod tests {
         tracker.add_candidate(block2, hash2, 1001).unwrap();
 
         // Winner is block1 → orphans from block2
-        let orphans = tracker.collect_orphaned_txs(&hash1);
+        let orphans = tracker.collect_orphaned_txs(&hash1, 1);
         assert!(orphans.is_empty(), "empty blocks have no orphan txs");
     }
 

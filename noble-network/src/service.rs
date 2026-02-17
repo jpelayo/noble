@@ -345,6 +345,8 @@ async fn handle_swarm_event(
             message_id,
             ..
         })) => {
+            let topic_str = message.topic.as_str();
+            tracing::debug!(task = "gossip_receive", "received message on topic: {}", topic_str);
             match codec::decode_gossip(&message.data) {
                 Ok(gossip_msg) => {
                     let peer_bytes = propagation_source.to_bytes().to_vec();
@@ -440,6 +442,10 @@ async fn handle_swarm_event(
                             signature_scheme,
                             signature_pubkey,
                             signature_bytes,
+                            attestation_scheme,
+                            attestation_scope,
+                            attestation_fingerprint,
+                            attestation_data,
                         } => {
                             match convert_and_validate_announce(
                                 &identity_key,
@@ -457,6 +463,10 @@ async fn handle_swarm_event(
                                 signature_scheme,
                                 &signature_pubkey,
                                 &signature_bytes,
+                                attestation_scheme.as_deref(),
+                                attestation_scope.as_deref(),
+                                attestation_fingerprint.as_deref(),
+                                attestation_data.as_deref(),
                             ) {
                                 Ok(announce) => {
                                     peer_manager
@@ -741,6 +751,7 @@ async fn handle_command(
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
+                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_BLOCK_ANNOUNCE);
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish block announce");
                 }
@@ -755,6 +766,7 @@ async fn handle_command(
             let msg = GossipMessage::TxAnnounce { tx_id };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_TX_ANNOUNCE);
+                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_TX_ANNOUNCE);
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish tx announce");
                 }
@@ -775,6 +787,7 @@ async fn handle_command(
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_POR_VOTE);
+                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_POR_VOTE);
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish vote");
                 }
@@ -800,6 +813,18 @@ async fn handle_command(
         }
 
         NetworkCommand::PublishNodeAnnounce(announce) => {
+            // Flatten optional attestation for wire format
+            let (att_scheme, att_scope, att_fingerprint, att_data) =
+                if let Some(ref att) = announce.identity_attestation {
+                    (
+                        Some(att.scheme.clone()),
+                        Some(att.scope.clone()),
+                        Some(att.signer_fingerprint.to_vec()),
+                        Some(att.signature_data.clone()),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
             let msg = GossipMessage::NodeAnnounce {
                 identity_key: announce.identity_key.to_wire_bytes(),
                 node_name: announce.node_name.clone(),
@@ -816,9 +841,14 @@ async fn handle_command(
                 signature_scheme: announce.signature.scheme_id,
                 signature_pubkey: announce.signature.public_key.clone(),
                 signature_bytes: announce.signature.signature.clone(),
+                attestation_scheme: att_scheme,
+                attestation_scope: att_scope,
+                attestation_fingerprint: att_fingerprint,
+                attestation_data: att_data,
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_NODE_ANNOUNCE);
+                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_NODE_ANNOUNCE);
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish node announce");
                 }
@@ -831,6 +861,7 @@ async fn handle_command(
                 let msg = GossipMessage::DoubleProposalEvidence { evidence_bytes };
                 if let Ok(data) = codec::encode_gossip(&msg) {
                     let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
+                    tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_EVIDENCE);
                     if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                         tracing::warn!(err = %e, "failed to publish evidence");
                     }
@@ -922,6 +953,10 @@ fn convert_and_validate_announce(
     signature_scheme: u8,
     signature_pubkey: &[u8],
     signature_bytes: &[u8],
+    attestation_scheme: Option<&str>,
+    attestation_scope: Option<&str>,
+    attestation_fingerprint: Option<&[u8]>,
+    attestation_data: Option<&[u8]>,
 ) -> Result<noble_core::NodeAnnounce, String> {
     let identity_key = noble_crypto::NoblePublicKey::from_wire_bytes(identity_key_bytes)
         .map_err(|e| format!("invalid identity key: {e}"))?;
@@ -931,6 +966,33 @@ fn convert_and_validate_announce(
 
     let node_role = parse_node_role(node_role_str)
         .ok_or_else(|| format!("unknown node_role: {node_role_str}"))?;
+
+    // Reconstruct attestation — all-or-nothing: all 4 fields must be present or absent
+    let identity_attestation = match (
+        attestation_scheme,
+        attestation_scope,
+        attestation_fingerprint,
+        attestation_data,
+    ) {
+        (Some(scheme), Some(scope), Some(fp), Some(data)) => {
+            if fp.len() != 32 {
+                return Err(format!(
+                    "attestation fingerprint must be 32 bytes, got {}",
+                    fp.len()
+                ));
+            }
+            let mut fingerprint = [0u8; 32];
+            fingerprint.copy_from_slice(fp);
+            Some(noble_core::ExternalAttestation {
+                scheme: scheme.to_string(),
+                scope: scope.to_string(),
+                signer_fingerprint: fingerprint,
+                signature_data: data.to_vec(),
+            })
+        }
+        (None, None, None, None) => None,
+        _ => return Err("attestation fields must be all present or all absent".to_string()),
+    };
 
     let announce = noble_core::NodeAnnounce {
         version: noble_core::NODE_ANNOUNCE_VERSION,
@@ -951,6 +1013,7 @@ fn convert_and_validate_announce(
             public_key: signature_pubkey.to_vec(),
             signature: signature_bytes.to_vec(),
         },
+        identity_attestation,
     };
 
     let now = std::time::SystemTime::now()

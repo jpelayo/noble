@@ -16,6 +16,7 @@ noble-core.workspace = true
 noble-crypto.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

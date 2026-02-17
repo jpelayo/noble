@@ -4,6 +4,13 @@
 # NOBLE Protocol Node Configuration
 # Copy this file to your data directory and adjust values as needed.
 
+[node]
+# Operational role: validator, observer, or light.
+role = "observer"
+
+# Target network: mainnet, testnet, or regtest.
+network = "mainnet"
+
 [network]
 # Address to listen for incoming P2P connections.
 listen_addr = "/ip4/0.0.0.0/tcp/30333"
@@ -37,10 +44,10 @@ validator_list_path = "validators.txt"
 
 [api]
 # JSON-RPC HTTP server bind address.
-rpc_addr = "127.0.0.1:9933"
+rpc_addr = "127.0.0.1:9332"
 
 # WebSocket server bind address for subscriptions.
-ws_addr = "127.0.0.1:9944"
+ws_addr = "127.0.0.1:9334"
 
 # Maximum concurrent RPC connections.
 max_connections = 100
@@ -77,6 +84,16 @@ prometheus_addr = "127.0.0.1:9615"
 # Enable or disable metrics collection.
 enabled = true
 
+[trace]
+# Maximum entries in the RAM ring buffer (no disk I/O).
+buffer_capacity = 50000
+
+# Initial filter directive. Override with NOBLE_LOG env var.
+initial_filter = "info"
+
+# Output traces to stderr in addition to the ring buffer (development only).
+stderr_enabled = false
+
 [identity]
 # Human-readable name for this node (max 64 chars).
 node_name = ""
@@ -112,3 +129,17 @@ website = ""
 
 # Publicly reachable host address for this node (optional).
 host_address = ""
+
+# Path to a PKCS#12 (.p12/.pfx) file for one-time PKI identity binding.
+# The private key signs a binding message: sha256("NOBLE-PKI-BIND-v1" || identity_key).
+# After the first successful binding, the .p12 file can be removed — the attestation
+# is saved to identity_attestation.cbor and loaded on subsequent startups.
+pkcs12_path = ""
+
+# Password for the PKCS#12 file. Only needed for the initial binding.
+pkcs12_password = ""
+
+# Directory containing trusted CA certificates (PEM/DER files) for verifying
+# PKI attestations from other nodes. Each node maintains its own trust store,
+# paralleling PoR's per-node validator list philosophy.
+ca_store_path = ""

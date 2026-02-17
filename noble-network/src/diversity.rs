@@ -87,6 +87,32 @@ pub fn check_subnet_diversity(
     same_subnet_count < max_per_subnet
 }
 
+/// Maximum inbound connections per /16 subnet.
+pub const MAX_INBOUND_PER_SUBNET: usize = 4;
+
+/// Check whether accepting a new inbound connection from `candidate_addr`
+/// would violate the per-subnet inbound diversity limit.
+///
+/// Returns `true` if the connection is allowed, `false` if it would exceed
+/// `max_per_subnet` inbound connections from the same /16 subnet.
+pub fn check_inbound_subnet_diversity(
+    existing_inbound_addrs: &[String],
+    candidate_addr: &str,
+    max_per_subnet: usize,
+) -> bool {
+    let candidate_subnet = match extract_subnet(candidate_addr) {
+        Some(s) => s,
+        None => return true, // Non-IPv4 — allow by default.
+    };
+
+    let same_subnet_count = existing_inbound_addrs
+        .iter()
+        .filter(|a| extract_subnet(a) == Some(candidate_subnet))
+        .count();
+
+    same_subnet_count < max_per_subnet
+}
+
 /// Find the worst-quality outbound peer from the given set.
 ///
 /// Returns the index and score of the peer with the highest (worst) quality score,
@@ -185,6 +211,33 @@ mod tests {
             &existing,
             "/ip4/10.0.1.1/tcp/9333",
             2
+        ));
+    }
+
+    #[test]
+    fn inbound_diversity_allows_below_limit() {
+        let existing = vec![
+            "/ip4/192.168.1.1/tcp/9333".to_string(),
+            "/ip4/192.168.2.2/tcp/9333".to_string(),
+        ];
+        assert!(check_inbound_subnet_diversity(
+            &existing,
+            "/ip4/192.168.3.3/tcp/9333",
+            4
+        ));
+    }
+
+    #[test]
+    fn inbound_diversity_blocks_over_limit() {
+        let existing = vec![
+            "/ip4/10.0.1.1/tcp/9333".to_string(),
+            "/ip4/10.0.2.2/tcp/9333".to_string(),
+            "/ip4/10.0.3.3/tcp/9333".to_string(),
+        ];
+        assert!(!check_inbound_subnet_diversity(
+            &existing,
+            "/ip4/10.0.4.4/tcp/9333",
+            3
         ));
     }
 

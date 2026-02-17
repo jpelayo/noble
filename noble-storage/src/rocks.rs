@@ -24,7 +24,7 @@ use rocksdb::{
 };
 
 use noble_codec::NobleCbor;
-use noble_core::constants::{subsidy_at_height, TX_TYPE_TRANSFER};
+use noble_core::constants::{subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, TX_TYPE_TRANSFER};
 use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
@@ -73,7 +73,7 @@ impl Default for RocksDbConfig {
 
 /// RocksDB-backed `StorageEngine` implementation.
 ///
-/// Uses 8 column families with bloom filters, Zstd compression on blocks,
+/// Uses 10 column families with bloom filters, Zstd compression on blocks,
 /// and a merge operator on `checksum_index` for append-only tx_id lists.
 pub struct RocksDbStorage {
     db: DB,
@@ -261,6 +261,7 @@ impl RocksDbStorage {
 }
 
 impl StorageEngine for RocksDbStorage {
+    #[tracing::instrument(skip(self, block, block_hash, tx_ids), fields(task = "storage_commit", height = block.header.height))]
     fn commit_block(
         &self,
         block: &Block,
@@ -350,6 +351,7 @@ impl StorageEngine for RocksDbStorage {
 
         // Phase 2: read current balances, apply deltas, write final
         for (key, delta) in &deltas {
+            tracing::debug!("balance delta: {} for key len={}", delta, key.len());
             let current = self.read_balance_raw(key)?;
             let new_balance = current as i128 + delta;
             if new_balance < 0 {
@@ -367,16 +369,59 @@ impl StorageEngine for RocksDbStorage {
             batch.put_cf(cf_balances, key, (new_balance as u64).to_be_bytes());
         }
 
+        // Phase 3: MAX_SUPPLY cap enforcement
+        // Sum all balances (current + deltas) to check cumulative supply
+        let block_subsidy = subsidy_at_height(height);
+        if block_subsidy > 0 {
+            // Only check when new supply is minted (subsidy > 0)
+            let mut cumulative: u64 = 0;
+            // Sum existing balances from the CF
+            let cf_bal_read = self.cf(CF_ADDRESS_BALANCES)?;
+            let iter = self.db.iterator_cf(cf_bal_read, IteratorMode::Start);
+            for item in iter {
+                let (key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+                // Use the updated balance if this key was modified, otherwise the stored one
+                if let Some(delta) = deltas.get(key.as_ref()) {
+                    let current = u64::from_be_bytes(val.as_ref().try_into().unwrap_or([0; 8]));
+                    let new_bal = (current as i128 + delta) as u64;
+                    cumulative = cumulative.saturating_add(new_bal);
+                } else {
+                    let bal = u64::from_be_bytes(val.as_ref().try_into().unwrap_or([0; 8]));
+                    cumulative = cumulative.saturating_add(bal);
+                }
+            }
+            // Add balances for new keys not yet in the CF
+            for (key, delta) in &deltas {
+                let exists = self
+                    .db
+                    .get_cf(cf_bal_read, key)
+                    .map_err(|e| StorageError::Database(e.to_string()))?
+                    .is_some();
+                if !exists && *delta > 0 {
+                    cumulative = cumulative.saturating_add(*delta as u64);
+                }
+            }
+            if cumulative > MAX_SUPPLY {
+                return Err(StorageError::SupplyOverflow {
+                    cumulative,
+                    max: MAX_SUPPLY,
+                });
+            }
+        }
+
         // Atomic commit
         self.db
             .write(batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        tracing::debug!("committed block at height {}", block.header.height);
 
         Ok(())
     }
 
     fn get_block(&self, block_hash: &Hash256) -> Result<Block, StorageError> {
         self.check_open()?;
+        tracing::trace!("get_block: hash={}", block_hash);
 
         // Look up height from block_hashes CF
         let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
@@ -588,12 +633,14 @@ impl StorageEngine for RocksDbStorage {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(task = "storage_rollback", target_height, chain_id))]
     fn rollback_to_height(
         &self,
         target_height: u64,
         chain_id: u32,
     ) -> Result<ChainTip, StorageError> {
         self.check_open()?;
+        tracing::debug!("rolling back to height {}", target_height);
 
         // Get current tip
         let tip = self
@@ -602,6 +649,15 @@ impl StorageEngine for RocksDbStorage {
 
         if target_height >= tip.height {
             return Ok(tip);
+        }
+
+        // Enforce MAX_REORG_DEPTH
+        let depth = tip.height - target_height;
+        if depth > MAX_REORG_DEPTH {
+            return Err(StorageError::ReorgTooDeep {
+                depth,
+                max: MAX_REORG_DEPTH,
+            });
         }
 
         let mut batch = WriteBatch::default();
@@ -643,10 +699,11 @@ impl StorageEngine for RocksDbStorage {
             .write(batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Phase 2: Clear all balances and history (iterate and delete)
+        // Phase 2: Clear all balances, history, and checksum_index (iterate and delete)
         let mut clear_batch = WriteBatch::default();
         let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+        let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
 
         let iter = self.db.iterator_cf(cf_balances, IteratorMode::Start);
         for item in iter {
@@ -660,6 +717,13 @@ impl StorageEngine for RocksDbStorage {
             clear_batch.delete_cf(cf_history, &key);
         }
 
+        // Clear checksum_index (merge-append values can't be selectively trimmed)
+        let iter = self.db.iterator_cf(cf_checksum, IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            clear_batch.delete_cf(cf_checksum, &key);
+        }
+
         // Phase 3: Update chain tip
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         let target_hash = self.get_block_hash_by_height(target_height)?;
@@ -670,9 +734,10 @@ impl StorageEngine for RocksDbStorage {
             .write(clear_batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Phase 4: Replay balances from 0..=target_height
+        // Phase 4: Replay balances, history, and checksum_index from 0..=target_height
         let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+        let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
 
         let mut balances: HashMap<Vec<u8>, i128> = HashMap::new();
         let mut replay_batch = WriteBatch::default();
@@ -696,6 +761,9 @@ impl StorageEngine for RocksDbStorage {
                 let tx_id = tx
                     .compute_tx_id(chain_id)
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
+
+                // Rebuild checksum_index
+                replay_batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
 
                 if tx.tx_type == TX_TYPE_TRANSFER {
                     let amount = tx.amount.unwrap_or(0) as i128;
@@ -841,8 +909,9 @@ impl StorageEngine for RocksDbStorage {
     fn store_peer_record(&self, record: &PeerRecord) -> Result<(), StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_PEER_MEMORY)?;
-        let mut buf = Vec::new();
-        ciborium::into_writer(record, &mut buf).map_err(|e| StorageError::Codec(e.to_string()))?;
+        let buf = record
+            .to_cbor()
+            .map_err(|e| StorageError::Codec(e.to_string()))?;
         self.db
             .put_cf(&cf, &record.identity_key, &buf)
             .map_err(|e| StorageError::Database(e.to_string()))
@@ -856,7 +925,7 @@ impl StorageEngine for RocksDbStorage {
             .get_cf(&cf, identity_key)
             .map_err(|e| StorageError::Database(e.to_string()))?
             .ok_or(StorageError::NotFound)?;
-        ciborium::from_reader(&bytes[..]).map_err(|e| StorageError::Codec(e.to_string()))
+        PeerRecord::from_cbor(&bytes).map_err(|e| StorageError::Codec(e.to_string()))
     }
 
     fn list_peer_records(&self) -> Result<Vec<PeerRecord>, StorageError> {
@@ -866,8 +935,8 @@ impl StorageEngine for RocksDbStorage {
         let mut records = Vec::new();
         for item in iter {
             let (_key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            let rec: PeerRecord =
-                ciborium::from_reader(&val[..]).map_err(|e| StorageError::Codec(e.to_string()))?;
+            let rec =
+                PeerRecord::from_cbor(&val).map_err(|e| StorageError::Codec(e.to_string()))?;
             records.push(rec);
         }
         Ok(records)
@@ -888,8 +957,8 @@ impl StorageEngine for RocksDbStorage {
         let mut to_delete = Vec::new();
         for item in iter {
             let (key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            let rec: PeerRecord =
-                ciborium::from_reader(&val[..]).map_err(|e| StorageError::Codec(e.to_string()))?;
+            let rec =
+                PeerRecord::from_cbor(&val).map_err(|e| StorageError::Codec(e.to_string()))?;
             if rec.is_stale(now, max_age_secs) {
                 to_delete.push(key.to_vec());
             }

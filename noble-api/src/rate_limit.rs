@@ -30,6 +30,8 @@ struct RateLimiterInner {
     rate: f64,
     /// Remove stale buckets after this duration of inactivity.
     stale_after: Duration,
+    /// Maximum tracked IPs (evict oldest when exceeded).
+    max_tracked: usize,
 }
 
 impl RpcRateLimiter {
@@ -45,6 +47,7 @@ impl RpcRateLimiter {
                 capacity,
                 rate: requests_per_second as f64,
                 stale_after: Duration::from_secs(300), // 5 min
+                max_tracked: 10_000,
             }),
         }
     }
@@ -76,13 +79,28 @@ impl RpcRateLimiter {
         }
     }
 
-    /// Remove stale entries (idle > 5 min).
+    /// Remove stale entries (idle > 5 min) and evict oldest if over max_tracked.
     pub fn cleanup(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let stale_after = inner.stale_after;
         inner
             .buckets
             .retain(|_, bucket| bucket.last_refill.elapsed() < stale_after);
+
+        // Evict oldest entries if we exceed the maximum tracked IPs
+        let max = inner.max_tracked;
+        if inner.buckets.len() > max {
+            let mut entries: Vec<(IpAddr, Instant)> = inner
+                .buckets
+                .iter()
+                .map(|(ip, b)| (*ip, b.last_refill))
+                .collect();
+            entries.sort_by_key(|&(_, t)| t);
+            let to_remove = inner.buckets.len() - max;
+            for (ip, _) in entries.into_iter().take(to_remove) {
+                inner.buckets.remove(&ip);
+            }
+        }
     }
 
     /// Number of tracked IPs.
@@ -117,15 +135,15 @@ mod tests {
 
     #[test]
     fn bucket_refills_over_time() {
-        let rl = RpcRateLimiter::new(1000, 1); // 1000 req/s, burst=1000
+        let rl = RpcRateLimiter::new(100, 1); // 100 req/s, burst=100
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // Deplete
-        for _ in 0..1000 {
+        for _ in 0..100 {
             rl.try_acquire(ip);
         }
         assert!(!rl.try_acquire(ip));
-        // Wait for refill
-        thread::sleep(Duration::from_millis(20));
+        // Wait for refill (50ms at 100/s = ~5 tokens)
+        thread::sleep(Duration::from_millis(50));
         assert!(rl.try_acquire(ip));
     }
 
@@ -170,5 +188,25 @@ mod tests {
             }
         }
         assert_eq!(allowed, 30);
+    }
+
+    #[test]
+    fn cleanup_evicts_oldest_when_over_max_tracked() {
+        let rl = RpcRateLimiter::new(10, 2);
+        // Set a small max_tracked
+        {
+            let mut inner = rl.inner.lock().unwrap();
+            inner.max_tracked = 3;
+        }
+        // Add 5 IPs
+        for i in 1..=5u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            rl.try_acquire(ip);
+        }
+        assert_eq!(rl.tracked_ips(), 5);
+
+        // Cleanup should evict 2 oldest
+        rl.cleanup();
+        assert_eq!(rl.tracked_ips(), 3);
     }
 }

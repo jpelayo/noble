@@ -39,17 +39,14 @@ pub trait NodeApi {
 impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>> {
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned> {
         let uptime = self.start_time.elapsed().as_secs();
-        let latest_network_version = self
-            .max_network_version
-            .read()
-            .map(|v| v.clone())
-            .unwrap_or_else(|_| SOFTWARE_VERSION.to_string());
         Ok(NodeInfoResponse {
-            version: PROTOCOL_VERSION as u32,
+            version: SOFTWARE_VERSION.to_string(),
+            protocol_version: PROTOCOL_VERSION,
             chain_id: self.chain_id,
             uptime_secs: uptime,
-            software_version: SOFTWARE_VERSION.to_string(),
-            latest_network_version,
+            rpc_port: self.rpc_port,
+            ws_port: self.ws_port,
+            p2p_port: self.p2p_port,
         })
     }
 

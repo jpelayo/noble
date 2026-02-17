@@ -10,5 +10,6 @@ pub mod document;
 pub mod mempool;
 pub mod network;
 pub mod node;
+pub mod trace;
 pub mod transaction;
 pub mod wallet;

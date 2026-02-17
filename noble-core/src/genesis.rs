@@ -7,9 +7,13 @@
 //! - `prev_block_hash`: Hash256::ZERO
 //! - `height`: 0
 //! - No transactions (empty Merkle root)
-//! - A hard-coded validator key and self-signature
+//! - A deterministic Ed25519 keypair derived from a domain-separated seed
+//! - A real cryptographic signature (not a placeholder)
 
-use noble_crypto::{Hash256, NoblePublicKey, SignatureEnvelope, SCHEME_ED25519};
+use noble_crypto::{
+    sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+    SCHEME_ED25519,
+};
 
 use crate::block::{Block, BlockHeader};
 use crate::constants::PROTOCOL_VERSION;
@@ -18,37 +22,35 @@ use crate::merkle::compute_merkle_root;
 /// Mainnet genesis block timestamp: 2026-03-01T00:00:00Z (Unix epoch).
 pub const GENESIS_TIMESTAMP: u64 = 1_772_524_800;
 
-/// Hardcoded mainnet genesis validator public key (Ed25519).
-///
-/// This is the SHA-256 hash of "NOBLE_GENESIS_VALIDATOR_MAINNET" used as a
-/// deterministic 32-byte public key for the genesis block. In a real deployment,
-/// this would be replaced with an actual Ed25519 key from the founding validator.
-const GENESIS_VALIDATOR_PUBKEY: [u8; 32] = [
-    0x4e, 0x4f, 0x42, 0x4c, 0x45, 0x5f, 0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x5f, 0x56, 0x41,
-    0x4c, 0x49, 0x44, 0x41, 0x54, 0x4f, 0x52, 0x5f, 0x4d, 0x41, 0x49, 0x4e, 0x4e, 0x45, 0x54, 0x00,
-];
+/// Domain-separated seed for deriving the mainnet genesis Ed25519 keypair.
+/// The SHA-256 hash of this string is used as the Ed25519 secret key seed.
+const MAINNET_SEED: &[u8] = b"NOBLE-GENESIS-VALIDATOR-MAINNET-v1";
 
-/// Hardcoded testnet genesis validator public key (Ed25519).
-const TESTNET_GENESIS_VALIDATOR_PUBKEY: [u8; 32] = [
-    0x54, 0x45, 0x53, 0x54, 0x4e, 0x45, 0x54, 0x5f, 0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x5f,
-    0x56, 0x41, 0x4c, 0x49, 0x44, 0x41, 0x54, 0x4f, 0x52, 0x5f, 0x4b, 0x45, 0x59, 0x00, 0x00, 0x00,
-];
+/// Domain-separated seed for deriving the testnet genesis Ed25519 keypair.
+const TESTNET_SEED: &[u8] = b"NOBLE-GENESIS-VALIDATOR-TESTNET-v1";
 
-/// Genesis block validator signature placeholder.
+/// Derive a deterministic Ed25519 keypair from a seed phrase.
 ///
-/// The genesis block is special-cased in validation: its validator signature
-/// is not verified cryptographically (there's no prior state to bootstrap from).
-/// This placeholder is a fixed 64-byte value for determinism.
-const GENESIS_SIGNATURE: [u8; 64] = [0x00; 64];
+/// The secret key is `sha256(seed)`, and the public key is derived from it.
+/// This is deterministic: the same seed always produces the same keypair.
+fn deterministic_keypair(seed: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let sk_bytes = sha256(seed);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes.0);
+    let verifying_key = signing_key.verifying_key();
+    (
+        signing_key.to_bytes().to_vec(),
+        verifying_key.to_bytes().to_vec(),
+    )
+}
 
 /// Construct the mainnet genesis block.
 pub fn genesis_block() -> Block {
-    build_genesis(GENESIS_TIMESTAMP, &GENESIS_VALIDATOR_PUBKEY)
+    build_genesis(GENESIS_TIMESTAMP, MAINNET_SEED)
 }
 
 /// Construct the testnet genesis block.
 pub fn testnet_genesis_block() -> Block {
-    build_genesis(GENESIS_TIMESTAMP, &TESTNET_GENESIS_VALIDATOR_PUBKEY)
+    build_genesis(GENESIS_TIMESTAMP, TESTNET_SEED)
 }
 
 /// Compute the mainnet genesis block hash.
@@ -67,23 +69,34 @@ pub fn testnet_genesis_hash() -> Hash256 {
         .expect("testnet genesis block hash computation must succeed")
 }
 
-fn build_genesis(timestamp: u64, validator_pubkey: &[u8; 32]) -> Block {
+fn build_genesis(timestamp: u64, seed: &[u8]) -> Block {
+    tracing::info!(timestamp, "generating genesis block");
+    let (sk, pk) = deterministic_keypair(seed);
+    let priv_key = NoblePrivateKey::Ed25519(sk);
     let merkle_root = compute_merkle_root(&[]); // Empty tree
 
-    let header = BlockHeader {
+    let mut header = BlockHeader {
         version: PROTOCOL_VERSION,
         prev_block_hash: Hash256::ZERO,
         merkle_root,
         timestamp,
         height: 0,
         tx_count: 0,
-        validator_id: NoblePublicKey::Ed25519(validator_pubkey.to_vec()),
+        validator_id: NoblePublicKey::Ed25519(pk.clone()),
         validator_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
-            public_key: validator_pubkey.to_vec(),
-            signature: GENESIS_SIGNATURE.to_vec(),
+            public_key: pk,
+            signature: vec![],
         },
     };
+
+    // Produce a real cryptographic signature over the header
+    let signing_msg = header
+        .compute_signing_message()
+        .expect("genesis header signing message must succeed");
+    header.validator_sig = priv_key
+        .sign(&signing_msg)
+        .expect("genesis header signing must succeed");
 
     Block {
         header,
@@ -95,6 +108,7 @@ fn build_genesis(timestamp: u64, validator_pubkey: &[u8; 32]) -> Block {
 mod tests {
     use super::*;
     use noble_codec::NobleCbor;
+    use noble_crypto::ed25519;
 
     #[test]
     fn genesis_block_is_deterministic() {
@@ -146,5 +160,61 @@ mod tests {
     #[test]
     fn genesis_hash_is_not_zero() {
         assert_ne!(genesis_hash(), Hash256::ZERO);
+    }
+
+    #[test]
+    fn genesis_signature_is_cryptographically_valid() {
+        let block = genesis_block();
+        let signing_msg = block.header.compute_signing_message().unwrap();
+        // Verify the validator signature against the public key
+        let result = ed25519::verify(
+            &block.header.validator_sig.public_key,
+            &signing_msg,
+            &block.header.validator_sig.signature,
+        );
+        assert!(result.is_ok(), "genesis signature must verify: {result:?}");
+    }
+
+    #[test]
+    fn testnet_genesis_signature_is_cryptographically_valid() {
+        let block = testnet_genesis_block();
+        let signing_msg = block.header.compute_signing_message().unwrap();
+        let result = ed25519::verify(
+            &block.header.validator_sig.public_key,
+            &signing_msg,
+            &block.header.validator_sig.signature,
+        );
+        assert!(
+            result.is_ok(),
+            "testnet genesis signature must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn genesis_validator_id_matches_sig_pubkey() {
+        let block = genesis_block();
+        if let NoblePublicKey::Ed25519(ref id_bytes) = block.header.validator_id {
+            assert_eq!(
+                id_bytes, &block.header.validator_sig.public_key,
+                "validator_id and validator_sig.public_key must match"
+            );
+        } else {
+            panic!("genesis validator must be Ed25519");
+        }
+    }
+
+    #[test]
+    fn deterministic_keypair_is_stable() {
+        let (sk1, pk1) = deterministic_keypair(MAINNET_SEED);
+        let (sk2, pk2) = deterministic_keypair(MAINNET_SEED);
+        assert_eq!(sk1, sk2);
+        assert_eq!(pk1, pk2);
+    }
+
+    #[test]
+    fn different_seeds_produce_different_keys() {
+        let (_, pk_main) = deterministic_keypair(MAINNET_SEED);
+        let (_, pk_test) = deterministic_keypair(TESTNET_SEED);
+        assert_ne!(pk_main, pk_test);
     }
 }

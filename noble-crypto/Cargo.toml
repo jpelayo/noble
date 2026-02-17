@@ -22,5 +22,8 @@ rand.workspace = true
 x25519-dalek.workspace = true
 hkdf.workspace = true
 aes-gcm.workspace = true
+zeroize.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true

@@ -106,7 +106,7 @@ impl TestNode {
             0,
             Hash256::ZERO,
             MAINNET_CHAIN_ID,
-            Some((private_key.clone(), public_key.clone())),
+            Some((private_key.clone_for_test(), public_key.clone())),
         );
 
         let mempool = Mempool::new(MempoolConfig::default());

@@ -49,8 +49,13 @@ pub struct Transaction {
 /// The signing payload is a CBOR-structured message containing only the
 /// fields that the signer commits to. The publisher signature and additional
 /// signatures are NOT included (they're the things being produced/verified).
+///
+/// Fields: `version`, `tx_type`, `checksum`, `timestamp`, `fee`,
+/// `recipient` (optional), `amount` (optional), `metadata` (sorted by key),
+/// `encrypted_locator` (optional), `external_attestations` (optional).
 #[derive(Serialize)]
 struct SigningPayload {
+    version: u16,
     tx_type: u8,
     checksum: Hash256,
     timestamp: u64,
@@ -85,6 +90,7 @@ impl Transaction {
         sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
 
         let payload = SigningPayload {
+            version: self.version,
             tx_type: self.tx_type,
             checksum: self.checksum,
             timestamp: self.timestamp,
@@ -186,6 +192,18 @@ mod tests {
         tx.fee = 2_000;
         let msg2 = tx.compute_signing_message().unwrap();
         assert_ne!(msg1, msg2, "signing message must change when fee changes");
+    }
+
+    #[test]
+    fn signing_message_changes_with_version() {
+        let mut tx = make_test_tx();
+        let msg1 = tx.compute_signing_message().unwrap();
+        tx.version = 99;
+        let msg2 = tx.compute_signing_message().unwrap();
+        assert_ne!(
+            msg1, msg2,
+            "signing message must change when version changes"
+        );
     }
 
     #[test]

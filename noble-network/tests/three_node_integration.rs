@@ -37,7 +37,7 @@ fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
 fn make_validator_list(keys: &[NoblePublicKey]) -> ValidatorList {
     let mut vl = ValidatorList::new();
     for key in keys {
-        vl.add_validator(key.clone(), 1);
+        vl.add_validator(key.clone(), 1, 0);
     }
     vl
 }
@@ -83,7 +83,7 @@ async fn three_nodes_complete_consensus_cycle() {
 
     // Start 3 network services.
     let mut node1 = TestNode::start(
-        sk1.clone(),
+        sk1.clone_for_test(),
         pk1.clone(),
         vl.clone(),
         consensus_cfg.clone(),
@@ -91,7 +91,7 @@ async fn three_nodes_complete_consensus_cycle() {
     )
     .await;
     let mut node2 = TestNode::start(
-        sk2.clone(),
+        sk2.clone_for_test(),
         pk2.clone(),
         vl.clone(),
         consensus_cfg.clone(),
@@ -99,7 +99,7 @@ async fn three_nodes_complete_consensus_cycle() {
     )
     .await;
     let mut node3 = TestNode::start(
-        sk3.clone(),
+        sk3.clone_for_test(),
         pk3.clone(),
         vl.clone(),
         consensus_cfg.clone(),
@@ -263,7 +263,7 @@ fn vote_dedup_prevents_double_counting() {
 #[tokio::test]
 async fn invalid_block_triggers_ban() {
     let (sk1, pk1) = make_validator();
-    let vl = make_validator_list(&[pk1.clone()]);
+    let vl = make_validator_list(std::slice::from_ref(&pk1));
     let consensus_cfg = test_consensus_config();
 
     let mut engine = CycleEngine::new(
@@ -272,7 +272,7 @@ async fn invalid_block_triggers_ban() {
         0,
         Hash256::ZERO,
         MAINNET_CHAIN_ID,
-        Some((sk1.clone(), pk1.clone())),
+        Some((sk1.clone_for_test(), pk1.clone())),
     );
     engine.set_peer_count(3);
 
@@ -347,7 +347,7 @@ async fn peers_discover_each_other_via_network() {
 
     // Node B starts first (the bootstrap).
     let node_b = TestNode::start(
-        sk_b.clone(),
+        sk_b.clone_for_test(),
         pk_b.clone(),
         vl.clone(),
         consensus_cfg.clone(),
@@ -362,7 +362,7 @@ async fn peers_discover_each_other_via_network() {
     // additional plumbing. Instead, verify that all 3 nodes start successfully
     // and that the network handles are functional.
     let node_a = TestNode::start(
-        sk_a.clone(),
+        sk_a.clone_for_test(),
         pk_a.clone(),
         vl.clone(),
         consensus_cfg.clone(),
@@ -371,7 +371,7 @@ async fn peers_discover_each_other_via_network() {
     .await;
 
     let node_c = TestNode::start(
-        sk_c.clone(),
+        sk_c.clone_for_test(),
         pk_c.clone(),
         vl.clone(),
         consensus_cfg.clone(),

@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Encrypted keystore — Argon2id key derivation + AES-256-GCM encryption.
+//!
+//! **Design choice: single passphrase for all keys.**
+//! The keystore uses one master passphrase to encrypt all private keys,
+//! rather than per-key passphrases. This simplifies the UX (one unlock
+//! per session) and matches the wallet model used by most blockchain
+//! implementations. Per-key passphrases can be layered on top if needed
+//! in a future version via an HSM or external signer interface.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -28,11 +36,24 @@ struct EncryptedKeyFile {
     ciphertext: String,
 }
 
+/// Minimum passphrase length (characters).
+const MIN_PASSPHRASE_LEN: usize = 12;
+
+/// Maximum consecutive failed unlock attempts before lockout.
+const MAX_UNLOCK_ATTEMPTS: usize = 5;
+
+/// Cooldown period after exceeding max unlock attempts (seconds).
+const UNLOCK_COOLDOWN_SECS: u64 = 300; // 5 minutes
+
 /// Manages encrypted private keys on disk.
 pub struct KeyStore {
     path: PathBuf,
     /// Decrypted keys loaded on unlock. `None` means locked.
     unlocked_keys: Option<HashMap<Vec<u8>, NoblePrivateKey>>,
+    /// Consecutive failed unlock attempts.
+    failed_attempts: usize,
+    /// When the lockout expires (if any).
+    lockout_until: Option<Instant>,
 }
 
 impl KeyStore {
@@ -41,20 +62,53 @@ impl KeyStore {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, WalletError> {
         let path = path.as_ref().to_path_buf();
         fs::create_dir_all(&path)?;
+        tracing::info!(task = "wallet_key", "creating new keystore");
         Ok(Self {
             path,
             unlocked_keys: None,
+            failed_attempts: 0,
+            lockout_until: None,
         })
+    }
+
+    /// Validate that a passphrase meets minimum strength requirements.
+    fn validate_passphrase(passphrase: &str) -> Result<(), WalletError> {
+        if passphrase.len() < MIN_PASSPHRASE_LEN {
+            return Err(WalletError::PassphraseTooWeak(format!(
+                "minimum {} characters required, got {}",
+                MIN_PASSPHRASE_LEN,
+                passphrase.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Check if the keystore is currently in brute-force lockout.
+    fn check_lockout(&self) -> Result<(), WalletError> {
+        if let Some(until) = self.lockout_until {
+            if Instant::now() < until {
+                let remaining = until.duration_since(Instant::now()).as_secs();
+                return Err(WalletError::TooManyAttempts {
+                    attempts: self.failed_attempts,
+                    cooldown_secs: remaining + 1,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Generate a new key for the given scheme, encrypt it, and store to disk.
     /// If the keystore is currently unlocked, the new key is also added to the
     /// in-memory map so it can be used immediately without re-unlock.
+    ///
+    /// Passphrase must be at least 12 characters.
     pub fn create_key(
         &mut self,
         scheme_id: u8,
         passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
+        Self::validate_passphrase(passphrase)?;
+
         let (secret_key, priv_key) = match scheme_id {
             SCHEME_ED25519 => {
                 let (sk, _pk) = noble_crypto::ed25519::generate_keypair();
@@ -80,7 +134,14 @@ impl KeyStore {
 
         let encrypted = encrypt_key(&secret_key, scheme_id, passphrase)?;
         let json = serde_json::to_string_pretty(&encrypted)?;
-        fs::write(&file_path, json)?;
+        fs::write(&file_path, &json)?;
+
+        // Restrict file permissions to owner-only (0o600) on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
+        }
 
         // If unlocked, add to in-memory map for immediate use.
         if let Some(ref mut keys) = self.unlocked_keys {
@@ -156,7 +217,12 @@ impl KeyStore {
 
     /// Unlock the keystore by decrypting all key files with the given passphrase.
     /// If any key file fails to decrypt, returns `InvalidPassphrase`.
+    ///
+    /// Enforces brute-force protection: after 5 consecutive failed attempts,
+    /// the keystore enters a 5-minute cooldown period.
     pub fn unlock(&mut self, passphrase: &str) -> Result<(), WalletError> {
+        self.check_lockout()?;
+
         let mut keys = HashMap::new();
 
         for entry in fs::read_dir(&self.path)? {
@@ -170,8 +236,18 @@ impl KeyStore {
             let json = fs::read_to_string(entry.path())?;
             let encrypted: EncryptedKeyFile = serde_json::from_str(&json)?;
 
-            let mut secret =
-                decrypt_key(&encrypted, passphrase).map_err(|_| WalletError::InvalidPassphrase)?;
+            let mut secret = match decrypt_key(&encrypted, passphrase) {
+                Ok(s) => s,
+                Err(_) => {
+                    self.failed_attempts += 1;
+                    if self.failed_attempts >= MAX_UNLOCK_ATTEMPTS {
+                        self.lockout_until = Some(
+                            Instant::now() + std::time::Duration::from_secs(UNLOCK_COOLDOWN_SECS),
+                        );
+                    }
+                    return Err(WalletError::InvalidPassphrase);
+                }
+            };
 
             let priv_key = match encrypted.scheme_id {
                 SCHEME_ED25519 => NoblePrivateKey::Ed25519(secret.clone()),
@@ -187,13 +263,18 @@ impl KeyStore {
             secret.zeroize();
         }
 
+        // Successful unlock — reset brute-force counters
+        self.failed_attempts = 0;
+        self.lockout_until = None;
         self.unlocked_keys = Some(keys);
+        tracing::debug!(task = "wallet_key", "key unlocked successfully");
         Ok(())
     }
 
     /// Lock the keystore, clearing all decrypted keys from memory.
     pub fn lock(&mut self) {
         self.unlocked_keys = None;
+        tracing::debug!(task = "wallet_key", "key locked");
     }
 
     /// Returns `true` if the keystore is currently unlocked.
@@ -231,9 +312,9 @@ fn encrypt_key(
     passphrase: &str,
 ) -> Result<EncryptedKeyFile, WalletError> {
     let mut salt = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut salt);
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
 
     let aes_key = derive_key(passphrase, &salt)?;
     let cipher =
@@ -279,7 +360,7 @@ mod tests {
     fn create_key_ed25519() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
         assert_eq!(pk.scheme_id(), SCHEME_ED25519);
 
         let keys = ks.list_keys().unwrap();
@@ -291,7 +372,7 @@ mod tests {
     fn create_key_secp256k1() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
         assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
 
         let keys = ks.list_keys().unwrap();
@@ -304,8 +385,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         // Unlock first (empty keystore), then create key so it's available.
-        ks.unlock("test-pass").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass").unwrap();
+        ks.unlock("test-pass-long").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
 
         let msg = sha256(b"wallet sign test");
         let envelope = ks.sign(&pk, msg.as_bytes()).unwrap();
@@ -318,13 +399,13 @@ mod tests {
     fn unlock_with_correct_passphrase() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("pass1").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "pass1").unwrap();
+        ks.unlock("pass1-is-long!").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "pass1-is-long!").unwrap();
         ks.lock();
         assert!(!ks.is_unlocked());
 
         // Unlock with correct passphrase.
-        ks.unlock("pass1").unwrap();
+        ks.unlock("pass1-is-long!").unwrap();
         assert!(ks.is_unlocked());
 
         // Should be able to sign.
@@ -336,12 +417,12 @@ mod tests {
     fn unlock_with_wrong_passphrase() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("correct").unwrap();
-        let _pk = ks.create_key(SCHEME_ED25519, "correct").unwrap();
+        ks.unlock("correct-is-ok!").unwrap();
+        let _pk = ks.create_key(SCHEME_ED25519, "correct-is-ok!").unwrap();
         ks.lock();
 
         // Unlock with wrong passphrase.
-        let result = ks.unlock("wrong");
+        let result = ks.unlock("wrong-is-long!");
         assert!(result.is_err());
         match result.unwrap_err() {
             WalletError::InvalidPassphrase => {}
@@ -353,8 +434,8 @@ mod tests {
     fn lock_clears_keys() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("pass").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "pass").unwrap();
+        ks.unlock("passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
 
         // Sign works while unlocked.
         let msg = sha256(b"lock test");
@@ -371,7 +452,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         // Create key without unlocking (key file on disk but not in memory).
-        let pk = ks.create_key(SCHEME_ED25519, "pass").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
 
         let msg = sha256(b"locked sign test");
         let result = ks.sign(&pk, msg.as_bytes());
@@ -382,11 +463,11 @@ mod tests {
     fn delete_key_removes_file() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("pass").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "pass").unwrap();
+        ks.unlock("passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
         assert_eq!(ks.list_keys().unwrap().len(), 1);
 
-        ks.delete_key(&pk, "pass").unwrap();
+        ks.delete_key(&pk, "passphrase-ok").unwrap();
         assert_eq!(ks.list_keys().unwrap().len(), 0);
     }
 
@@ -394,8 +475,8 @@ mod tests {
     fn key_file_roundtrip() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("pass").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "pass").unwrap();
+        ks.unlock("passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
 
         // Sign while unlocked.
         let msg = sha256(b"roundtrip test");
@@ -403,7 +484,7 @@ mod tests {
 
         // Lock, then unlock again (reload from disk).
         ks.lock();
-        ks.unlock("pass").unwrap();
+        ks.unlock("passphrase-ok").unwrap();
 
         // Sign again — should produce a valid signature.
         let sig2 = ks.sign(&pk, msg.as_bytes()).unwrap();
@@ -425,9 +506,9 @@ mod tests {
     fn multiple_keys() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let _pk1 = ks.create_key(SCHEME_ED25519, "pass").unwrap();
-        let _pk2 = ks.create_key(SCHEME_ED25519, "pass").unwrap();
-        let _pk3 = ks.create_key(SCHEME_SECP256K1, "pass").unwrap();
+        let _pk1 = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let _pk2 = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let _pk3 = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         let keys = ks.list_keys().unwrap();
         assert_eq!(keys.len(), 3);
@@ -444,6 +525,66 @@ mod tests {
         assert_ne!(
             key1, key3,
             "different passphrase must produce different key"
+        );
+    }
+
+    #[test]
+    fn short_passphrase_rejected() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let result = ks.create_key(SCHEME_ED25519, "short");
+        assert!(
+            matches!(result, Err(WalletError::PassphraseTooWeak(_))),
+            "expected PassphraseTooWeak, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn exactly_min_passphrase_accepted() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        // 12 chars exactly should pass
+        let result = ks.create_key(SCHEME_ED25519, "123456789012");
+        assert!(result.is_ok(), "12-char passphrase should be accepted");
+    }
+
+    #[test]
+    fn brute_force_lockout() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.unlock("correct-is-ok!").unwrap();
+        let _pk = ks.create_key(SCHEME_ED25519, "correct-is-ok!").unwrap();
+        ks.lock();
+
+        // Exhaust attempts with wrong passphrase
+        for _ in 0..MAX_UNLOCK_ATTEMPTS {
+            let _ = ks.unlock("wrong-is-long!");
+        }
+
+        // Now even the correct passphrase should be rejected
+        let result = ks.unlock("correct-is-ok!");
+        assert!(
+            matches!(result, Err(WalletError::TooManyAttempts { .. })),
+            "expected TooManyAttempts, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let file_path = dir
+            .path()
+            .join("keys")
+            .join(format!("{}.json", hex::encode(pk.to_wire_bytes())));
+        let perms = std::fs::metadata(&file_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "key file should have 0o600 permissions"
         );
     }
 }

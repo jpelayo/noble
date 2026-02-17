@@ -29,14 +29,22 @@ pub trait MempoolApi {
 impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState<S>> {
     async fn estimate_fee(&self) -> Result<FeeEstimateResponse, ErrorObjectOwned> {
         let (low, medium, high) = TransactionBuilder::estimate_fee();
-        Ok(FeeEstimateResponse { low, medium, high })
+        Ok(FeeEstimateResponse {
+            min_fee: low,
+            recommended_fee: medium,
+            high_priority_fee: high,
+        })
     }
 
     async fn get_mempool_info(&self) -> Result<MempoolInfoResponse, ErrorObjectOwned> {
         let mempool = self.mempool.lock().unwrap();
+        let (min_fee, max_fee, avg_fee) = mempool.fee_stats();
         Ok(MempoolInfoResponse {
-            size: mempool.len(),
+            count: mempool.len(),
             total_bytes: mempool.total_size(),
+            min_fee,
+            max_fee,
+            avg_fee,
         })
     }
 }

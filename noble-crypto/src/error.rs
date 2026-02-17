@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors that can occur during cryptographic operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// Invalid key length or format.
     #[error("invalid key: {0}")]

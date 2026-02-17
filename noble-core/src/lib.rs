@@ -24,7 +24,7 @@ pub use evidence::{DoubleProposalEvidence, EvidenceError};
 pub use genesis::{genesis_block, genesis_hash, testnet_genesis_block, testnet_genesis_hash};
 pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, MetadataEntry};
-pub use node_announce::{NodeAnnounce, NodeRole, OrgType};
+pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeRole, OrgType};
 pub use peer_record::PeerRecord;
 pub use transaction::Transaction;
 pub use validation::{

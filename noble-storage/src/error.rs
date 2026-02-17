@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StorageError {
     /// The requested block was not found.
     #[error("block not found: {0}")]
@@ -51,6 +52,14 @@ pub enum StorageError {
     /// Corruption detected at a specific height.
     #[error("corruption detected at height {height}: {detail}")]
     CorruptionDetected { height: u64, detail: String },
+
+    /// Committing this block would exceed MAX_SUPPLY.
+    #[error("supply overflow: cumulative {cumulative} would exceed max {max}")]
+    SupplyOverflow { cumulative: u64, max: u64 },
+
+    /// Rollback depth exceeds MAX_REORG_DEPTH.
+    #[error("reorg too deep: depth {depth} exceeds max {max}")]
+    ReorgTooDeep { depth: u64, max: u64 },
 }
 
 impl From<noble_codec::CodecError> for StorageError {

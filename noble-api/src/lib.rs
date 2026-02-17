@@ -8,6 +8,7 @@ pub mod error;
 pub mod middleware;
 pub mod rate_limit;
 pub mod state;
+pub mod trace_types;
 pub mod types;
 
 pub mod methods;

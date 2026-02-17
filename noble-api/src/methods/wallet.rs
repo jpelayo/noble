@@ -148,12 +148,28 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let keystore = self.wallet_keystore.lock().unwrap();
         let state = self.wallet_state.lock().unwrap();
 
-        let key_count = keystore.list_keys().map(|keys| keys.len()).unwrap_or(0);
+        let keys = keystore.list_keys().unwrap_or_default();
+        let key_count = keys.len();
+
+        // Sum balances across all wallet keys
+        let storage = self.storage.read().unwrap();
+        let mempool = self.mempool.lock().unwrap();
+        let mut total_balance = 0u64;
+        let mut total_pending = 0u64;
+        for pk in &keys {
+            total_balance += storage.get_balance(pk).unwrap_or(0);
+            total_pending += mempool.pending_debit(pk);
+        }
+        drop(mempool);
+        drop(storage);
 
         Ok(WalletInfoResponse {
             unlocked: state.is_unlocked(),
             expires_at: state.expires_at_unix(),
             key_count,
+            balance: total_balance,
+            available: total_balance.saturating_sub(total_pending),
+            pending: total_pending,
         })
     }
 

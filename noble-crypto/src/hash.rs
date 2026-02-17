@@ -118,6 +118,7 @@ pub fn sha256(data: &[u8]) -> Hash256 {
 /// Used for transaction IDs, following the Bitcoin convention of using
 /// double-hashing to prevent length-extension attacks.
 pub fn double_sha256(data: &[u8]) -> Hash256 {
+    tracing::trace!("sha256: hashing {} bytes", data.len());
     let first = sha256(data);
     sha256(&first.0)
 }

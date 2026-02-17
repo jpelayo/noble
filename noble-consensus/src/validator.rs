@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use noble_crypto::NoblePublicKey;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 /// Validator liveness status, derived from `last_seen` relative to thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +113,10 @@ impl ValidatorList {
 
     /// Add a validator with the given weight.
     /// If already present, updates the weight.
-    pub fn add_validator(&mut self, pubkey: NoblePublicKey, weight: u64) {
+    /// `now` is the current unix timestamp in seconds.
+    pub fn add_validator(&mut self, pubkey: NoblePublicKey, weight: u64, now: u64) {
+        debug!("validator added: {:?}", pubkey);
         let wire = pubkey.to_wire_bytes();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         self.entries.insert(
             wire,
             ValidatorEntry {
@@ -177,7 +176,11 @@ impl ValidatorList {
 
     /// Remove a validator. Returns `true` if it was present.
     pub fn remove_validator(&mut self, pubkey: &NoblePublicKey) -> bool {
-        self.entries.remove(&pubkey.to_wire_bytes()).is_some()
+        let removed = self.entries.remove(&pubkey.to_wire_bytes()).is_some();
+        if removed {
+            debug!("validator removed: {:?}", pubkey);
+        }
+        removed
     }
 
     /// List all validators sorted by weight (descending), then by wire bytes (ascending) for determinism.
@@ -357,7 +360,7 @@ mod tests {
     fn add_and_check_validator() {
         let mut list = ValidatorList::new();
         let pk = make_pubkey();
-        list.add_validator(pk.clone(), 100);
+        list.add_validator(pk.clone(), 100, 1_700_000_000);
         assert!(list.is_validator(&pk));
         assert_eq!(list.len(), 1);
     }
@@ -366,7 +369,7 @@ mod tests {
     fn remove_validator() {
         let mut list = ValidatorList::new();
         let pk = make_pubkey();
-        list.add_validator(pk.clone(), 100);
+        list.add_validator(pk.clone(), 100, 1_700_000_000);
         assert!(list.remove_validator(&pk));
         assert!(!list.is_validator(&pk));
         assert!(list.is_empty());
@@ -380,9 +383,9 @@ mod tests {
         let pk_low = make_pubkey();
         let pk_high = make_pubkey();
         let pk_mid = make_pubkey();
-        list.add_validator(pk_low.clone(), 10);
-        list.add_validator(pk_high.clone(), 100);
-        list.add_validator(pk_mid.clone(), 50);
+        list.add_validator(pk_low.clone(), 10, 1_700_000_000);
+        list.add_validator(pk_high.clone(), 100, 1_700_000_000);
+        list.add_validator(pk_mid.clone(), 50, 1_700_000_000);
 
         let sorted = list.list_validators();
         assert_eq!(sorted.len(), 3);
@@ -396,8 +399,8 @@ mod tests {
         use noble_codec::NobleCbor;
 
         let mut list = ValidatorList::new();
-        list.add_validator(make_pubkey(), 100);
-        list.add_validator(make_pubkey(), 50);
+        list.add_validator(make_pubkey(), 100, 1_700_000_000);
+        list.add_validator(make_pubkey(), 50, 1_700_000_000);
 
         let bytes = list.to_cbor().unwrap();
         let decoded = ValidatorList::from_cbor(&bytes).unwrap();
@@ -411,7 +414,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
 
         assert!(list.apply_rotation(&old_key, new_key.clone(), 10).is_ok());
         assert_eq!(list.pending_rotations().len(), 1);
@@ -434,7 +437,7 @@ mod tests {
         let old_key = make_pubkey();
         let new_key1 = make_pubkey();
         let new_key2 = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
 
         assert!(list.apply_rotation(&old_key, new_key1, 10).is_ok());
         let result = list.apply_rotation(&old_key, new_key2, 11);
@@ -447,7 +450,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
         list.apply_rotation(&old_key, new_key.clone(), 10).unwrap();
 
         // During grace period (cycle 10, grace=48, so valid until cycle 58)
@@ -459,7 +462,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
         list.apply_rotation(&old_key, new_key.clone(), 10).unwrap();
 
         // New key should be valid during grace period
@@ -471,7 +474,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
         list.apply_rotation(&old_key, new_key.clone(), 10).unwrap();
 
         // Finalize at cycle 58 (10 + 48 = 58, grace expired)
@@ -490,7 +493,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 75);
+        list.add_validator(old_key.clone(), 75, 1_700_000_000);
         list.apply_rotation(&old_key, new_key.clone(), 10).unwrap();
 
         list.finalize_rotations(58, 48);
@@ -506,7 +509,7 @@ mod tests {
         let mut list = ValidatorList::new();
         let old_key = make_pubkey();
         let new_key = make_pubkey();
-        list.add_validator(old_key.clone(), 100);
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
 
         let rotation = PendingRotation {
             old_key: old_key.clone(),
@@ -554,7 +557,7 @@ mod tests {
     fn update_last_seen_changes_liveness() {
         let mut list = ValidatorList::new();
         let pk = make_pubkey();
-        list.add_validator(pk.clone(), 100);
+        list.add_validator(pk.clone(), 100, 1_700_000_000);
 
         let now = 1_700_000_000;
         // Before update: no last_seen → unreachable
@@ -572,7 +575,7 @@ mod tests {
     fn list_validators_with_liveness_includes_metadata() {
         let mut list = ValidatorList::new();
         let pk = make_pubkey();
-        list.add_validator(pk.clone(), 100);
+        list.add_validator(pk.clone(), 100, 1_700_000_000);
         list.set_friendly_name(&pk, "test-validator".to_string());
         list.update_last_seen(&pk, 1_700_000_000);
 

@@ -18,6 +18,7 @@ use crate::methods::document::DocumentApiServer;
 use crate::methods::mempool::MempoolApiServer;
 use crate::methods::network::NetworkApiServer;
 use crate::methods::node::NodeApiServer;
+use crate::methods::trace::TraceApiServer;
 use crate::methods::transaction::TransactionApiServer;
 use crate::methods::wallet::WalletApiServer;
 use crate::middleware::AuthLayer;
@@ -71,10 +72,13 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     module
         .merge(NodeApiServer::into_rpc(state.clone()))
         .map_err(|e| ApiError::Internal(format!("merge NodeApi: {e}")))?;
+    module
+        .merge(TraceApiServer::into_rpc(state.clone()))
+        .map_err(|e| ApiError::Internal(format!("merge TraceApi: {e}")))?;
 
     let handle = server.start(module);
 
-    tracing::info!("JSON-RPC server listening on {}", addr);
+    tracing::info!(task = "rpc_server", "RPC server starting on {}", addr);
 
     Ok(handle)
 }

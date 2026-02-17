@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors that can occur during wallet operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WalletError {
     /// Wallet is locked; sign/create operations rejected.
     #[error("wallet is locked")]
@@ -52,6 +53,14 @@ pub enum WalletError {
     /// Unsupported signature scheme.
     #[error("unsupported scheme: {0:#04x}")]
     UnsupportedScheme(u8),
+
+    /// Passphrase does not meet minimum strength requirements.
+    #[error("passphrase too weak: {0}")]
+    PassphraseTooWeak(String),
+
+    /// Too many failed unlock attempts; keystore is temporarily locked out.
+    #[error("too many unlock attempts ({attempts}), try again after {cooldown_secs}s")]
+    TooManyAttempts { attempts: usize, cooldown_secs: u64 },
 }
 
 impl From<std::io::Error> for WalletError {

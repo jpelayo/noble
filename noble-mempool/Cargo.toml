@@ -15,6 +15,7 @@ noble-codec.workspace = true
 noble-core.workspace = true
 noble-crypto.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

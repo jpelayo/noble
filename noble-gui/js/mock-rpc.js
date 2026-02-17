@@ -864,6 +864,8 @@ export class MockRpcClient {
           governance_class: 'individual',
           wants_to_validate: false,
           wants_to_vote: false,
+          pki_attestation: null,
+          pkcs12_configured: false,
         };
 
       case 'noble_setNodeIdentity':
@@ -884,6 +886,12 @@ export class MockRpcClient {
             last_seen: Math.floor(Date.now() / 1000) - 120,
             wants_to_validate: false,
             wants_to_vote: true,
+            pki_attestation: {
+              scheme: 'pkcs7',
+              scope: 'identity',
+              signer_fingerprint: deterministicHash(101).slice(0, 64),
+              signer_cn: 'Massachusetts Institute of Technology',
+            },
           },
           {
             peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
@@ -898,6 +906,12 @@ export class MockRpcClient {
             last_seen: Math.floor(Date.now() / 1000) - 300,
             wants_to_validate: true,
             wants_to_vote: true,
+            pki_attestation: {
+              scheme: 'pkcs7',
+              scope: 'identity',
+              signer_fingerprint: deterministicHash(202).slice(0, 64),
+              signer_cn: 'U.S. Department of the Treasury',
+            },
           },
           {
             peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
@@ -1047,6 +1061,56 @@ export class MockRpcClient {
       case 'noble_pruneStalePeers':
         return { pruned: 1 };
 
+      case 'noble_setTraceFilter': {
+        const filter = params.filter || 'info';
+        const durationMinutes = params.duration_minutes;
+        const validDurations = [1, 5, 15, 30, 60, 120, 360, 720, 1440];
+        if (durationMinutes != null && !validDurations.includes(durationMinutes)) {
+          throw { code: -32602, message: `Invalid duration: ${durationMinutes}` };
+        }
+        if (filter === 'off') {
+          this._traceSession = null;
+          return { active: false, filter: 'off', expires_at: null, remaining_seconds: null };
+        }
+        const now = Math.floor(Date.now() / 1000);
+        const expiresAt = durationMinutes ? now + durationMinutes * 60 : null;
+        this._traceSession = { filter, expires_at: expiresAt, started_at: now };
+        return {
+          active: true,
+          filter,
+          expires_at: expiresAt,
+          remaining_seconds: durationMinutes ? durationMinutes * 60 : null,
+        };
+      }
+
+      case 'noble_getTraceBuffer': {
+        const lastN = params.last_n || 200;
+        const entries = this._generateTraceEntries(lastN, params.level, params.task);
+        return {
+          entries,
+          total_in_buffer: 847 + Math.floor(Math.random() * 200),
+          capacity: 50000,
+          current_filter: this._traceSession?.filter || 'info',
+          session_active: !!this._traceSession,
+          remaining_seconds: this._traceSessionRemaining(),
+        };
+      }
+
+      case 'noble_clearTraceBuffer':
+        return { cleared: true };
+
+      case 'noble_getTraceStatus': {
+        const session = this._traceSession;
+        const remaining = this._traceSessionRemaining();
+        return {
+          session_active: !!session && (remaining === null || remaining > 0),
+          current_filter: session?.filter || 'info',
+          remaining_seconds: remaining,
+          buffer_size: 847 + Math.floor(Math.random() * 200),
+          buffer_capacity: 50000,
+        };
+      }
+
       case 'noble_rotateTotpSecret': {
         if (!params.current_code_hash || params.current_code_hash.length !== 64) {
           throw { code: -32012, message: 'authentication required' };
@@ -1062,6 +1126,69 @@ export class MockRpcClient {
       default:
         throw { code: -32601, message: `Method not found: ${method}` };
     }
+  }
+
+  _traceSessionRemaining() {
+    if (!this._traceSession || !this._traceSession.expires_at) return null;
+    const now = Math.floor(Date.now() / 1000);
+    return Math.max(0, this._traceSession.expires_at - now);
+  }
+
+  _generateTraceEntries(count, levelFilter, taskFilter) {
+    const levels = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR'];
+    const targets = [
+      'noble_core::validation', 'noble_crypto::ed25519', 'noble_storage::rocks',
+      'noble_mempool::pool', 'noble_consensus::cycle_engine', 'noble_network::service',
+      'noble_api::server', 'noble_wallet::keystore', 'noble_node::node',
+      'noble_consensus::vote_manager', 'noble_network::peer_manager',
+    ];
+    const tasks = [
+      'block_validation', 'mempool_admit', 'consensus_step', 'peer_connect',
+      'sync_headers', 'tx_verify', 'rpc_request', 'gossip_receive',
+    ];
+    const messages = [
+      'Validating transaction T7: fee check passed',
+      'Block #{{h}} committed to storage ({{n}} txs)',
+      'Peer 12D3KooW...a3f2 connected (outbound)',
+      'CycleEngine step: Proposal → Voting',
+      'Mempool admit: 8-step validation passed for tx {{id}}',
+      'Ed25519 signature verified in 0.12ms',
+      'RPC request: noble_getBlockCount (2ms)',
+      'GossipSub: received tx announcement from 3 peers',
+      'Vote received for candidate block {{hash}}',
+      'Headers-first sync: fetched 10 headers from peer',
+      'Balance delta applied: +50000000 for validator key',
+      'SigCache hit ratio: 94.2% (1847/1960)',
+      'Evicted 3 expired transactions from mempool',
+      'Peer ban score increased: +5 (invalid block)',
+      'CBOR deserialization: 342 bytes in 0.08ms',
+    ];
+
+    const now = Math.floor(Date.now() / 1000);
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const seed = now * 100 + i;
+      const level = levels[seed % 5 < 2 ? 2 : seed % 5]; // bias towards INFO
+      if (levelFilter && level !== levelFilter) continue;
+      const task = tasks[seed % tasks.length];
+      if (taskFilter && task !== taskFilter) continue;
+
+      const msg = messages[seed % messages.length]
+        .replace('{{h}}', String(99 + (seed % 20)))
+        .replace('{{n}}', String(1 + (seed % 15)))
+        .replace('{{id}}', deterministicHash(seed).slice(0, 16))
+        .replace('{{hash}}', deterministicHash(seed * 3).slice(0, 16));
+
+      entries.push({
+        timestamp: now - (count - i) * 2,
+        level,
+        target: targets[seed % targets.length],
+        message: msg,
+        fields: { task },
+        span_stack: [],
+      });
+    }
+    return entries.slice(-count);
   }
 
   #findBlock(heightOrHash) {

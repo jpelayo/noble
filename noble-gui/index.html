@@ -9,10 +9,11 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+  <a href="#content" class="skip-to-content">Skip to content</a>
   <!-- Sidebar navigation -->
-  <nav id="sidebar">
-    <div class="logo">NOBLE</div>
-    <ul>
+  <nav id="sidebar" aria-label="Main navigation">
+    <div class="logo" aria-hidden="true">NOBLE</div>
+    <ul role="list">
       <li><a href="#/"><span class="nav-icon">&#9673;</span><span class="nav-label">Overview</span></a></li>
       <li><a href="#/blocks"><span class="nav-icon">&#9638;</span><span class="nav-label">Blocks</span></a></li>
       <li><a href="#/transactions"><span class="nav-icon">&#8644;</span><span class="nav-label">Transactions</span></a></li>
@@ -23,6 +24,7 @@
       <li><a href="#/wallet"><span class="nav-icon">&#9671;</span><span class="nav-label">Wallet</span></a></li>
       <li><a href="#/health"><span class="nav-icon">&#9829;</span><span class="nav-label">Health</span></a></li>
       <li><a href="#/identity"><span class="nav-icon">&#9998;</span><span class="nav-label">Identity</span></a></li>
+      <li><a href="#/trace"><span class="nav-icon">&#9881;</span><span class="nav-label">Trace</span></a></li>
     </ul>
     <button id="theme-toggle" title="Toggle dark/light theme">Dark</button>
     <div class="sidebar-footer">
@@ -32,12 +34,12 @@
   </nav>
 
   <!-- Main content area -->
-  <main id="content">
+  <main id="content" role="main">
     <p>Loading...</p>
   </main>
 
   <!-- Status bar -->
-  <footer id="status-bar">
+  <footer id="status-bar" aria-live="polite" role="status">
     <span><span id="kpi-height" class="kpi-val">--</span><span class="kpi-label"> height</span></span>
     <span><span id="kpi-peers" class="kpi-val">--</span><span class="kpi-label"> peers</span></span>
     <span><span id="kpi-mempool" class="kpi-val">--</span><span class="kpi-label"> mempool</span></span>

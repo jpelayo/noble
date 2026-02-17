@@ -13,8 +13,10 @@ authors.workspace = true
 [dependencies]
 noble-codec.workspace = true
 noble-crypto.workspace = true
+ed25519-dalek.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true

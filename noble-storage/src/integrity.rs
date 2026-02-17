@@ -60,6 +60,8 @@ pub fn verify_chain_integrity(
     start: u64,
     end: u64,
 ) -> IntegrityReport {
+    tracing::info!("starting integrity check from height {} to {}", start, end);
+
     let mut report = IntegrityReport {
         heights_checked: 0,
         first_corrupt_height: None,
@@ -153,6 +155,12 @@ pub fn verify_chain_integrity(
 
         prev_hash = Some(stored_hash);
     }
+
+    tracing::debug!(
+        "checked {} blocks, {} findings",
+        report.heights_checked,
+        report.findings.len()
+    );
 
     report
 }
