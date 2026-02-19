@@ -162,6 +162,10 @@ function makeTransaction(seed, timestamp) {
     signature_size: 128 + (seed % 384),
   }] : [];
 
+  // ~30% have a gateway address (fee split: 50% to gateway node)
+  const hasGateway = seed % 3 === 0;
+  const gateway_address = hasGateway ? deterministicHash(seed * 59).slice(0, 66) : null;
+
   return {
     version: PROTOCOL_VERSION,
     checksum: deterministicHash(seed * 17),
@@ -174,6 +178,7 @@ function makeTransaction(seed, timestamp) {
     locator_recipient_count: hasLocator ? 1 + (seed % 3) : 0,
     attestation_count: attestations.length,
     attestations,
+    gateway_address,
   };
 }
 
@@ -327,6 +332,7 @@ export class MockRpcClient {
   #authEnabled = false;
   #authToken = null;
   #totpSecret = null;
+  #allowedIps = [];
 
   constructor({ latencyMin = 50, latencyMax = 150 } = {}) {
     const { blocks, txIndex, checksumIndex } = generateChain(100);
@@ -704,9 +710,9 @@ export class MockRpcClient {
           uptime_secs: 86400 * 3 + 7200 + 1800,
           storage_bytes: 256 * 1024 * 1024,
           storage_capacity_bytes: 1024 * 1024 * 1024,
-          rpc_port: 9332,
-          ws_port: 9334,
-          p2p_port: 9333,
+          rpc_port: 8783,
+          ws_port: 8784,
+          p2p_port: 8780,
           data_dir: '/var/noble/data',
         };
 
@@ -760,56 +766,84 @@ export class MockRpcClient {
           if (h % validatorCount === 0) blocksWon.push(h);
         }
 
-        // For each won block: one subsidy tx + one fee_income tx
+        // For each won block: one validation_subsidy tx + one fee tx (validator or gateway share)
         for (const h of blocksWon) {
           const block = this.#chain.blocks[h];
           if (!block) continue;
-          const feeIncome = block.transactions.reduce((s, tx) => s + tx.fee, 0);
+          const totalFees = block.transactions.reduce((s, tx) => s + tx.fee, 0);
           const confirmations = chainHeight - h;
+          const txCount = block.transactions.length;
 
+          // Subsidy → validation_subsidy
           runningBalance += subsidyPerBlock;
           txs.push({
-            type: 'subsidy',
+            type: 'validation_subsidy',
             direction: 'incoming',
             amount: subsidyPerBlock,
             running_balance: runningBalance,
             timestamp: block.header.timestamp,
             block_height: h,
             tx_id: deterministicHash(h * 41 + 7777),
-            description: `Block #${h} validation reward`,
+            description: `Block #${h} validation reward (${(subsidyPerBlock / 1_000_000).toFixed(0)} NOBLE)`,
             confirmations,
             status: confirmations >= 6 ? 'confirmed' : 'pending',
           });
 
-          if (feeIncome > 0) {
-            runningBalance += feeIncome;
-            txs.push({
-              type: 'fee_income',
-              direction: 'incoming',
-              amount: feeIncome,
-              running_balance: runningBalance,
-              timestamp: block.header.timestamp + 1,
-              block_height: h,
-              tx_id: deterministicHash(h * 41 + 8888),
-              description: `Block #${h} tx fees (${block.transactions.length} txs)`,
-              confirmations,
-              status: confirmations >= 6 ? 'confirmed' : 'pending',
-            });
+          if (totalFees > 0) {
+            // ~60% of blocks: validator fee share; ~40%: gateway fee share
+            const hasGatewayTxs = block.transactions.some(tx => tx.gateway_address);
+            const gatewayTxCount = block.transactions.filter(tx => tx.gateway_address).length;
+
+            if (hasGatewayTxs && h % 5 < 2) {
+              // Gateway fee share (this node was the accepting gateway)
+              const gatewayShare = Math.floor(totalFees / 2);
+              runningBalance += gatewayShare;
+              txs.push({
+                type: 'fee_gateway',
+                direction: 'incoming',
+                amount: gatewayShare,
+                running_balance: runningBalance,
+                timestamp: block.header.timestamp + 1,
+                block_height: h,
+                tx_id: deterministicHash(h * 41 + 8888),
+                description: `Block #${h} gateway fee share (${gatewayTxCount} gateway txs)`,
+                confirmations,
+                status: confirmations >= 6 ? 'confirmed' : 'pending',
+              });
+            } else {
+              // Validator fee share
+              const validatorShare = hasGatewayTxs ? Math.ceil(totalFees / 2) : totalFees;
+              runningBalance += validatorShare;
+              txs.push({
+                type: 'fee_validation',
+                direction: 'incoming',
+                amount: validatorShare,
+                running_balance: runningBalance,
+                timestamp: block.header.timestamp + 1,
+                block_height: h,
+                tx_id: deterministicHash(h * 41 + 8888),
+                description: `Block #${h} validator fee share (${txCount} txs)`,
+                confirmations,
+                status: confirmations >= 6 ? 'confirmed' : 'pending',
+              });
+            }
           }
         }
 
-        // Add a few outgoing transfers (sent to other addresses)
+        // Outgoing transfers: mix of payment_sent and doc_registration
         const outgoing = [
-          { amount: 200_000_000, desc: 'Transfer to cold storage', ago: 86400 * 5, id: 1001 },
-          { amount: 150_000_000, desc: 'Operational payment', ago: 86400 * 3, id: 1002 },
-          { amount: 100_000_000, desc: 'Transfer to exchange', ago: 86400, id: 1003 },
-          { amount: 50_000_000, desc: 'Service fee payment', ago: 3600 * 6, id: 1004 },
+          { amount: 200_000_000, desc: 'Payment to noble1b7e2...f4a9', ago: 86400 * 5, id: 1001, type: 'payment_sent' },
+          { amount: 150_000_000, desc: 'Payment to noble1c3d8...e2b7', ago: 86400 * 3, id: 1002, type: 'payment_sent' },
+          { amount: 1_050_000, desc: 'Document registration: a8f3c2d1...', ago: 86400 * 2, id: 1005, type: 'doc_registration' },
+          { amount: 100_000_000, desc: 'Payment to noble1d9f1...a3c5', ago: 86400, id: 1003, type: 'payment_sent' },
+          { amount: 1_050_000, desc: 'Document registration: 7b2e9f04...', ago: 3600 * 12, id: 1006, type: 'doc_registration' },
+          { amount: 50_000_000, desc: 'Payment to noble1e4a7...d8f2', ago: 3600 * 6, id: 1004, type: 'payment_sent' },
         ];
 
         for (const out of outgoing) {
           runningBalance -= out.amount;
           txs.push({
-            type: 'transfer_out',
+            type: out.type,
             direction: 'outgoing',
             amount: out.amount,
             running_balance: runningBalance,
@@ -822,17 +856,17 @@ export class MockRpcClient {
           });
         }
 
-        // Add one incoming transfer (received from another wallet)
+        // Incoming transfer → payment_received
         runningBalance += 25_000_000;
         txs.push({
-          type: 'transfer_in',
+          type: 'payment_received',
           direction: 'incoming',
           amount: 25_000_000,
           running_balance: runningBalance,
           timestamp: now - 86400 * 2,
           block_height: chainHeight - 96,
           tx_id: deterministicHash(2001 * 9999),
-          description: 'Received from noble1a8f3...c2d1',
+          description: 'Payment from noble1a8f3...c2d1',
           confirmations: 96,
           status: 'confirmed',
         });
@@ -881,7 +915,7 @@ export class MockRpcClient {
             node_role: 'ArchiveNode',
             contact_email: 'blockchain@mit.edu',
             website: 'https://blockchain.mit.edu',
-            host_address: '/ip4/18.4.86.10/tcp/9333',
+            host_address: '/ip4/18.4.86.10/tcp/8780',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 120,
             wants_to_validate: false,
@@ -901,7 +935,7 @@ export class MockRpcClient {
             node_role: 'Validator',
             contact_email: 'nodes@treasury.gov',
             website: 'https://treasury.gov/blockchain',
-            host_address: '/ip4/52.1.100.50/tcp/9333',
+            host_address: '/ip4/52.1.100.50/tcp/8780',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 300,
             wants_to_validate: true,
@@ -921,7 +955,7 @@ export class MockRpcClient {
             node_role: 'FullNode',
             contact_email: 'infra@acme.com',
             website: 'https://acme.com',
-            host_address: '/ip4/203.0.113.42/tcp/9333',
+            host_address: '/ip4/203.0.113.42/tcp/8780',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 60,
             wants_to_validate: false,
@@ -935,7 +969,7 @@ export class MockRpcClient {
             node_role: 'FullNode',
             contact_email: 'admin@opennoble.org',
             website: 'https://opennoble.org',
-            host_address: '/ip4/198.51.100.7/tcp/9333',
+            host_address: '/ip4/198.51.100.7/tcp/8780',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 45,
             wants_to_validate: true,
@@ -949,7 +983,7 @@ export class MockRpcClient {
             node_role: 'Validator',
             contact_email: 'blockchain@bcn.cat',
             website: 'https://ajuntament.barcelona.cat',
-            host_address: '/ip4/85.91.200.12/tcp/9333',
+            host_address: '/ip4/85.91.200.12/tcp/8780',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 180,
             wants_to_validate: true,
@@ -980,7 +1014,7 @@ export class MockRpcClient {
             last_seen: now - 120,
             connection_count: 47,
             peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
-            last_addr: '/ip4/18.4.86.10/tcp/9333',
+            last_addr: '/ip4/18.4.86.10/tcp/8780',
             node_name: 'MIT Blockchain Lab',
             org_type: 'University',
             node_role: 'ArchiveNode',
@@ -993,7 +1027,7 @@ export class MockRpcClient {
             last_seen: now - 300,
             connection_count: 120,
             peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
-            last_addr: '/ip4/52.1.100.50/tcp/9333',
+            last_addr: '/ip4/52.1.100.50/tcp/8780',
             node_name: 'Treasury Node Alpha',
             org_type: 'GovernmentFederal',
             node_role: 'Validator',
@@ -1006,7 +1040,7 @@ export class MockRpcClient {
             last_seen: now - 60,
             connection_count: 12,
             peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
-            last_addr: '/ip4/203.0.113.42/tcp/9333',
+            last_addr: '/ip4/203.0.113.42/tcp/8780',
             node_name: 'Acme Corp Node',
             org_type: 'Enterprise',
             node_role: 'FullNode',
@@ -1019,7 +1053,7 @@ export class MockRpcClient {
             last_seen: now - 86400 * 8,
             connection_count: 3,
             peer_id: '12D3KooWG7h8i9j0k1l2m3n4o5p6',
-            last_addr: '/ip4/10.0.0.1/tcp/9333',
+            last_addr: '/ip4/10.0.0.1/tcp/8780',
             node_name: 'Stale Observer',
             org_type: 'Individual',
             node_role: 'LightClient',
@@ -1032,7 +1066,7 @@ export class MockRpcClient {
             last_seen: now - 45,
             connection_count: 34,
             peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
-            last_addr: '/ip4/198.51.100.7/tcp/9333',
+            last_addr: '/ip4/198.51.100.7/tcp/8780',
             node_name: 'OpenNoble Community',
             org_type: 'OpenSourceProject',
             node_role: 'FullNode',
@@ -1045,7 +1079,7 @@ export class MockRpcClient {
             last_seen: now - 180,
             connection_count: 67,
             peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
-            last_addr: '/ip4/85.91.200.12/tcp/9333',
+            last_addr: '/ip4/85.91.200.12/tcp/8780',
             node_name: 'City of Barcelona',
             org_type: 'GovernmentMunicipal',
             node_role: 'Validator',
@@ -1109,6 +1143,23 @@ export class MockRpcClient {
           buffer_size: 847 + Math.floor(Math.random() * 200),
           buffer_capacity: 50000,
         };
+      }
+
+      case 'noble_getAllowedIps':
+        return {
+          allowed_ips: this.#allowedIps,
+          remote_access_enabled: this.#allowedIps.length > 0,
+        };
+
+      case 'noble_setAllowedIps': {
+        const newList = params.allowed_ips || [];
+        const wasRemote = this.#allowedIps.length > 0;
+        this.#allowedIps = newList;
+        const isRemote = newList.length > 0;
+        const msg = wasRemote !== isRemote
+          ? `Allowed IPs updated (${newList.length} entries). Note: bind address change requires node restart.`
+          : `Allowed IPs updated (${newList.length} entries)`;
+        return { success: true, message: msg };
       }
 
       case 'noble_rotateTotpSecret': {

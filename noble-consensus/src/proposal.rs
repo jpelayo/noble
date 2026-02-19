@@ -111,6 +111,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();

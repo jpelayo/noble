@@ -215,9 +215,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         trace_handle: Option<Arc<noble_api::trace_types::TraceHandle>>,
     ) -> Result<(), NodeError> {
         // --- Parse port numbers from config addresses ---
-        let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(9332);
-        let ws_port = parse_port(&config.api.ws_addr).unwrap_or(9334);
-        let p2p_port = parse_p2p_port(&config.network.listen_addr).unwrap_or(30333);
+        let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
+        let ws_port = parse_port(&config.api.ws_addr).unwrap_or(8784);
 
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
@@ -236,8 +235,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             .await
             .map_err(|e| NodeError::Network(e.to_string()))?;
 
+        let p2p_port = network.bound_port;
         let network_cmd = network.command_sender();
-        tracing::info!("P2P network started on {}", config.network.listen_addr);
+        tracing::info!("P2P network started on port {p2p_port}");
 
         // --- Initialize TOTP auth ---
         let (totp_validator, totp_secret_path) =
@@ -248,6 +248,41 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let (new_tx_tx, _) = broadcast::channel(256);
         let (cycle_phase_tx, _) = broadcast::channel(16);
         let (peer_update_tx, _) = broadcast::channel(64);
+
+        // --- IP access control ---
+        let ip_filter = if config.api.allowed_ips.is_empty() {
+            None
+        } else {
+            match noble_api::ip_filter::IpFilter::new(&config.api.allowed_ips) {
+                Ok(f) => {
+                    tracing::info!(
+                        "IP access control enabled: {} entries",
+                        config.api.allowed_ips.len()
+                    );
+                    Some(f)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Invalid allowed_ips config: {e} — falling back to localhost-only"
+                    );
+                    None
+                }
+            }
+        };
+
+        // --- Derive gateway key (first wallet key, if any) ---
+        let gateway_key = {
+            let ks = self.wallet_keystore.lock().unwrap();
+            ks.list_keys()
+                .ok()
+                .and_then(|keys| keys.into_iter().next())
+                .map(|pk| pk.to_wire_bytes())
+        };
+        if gateway_key.is_some() {
+            tracing::info!("Gateway fee split enabled (wallet key found)");
+        } else {
+            tracing::info!("Gateway fee split disabled (no wallet key yet)");
+        }
 
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
@@ -272,14 +307,58 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cycle_phase_tx: cycle_phase_tx.clone(),
             peer_update_tx: peer_update_tx.clone(),
             trace_handle,
+            gateway_key,
+            ip_filter: ip_filter.clone(),
         });
 
+        // --- Determine RPC bind address ---
+        // When remote access is enabled, bind to 0.0.0.0 instead of 127.0.0.1.
+        let rpc_bind_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
+            config.api.rpc_addr.replace("127.0.0.1", "0.0.0.0")
+        } else {
+            config.api.rpc_addr.clone()
+        };
+
         // --- Start RPC server ---
-        let rpc_handle = noble_api::server::start_server(api_state, &config.api.rpc_addr)
+        let rpc_handle = noble_api::server::start_server(api_state, &rpc_bind_addr)
             .await
             .map_err(|e| NodeError::Api(e.to_string()))?;
 
-        tracing::info!("JSON-RPC server listening on {}", config.api.rpc_addr);
+        tracing::info!("JSON-RPC server listening on {}", rpc_bind_addr);
+
+        // --- Start embedded GUI server ---
+        let gui_dir = if config.api.gui_dir.is_empty() {
+            crate::gui_server::detect_gui_dir()
+        } else {
+            let p = std::path::PathBuf::from(&config.api.gui_dir);
+            if p.join("index.html").exists() {
+                Some(p)
+            } else {
+                tracing::warn!("Configured gui_dir {} not found", config.api.gui_dir);
+                None
+            }
+        };
+
+        if let Some(gui_path) = gui_dir {
+            let gui_addr_str = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
+                config.api.gui_addr.replace("127.0.0.1", "0.0.0.0")
+            } else {
+                config.api.gui_addr.clone()
+            };
+            let gui_addr: std::net::SocketAddr = gui_addr_str
+                .parse()
+                .unwrap_or_else(|_| "127.0.0.1:8785".parse().unwrap());
+            let gui_filter = ip_filter.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    crate::gui_server::start_gui_server(gui_addr, gui_path, gui_filter).await
+                {
+                    tracing::error!("GUI server error: {e}");
+                }
+            });
+        } else {
+            tracing::info!("GUI directory not found — dashboard server not started");
+        }
 
         // --- Consensus tick interval ---
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -539,7 +618,8 @@ fn parse_port(addr: &str) -> Option<u16> {
     addr.rsplit(':').next()?.parse().ok()
 }
 
-/// Parse port number from a multiaddr string like "/ip4/0.0.0.0/tcp/30333".
+/// Parse port number from a multiaddr string like "/ip4/0.0.0.0/tcp/8780".
+#[allow(dead_code)]
 fn parse_p2p_port(multiaddr: &str) -> Option<u16> {
     let parts: Vec<&str> = multiaddr.split('/').collect();
     // Find the segment after "tcp"
@@ -763,7 +843,7 @@ mod tests {
     fn node_config_default_is_valid() {
         let config = NodeConfig::default();
         assert_eq!(config.network.max_peers, 50);
-        assert_eq!(config.api.rpc_addr, "127.0.0.1:9332");
+        assert_eq!(config.api.rpc_addr, "127.0.0.1:8783");
         assert_eq!(config.logging.level, "info");
         assert!(config.metrics.enabled);
     }
@@ -861,16 +941,16 @@ mod tests {
 
     #[test]
     fn parse_port_from_addr() {
-        assert_eq!(parse_port("127.0.0.1:9332"), Some(9332));
-        assert_eq!(parse_port("0.0.0.0:9334"), Some(9334));
+        assert_eq!(parse_port("127.0.0.1:8783"), Some(8783));
+        assert_eq!(parse_port("0.0.0.0:8784"), Some(8784));
         assert_eq!(parse_port("127.0.0.1:0"), Some(0));
         assert_eq!(parse_port("no_colon"), None);
     }
 
     #[test]
     fn parse_p2p_port_from_multiaddr() {
-        assert_eq!(parse_p2p_port("/ip4/0.0.0.0/tcp/30333"), Some(30333));
-        assert_eq!(parse_p2p_port("/ip4/127.0.0.1/tcp/9333"), Some(9333));
+        assert_eq!(parse_p2p_port("/ip4/0.0.0.0/tcp/8780"), Some(8780));
+        assert_eq!(parse_p2p_port("/ip4/127.0.0.1/tcp/8781"), Some(8781));
         assert_eq!(parse_p2p_port("/ip4/0.0.0.0/udp/1234"), None);
         assert_eq!(parse_p2p_port(""), None);
     }
@@ -912,7 +992,7 @@ mod tests {
         // Peer connect should increment count
         let connect_event = NetworkEvent::PeerConnected {
             peer_id: vec![1, 2, 3],
-            addr: "/ip4/1.2.3.4/tcp/30333".to_string(),
+            addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
             chain_tip: None,
         };
         node.handle_network_event(&connect_event, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx);

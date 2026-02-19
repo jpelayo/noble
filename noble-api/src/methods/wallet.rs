@@ -200,17 +200,24 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         let fee = fee.unwrap_or(MIN_TX_FEE);
 
-        // Build and sign the transaction
+        // Build and sign the transaction (inject gateway address if configured)
         let tx = {
             let keystore = self.wallet_keystore.lock().unwrap();
-            TransactionBuilder::build_transfer(&keystore, &sender, recipient, amount, fee, memo)
-                .map_err(|e| match e {
-                    noble_wallet::WalletError::Locked => ApiError::WalletLocked,
-                    noble_wallet::WalletError::InsufficientBalance { have, need } => {
-                        ApiError::InsufficientBalance(format!("have {have}, need {need}"))
-                    }
-                    other => ApiError::Internal(other.to_string()),
-                })?
+            let mut tx = TransactionBuilder::build_transfer(
+                &keystore, &sender, recipient, amount, fee, memo,
+            )
+            .map_err(|e| match e {
+                noble_wallet::WalletError::Locked => ApiError::WalletLocked,
+                noble_wallet::WalletError::InsufficientBalance { have, need } => {
+                    ApiError::InsufficientBalance(format!("have {have}, need {need}"))
+                }
+                other => ApiError::Internal(other.to_string()),
+            })?;
+            if let Some(ref gw) = self.gateway_key {
+                TransactionBuilder::set_gateway_and_resign(&mut tx, &keystore, &sender, gw.clone())
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
+            tx
         };
 
         // Admit to mempool
@@ -320,17 +327,22 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
             sha256(checksum_hex.as_bytes())
         };
 
-        // Build transaction
+        // Build transaction (inject gateway address if configured)
         let tx = {
             let keystore = self.wallet_keystore.lock().unwrap();
-            TransactionBuilder::build_notarization(
+            let mut tx = TransactionBuilder::build_notarization(
                 &keystore,
                 signer,
                 checksum,
                 fee,
                 vec![], // no metadata in batch mode
             )
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+            if let Some(ref gw) = self.gateway_key {
+                TransactionBuilder::set_gateway_and_resign(&mut tx, &keystore, signer, gw.clone())
+                    .map_err(|e| e.to_string())?;
+            }
+            tx
         };
 
         // Admit to mempool

@@ -33,6 +33,20 @@ pub trait NodeApi {
         &self,
         current_code_hash: String,
     ) -> Result<RotateTotpResponse, ErrorObjectOwned>;
+
+    /// Get the current IP access control list.
+    #[method(name = "getAllowedIps")]
+    async fn get_allowed_ips(&self) -> Result<AllowedIpsResponse, ErrorObjectOwned>;
+
+    /// Update the IP access control list at runtime.
+    ///
+    /// Note: switching between empty (localhost-only) and non-empty (remote
+    /// access) requires a node restart because the bind address changes.
+    #[method(name = "setAllowedIps")]
+    async fn set_allowed_ips(
+        &self,
+        allowed_ips: Vec<String>,
+    ) -> Result<SetAllowedIpsResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -95,6 +109,55 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(RotateTotpResponse {
             secret_base32: base32,
             otpauth_uri: uri,
+        })
+    }
+
+    async fn get_allowed_ips(&self) -> Result<AllowedIpsResponse, ErrorObjectOwned> {
+        let (allowed_ips, remote_access_enabled) = match &self.ip_filter {
+            Some(filter) => (filter.list(), filter.has_remote_access()),
+            None => (Vec::new(), false),
+        };
+        Ok(AllowedIpsResponse {
+            allowed_ips,
+            remote_access_enabled,
+        })
+    }
+
+    async fn set_allowed_ips(
+        &self,
+        allowed_ips: Vec<String>,
+    ) -> Result<SetAllowedIpsResponse, ErrorObjectOwned> {
+        let filter = self.ip_filter.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam(
+                "IP filter not initialized. Add allowed_ips to [api] config and restart.".into(),
+            )
+        })?;
+
+        let was_remote = filter.has_remote_access();
+
+        filter
+            .update(&allowed_ips)
+            .map_err(ApiError::InvalidParam)?;
+
+        let is_remote = filter.has_remote_access();
+
+        // Warn if the bind address mode changed (requires restart).
+        let message = if was_remote != is_remote {
+            format!(
+                "Allowed IPs updated ({} entries). Note: bind address change ({}→{}) requires node restart to take effect.",
+                allowed_ips.len(),
+                if was_remote { "0.0.0.0" } else { "127.0.0.1" },
+                if is_remote { "0.0.0.0" } else { "127.0.0.1" },
+            )
+        } else {
+            format!("Allowed IPs updated ({} entries)", allowed_ips.len())
+        };
+
+        tracing::info!(task = "ip_filter", "{message}");
+
+        Ok(SetAllowedIpsResponse {
+            success: true,
+            message,
         })
     }
 }

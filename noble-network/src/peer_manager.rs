@@ -183,7 +183,11 @@ impl PeerManager {
 
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.ban_score = state.ban_score.saturating_add(penalty);
-            tracing::debug!(task = "peer_ban", "ban score updated for peer: +{}", penalty);
+            tracing::debug!(
+                task = "peer_ban",
+                "ban score updated for peer: +{}",
+                penalty
+            );
             if state.ban_score >= self.ban_threshold {
                 self.banned.insert(*peer_id, Instant::now());
                 self.peers.remove(peer_id);
@@ -524,10 +528,10 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
         assert!(pm.get_peer(&p).unwrap().addr.is_none());
 
-        pm.update_addr(&p, "/ip4/1.2.3.4/tcp/9333".to_string());
+        pm.update_addr(&p, "/ip4/1.2.3.4/tcp/8780".to_string());
         assert_eq!(
             pm.get_peer(&p).unwrap().addr.as_deref(),
-            Some("/ip4/1.2.3.4/tcp/9333")
+            Some("/ip4/1.2.3.4/tcp/8780")
         );
     }
 
@@ -538,7 +542,7 @@ mod tests {
         let p2 = random_peer();
         pm.on_connected(p1, Direction::Outbound);
         pm.on_connected(p2, Direction::Inbound);
-        pm.update_addr(&p1, "/ip4/1.2.3.4/tcp/9333".to_string());
+        pm.update_addr(&p1, "/ip4/1.2.3.4/tcp/8780".to_string());
         // p2 has no addr — should not appear.
         let addrs = pm.connected_addrs();
         assert_eq!(addrs.len(), 1);

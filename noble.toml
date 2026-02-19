@@ -13,7 +13,7 @@ network = "mainnet"
 
 [network]
 # Address to listen for incoming P2P connections.
-listen_addr = "/ip4/0.0.0.0/tcp/30333"
+listen_addr = "/ip4/0.0.0.0/tcp/8780"
 
 # Seed nodes to connect to on startup (multiaddr format).
 seeds = []
@@ -44,10 +44,10 @@ validator_list_path = "validators.txt"
 
 [api]
 # JSON-RPC HTTP server bind address.
-rpc_addr = "127.0.0.1:9332"
+rpc_addr = "127.0.0.1:8783"
 
 # WebSocket server bind address for subscriptions.
-ws_addr = "127.0.0.1:9334"
+ws_addr = "127.0.0.1:8784"
 
 # Maximum concurrent RPC connections.
 max_connections = 100
@@ -62,6 +62,15 @@ totp_enabled = false
 # Path to the TOTP shared secret file (base32-encoded).
 # If empty and totp_enabled is true, a secret is auto-generated on first startup.
 totp_secret_file = ""
+
+# Dashboard GUI HTTP server bind address.
+gui_addr = "127.0.0.1:8785"
+
+# Allowed remote IPs or CIDR blocks for RPC/GUI access.
+# 127.0.0.1 is always allowed. Empty = localhost-only.
+# When non-empty, RPC and GUI bind to 0.0.0.0 (all interfaces).
+# Examples: ["192.168.1.0/24"] or ["10.0.0.5", "172.16.0.0/12"]
+allowed_ips = []
 
 [wallet]
 # Directory where encrypted keystores are stored.

@@ -24,10 +24,11 @@ use crate::methods::wallet::WalletApiServer;
 use crate::middleware::AuthLayer;
 use crate::state::ApiState;
 
-/// Start the JSON-RPC server on the given address (e.g. "127.0.0.1:9333").
+/// Start the JSON-RPC server on the given address (e.g. "127.0.0.1:8783").
 ///
 /// When `ApiState.totp_validator` is `Some`, all requests require a valid
 /// `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
+/// CORS headers allow requests from the dashboard GUI on port 8785.
 ///
 /// Returns a `ServerHandle` that can be used for graceful shutdown.
 pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
@@ -36,8 +37,30 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
     let auth_layer = AuthLayer::new(state.totp_validator.clone());
 
+    // CORS: permissive when remote access is enabled (IP filter provides security),
+    // restrictive to the local GUI origin when localhost-only.
+    let remote_access = state
+        .ip_filter
+        .as_ref()
+        .is_some_and(|f| f.has_remote_access());
+
+    let cors = if remote_access {
+        tower_http::cors::CorsLayer::permissive()
+    } else {
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(
+                "http://127.0.0.1:8785"
+                    .parse::<http::HeaderValue>()
+                    .unwrap(),
+            )
+            .allow_methods([http::Method::GET, http::Method::POST, http::Method::OPTIONS])
+            .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+    };
+
+    // RPC server security: bind address controls access (127.0.0.1 vs 0.0.0.0),
+    // CORS restricts browser origins, auth layer checks TOTP tokens.
     let server = Server::builder()
-        .set_http_middleware(tower::ServiceBuilder::new().layer(auth_layer))
+        .set_http_middleware(tower::ServiceBuilder::new().layer(cors).layer(auth_layer))
         .build(addr)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to bind server: {e}")))?;

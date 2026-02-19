@@ -186,6 +186,10 @@ pub enum ValidationError {
     #[error("T17b: key rotation tx must not have amount")]
     KeyRotationHasAmount,
 
+    /// T25: Gateway address wire bytes are invalid.
+    #[error("T25: invalid gateway_address: {0}")]
+    InvalidGatewayAddress(String),
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

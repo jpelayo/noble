@@ -71,8 +71,10 @@ export function init(root, ctx) {
             <option value="all">All</option>
             <option value="incoming">Incoming</option>
             <option value="outgoing">Outgoing</option>
-            <option value="subsidy">Subsidies</option>
-            <option value="fee_income">Fees</option>
+            <option value="subsidies">Subsidies</option>
+            <option value="fees">Fee Income</option>
+            <option value="transfers">Transfers</option>
+            <option value="documents">Documents</option>
           </select>
           <span id="w-tx-count" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
         </div>
@@ -146,20 +148,24 @@ export function init(root, ctx) {
         <dt>First Active</dt><dd>${formatTimestamp(info.first_active)}</dd>
       `;
 
-      // Income breakdown
+      // Income breakdown — 3 categories: subsidies, validator fees, gateway fees
       const subsidyTotal = txResult.transactions
-        .filter(t => t.type === 'subsidy')
+        .filter(t => t.type === 'validation_subsidy')
         .reduce((s, t) => s + t.amount, 0);
-      const feeTotal = txResult.transactions
-        .filter(t => t.type === 'fee_income')
+      const valFeeTotal = txResult.transactions
+        .filter(t => t.type === 'fee_validation')
+        .reduce((s, t) => s + t.amount, 0);
+      const gwFeeTotal = txResult.transactions
+        .filter(t => t.type === 'fee_gateway')
         .reduce((s, t) => s + t.amount, 0);
       const outTotal = txResult.transactions
         .filter(t => t.direction === 'outgoing')
         .reduce((s, t) => s + t.amount, 0);
-      const totalIncome = subsidyTotal + feeTotal;
+      const totalIncome = subsidyTotal + valFeeTotal + gwFeeTotal;
 
       const subsidyPct = totalIncome > 0 ? Math.round(subsidyTotal / totalIncome * 100) : 0;
-      const feePct = 100 - subsidyPct;
+      const valFeePct = totalIncome > 0 ? Math.round(valFeeTotal / totalIncome * 100) : 0;
+      const gwFeePct = Math.max(0, 100 - subsidyPct - valFeePct);
 
       wIncomeBreakdown.innerHTML = `
         <div style="margin-bottom:var(--gap)">
@@ -173,11 +179,20 @@ export function init(root, ctx) {
         </div>
         <div style="margin-bottom:var(--gap)">
           <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
-            <span>Transaction Fees</span>
-            <span class="mono">${formatNoble(feeTotal)} (${feePct}%)</span>
+            <span>Validator Fees</span>
+            <span class="mono">${formatNoble(valFeeTotal)} (${valFeePct}%)</span>
           </div>
           <div style="height:8px;background:var(--bg-tertiary);border-radius:4px">
-            <div style="height:100%;width:${feePct}%;background:var(--success);border-radius:4px;transition:width 0.3s"></div>
+            <div style="height:100%;width:${valFeePct}%;background:var(--success);border-radius:4px;transition:width 0.3s"></div>
+          </div>
+        </div>
+        <div style="margin-bottom:var(--gap)">
+          <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
+            <span>Gateway Fees</span>
+            <span class="mono">${formatNoble(gwFeeTotal)} (${gwFeePct}%)</span>
+          </div>
+          <div style="height:8px;background:var(--bg-tertiary);border-radius:4px">
+            <div style="height:100%;width:${gwFeePct}%;background:var(--warning);border-radius:4px;transition:width 0.3s"></div>
           </div>
         </div>
         <div style="padding-top:var(--gap-sm);border-top:1px solid var(--border);display:flex;justify-content:space-between;font-size:var(--font-size-sm)">
@@ -221,8 +236,10 @@ export function init(root, ctx) {
     let filtered = allTransactions;
     if (filter === 'incoming') filtered = allTransactions.filter(t => t.direction === 'incoming');
     else if (filter === 'outgoing') filtered = allTransactions.filter(t => t.direction === 'outgoing');
-    else if (filter === 'subsidy') filtered = allTransactions.filter(t => t.type === 'subsidy');
-    else if (filter === 'fee_income') filtered = allTransactions.filter(t => t.type === 'fee_income');
+    else if (filter === 'subsidies') filtered = allTransactions.filter(t => t.type === 'validation_subsidy');
+    else if (filter === 'fees') filtered = allTransactions.filter(t => t.type.startsWith('fee_'));
+    else if (filter === 'transfers') filtered = allTransactions.filter(t => t.type.startsWith('payment_'));
+    else if (filter === 'documents') filtered = allTransactions.filter(t => t.type === 'doc_registration');
 
     wTxCount.textContent = `${filtered.length} transactions`;
 
@@ -245,7 +262,7 @@ export function init(root, ctx) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-size:var(--font-size-base);text-align:center">${icon}</td>
-        <td><span class="badge ${isIn ? 'inbound' : 'outbound'}">${tx.type.replace('_', ' ')}</span></td>
+        <td><span class="badge ${isIn ? 'inbound' : 'outbound'}">${typeLabel(tx.type)}</span></td>
         <td>
           <div style="font-size:var(--font-size-sm)">${tx.description}</div>
           ${tx.tx_id ? `<div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(tx.tx_id, 8)}</div>` : ''}
@@ -301,20 +318,24 @@ function formatNoble(atomicUnits) {
 
 function typeIcon(type) {
   switch (type) {
-    case 'subsidy': return '&#9670;'; // diamond — block reward
-    case 'fee_income': return '&#9733;'; // star — fee income
-    case 'transfer_in': return '&#8595;'; // down arrow — received
-    case 'transfer_out': return '&#8593;'; // up arrow — sent
+    case 'validation_subsidy': return '&#9670;';  // diamond — block reward
+    case 'fee_validation':     return '&#9733;';  // star — validator fee share
+    case 'fee_gateway':        return '&#9672;';  // outlined diamond — gateway fee share
+    case 'payment_received':   return '&#8595;';  // down arrow — received
+    case 'payment_sent':       return '&#8593;';  // up arrow — sent
+    case 'doc_registration':   return '&#10003;'; // checkmark — document registration
     default: return '&#8226;';
   }
 }
 
 function typeLabel(type) {
   switch (type) {
-    case 'subsidy': return 'Block Subsidy';
-    case 'fee_income': return 'Fee Income';
-    case 'transfer_in': return 'Transfer In';
-    case 'transfer_out': return 'Transfer Out';
+    case 'validation_subsidy': return 'Validation Subsidy';
+    case 'fee_validation':     return 'Fee (Validator)';
+    case 'fee_gateway':        return 'Fee (Gateway)';
+    case 'payment_received':   return 'Payment Received';
+    case 'payment_sent':       return 'Payment Sent';
+    case 'doc_registration':   return 'Doc Registration';
     default: return type;
   }
 }

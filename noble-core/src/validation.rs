@@ -100,7 +100,10 @@ pub fn validate_transaction(
             tx.publisher_sig.scheme_id,
         ));
     }
-    tracing::trace!(scheme_id = tx.publisher_sig.scheme_id, "T5: publisher scheme recognized");
+    tracing::trace!(
+        scheme_id = tx.publisher_sig.scheme_id,
+        "T5: publisher scheme recognized"
+    );
 
     // T6: Publisher signature verification
     let signing_msg = tx
@@ -125,7 +128,10 @@ pub fn validate_transaction(
                 reason: e.to_string(),
             })?;
     }
-    tracing::trace!(count = tx.additional_sigs.len(), "T7: additional signatures verified");
+    tracing::trace!(
+        count = tx.additional_sigs.len(),
+        "T7: additional signatures verified"
+    );
 
     // T8 + T9: Metadata validation
     validate_metadata(&tx.metadata)?;
@@ -220,6 +226,13 @@ pub fn validate_transaction(
         return Err(ValidationError::KeyRotationMissingNewKey);
     }
     tracing::trace!("T17b/T21: key rotation checks passed");
+
+    // T25: Gateway address wire bytes validation
+    if let Some(ref gw) = tx.gateway_address {
+        NoblePublicKey::from_wire_bytes(gw)
+            .map_err(|e| ValidationError::InvalidGatewayAddress(format!("bad wire bytes: {e}")))?;
+    }
+    tracing::trace!("T25: gateway_address check passed");
 
     // T18-T20: Validator identity checks deferred to consensus (needs validator list)
 
@@ -426,7 +439,10 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             }
         })?;
     }
-    tracing::trace!(count = block.transactions.len(), "B11: all transactions valid");
+    tracing::trace!(
+        count = block.transactions.len(),
+        "B11: all transactions valid"
+    );
 
     // B12: Validator scheme recognized
     if !is_recognized_scheme(header.validator_id.scheme_id()) {
@@ -436,7 +452,11 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     }
     tracing::trace!("B12: validator scheme recognized");
 
-    tracing::debug!(height = header.height, tx_count = header.tx_count, "block validation passed");
+    tracing::debug!(
+        height = header.height,
+        tx_count = header.tx_count,
+        "block validation passed"
+    );
     Ok(())
 }
 
@@ -472,6 +492,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
 
         let msg = tx.compute_signing_message().unwrap();
@@ -810,6 +831,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -866,6 +888,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -900,6 +923,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -934,6 +958,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -968,6 +993,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1002,6 +1028,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1034,6 +1061,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1154,6 +1182,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: Some(locator),
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1198,6 +1227,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: Some(locator),
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1238,6 +1268,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![attestation],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1278,6 +1309,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![attestation],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1420,6 +1452,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1454,6 +1487,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1482,6 +1516,77 @@ mod tests {
         assert!(matches!(
             result,
             Err(ValidationError::InvalidTransaction { index: 0, .. })
+        ));
+    }
+
+    // --- T25: gateway_address validation ---
+
+    #[test]
+    fn t25_valid_gateway_address_accepted() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, gw_pk) = ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk);
+        let gw_wire = gw_key.to_wire_bytes();
+
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum: sha256(b"gw-valid"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: Some(gw_wire),
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    #[test]
+    fn t25_invalid_gateway_address_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum: sha256(b"gw-invalid"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: Some(vec![0xFF, 0x01, 0x02]), // invalid wire bytes
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(matches!(
+            result,
+            Err(ValidationError::InvalidGatewayAddress(_))
         ));
     }
 }

@@ -73,3 +73,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 subtle = "2"
 openssl = { version = "0.10", features = ["vendored"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
+axum = "0.7"
+hyper = { version = "1", features = ["full"] }
+ipnet = "2"

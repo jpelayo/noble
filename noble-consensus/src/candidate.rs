@@ -66,7 +66,10 @@ impl CandidateTracker {
         let order = self.next_order;
         self.next_order += 1;
 
-        debug!("new candidate block proposed at height {}", block.header.height);
+        debug!(
+            "new candidate block proposed at height {}",
+            block.header.height
+        );
 
         self.by_validator.insert(validator_wire, block_hash);
         self.candidates.insert(
@@ -78,7 +81,10 @@ impl CandidateTracker {
                 order,
             },
         );
-        trace!("candidate tracker: {} candidates for cycle", self.candidates.len());
+        trace!(
+            "candidate tracker: {} candidates for cycle",
+            self.candidates.len()
+        );
         Ok(())
     }
 

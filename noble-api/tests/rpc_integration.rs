@@ -90,14 +90,16 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         rate_limiter: None,   // disabled in tests
         totp_validator: None, // auth disabled in tests
         totp_secret_path: None,
-        rpc_port: 9332,
-        ws_port: 9334,
-        p2p_port: 30333,
+        rpc_port: 8783,
+        ws_port: 8784,
+        p2p_port: 8780,
         new_block_tx,
         new_tx_tx,
         cycle_phase_tx,
         peer_update_tx,
         trace_handle: None, // trace disabled in tests
+        gateway_key: None,  // no gateway in tests
+        ip_filter: None,    // no IP filter in tests
     });
 
     (state, dir)
@@ -381,9 +383,9 @@ async fn get_node_info() {
     assert_eq!(resp["chain_id"], MAINNET_CHAIN_ID);
     // uptime_secs should be a small number (just started)
     assert!(resp["uptime_secs"].as_u64().unwrap() < 60);
-    assert_eq!(resp["rpc_port"], 9332);
-    assert_eq!(resp["ws_port"], 9334);
-    assert_eq!(resp["p2p_port"], 30333);
+    assert_eq!(resp["rpc_port"], 8783);
+    assert_eq!(resp["ws_port"], 8784);
+    assert_eq!(resp["p2p_port"], 8780);
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +601,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
+        gateway_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();

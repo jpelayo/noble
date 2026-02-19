@@ -21,8 +21,8 @@ pub const MAX_PER_SUBNET: usize = 2;
 /// # Examples
 ///
 /// ```ignore
-/// assert_eq!(extract_subnet("/ip4/192.168.1.5/tcp/9333"), Some(0xC0A8)); // 192.168
-/// assert_eq!(extract_subnet("/ip6/::1/tcp/9333"), None);
+/// assert_eq!(extract_subnet("/ip4/192.168.1.5/tcp/8780"), Some(0xC0A8)); // 192.168
+/// assert_eq!(extract_subnet("/ip6/::1/tcp/8780"), None);
 /// ```
 pub fn extract_subnet(addr: &str) -> Option<u16> {
     // Look for "/ip4/x.x.x.x" pattern.
@@ -147,19 +147,19 @@ mod tests {
     #[test]
     fn extract_subnet_ipv4() {
         assert_eq!(
-            extract_subnet("/ip4/192.168.1.5/tcp/9333"),
+            extract_subnet("/ip4/192.168.1.5/tcp/8780"),
             Some(0xC0A8) // 192 << 8 | 168
         );
         assert_eq!(
-            extract_subnet("/ip4/10.0.42.1/tcp/9333"),
+            extract_subnet("/ip4/10.0.42.1/tcp/8780"),
             Some(0x0A00) // 10 << 8 | 0
         );
     }
 
     #[test]
     fn extract_subnet_non_ip_returns_none() {
-        assert_eq!(extract_subnet("/ip6/::1/tcp/9333"), None);
-        assert_eq!(extract_subnet("/dns4/example.com/tcp/9333"), None);
+        assert_eq!(extract_subnet("/ip6/::1/tcp/8780"), None);
+        assert_eq!(extract_subnet("/dns4/example.com/tcp/8780"), None);
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
         let existing: Vec<String> = vec![];
         assert!(check_subnet_diversity(
             &existing,
-            "/ip4/192.168.1.1/tcp/9333",
+            "/ip4/192.168.1.1/tcp/8780",
             2
         ));
     }
@@ -189,13 +189,13 @@ mod tests {
     #[test]
     fn diversity_blocks_over_limit() {
         let existing = vec![
-            "/ip4/192.168.1.1/tcp/9333".to_string(),
-            "/ip4/192.168.2.2/tcp/9333".to_string(),
+            "/ip4/192.168.1.1/tcp/8780".to_string(),
+            "/ip4/192.168.2.2/tcp/8780".to_string(),
         ];
         // Same /16 subnet (192.168.x.x) — should be blocked at max=2.
         assert!(!check_subnet_diversity(
             &existing,
-            "/ip4/192.168.3.3/tcp/9333",
+            "/ip4/192.168.3.3/tcp/8780",
             2
         ));
     }
@@ -203,13 +203,13 @@ mod tests {
     #[test]
     fn diversity_allows_different_subnet() {
         let existing = vec![
-            "/ip4/192.168.1.1/tcp/9333".to_string(),
-            "/ip4/192.168.2.2/tcp/9333".to_string(),
+            "/ip4/192.168.1.1/tcp/8780".to_string(),
+            "/ip4/192.168.2.2/tcp/8780".to_string(),
         ];
         // Different /16 subnet (10.0.x.x) — should be allowed.
         assert!(check_subnet_diversity(
             &existing,
-            "/ip4/10.0.1.1/tcp/9333",
+            "/ip4/10.0.1.1/tcp/8780",
             2
         ));
     }
@@ -217,12 +217,12 @@ mod tests {
     #[test]
     fn inbound_diversity_allows_below_limit() {
         let existing = vec![
-            "/ip4/192.168.1.1/tcp/9333".to_string(),
-            "/ip4/192.168.2.2/tcp/9333".to_string(),
+            "/ip4/192.168.1.1/tcp/8780".to_string(),
+            "/ip4/192.168.2.2/tcp/8780".to_string(),
         ];
         assert!(check_inbound_subnet_diversity(
             &existing,
-            "/ip4/192.168.3.3/tcp/9333",
+            "/ip4/192.168.3.3/tcp/8780",
             4
         ));
     }
@@ -230,13 +230,13 @@ mod tests {
     #[test]
     fn inbound_diversity_blocks_over_limit() {
         let existing = vec![
-            "/ip4/10.0.1.1/tcp/9333".to_string(),
-            "/ip4/10.0.2.2/tcp/9333".to_string(),
-            "/ip4/10.0.3.3/tcp/9333".to_string(),
+            "/ip4/10.0.1.1/tcp/8780".to_string(),
+            "/ip4/10.0.2.2/tcp/8780".to_string(),
+            "/ip4/10.0.3.3/tcp/8780".to_string(),
         ];
         assert!(!check_inbound_subnet_diversity(
             &existing,
-            "/ip4/10.0.4.4/tcp/9333",
+            "/ip4/10.0.4.4/tcp/8780",
             3
         ));
     }
@@ -246,8 +246,8 @@ mod tests {
         let state1 = make_peer_state(10, 0);
         let state2 = make_peer_state(500, 50);
         let peers = vec![
-            ("/ip4/1.2.3.4/tcp/9333", &state1),
-            ("/ip4/5.6.7.8/tcp/9333", &state2),
+            ("/ip4/1.2.3.4/tcp/8780", &state1),
+            ("/ip4/5.6.7.8/tcp/8780", &state2),
         ];
         let (idx, _score) = worst_outbound_peer(&peers).unwrap();
         assert_eq!(idx, 1); // state2 is worse (higher latency + ban score)

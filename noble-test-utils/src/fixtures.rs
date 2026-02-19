@@ -62,6 +62,7 @@ pub fn make_signed_tx(
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
+        gateway_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
@@ -95,6 +96,7 @@ pub fn make_signed_tx_with_metadata(
         metadata,
         encrypted_locator: None,
         external_attestations: vec![],
+        gateway_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
@@ -129,6 +131,7 @@ pub fn make_signed_transfer_tx(
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
+        gateway_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();

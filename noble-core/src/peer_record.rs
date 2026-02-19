@@ -97,7 +97,7 @@ mod tests {
             connection_count: 5,
             last_announce: None,
             peer_id_bytes: vec![0xBB; 38],
-            last_addr: Some("/ip4/1.2.3.4/tcp/9333".into()),
+            last_addr: Some("/ip4/1.2.3.4/tcp/8780".into()),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&rec, &mut buf).unwrap();

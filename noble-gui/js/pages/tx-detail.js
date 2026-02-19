@@ -51,6 +51,10 @@ export function init(root, ctx) {
       <dt>Checksum</dt><dd class="mono">${tx.checksum}</dd>
       <dt>Timestamp</dt><dd>${formatTimestamp(tx.timestamp)}</dd>
       <dt>Fee</dt><dd>${formatFee(tx.fee)} (${tx.fee} atomic)</dd>
+      ${tx.gateway_address ? `
+      <dt>Gateway</dt><dd class="mono" title="This node receives 50% of the fee">${truncateHash(tx.gateway_address, 12)}</dd>
+      <dt>Fee Split</dt><dd>Validator: ${Math.ceil(tx.fee / 2)} &middot; Gateway: ${Math.floor(tx.fee / 2)}</dd>
+      ` : ''}
       <dt>Status</dt><dd><span class="badge confirmed">${txResult.status}</span></dd>
       <dt>Block Height</dt><dd><a href="#/block/${txResult.block_height}">${txResult.block_height}</a></dd>
       <dt>Confirmations</dt><dd>${txResult.confirmations}</dd>

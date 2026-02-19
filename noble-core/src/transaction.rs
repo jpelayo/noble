@@ -42,6 +42,10 @@ pub struct Transaction {
     /// Protocol-opaque: stored but never validated by the node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_attestations: Vec<ExternalAttestation>,
+    /// Gateway node address (wire bytes). If present, the gateway receives 50% of the fee.
+    /// Set by the node's RPC handler when it first accepts the transaction from the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_address: Option<Vec<u8>>,
 }
 
 /// Internal struct used to compute the signing message (GAP-C1).
@@ -67,6 +71,8 @@ struct SigningPayload {
     encrypted_locator: Option<EncryptedLocator>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     external_attestations: Vec<ExternalAttestation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gateway_address: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -100,6 +106,7 @@ impl Transaction {
             metadata: sorted_metadata,
             encrypted_locator: self.encrypted_locator.clone(),
             external_attestations: self.external_attestations.clone(),
+            gateway_address: self.gateway_address.clone(),
         };
 
         let canonical = noble_codec::to_canonical_cbor(&payload)?;
@@ -142,6 +149,7 @@ mod tests {
             metadata,
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
 
         // Sign with the actual signing message
@@ -264,5 +272,37 @@ mod tests {
         let canonical = tx.canonical_bytes().unwrap();
         let decoded = Transaction::from_cbor(&canonical).unwrap();
         assert_eq!(tx, decoded);
+    }
+
+    #[test]
+    fn signing_payload_includes_gateway_address() {
+        let tx_none = make_test_tx();
+        let msg_none = tx_none.compute_signing_message().unwrap();
+
+        let mut tx_gw = make_test_tx();
+        // Force same checksum/timestamp/fee to isolate the gateway_address diff
+        tx_gw.checksum = tx_none.checksum;
+        tx_gw.timestamp = tx_none.timestamp;
+        tx_gw.fee = tx_none.fee;
+        tx_gw.gateway_address = Some(vec![0x01; 33]); // 1 + 32 bytes
+        let msg_gw = tx_gw.compute_signing_message().unwrap();
+
+        assert_ne!(
+            msg_none, msg_gw,
+            "signing message must change when gateway_address is set"
+        );
+    }
+
+    #[test]
+    fn tx_without_gateway_backward_compat_cbor() {
+        // A tx with gateway_address: None should serialize/deserialize
+        // identically to the pre-gateway era (serde skip_serializing_if).
+        let tx = make_test_tx();
+        assert!(tx.gateway_address.is_none());
+
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
+        assert_eq!(tx, decoded);
+        assert!(decoded.gateway_address.is_none());
     }
 }

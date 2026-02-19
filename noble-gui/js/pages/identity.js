@@ -98,7 +98,7 @@ export function init(root, ctx) {
             </div>
             <div class="form-group">
               <label for="id-host">Host Address</label>
-              <input type="text" id="id-host" placeholder="e.g. /ip4/1.2.3.4/tcp/9333">
+              <input type="text" id="id-host" placeholder="e.g. /ip4/1.2.3.4/tcp/8780">
             </div>
             <fieldset class="form-group participation-fieldset">
               <legend>Consensus Participation</legend>

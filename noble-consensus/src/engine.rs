@@ -115,7 +115,10 @@ impl CycleEngine {
         // Detect cycle boundary
         if new_cycle > self.tracked_cycle {
             let completed = self.tracked_cycle;
-            info!("cycle engine: state transition cycle {} -> {}", completed, new_cycle);
+            info!(
+                "cycle engine: state transition cycle {} -> {}",
+                completed, new_cycle
+            );
             self.tracked_cycle = new_cycle;
             outputs.extend(self.handle_cycle_boundary(completed));
         }
@@ -141,7 +144,10 @@ impl CycleEngine {
     fn handle_phase_transition(&mut self, cycle: u64, phase: CyclePhase) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
         let old_phase = self.tracked_phase;
-        info!("cycle engine: state transition {:?} -> {:?}", old_phase, phase);
+        info!(
+            "cycle engine: state transition {:?} -> {:?}",
+            old_phase, phase
+        );
 
         match phase {
             CyclePhase::Validation => {
@@ -195,7 +201,10 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
-                info!("vote tally complete: winner = {}, strength = {:?}", candidate_hash, strength);
+                info!(
+                    "vote tally complete: winner = {}, strength = {:?}",
+                    candidate_hash, strength
+                );
                 if let Some(entry) = self.candidate_tracker.get(&candidate_hash) {
                     let block = entry.block.clone();
                     let new_height = block.header.height;
@@ -229,7 +238,10 @@ impl CycleEngine {
                 }
             }
             MigrationResult::Indeterminate => {
-                debug!("cycle {}: vote tally indeterminate, no block committed", completed_cycle);
+                debug!(
+                    "cycle {}: vote tally indeterminate, no block committed",
+                    completed_cycle
+                );
                 // Re-admit all candidate txs back to mempool
                 let all_txs: Vec<_> = self
                     .candidate_tracker
@@ -261,7 +273,10 @@ impl CycleEngine {
 
     fn handle_block_proposed(&mut self, block: Box<Block>, from_peer: Vec<u8>) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
-        debug!("consensus: received block proposal at height {}", block.header.height);
+        debug!(
+            "consensus: received block proposal at height {}",
+            block.header.height
+        );
 
         // Only accept block proposals during Validation phase
         if self.tracked_phase != CyclePhase::Validation {
@@ -334,7 +349,10 @@ impl CycleEngine {
 
     fn handle_vote_received(&mut self, vote: PorVote, from_peer: Vec<u8>) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
-        debug!("consensus: received vote for candidate {}", vote.candidate_hash);
+        debug!(
+            "consensus: received vote for candidate {}",
+            vote.candidate_hash
+        );
 
         // Only accept votes during Reflection phase
         if self.tracked_phase != CyclePhase::Reflection {
@@ -373,7 +391,10 @@ impl CycleEngine {
 impl ConsensusStateMachine for CycleEngine {
     #[tracing::instrument(skip(self, event), fields(task = "consensus_step", cycle = self.tracked_cycle))]
     fn step(&mut self, event: CycleEvent) -> Vec<CycleIo> {
-        debug!("consensus: processing event {:?}", std::mem::discriminant(&event));
+        debug!(
+            "consensus: processing event {:?}",
+            std::mem::discriminant(&event)
+        );
         match event {
             CycleEvent::Tick { now } => self.handle_tick(now),
             CycleEvent::PhaseTransition { cycle, new_phase } => {

@@ -313,11 +313,25 @@ impl StorageEngine for RocksDbStorage {
         // Phase 1: accumulate deltas as i128
         let mut deltas: HashMap<Vec<u8>, i128> = HashMap::new();
 
-        // Validator gets subsidy + all fees
+        // Validator gets subsidy + fees (split with gateway if present)
         let validator_key = Self::pubkey_key(&block.header.validator_id);
         let subsidy = subsidy_at_height(height) as i128;
-        let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
-        *deltas.entry(validator_key).or_default() += subsidy + total_fees;
+
+        // Split fees: 50% to gateway (if present), remainder to validator.
+        // Subsidy always goes 100% to validator.
+        let mut validator_fee_total: i128 = 0;
+        for tx in &block.transactions {
+            let fee = tx.fee as i128;
+            if let Some(ref gw) = tx.gateway_address {
+                let gw_share = fee / 2;
+                let val_share = fee - gw_share; // validator gets rounding
+                *deltas.entry(gw.clone()).or_default() += gw_share;
+                validator_fee_total += val_share;
+            } else {
+                validator_fee_total += fee;
+            }
+        }
+        *deltas.entry(validator_key).or_default() += subsidy + validator_fee_total;
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
             let sender_key = tx
@@ -748,8 +762,20 @@ impl StorageEngine for RocksDbStorage {
 
             let validator_key = Self::pubkey_key(&block.header.validator_id);
             let subsidy = subsidy_at_height(h) as i128;
-            let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
-            *balances.entry(validator_key).or_default() += subsidy + total_fees;
+
+            let mut validator_fee_total: i128 = 0;
+            for tx in &block.transactions {
+                let fee = tx.fee as i128;
+                if let Some(ref gw) = tx.gateway_address {
+                    let gw_share = fee / 2;
+                    let val_share = fee - gw_share;
+                    *balances.entry(gw.clone()).or_default() += gw_share;
+                    validator_fee_total += val_share;
+                } else {
+                    validator_fee_total += fee;
+                }
+            }
+            *balances.entry(validator_key).or_default() += subsidy + validator_fee_total;
 
             for (offset, tx) in block.transactions.iter().enumerate() {
                 let sender_key = tx
@@ -1067,6 +1093,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1101,6 +1128,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -2042,5 +2070,241 @@ mod tests {
             db.get_peer_record(&[99]),
             Err(StorageError::NotFound)
         ));
+    }
+
+    // --- Gateway fee split tests ---
+
+    /// Helper: create a signed notarization tx with an optional gateway_address.
+    fn make_signed_tx_with_gateway(
+        sk: &[u8],
+        pk: &[u8],
+        doc: &[u8],
+        timestamp: u64,
+        fee: u64,
+        gateway: Option<Vec<u8>>,
+    ) -> (Transaction, Hash256) {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let checksum = sha256(doc);
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum,
+            timestamp,
+            fee,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: gateway,
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    #[test]
+    fn gateway_fee_split_50_50() {
+        let (db, _dir) = temp_db();
+
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (_, gw_pk) = ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
+        let gw_wire = gw_key.to_wire_bytes();
+
+        // Fund sender with block 0
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: tx with gateway, fee=2000
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-gw",
+            1_700_000_001,
+            2_000,
+            Some(gw_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        // Validator gets subsidy + 50% of fee (1000)
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 1_000);
+        // Gateway gets 50% of fee (1000)
+        assert_eq!(db.get_balance(&gw_key).unwrap(), 1_000);
+    }
+
+    #[test]
+    fn gateway_fee_split_odd_rounds_to_validator() {
+        let (db, _dir) = temp_db();
+
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (_, gw_pk) = ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
+        let gw_wire = gw_key.to_wire_bytes();
+
+        // Fund sender
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: tx with gateway, odd fee=1001
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-odd",
+            1_700_000_001,
+            1_001,
+            Some(gw_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        // fee=1001: gw_share=500, val_share=501
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 501);
+        assert_eq!(db.get_balance(&gw_key).unwrap(), 500);
+    }
+
+    #[test]
+    fn no_gateway_100_percent_to_validator() {
+        let (db, _dir) = temp_db();
+
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+
+        // Fund sender
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: tx WITHOUT gateway, fee=2000
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-no-gw",
+            1_700_000_001,
+            2_000,
+            None,
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        // Validator gets subsidy + 100% of fee
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 2_000);
+    }
+
+    #[test]
+    fn gateway_equals_sender() {
+        let (db, _dir) = temp_db();
+
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
+        let sender_wire = sender_pub.to_wire_bytes();
+
+        // Fund sender with block 0 (sender is also validator)
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+        // sender_pub balance = INITIAL_SUBSIDY
+
+        // Block 1: sender sends notarization with self as gateway, fee=2000
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-self-gw",
+            1_700_000_001,
+            2_000,
+            Some(sender_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // sender pays fee=2000, gets back gw_share=1000 → net change = -1000
+        assert_eq!(
+            db.get_balance(&sender_pub).unwrap(),
+            INITIAL_SUBSIDY - 1_000
+        );
+        // validator gets subsidy + val_share=1000
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 1_000);
+    }
+
+    #[test]
+    fn gateway_equals_validator() {
+        let (db, _dir) = temp_db();
+
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        let val_wire = val_pub.to_wire_bytes();
+
+        // Fund sender
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: gateway == validator, fee=2000
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-val-gw",
+            1_700_000_001,
+            2_000,
+            Some(val_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
+        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 2_000);
     }
 }

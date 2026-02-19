@@ -62,7 +62,13 @@ pub fn compute_merkle_root(tx_ids: &[Hash256]) -> Hash256 {
         for chunk in level.chunks_exact(2) {
             next_level.push(hash_internal(&chunk[0], &chunk[1]));
         }
-        tracing::trace!(level = tree_level, nodes = level.len(), "merkle level {}: {} nodes", tree_level, level.len());
+        tracing::trace!(
+            level = tree_level,
+            nodes = level.len(),
+            "merkle level {}: {} nodes",
+            tree_level,
+            level.len()
+        );
         tree_level += 1;
         level = next_level;
     }

@@ -97,11 +97,24 @@ impl StorageEngine for MemoryStorage {
         // Phase 1: accumulate deltas as i128 to detect overflows later
         let mut deltas: HashMap<NoblePublicKey, i128> = HashMap::new();
 
-        // Validator gets subsidy + all fees
+        // Validator gets subsidy + fee share (gateway gets 50% of fee when present)
         let validator = &block.header.validator_id;
         let subsidy = subsidy_at_height(height) as i128;
-        let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
-        *deltas.entry(validator.clone()).or_default() += subsidy + total_fees;
+        let mut validator_fee_total: i128 = 0;
+        for tx in &block.transactions {
+            let fee = tx.fee as i128;
+            if let Some(ref gw) = tx.gateway_address {
+                let gw_key = NoblePublicKey::from_wire_bytes(gw)
+                    .map_err(|e| StorageError::Codec(format!("bad gateway_address: {e}")))?;
+                let gw_share = fee / 2;
+                let val_share = fee - gw_share; // validator gets rounding
+                *deltas.entry(gw_key).or_default() += gw_share;
+                validator_fee_total += val_share;
+            } else {
+                validator_fee_total += fee;
+            }
+        }
+        *deltas.entry(validator.clone()).or_default() += subsidy + validator_fee_total;
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
             let sender = tx
@@ -282,7 +295,10 @@ impl StorageEngine for MemoryStorage {
         Ok(inner.chain_tip.clone())
     }
 
-    #[tracing::instrument(skip(self), fields(task = "memory_storage_rollback", target_height, chain_id))]
+    #[tracing::instrument(
+        skip(self),
+        fields(task = "memory_storage_rollback", target_height, chain_id)
+    )]
     fn rollback_to_height(
         &self,
         target_height: u64,
@@ -354,8 +370,21 @@ impl StorageEngine for MemoryStorage {
                 std::collections::HashMap::new();
             let validator = &block.header.validator_id;
             let subsidy = subsidy_at_height(h) as i128;
-            let total_fees: i128 = block.transactions.iter().map(|tx| tx.fee as i128).sum();
-            *deltas.entry(validator.clone()).or_default() += subsidy + total_fees;
+            let mut validator_fee_total: i128 = 0;
+            for tx in &block.transactions {
+                let fee = tx.fee as i128;
+                if let Some(ref gw) = tx.gateway_address {
+                    let gw_key = NoblePublicKey::from_wire_bytes(gw)
+                        .map_err(|e| StorageError::Codec(format!("bad gateway_address: {e}")))?;
+                    let gw_share = fee / 2;
+                    let val_share = fee - gw_share;
+                    *deltas.entry(gw_key).or_default() += gw_share;
+                    validator_fee_total += val_share;
+                } else {
+                    validator_fee_total += fee;
+                }
+            }
+            *deltas.entry(validator.clone()).or_default() += subsidy + validator_fee_total;
 
             for (offset, tx) in block.transactions.iter().enumerate() {
                 let sender = tx
@@ -573,6 +602,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -607,6 +637,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1542,13 +1573,13 @@ mod tests {
         store.store_peer_record(&rec).unwrap();
 
         rec.on_connected(2000);
-        rec.last_addr = Some("/ip4/1.2.3.4/tcp/9333".into());
+        rec.last_addr = Some("/ip4/1.2.3.4/tcp/8780".into());
         store.store_peer_record(&rec).unwrap();
 
         let loaded = store.get_peer_record(&[1, 2, 3]).unwrap();
         assert_eq!(loaded.connection_count, 2);
         assert_eq!(loaded.last_seen, 2000);
-        assert_eq!(loaded.last_addr.as_deref(), Some("/ip4/1.2.3.4/tcp/9333"));
+        assert_eq!(loaded.last_addr.as_deref(), Some("/ip4/1.2.3.4/tcp/8780"));
     }
 
     #[test]
@@ -1614,5 +1645,191 @@ mod tests {
             store.get_peer_record(&[99]),
             Err(StorageError::NotFound)
         ));
+    }
+
+    // --- Gateway fee split tests ---
+
+    fn make_signed_tx_with_gateway(
+        sk: &[u8],
+        pk: &[u8],
+        doc: &[u8],
+        timestamp: u64,
+        fee: u64,
+        gateway: Option<Vec<u8>>,
+    ) -> (Transaction, Hash256) {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let checksum = sha256(doc);
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum,
+            timestamp,
+            fee,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: gateway,
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    #[test]
+    fn mem_gateway_fee_split_50_50() {
+        let store = MemoryStorage::new();
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (_, gw_pk) = ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
+        let gw_wire = gw_key.to_wire_bytes();
+
+        // Block 0: fund sender
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: tx with gateway, fee=2000
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-gw",
+            1_700_000_001,
+            2_000,
+            Some(gw_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        assert_eq!(
+            store.get_balance(&val_pub).unwrap(),
+            INITIAL_SUBSIDY + 1_000
+        );
+        assert_eq!(store.get_balance(&gw_key).unwrap(), 1_000);
+    }
+
+    #[test]
+    fn mem_gateway_fee_split_odd_rounds_to_validator() {
+        let store = MemoryStorage::new();
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (_, gw_pk) = ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
+        let gw_wire = gw_key.to_wire_bytes();
+
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-odd",
+            1_700_000_001,
+            1_001,
+            Some(gw_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 501);
+        assert_eq!(store.get_balance(&gw_key).unwrap(), 500);
+    }
+
+    #[test]
+    fn mem_no_gateway_100_percent_to_validator() {
+        let store = MemoryStorage::new();
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-no-gw",
+            1_700_000_001,
+            2_000,
+            None,
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        assert_eq!(
+            store.get_balance(&val_pub).unwrap(),
+            INITIAL_SUBSIDY + 2_000
+        );
+    }
+
+    #[test]
+    fn mem_gateway_equals_validator() {
+        let store = MemoryStorage::new();
+        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        let val_wire = val_pub.to_wire_bytes();
+
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sender_sk,
+            &sender_pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        let (tx, tx_id) = make_signed_tx_with_gateway(
+            &sender_sk,
+            &sender_pk,
+            b"doc-val-gw",
+            1_700_000_001,
+            2_000,
+            Some(val_wire),
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
+        assert_eq!(
+            store.get_balance(&val_pub).unwrap(),
+            INITIAL_SUBSIDY + 2_000
+        );
     }
 }

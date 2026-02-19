@@ -5,8 +5,29 @@
 
 use noble_core::constants::{MAINNET_CHAIN_ID, PROTOCOL_VERSION};
 
-/// Default listen port for NOBLE P2P.
-pub const DEFAULT_LISTEN_PORT: u16 = 9333;
+/// Primary P2P listen port.
+pub const P2P_PORT_PRIMARY: u16 = 8780;
+
+/// First alternate P2P port (auto-bind fallback).
+pub const P2P_PORT_ALT1: u16 = 8781;
+
+/// Second alternate P2P port (auto-bind fallback).
+pub const P2P_PORT_ALT2: u16 = 8782;
+
+/// All P2P ports tried during auto-bind (primary → alt1 → alt2).
+pub const P2P_PORTS: [u16; 3] = [P2P_PORT_PRIMARY, P2P_PORT_ALT1, P2P_PORT_ALT2];
+
+/// JSON-RPC HTTP server port.
+pub const RPC_HTTP_PORT: u16 = 8783;
+
+/// JSON-RPC WebSocket server port.
+pub const WS_PORT: u16 = 8784;
+
+/// Dashboard GUI HTTP server port.
+pub const GUI_PORT: u16 = 8785;
+
+/// Legacy alias kept for backward compatibility within the crate.
+pub const DEFAULT_LISTEN_PORT: u16 = P2P_PORT_PRIMARY;
 
 /// Default maximum outbound peer connections.
 pub const DEFAULT_MAX_OUTBOUND: usize = 8;
@@ -23,7 +44,7 @@ pub const DEFAULT_BAN_DURATION_SECS: u64 = 86_400;
 /// Configuration for the NOBLE P2P network layer.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
-    /// Multiaddr string to listen on (e.g. "/ip4/0.0.0.0/tcp/9333").
+    /// Multiaddr string to listen on (e.g. "/ip4/0.0.0.0/tcp/8780").
     pub listen_addr: String,
 
     /// Bootstrap peer multiaddr strings to connect on startup.
@@ -129,7 +150,7 @@ mod tests {
         assert_eq!(cfg.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(cfg.protocol_version, PROTOCOL_VERSION);
         assert!(cfg.enable_mdns);
-        assert!(cfg.listen_addr.contains("9333"));
+        assert!(cfg.listen_addr.contains("8780"));
         assert!(cfg.enable_kademlia);
         assert_eq!(cfg.kad_walk_interval_secs, 300);
         assert_eq!(cfg.tx_relay_rate_per_sec, 100);
@@ -138,6 +159,17 @@ mod tests {
         assert_eq!(cfg.max_addrs_per_exchange, 1000);
         assert_eq!(cfg.max_outbound_per_subnet, 2);
         assert_eq!(cfg.peer_rotation_interval_secs, 600);
+    }
+
+    #[test]
+    fn p2p_ports_constant() {
+        assert_eq!(P2P_PORTS, [8780, 8781, 8782]);
+    }
+
+    #[test]
+    fn default_config_uses_primary_port() {
+        let cfg = NetworkConfig::default();
+        assert!(cfg.listen_addr.contains(&P2P_PORT_PRIMARY.to_string()));
     }
 
     #[test]

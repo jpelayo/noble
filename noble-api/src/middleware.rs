@@ -75,6 +75,15 @@ where
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        // Pass through OPTIONS requests (CORS preflight) without auth.
+        if req.method() == http::Method::OPTIONS {
+            let fut = self.inner.call(req);
+            return Box::pin(async move {
+                let resp = fut.await?;
+                Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
+            });
+        }
+
         // If no validator is configured, pass through.
         let Some(validator) = &self.validator else {
             let fut = self.inner.call(req);

@@ -340,7 +340,7 @@ mod tests {
             node_role: "ArchiveNode".into(),
             contact_email: Some("test@mit.edu".into()),
             website: Some("https://mit.edu".into()),
-            host_address: Some("/ip4/1.2.3.4/tcp/9333".into()),
+            host_address: Some("/ip4/1.2.3.4/tcp/8780".into()),
             software_version: "0.1.0".into(),
             wants_to_validate: true,
             wants_to_vote: false,
@@ -392,8 +392,8 @@ mod tests {
     fn gossip_peer_exchange_roundtrip() {
         let msg = GossipMessage::PeerExchange {
             addrs: vec![
-                "/ip4/1.2.3.4/tcp/9333".to_string(),
-                "/ip4/5.6.7.8/tcp/9333".to_string(),
+                "/ip4/1.2.3.4/tcp/8780".to_string(),
+                "/ip4/5.6.7.8/tcp/8780".to_string(),
             ],
         };
         let mut buf = Vec::new();

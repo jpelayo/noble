@@ -77,4 +77,11 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Runtime trace handle for the trace RPC methods. None = tracing not initialized.
     pub trace_handle: Option<Arc<crate::trace_types::TraceHandle>>,
+
+    /// Gateway identity key (wire bytes). When set, wallet-built transactions
+    /// get this as `gateway_address` so the node earns 50% of the fee.
+    pub gateway_key: Option<Vec<u8>>,
+
+    /// IP access control filter. None = middleware not installed (localhost-only).
+    pub ip_filter: Option<crate::ip_filter::IpFilter>,
 }

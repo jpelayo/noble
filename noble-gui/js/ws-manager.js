@@ -2,7 +2,7 @@
  * NOBLE Dashboard — WebSocket Manager with Auto-Reconnect
  *
  * Usage:
- *   const ws = new WsManager('ws://localhost:9334');
+ *   const ws = new WsManager('ws://localhost:8784');
  *   ws.subscribe('newBlocks', (block) => { ... });
  *   ws.connect();
  *   ws.unsubscribe('newBlocks');

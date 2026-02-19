@@ -2,7 +2,7 @@
  * NOBLE Dashboard — Application Entry Point
  *
  * RPC endpoint is configurable via URL parameter:
- *   ?rpc=http://localhost:9332&ws=ws://localhost:9334
+ *   ?rpc=http://localhost:8783&ws=ws://localhost:8784
  *
  * If no ?rpc parameter is provided, the mock layer is used.
  */
@@ -26,6 +26,7 @@ import * as walletPage from './pages/wallet.js';
 import * as healthPage from './pages/health.js';
 import * as identityPage from './pages/identity.js';
 import * as tracePage from './pages/trace.js';
+import * as settingsPage from './pages/settings.js';
 
 // ── Status change handler ──
 function onStatusChange(status) {
@@ -43,7 +44,7 @@ if (rpcUrl) {
   const { RpcClient } = await import('./rpc-client.js');
   const { WsManager } = await import('./ws-manager.js');
   rpc = new RpcClient(rpcUrl);
-  ws = new WsManager(wsUrl || rpcUrl.replace(/^http/, 'ws').replace(/:\d+/, ':9334'), { onStatusChange });
+  ws = new WsManager(wsUrl || rpcUrl.replace(/^http/, 'ws').replace(/:\d+/, ':8784'), { onStatusChange });
   console.info(`[app] Using real RPC: ${rpcUrl}`);
 } else {
   rpc = new MockRpcClient();
@@ -142,6 +143,7 @@ router
   .add('/health', healthPage)
   .add('/identity', identityPage)
   .add('/trace', tracePage)
+  .add('/settings', settingsPage)
   .start();
 
 // ── Auth prompt ──

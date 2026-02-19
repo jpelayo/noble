@@ -142,7 +142,10 @@ impl VoteManager {
             .insert(peer_id.to_vec());
 
         let count = self.voted_peers.len();
-        debug!("vote received from validator, tally: {} total recorded", count);
+        debug!(
+            "vote received from validator, tally: {} total recorded",
+            count
+        );
         Ok(true)
     }
 
@@ -191,7 +194,10 @@ impl VoteManager {
 
         // Tier 1: Strong majority (> 50%)
         if leader_count * 2 > total_peers {
-            info!("vote tally complete: winner = {}, strength = Strong, votes = {}/{}", winner_hash, leader_count, total_peers);
+            info!(
+                "vote tally complete: winner = {}, strength = Strong, votes = {}/{}",
+                winner_hash, leader_count, total_peers
+            );
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
                 strength: ConsensusStrength::Strong,
@@ -201,14 +207,20 @@ impl VoteManager {
         // Tier 2: Plurality floor (≥ total / divisor)
         let floor = total_peers / config.plurality_floor_divisor as usize;
         if leader_count >= floor.max(1) {
-            info!("vote tally complete: winner = {}, strength = Plurality, votes = {}/{}", winner_hash, leader_count, total_peers);
+            info!(
+                "vote tally complete: winner = {}, strength = Plurality, votes = {}/{}",
+                winner_hash, leader_count, total_peers
+            );
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
                 strength: ConsensusStrength::Plurality,
             };
         }
 
-        debug!("vote tally indeterminate: leader has {}/{} votes, floor = {}", leader_count, total_peers, floor);
+        debug!(
+            "vote tally indeterminate: leader has {}/{} votes, floor = {}",
+            leader_count, total_peers, floor
+        );
         MigrationResult::Indeterminate
     }
 

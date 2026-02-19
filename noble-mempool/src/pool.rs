@@ -235,7 +235,10 @@ impl Mempool {
     ///
     /// Returns `Ok(tx_id)` if admitted, or `Err(MempoolError)` with the
     /// specific step that rejected the transaction.
-    #[tracing::instrument(skip(self, tx, current_time, chain, balance), fields(task = "mempool_admit"))]
+    #[tracing::instrument(
+        skip(self, tx, current_time, chain, balance),
+        fields(task = "mempool_admit")
+    )]
     pub fn admit<C: ChainLookup, B: BalanceLookup>(
         &mut self,
         tx: &Transaction,
@@ -299,7 +302,10 @@ impl Mempool {
         let sigs_verified = self.sig_cache.contains(&tx_id);
 
         // Step 6: Signature verification (skip if cached)
-        tracing::trace!("mempool step 6: signature verification (cached={})", sigs_verified);
+        tracing::trace!(
+            "mempool step 6: signature verification (cached={})",
+            sigs_verified
+        );
         if !sigs_verified {
             self.verify_signatures(tx)?;
             self.sig_cache.insert(tx_id);
@@ -530,7 +536,10 @@ impl Mempool {
                 None => break,
             };
 
-            tracing::trace!("mempool eviction: removing lowest-fee tx (fee={})", lowest_fee);
+            tracing::trace!(
+                "mempool eviction: removing lowest-fee tx (fee={})",
+                lowest_fee
+            );
             self.remove(&tx_id);
         }
     }
@@ -564,6 +573,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -718,6 +728,7 @@ mod tests {
             ],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -779,6 +790,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -988,6 +1000,7 @@ mod tests {
             metadata: vec![],
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();

@@ -114,6 +114,7 @@ impl TransactionBuilder {
             metadata,
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
 
         let msg = tx
@@ -133,7 +134,11 @@ impl TransactionBuilder {
         fee: u64,
         memo: Option<String>,
     ) -> Result<Transaction, WalletError> {
-        tracing::debug!(task = "wallet_build", "building transfer transaction, amount: {}", amount);
+        tracing::debug!(
+            task = "wallet_build",
+            "building transfer transaction, amount: {}",
+            amount
+        );
         if amount == 0 {
             return Err(WalletError::InvalidRecipient("amount must be > 0".into()));
         }
@@ -169,6 +174,7 @@ impl TransactionBuilder {
             metadata,
             encrypted_locator: None,
             external_attestations: vec![],
+            gateway_address: None,
         };
 
         let msg = tx
@@ -255,6 +261,7 @@ impl TransactionBuilder {
             metadata,
             encrypted_locator,
             external_attestations: attestations,
+            gateway_address: None,
         };
 
         let msg = tx
@@ -301,6 +308,25 @@ impl TransactionBuilder {
         }
 
         Self::build_notarization(keystore, signer, checksum, fee, metadata)
+    }
+
+    /// Set the gateway address on an already-built transaction and re-sign.
+    ///
+    /// Call after `build_*()` and before mempool admission.  The gateway
+    /// address is included in the signing payload, so the transaction must
+    /// be re-signed after the field is set.
+    pub fn set_gateway_and_resign(
+        tx: &mut Transaction,
+        keystore: &KeyStore,
+        signer: &NoblePublicKey,
+        gateway: Vec<u8>,
+    ) -> Result<(), WalletError> {
+        tx.gateway_address = Some(gateway);
+        let msg = tx
+            .compute_signing_message()
+            .map_err(|e| WalletError::Crypto(e.to_string()))?;
+        tx.publisher_sig = keystore.sign(signer, &msg)?;
+        Ok(())
     }
 
     /// Estimate fee based on mempool fullness (placeholder).
@@ -519,5 +545,36 @@ mod tests {
         // Verify slot 1 value matches original.
         let desc_value = String::from_utf8(tx.metadata[1].value.clone()).unwrap();
         assert_eq!(desc_value, original_desc);
+    }
+
+    #[test]
+    fn set_gateway_and_resign_updates_field_and_signature() {
+        let (ks, pk) = setup_keystore();
+        let checksum = Hash256::from_bytes([0xAB; 32]);
+        let mut tx =
+            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![]).unwrap();
+
+        assert!(tx.gateway_address.is_none());
+
+        // Original signature is valid
+        let msg_before = tx.compute_signing_message().unwrap();
+        assert!(pk.verify(&msg_before, &tx.publisher_sig).is_ok());
+
+        // Set gateway
+        let (_, gw_pk) = noble_crypto::ed25519::generate_keypair();
+        let gw_key = NoblePublicKey::Ed25519(gw_pk);
+        let gw_wire = gw_key.to_wire_bytes();
+
+        TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire.clone()).unwrap();
+
+        // Field is set
+        assert_eq!(tx.gateway_address.as_ref().unwrap(), &gw_wire);
+
+        // New signature is valid (covers gateway_address)
+        let msg_after = tx.compute_signing_message().unwrap();
+        assert!(pk.verify(&msg_after, &tx.publisher_sig).is_ok());
+
+        // Signing messages differ (gateway changed the payload)
+        assert_ne!(msg_before, msg_after);
     }
 }

@@ -42,6 +42,8 @@ const MAINTENANCE_INTERVAL_SECS: u64 = 60;
 pub struct NetworkHandle {
     command_tx: mpsc::Sender<NetworkCommand>,
     event_rx: mpsc::Receiver<NetworkEvent>,
+    /// The P2P port that was actually bound (may differ from config if fallback was used).
+    pub bound_port: u16,
 }
 
 impl NetworkHandle {
@@ -75,14 +77,32 @@ pub async fn start_network(
 
     let mut swarm = build_swarm(keypair, &config)?;
 
-    // Listen on configured address.
-    let listen_addr: Multiaddr = config
-        .listen_addr
-        .parse()
-        .map_err(|e: libp2p::multiaddr::Error| NetworkError::Transport(e.to_string()))?;
-    swarm
-        .listen_on(listen_addr)
-        .map_err(|e| NetworkError::Transport(e.to_string()))?;
+    // Auto-bind fallback: try P2P_PORTS in order if the configured port fails.
+    let base_addr = extract_base_addr(&config.listen_addr);
+    let bound_port = {
+        let mut bound = None;
+        for &port in &crate::config::P2P_PORTS {
+            let addr_str = format!("{base_addr}/tcp/{port}");
+            match addr_str.parse::<Multiaddr>() {
+                Ok(maddr) => match swarm.listen_on(maddr) {
+                    Ok(_) => {
+                        tracing::info!(port, "P2P listening on {addr_str}");
+                        bound = Some(port);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(port, err = %e, "failed to bind P2P port, trying next");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(port, err = %e, "invalid multiaddr");
+                }
+            }
+        }
+        bound.ok_or_else(|| {
+            NetworkError::Transport("failed to bind on any P2P port (8780-8782)".into())
+        })?
+    };
 
     // Dial bootstrap peers and add them to Kademlia routing table.
     for addr_str in &config.bootstrap_peers {
@@ -101,7 +121,11 @@ pub async fn start_network(
             // Add to Kademlia routing table for discovery.
             if config.enable_kademlia {
                 if let Some(pid) = peer_id_from_addr {
-                    swarm.behaviour_mut().kad.add_address(&pid, addr);
+                    swarm.behaviour_mut().kad.add_address(&pid, addr.clone());
+                    // Also add port variants for multi-port discovery.
+                    for variant in generate_port_variants(&addr) {
+                        swarm.behaviour_mut().kad.add_address(&pid, variant);
+                    }
                 }
             }
         }
@@ -132,6 +156,7 @@ pub async fn start_network(
     Ok(NetworkHandle {
         command_tx,
         event_rx,
+        bound_port,
     })
 }
 
@@ -346,7 +371,11 @@ async fn handle_swarm_event(
             ..
         })) => {
             let topic_str = message.topic.as_str();
-            tracing::debug!(task = "gossip_receive", "received message on topic: {}", topic_str);
+            tracing::debug!(
+                task = "gossip_receive",
+                "received message on topic: {}",
+                topic_str
+            );
             match codec::decode_gossip(&message.data) {
                 Ok(gossip_msg) => {
                     let peer_bytes = propagation_source.to_bytes().to_vec();
@@ -419,7 +448,17 @@ async fn handle_swarm_event(
                                             }
                                         });
                                         if let Some(pid) = pid {
-                                            swarm.behaviour_mut().kad.add_address(&pid, maddr);
+                                            swarm
+                                                .behaviour_mut()
+                                                .kad
+                                                .add_address(&pid, maddr.clone());
+                                            // Multi-port discovery: add variants for alternate ports.
+                                            for variant in generate_port_variants(&maddr) {
+                                                swarm
+                                                    .behaviour_mut()
+                                                    .kad
+                                                    .add_address(&pid, variant);
+                                            }
                                         }
                                     }
                                 }
@@ -655,6 +694,10 @@ async fn handle_swarm_event(
                         .behaviour_mut()
                         .kad
                         .add_address(&peer_id, addr.clone());
+                    // Multi-port discovery: add variants for alternate ports.
+                    for variant in generate_port_variants(addr) {
+                        swarm.behaviour_mut().kad.add_address(&peer_id, variant);
+                    }
                 }
             }
         }
@@ -751,7 +794,11 @@ async fn handle_command(
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
-                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_BLOCK_ANNOUNCE);
+                tracing::debug!(
+                    task = "gossip_publish",
+                    "publishing to topic: {}",
+                    topics::TOPIC_BLOCK_ANNOUNCE
+                );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish block announce");
                 }
@@ -766,7 +813,11 @@ async fn handle_command(
             let msg = GossipMessage::TxAnnounce { tx_id };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_TX_ANNOUNCE);
-                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_TX_ANNOUNCE);
+                tracing::debug!(
+                    task = "gossip_publish",
+                    "publishing to topic: {}",
+                    topics::TOPIC_TX_ANNOUNCE
+                );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish tx announce");
                 }
@@ -787,7 +838,11 @@ async fn handle_command(
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_POR_VOTE);
-                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_POR_VOTE);
+                tracing::debug!(
+                    task = "gossip_publish",
+                    "publishing to topic: {}",
+                    topics::TOPIC_POR_VOTE
+                );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish vote");
                 }
@@ -848,7 +903,11 @@ async fn handle_command(
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_NODE_ANNOUNCE);
-                tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_NODE_ANNOUNCE);
+                tracing::debug!(
+                    task = "gossip_publish",
+                    "publishing to topic: {}",
+                    topics::TOPIC_NODE_ANNOUNCE
+                );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(err = %e, "failed to publish node announce");
                 }
@@ -861,7 +920,11 @@ async fn handle_command(
                 let msg = GossipMessage::DoubleProposalEvidence { evidence_bytes };
                 if let Ok(data) = codec::encode_gossip(&msg) {
                     let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
-                    tracing::debug!(task = "gossip_publish", "publishing to topic: {}", topics::TOPIC_EVIDENCE);
+                    tracing::debug!(
+                        task = "gossip_publish",
+                        "publishing to topic: {}",
+                        topics::TOPIC_EVIDENCE
+                    );
                     if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                         tracing::warn!(err = %e, "failed to publish evidence");
                     }
@@ -891,6 +954,65 @@ async fn handle_command(
     }
 
     false
+}
+
+/// Extract the base multiaddr (everything before `/tcp/PORT`).
+///
+/// E.g. "/ip4/1.2.3.4/tcp/8780/p2p/QmFoo" → "/ip4/1.2.3.4".
+/// If no `/tcp/` is found, returns the full input.
+pub fn extract_base_addr(multiaddr_str: &str) -> String {
+    if let Some(idx) = multiaddr_str.find("/tcp/") {
+        multiaddr_str[..idx].to_string()
+    } else {
+        multiaddr_str.to_string()
+    }
+}
+
+/// Generate port variants for multi-port peer discovery.
+///
+/// If the multiaddr's TCP port is one of [`P2P_PORTS`], returns multiaddrs
+/// with the other two ports (preserving any `/p2p/` suffix).
+/// If the port is not in `P2P_PORTS`, returns an empty vec.
+pub fn generate_port_variants(addr: &Multiaddr) -> Vec<Multiaddr> {
+    use crate::config::P2P_PORTS;
+
+    // Find the TCP port in the multiaddr.
+    let tcp_port = addr.iter().find_map(|p| {
+        if let libp2p::multiaddr::Protocol::Tcp(port) = p {
+            Some(port)
+        } else {
+            None
+        }
+    });
+
+    let Some(port) = tcp_port else {
+        return Vec::new();
+    };
+
+    // Only generate variants for known P2P ports.
+    if !P2P_PORTS.contains(&port) {
+        return Vec::new();
+    }
+
+    let mut variants = Vec::with_capacity(2);
+    for &alt_port in &P2P_PORTS {
+        if alt_port == port {
+            continue;
+        }
+        // Rebuild the multiaddr replacing the TCP port.
+        let new_addr: Multiaddr = addr
+            .iter()
+            .map(|p| {
+                if let libp2p::multiaddr::Protocol::Tcp(_) = p {
+                    libp2p::multiaddr::Protocol::Tcp(alt_port)
+                } else {
+                    p
+                }
+            })
+            .collect();
+        variants.push(new_addr);
+    }
+    variants
 }
 
 fn parse_org_type(s: &str) -> Option<noble_core::OrgType> {
@@ -1153,5 +1275,78 @@ mod tests {
         // Both senders should work.
         sender1.send(NetworkCommand::RequestSync).await.unwrap();
         sender2.send(NetworkCommand::Shutdown).await.unwrap();
+    }
+
+    // --- Port variant and extract_base_addr tests ---
+
+    #[test]
+    fn generate_port_variants_primary() {
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/8780".parse().unwrap();
+        let variants = generate_port_variants(&addr);
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[0],
+            "/ip4/1.2.3.4/tcp/8781".parse::<Multiaddr>().unwrap()
+        );
+        assert_eq!(
+            variants[1],
+            "/ip4/1.2.3.4/tcp/8782".parse::<Multiaddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn generate_port_variants_alt1() {
+        let addr: Multiaddr = "/ip4/10.0.0.1/tcp/8781".parse().unwrap();
+        let variants = generate_port_variants(&addr);
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[0],
+            "/ip4/10.0.0.1/tcp/8780".parse::<Multiaddr>().unwrap()
+        );
+        assert_eq!(
+            variants[1],
+            "/ip4/10.0.0.1/tcp/8782".parse::<Multiaddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn generate_port_variants_unknown_port() {
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/9999".parse().unwrap();
+        let variants = generate_port_variants(&addr);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn generate_port_variants_no_tcp() {
+        let addr: Multiaddr = "/ip4/1.2.3.4/udp/8780".parse().unwrap();
+        let variants = generate_port_variants(&addr);
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn generate_port_variants_preserves_p2p_suffix() {
+        let addr: Multiaddr =
+            "/ip4/1.2.3.4/tcp/8780/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                .parse()
+                .unwrap();
+        let variants = generate_port_variants(&addr);
+        assert_eq!(variants.len(), 2);
+        // Verify /p2p/ suffix is preserved
+        let v0_str = variants[0].to_string();
+        assert!(v0_str.contains("/tcp/8781/"));
+        assert!(v0_str.contains("/p2p/"));
+    }
+
+    #[test]
+    fn extract_base_addr_standard() {
+        assert_eq!(extract_base_addr("/ip4/1.2.3.4/tcp/8780"), "/ip4/1.2.3.4");
+    }
+
+    #[test]
+    fn extract_base_addr_no_tcp() {
+        assert_eq!(
+            extract_base_addr("/ip4/1.2.3.4/udp/1234"),
+            "/ip4/1.2.3.4/udp/1234"
+        );
     }
 }

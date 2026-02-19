@@ -7,6 +7,7 @@ mod bridge;
 pub mod ca_store;
 #[allow(dead_code)]
 mod config;
+mod gui_server;
 mod node;
 pub mod pkcs12;
 mod providers;

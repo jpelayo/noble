@@ -2,7 +2,7 @@
  * NOBLE Dashboard — JSON-RPC 2.0 Client
  *
  * Usage:
- *   const rpc = new RpcClient('http://localhost:9332');
+ *   const rpc = new RpcClient('http://localhost:8783');
  *   const block = await rpc.call('noble_getLatestBlock');
  *   const results = await rpc.batch([
  *     ['noble_getBlockCount'],

@@ -431,6 +431,20 @@ pub struct DecryptLocatorResponse {
     pub plaintext: String,
 }
 
+/// Response for `noble_getAllowedIps`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AllowedIpsResponse {
+    pub allowed_ips: Vec<String>,
+    pub remote_access_enabled: bool,
+}
+
+/// Response for `noble_setAllowedIps`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetAllowedIpsResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

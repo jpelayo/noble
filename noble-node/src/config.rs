@@ -115,6 +115,22 @@ pub struct ApiConfig {
     /// If empty and totp_enabled is true, a secret is auto-generated and written here.
     #[serde(default)]
     pub totp_secret_file: String,
+    /// Dashboard GUI HTTP server bind address.
+    #[serde(default = "default_gui_addr")]
+    pub gui_addr: String,
+    /// Path to the GUI static files directory.
+    /// If empty, auto-detected relative to the binary.
+    #[serde(default)]
+    pub gui_dir: String,
+    /// Allowed remote IPs or CIDR blocks for RPC/GUI access.
+    /// 127.0.0.1 is always allowed. Empty = localhost-only (default).
+    /// Example: ["192.168.1.0/24", "10.0.0.5"]
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
+}
+
+fn default_gui_addr() -> String {
+    "127.0.0.1:8785".to_string()
 }
 
 /// Wallet keystore configuration.
@@ -238,7 +254,7 @@ impl NodeConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "/ip4/0.0.0.0/tcp/30333".to_string(),
+            listen_addr: "/ip4/0.0.0.0/tcp/8780".to_string(),
             seeds: Vec::new(),
             max_peers: 50,
             ban_threshold: 100,
@@ -268,12 +284,15 @@ impl Default for ConsensusConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            rpc_addr: "127.0.0.1:9332".to_string(),
-            ws_addr: "127.0.0.1:9334".to_string(),
+            rpc_addr: "127.0.0.1:8783".to_string(),
+            ws_addr: "127.0.0.1:8784".to_string(),
             max_connections: 100,
             rate_limit: 30,
             totp_enabled: false,
             totp_secret_file: String::new(),
+            gui_addr: default_gui_addr(),
+            gui_dir: String::new(),
+            allowed_ips: Vec::new(),
         }
     }
 }
@@ -364,8 +383,9 @@ mod tests {
         assert_eq!(config.network.max_peers, 50);
         assert_eq!(config.storage.cache_size_mb, 256);
         assert!(config.storage.compression);
-        assert_eq!(config.api.rpc_addr, "127.0.0.1:9332");
-        assert_eq!(config.api.ws_addr, "127.0.0.1:9334");
+        assert_eq!(config.api.rpc_addr, "127.0.0.1:8783");
+        assert_eq!(config.api.ws_addr, "127.0.0.1:8784");
+        assert_eq!(config.api.gui_addr, "127.0.0.1:8785");
         assert_eq!(config.logging.level, "info");
         assert!(config.metrics.enabled);
         assert_eq!(config.identity.org_type, "Individual");
@@ -378,7 +398,7 @@ mod tests {
         // Config without [node] section should use defaults
         let toml_str = r#"
             [network]
-            listen_addr = "/ip4/0.0.0.0/tcp/30333"
+            listen_addr = "/ip4/0.0.0.0/tcp/8780"
             seeds = []
             max_peers = 50
             ban_threshold = 100
@@ -393,8 +413,8 @@ mod tests {
             validator_list_path = "validators.txt"
 
             [api]
-            rpc_addr = "127.0.0.1:9332"
-            ws_addr = "127.0.0.1:9334"
+            rpc_addr = "127.0.0.1:8783"
+            ws_addr = "127.0.0.1:8784"
             max_connections = 100
             rate_limit = 30
 
@@ -422,6 +442,78 @@ mod tests {
         let config: NodeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.node.role, OperationalRole::Observer);
         assert_eq!(config.node.network, NetworkId::Mainnet);
+    }
+
+    #[test]
+    fn all_default_ports_correct() {
+        let config = ApiConfig::default();
+        assert_eq!(config.rpc_addr, "127.0.0.1:8783");
+        assert_eq!(config.ws_addr, "127.0.0.1:8784");
+        assert_eq!(config.gui_addr, "127.0.0.1:8785");
+
+        let net = NetworkConfig::default();
+        assert_eq!(net.listen_addr, "/ip4/0.0.0.0/tcp/8780");
+    }
+
+    // T10: Default allowed_ips is empty vec
+    #[test]
+    fn default_allowed_ips_empty() {
+        let config = ApiConfig::default();
+        assert!(config.allowed_ips.is_empty());
+    }
+
+    // T11: Config with allowed_ips parses correctly
+    #[test]
+    fn config_allowed_ips_parses() {
+        let toml_str = r#"
+            [node]
+            [network]
+            listen_addr = "/ip4/0.0.0.0/tcp/8780"
+            seeds = []
+            max_peers = 50
+            ban_threshold = 100
+
+            [storage]
+            data_dir = "data"
+            cache_size_mb = 256
+            compression = true
+
+            [consensus]
+            validator_key_path = ""
+            validator_list_path = "validators.txt"
+
+            [api]
+            rpc_addr = "127.0.0.1:8783"
+            ws_addr = "127.0.0.1:8784"
+            max_connections = 100
+            rate_limit = 30
+            allowed_ips = ["192.168.1.0/24", "10.0.0.5"]
+
+            [wallet]
+            keystore_path = "keystore"
+
+            [logging]
+            level = "info"
+            file = ""
+            rotation = "daily"
+
+            [metrics]
+            prometheus_addr = "127.0.0.1:9615"
+            enabled = true
+
+            [identity]
+            node_name = ""
+            org_type = "Individual"
+            org_name = ""
+            node_role = "FullNode"
+            contact_email = ""
+            website = ""
+            host_address = ""
+        "#;
+        let config: NodeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.api.allowed_ips.len(), 2);
+        assert_eq!(config.api.allowed_ips[0], "192.168.1.0/24");
+        assert_eq!(config.api.allowed_ips[1], "10.0.0.5");
     }
 
     #[test]
