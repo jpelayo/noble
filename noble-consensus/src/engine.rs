@@ -6,8 +6,8 @@
 //! Orchestrates cycle management, block proposals, vote collection,
 //! and chain tip advancement using deterministic event-driven processing.
 
-use noble_core::{validate_block, Block, BlockValidationContext};
-use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
+use noble_core::{validate_block, Block, BlockHeader, BlockValidationContext};
+use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey, SignatureEnvelope};
 use tracing::{debug, info};
 
 use crate::candidate::CandidateTracker;
@@ -39,9 +39,11 @@ pub struct CycleEngine {
     vote_mgr: VoteManager,
     candidate_tracker: CandidateTracker,
     validator_list: ValidatorList,
-    /// Chain tip: (height, block_hash).
+    /// Chain tip: (height, block_hash, timestamp).
     tip_height: u64,
     tip_hash: Hash256,
+    /// AUD2-C2: Track tip block timestamp so we can validate B5 (timestamp ordering).
+    tip_timestamp: u64,
     /// Current tracked cycle and phase.
     tracked_cycle: u64,
     tracked_phase: CyclePhase,
@@ -51,6 +53,9 @@ pub struct CycleEngine {
     our_validator_key: Option<(NoblePrivateKey, NoblePublicKey)>,
     /// Number of connected peers (set externally by the node event loop).
     total_peers: usize,
+    /// AUD-M7: Monotonic clock anchor (Instant, unix_timestamp) captured at creation.
+    /// Used by phase_timing() to avoid NTP jumps affecting phase reporting.
+    clock_anchor: (std::time::Instant, u64),
 }
 
 impl CycleEngine {
@@ -67,6 +72,10 @@ impl CycleEngine {
         validator_key: Option<(NoblePrivateKey, NoblePublicKey)>,
     ) -> Self {
         let cycle_mgr = CycleManager::new(config.cycle_duration_secs);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             config,
             cycle_mgr,
@@ -75,11 +84,13 @@ impl CycleEngine {
             validator_list,
             tip_height,
             tip_hash,
+            tip_timestamp: 0,
             tracked_cycle: 0,
             tracked_phase: CyclePhase::Validation,
             chain_id,
             our_validator_key: validator_key,
             total_peers: 0,
+            clock_anchor: (std::time::Instant::now(), now_unix),
         }
     }
 
@@ -105,6 +116,13 @@ impl CycleEngine {
     pub fn update_tip(&mut self, height: u64, block_hash: Hash256) {
         self.tip_height = height;
         self.tip_hash = block_hash;
+    }
+
+    /// Update the chain tip with timestamp for full parent validation (AUD2-C2).
+    pub fn update_tip_with_timestamp(&mut self, height: u64, block_hash: Hash256, timestamp: u64) {
+        self.tip_height = height;
+        self.tip_hash = block_hash;
+        self.tip_timestamp = timestamp;
     }
 
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
@@ -153,6 +171,7 @@ impl CycleEngine {
             CyclePhase::Validation => {
                 // New validation phase: clear previous state
                 self.vote_mgr.clear();
+                self.vote_mgr.set_current_cycle(cycle);
                 self.candidate_tracker.clear();
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cycle}: entering Validation phase"
@@ -221,6 +240,7 @@ impl CycleEngine {
                     // Commit the winning block
                     self.tip_height = new_height;
                     self.tip_hash = new_hash;
+                    self.tip_timestamp = block.header.timestamp;
                     outputs.push(CycleIo::CommitBlock(block));
                     outputs.push(CycleIo::EmitMetric {
                         name: "block_committed".to_string(),
@@ -266,6 +286,7 @@ impl CycleEngine {
 
         // Clear state for next cycle
         self.vote_mgr.clear();
+        self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
 
         outputs
@@ -287,12 +308,32 @@ impl CycleEngine {
             return outputs;
         }
 
+        // AUD2-C2: Construct parent header from tip state for B2/B3/B5 validation
+        let parent_header = if self.tip_height > 0 || self.tip_hash != Hash256::ZERO {
+            Some(BlockHeader {
+                version: noble_core::PROTOCOL_VERSION,
+                prev_block_hash: Hash256::ZERO, // not needed for B2/B3/B5 checks
+                merkle_root: Hash256::ZERO,
+                timestamp: self.tip_timestamp,
+                height: self.tip_height,
+                tx_count: 0,
+                validator_id: NoblePublicKey::Ed25519(vec![]),
+                validator_sig: SignatureEnvelope {
+                    scheme_id: 0,
+                    public_key: vec![],
+                    signature: vec![],
+                },
+            })
+        } else {
+            None
+        };
+
         // Validate the block
         let val_list = self.validator_list.as_pubkey_vec();
         let ctx = BlockValidationContext {
             chain_id: self.chain_id,
             current_time: block.header.timestamp,
-            parent: None, // simplified: parent check deferred to storage
+            parent: parent_header.as_ref(),
             validator_list: &val_list,
         };
 
@@ -363,6 +404,18 @@ impl CycleEngine {
             return outputs;
         }
 
+        // AUD2-C3: Verify voter is in the trusted validator list before recording
+        if !self.validator_list.is_validator(&vote.voter_pubkey) {
+            outputs.push(CycleIo::Log(
+                "rejected vote from non-validator peer (pubkey not in validator list)".to_string(),
+            ));
+            outputs.push(CycleIo::BanPeer {
+                peer_id: from_peer,
+                reason: "vote from non-validator".to_string(),
+            });
+            return outputs;
+        }
+
         // Record the vote (includes signature verification via GAP-C7)
         match self.vote_mgr.record_vote(&from_peer, &vote) {
             Ok(true) => {
@@ -379,7 +432,7 @@ impl CycleEngine {
             Err(e) => {
                 outputs.push(CycleIo::BanPeer {
                     peer_id: from_peer,
-                    reason: format!("invalid vote signature: {e}"),
+                    reason: format!("invalid vote: {e}"),
                 });
             }
         }
@@ -426,10 +479,11 @@ impl ConsensusStateMachine for CycleEngine {
     }
 
     fn phase_timing(&self) -> (u8, u64, u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+        // AUD-M7: Use monotonic Instant offset from anchor to avoid NTP jumps
+        let elapsed = std::time::Instant::now()
+            .duration_since(self.clock_anchor.0)
             .as_secs();
+        let now = self.clock_anchor.1 + elapsed;
         let phase_idx = match self.tracked_phase {
             CyclePhase::Validation => 0,
             CyclePhase::Reflection => 1,
@@ -588,7 +642,11 @@ mod tests {
     #[test]
     fn cycle_boundary_commits_strong_majority() {
         let (vp, vpub) = make_validator();
-        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        // Create 3 voting validators (must be in the validator list for AUD2-C3)
+        let voters: Vec<_> = (0..3).map(|_| make_validator()).collect();
+        let mut all_validators: Vec<NoblePublicKey> = vec![vpub.clone()];
+        all_validators.extend(voters.iter().map(|(_, pk)| pk.clone()));
+        let mut engine = make_engine(None, &all_validators, 5);
 
         // Add a candidate
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
@@ -600,12 +658,11 @@ mod tests {
 
         // Add votes (3/5 = 60% > 50% → Strong)
         engine.tracked_phase = CyclePhase::Reflection;
-        for i in 0..3u8 {
-            let (vk, vp) = make_validator();
-            let vote = PorVote::sign(0, hash, &vk, vp).unwrap();
+        for (i, (vk, vpk)) in voters.iter().enumerate() {
+            let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
                 vote,
-                from_peer: vec![i + 10],
+                from_peer: vec![i as u8 + 10],
             });
         }
 
@@ -716,7 +773,11 @@ mod tests {
     #[test]
     fn observation_mode_still_commits() {
         let (vp, vpub) = make_validator();
-        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        // Voters must be in the validator list (AUD2-C3)
+        let voters: Vec<_> = (0..3).map(|_| make_validator()).collect();
+        let mut all_validators: Vec<NoblePublicKey> = vec![vpub.clone()];
+        all_validators.extend(voters.iter().map(|(_, pk)| pk.clone()));
+        let mut engine = make_engine(None, &all_validators, 5);
 
         // Proposal
         engine.tracked_phase = CyclePhase::Validation;
@@ -728,12 +789,11 @@ mod tests {
 
         // Votes from others
         engine.tracked_phase = CyclePhase::Reflection;
-        for i in 0..3u8 {
-            let (vk, vp2) = make_validator();
-            let vote = PorVote::sign(0, hash, &vk, vp2).unwrap();
+        for (i, (vk, vpk)) in voters.iter().enumerate() {
+            let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
                 vote,
-                from_peer: vec![i + 20],
+                from_peer: vec![i as u8 + 20],
             });
         }
 
@@ -769,35 +829,32 @@ mod tests {
 
     #[test]
     fn deterministic_same_events_same_result() {
-        // Run the same event sequence twice and verify same chain tip
-        fn run_sequence() -> (u64, Hash256) {
-            let (vp, vpub) = make_validator();
-            let mut engine = make_engine(None, &[vpub.clone()], 5);
-            engine.tracked_phase = CyclePhase::Validation;
+        // Run the same event sequence and verify chain tip advances
+        let (vp, vpub) = make_validator();
+        // Voters must be in the validator list (AUD2-C3)
+        let voters: Vec<_> = (0..3).map(|_| make_validator()).collect();
+        let mut all_validators: Vec<NoblePublicKey> = vec![vpub.clone()];
+        all_validators.extend(voters.iter().map(|(_, pk)| pk.clone()));
+        let mut engine = make_engine(None, &all_validators, 5);
+        engine.tracked_phase = CyclePhase::Validation;
 
-            let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-            engine.step(CycleEvent::BlockProposed {
-                block,
-                from_peer: b"p1".to_vec(),
+        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"p1".to_vec(),
+        });
+
+        engine.tracked_phase = CyclePhase::Reflection;
+        for (i, (vk, vpk)) in voters.iter().enumerate() {
+            let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
+            engine.step(CycleEvent::VoteReceived {
+                vote,
+                from_peer: vec![i as u8 + 30],
             });
-
-            engine.tracked_phase = CyclePhase::Reflection;
-            for i in 0..3u8 {
-                let (vk, vp2) = make_validator();
-                let vote = PorVote::sign(0, hash, &vk, vp2).unwrap();
-                engine.step(CycleEvent::VoteReceived {
-                    vote,
-                    from_peer: vec![i + 30],
-                });
-            }
-
-            engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
-            engine.chain_tip()
         }
 
-        // Note: due to random key generation, the hash will differ between runs.
-        // But within a single run, the result is deterministic.
-        let (h, _) = run_sequence();
+        engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        let (h, _) = engine.chain_tip();
         assert_eq!(h, 1, "chain tip should advance to height 1");
     }
 
@@ -831,5 +888,82 @@ mod tests {
                 false
             }
         })
+    }
+
+    // --- AUD-M7: Monotonic phase_timing ---
+
+    #[test]
+    fn phase_timing_returns_consistent_values() {
+        let (_vp, vpub) = make_validator();
+        let engine = make_engine(None, &[vpub], 5);
+        let (phase_idx, _phase_remaining, _cycle_remaining) = engine.phase_timing();
+        // Phase index should be 0 (Validation) or 1 (Reflection)
+        assert!(phase_idx <= 1);
+    }
+
+    // --- AUD2-C2: Block with wrong prev_hash rejected ---
+
+    #[test]
+    fn block_with_wrong_prev_hash_rejected() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Validation;
+        // Set tip to a known state
+        engine.update_tip_with_timestamp(1, Hash256::from_bytes([0xAA; 32]), 1_700_000_000);
+
+        // Create a block that claims prev_hash is ZERO (wrong — tip is 0xAA...)
+        let (block, _) = make_valid_block(&vp, &vpub, 2, Hash256::ZERO);
+        let outputs = engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        // Block should be rejected (prev_hash doesn't match parent)
+        assert!(
+            has_ban(&outputs) || has_log_containing(&outputs, "rejected"),
+            "block with wrong prev_hash should be rejected"
+        );
+    }
+
+    // --- AUD2-C3: Vote from non-validator rejected ---
+
+    #[test]
+    fn vote_from_non_validator_rejected() {
+        let (_vp, vpub) = make_validator();
+        let (unknown_priv, unknown_pub) = make_validator();
+        // Engine only knows vpub, not unknown_pub
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Reflection;
+
+        let candidate = Hash256::from_bytes([0x42; 32]);
+        let vote = PorVote::sign(0, candidate, &unknown_priv, unknown_pub).unwrap();
+        let outputs = engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"unknownpeer".to_vec(),
+        });
+
+        assert!(has_ban(&outputs), "vote from non-validator should ban peer");
+        assert!(has_log_containing(&outputs, "non-validator"));
+        assert_eq!(engine.vote_mgr.total_votes(), 0);
+    }
+
+    #[test]
+    fn vote_from_valid_validator_accepted() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Reflection;
+
+        let candidate = Hash256::from_bytes([0x42; 32]);
+        let vote = PorVote::sign(0, candidate, &vp, vpub).unwrap();
+        let outputs = engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(
+            !has_ban(&outputs),
+            "valid validator's vote should be accepted"
+        );
+        assert_eq!(engine.vote_mgr.total_votes(), 1);
     }
 }

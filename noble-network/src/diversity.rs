@@ -141,6 +141,8 @@ mod tests {
             latency: Some(Duration::from_millis(latency_ms)),
             announce: None,
             addr: None,
+            misbehavior_window: std::collections::VecDeque::new(),
+            last_misbehavior: None,
         }
     }
 

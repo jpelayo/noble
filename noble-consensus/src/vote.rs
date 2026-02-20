@@ -8,6 +8,7 @@
 //! - **GAP-C8**: Vote counting uses `peer_id` (transport-layer identity), not pubkey.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use noble_crypto::{
     sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
@@ -16,6 +17,41 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::config::ConsensusConfig;
+
+/// Error type for vote recording operations (AUD2-M4).
+#[derive(Debug)]
+pub enum VoteError {
+    /// The vote's cycle number doesn't match the manager's current cycle.
+    WrongCycle { expected: u64, got: u64 },
+    /// The vote signature failed verification.
+    Crypto(noble_crypto::CryptoError),
+}
+
+impl fmt::Display for VoteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VoteError::WrongCycle { expected, got } => {
+                write!(f, "wrong cycle: expected {expected}, got {got}")
+            }
+            VoteError::Crypto(e) => write!(f, "crypto: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for VoteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VoteError::Crypto(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<noble_crypto::CryptoError> for VoteError {
+    fn from(e: noble_crypto::CryptoError) -> Self {
+        VoteError::Crypto(e)
+    }
+}
 
 /// A Proof of Reputation vote cast by a validator for a candidate block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +140,8 @@ pub struct VoteManager {
     votes: HashMap<Hash256, HashSet<Vec<u8>>>,
     /// Set of peer_ids that have already voted (one vote per peer per cycle).
     voted_peers: HashSet<Vec<u8>>,
+    /// Current cycle number for vote validation (AUD2-M4).
+    current_cycle: u64,
 }
 
 impl VoteManager {
@@ -112,20 +150,31 @@ impl VoteManager {
         Self {
             votes: HashMap::new(),
             voted_peers: HashSet::new(),
+            current_cycle: 0,
         }
+    }
+
+    /// Set the current cycle number (AUD2-M4).
+    pub fn set_current_cycle(&mut self, cycle: u64) {
+        self.current_cycle = cycle;
     }
 
     /// Record a vote from a peer.
     ///
+    /// - Validates the vote cycle matches `current_cycle` (AUD2-M4).
     /// - Verifies the vote signature (GAP-C7).
     /// - Rejects duplicate votes from the same peer_id (GAP-C8).
     /// - Returns `true` if the vote was accepted, `false` if duplicate.
     #[tracing::instrument(skip(self, vote), fields(task = "consensus_vote"))]
-    pub fn record_vote(
-        &mut self,
-        peer_id: &[u8],
-        vote: &PorVote,
-    ) -> Result<bool, noble_crypto::CryptoError> {
+    pub fn record_vote(&mut self, peer_id: &[u8], vote: &PorVote) -> Result<bool, VoteError> {
+        // AUD2-M4: Validate vote cycle matches current cycle
+        if vote.cycle != self.current_cycle {
+            return Err(VoteError::WrongCycle {
+                expected: self.current_cycle,
+                got: vote.cycle,
+            });
+        }
+
         // GAP-C7: Verify signature before recording
         vote.verify()?;
 
@@ -230,6 +279,8 @@ impl VoteManager {
     }
 
     /// Clear all votes for a new cycle.
+    ///
+    /// Optionally set the new cycle number via `set_current_cycle()` after clearing.
     pub fn clear(&mut self) {
         self.votes.clear();
         self.voted_peers.clear();
@@ -412,6 +463,7 @@ mod tests {
         assert_eq!(mgr.total_votes(), 1);
 
         mgr.clear();
+        mgr.set_current_cycle(1);
         assert_eq!(mgr.total_votes(), 0);
         // Can vote again after clear
         let (vote2, _) = make_vote(1, candidate);
@@ -424,5 +476,23 @@ mod tests {
         let msg1 = PorVote::signing_payload(5, candidate);
         let msg2 = PorVote::signing_payload(5, candidate);
         assert_eq!(msg1, msg2);
+    }
+
+    #[test]
+    fn aud2_m4_vote_with_wrong_cycle_rejected() {
+        let mut mgr = VoteManager::new();
+        mgr.set_current_cycle(5);
+        let candidate = hash_n(1);
+        // Create a vote for cycle 3 (stale), but manager expects cycle 5
+        let (vote, _) = make_vote(3, candidate);
+        let result = mgr.record_vote(b"peer1", &vote);
+        match result {
+            Err(VoteError::WrongCycle { expected, got }) => {
+                assert_eq!(expected, 5);
+                assert_eq!(got, 3);
+            }
+            other => panic!("expected WrongCycle error, got {:?}", other),
+        }
+        assert_eq!(mgr.total_votes(), 0, "stale vote should not be counted");
     }
 }

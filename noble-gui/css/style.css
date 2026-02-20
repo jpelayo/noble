@@ -47,13 +47,16 @@ body {
 }
 
 .logo {
-  font-size: var(--font-size-xl);
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: var(--accent);
   padding: 0 var(--gap);
   margin-bottom: var(--gap-lg);
-  font-family: var(--font-mono);
+  display: flex;
+  justify-content: center;
+}
+
+.logo img {
+  width: 144px;
+  height: auto;
+  display: block;
 }
 
 #sidebar ul {
@@ -678,10 +681,13 @@ body {
   }
 
   .logo {
-    font-size: var(--font-size-base);
     text-align: center;
     padding: 0;
     margin-bottom: var(--gap);
+  }
+
+  .logo img {
+    width: 60px;
   }
 
   #sidebar li a {

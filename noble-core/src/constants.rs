@@ -54,6 +54,36 @@ pub const TX_TYPE_TRANSFER: u8 = 0x01;
 /// Transaction type: validator key rotation.
 pub const TX_TYPE_KEY_ROTATION: u8 = 0x02;
 
+/// Transaction type: badge proposal (grant vote badge to a peer).
+pub const TX_TYPE_BADGE_PROPOSAL: u8 = 0x03;
+
+/// Transaction type: badge vote (approve/reject a proposal or revocation).
+pub const TX_TYPE_BADGE_VOTE: u8 = 0x04;
+
+/// Transaction type: badge revocation (propose revoking an existing badge).
+pub const TX_TYPE_BADGE_REVOCATION: u8 = 0x05;
+
+/// Minimum presence time (seconds) before a node can be proposed for a badge.
+/// Production: 7 days = 604,800 seconds. Testnet: 2 days = 172,800 seconds.
+pub const BADGE_MIN_PRESENCE_SECS: u64 = 604_800;
+
+/// Testnet minimum presence (2 days).
+pub const BADGE_MIN_PRESENCE_TESTNET_SECS: u64 = 172_800;
+
+/// Bootstrap mode duration in cycles (60 days at 30-min cycles = 2,880 cycles).
+pub const BOOTSTRAP_MODE_CYCLES: u64 = 2_880;
+
+/// Suspension threshold: offline for this many seconds triggers local suspension.
+/// 15 days = 1,296,000 seconds.
+pub const BADGE_SUSPENSION_THRESHOLD_SECS: u64 = 1_296_000;
+
+/// Recovery period: must be online for this many seconds to recover from suspension.
+/// 2 days = 172,800 seconds.
+pub const BADGE_RECOVERY_THRESHOLD_SECS: u64 = 172_800;
+
+/// Voting window for badge proposals/revocations: 48 cycles = 24 hours.
+pub const BADGE_VOTE_WINDOW_CYCLES: u64 = 48;
+
 /// Grace period (in cycles) during which both old and new keys are valid.
 /// 48 cycles = 24 hours at 30-min cycles.
 pub const KEY_ROTATION_GRACE_CYCLES: u64 = 48;
@@ -112,6 +142,24 @@ pub const PKI_BIND_DOMAIN_TAG: &[u8] = b"NOBLE-PKI-BIND-v1";
 /// Populated after mainnet launch; empty during pre-launch development.
 pub const CHECKPOINTS: &[(u64, &str)] = &[];
 
+/// Maximum mempool size in bytes (default 300 MB).
+pub const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;
+
+/// AUD-H4: Compute the dynamic minimum fee based on mempool utilization.
+///
+/// - `< 50%` → `MIN_TX_FEE` (1,000)
+/// - `50-75%` → `MIN_TX_FEE * 2`
+/// - `75-90%` → `MIN_TX_FEE * 5`
+/// - `> 90%` → `MIN_TX_FEE * 10`
+pub fn dynamic_min_fee(utilization_pct: u8) -> u64 {
+    match utilization_pct {
+        0..=49 => MIN_TX_FEE,
+        50..=74 => MIN_TX_FEE * 2,
+        75..=89 => MIN_TX_FEE * 5,
+        _ => MIN_TX_FEE * 10,
+    }
+}
+
 /// Compute block subsidy at a given height.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).
 pub fn subsidy_at_height(height: u64) -> u64 {
@@ -157,6 +205,30 @@ mod tests {
         assert_eq!(subsidy_at_height(HALVING_INTERVAL), INITIAL_SUBSIDY / 2);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL * 2), INITIAL_SUBSIDY / 4);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL * 3), INITIAL_SUBSIDY / 8);
+    }
+
+    // AUD-H4: Dynamic fee tests
+    #[test]
+    fn dynamic_fee_at_zero_utilization() {
+        assert_eq!(dynamic_min_fee(0), MIN_TX_FEE);
+        assert_eq!(dynamic_min_fee(25), MIN_TX_FEE);
+        assert_eq!(dynamic_min_fee(49), MIN_TX_FEE);
+    }
+
+    #[test]
+    fn dynamic_fee_at_medium_utilization() {
+        assert_eq!(dynamic_min_fee(50), MIN_TX_FEE * 2);
+        assert_eq!(dynamic_min_fee(60), MIN_TX_FEE * 2);
+        assert_eq!(dynamic_min_fee(74), MIN_TX_FEE * 2);
+    }
+
+    #[test]
+    fn dynamic_fee_at_high_utilization() {
+        assert_eq!(dynamic_min_fee(75), MIN_TX_FEE * 5);
+        assert_eq!(dynamic_min_fee(89), MIN_TX_FEE * 5);
+        assert_eq!(dynamic_min_fee(90), MIN_TX_FEE * 10);
+        assert_eq!(dynamic_min_fee(95), MIN_TX_FEE * 10);
+        assert_eq!(dynamic_min_fee(100), MIN_TX_FEE * 10);
     }
 
     #[test]

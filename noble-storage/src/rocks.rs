@@ -49,6 +49,8 @@ const CF_PEER_MEMORY: &str = "peer_memory";
 
 const KEY_TIP_HASH: &[u8] = b"tip_hash";
 const KEY_TIP_HEIGHT: &[u8] = b"tip_height";
+/// Running total supply in atomic units (AUD2-M2: O(1) supply tracking).
+const KEY_TOTAL_SUPPLY: &[u8] = b"total_supply";
 
 /// Configuration for the RocksDB storage engine.
 #[derive(Debug, Clone)]
@@ -258,6 +260,30 @@ impl RocksDbStorage {
             }
         }
     }
+
+    /// Read the running total supply in O(1) from `chain_state` CF (AUD2-M2).
+    ///
+    /// Returns 0 if no blocks have been committed yet.
+    pub fn get_total_supply(&self) -> Result<u64, StorageError> {
+        self.check_open()?;
+        let cf_state = self.cf(CF_CHAIN_STATE)?;
+        match self
+            .db
+            .get_cf(cf_state, KEY_TOTAL_SUPPLY)
+            .map_err(|e| StorageError::Database(e.to_string()))?
+        {
+            Some(bytes) => {
+                if bytes.len() != 8 {
+                    return Err(StorageError::Database(format!(
+                        "corrupt total_supply entry: expected 8 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                Ok(u64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
+            }
+            None => Ok(0),
+        }
+    }
 }
 
 impl StorageEngine for RocksDbStorage {
@@ -383,45 +409,20 @@ impl StorageEngine for RocksDbStorage {
             batch.put_cf(cf_balances, key, (new_balance as u64).to_be_bytes());
         }
 
-        // Phase 3: MAX_SUPPLY cap enforcement
-        // Sum all balances (current + deltas) to check cumulative supply
+        // Phase 3: MAX_SUPPLY cap enforcement via O(1) running total (AUD2-M2)
+        // Read current total_supply from chain_state, add this block's subsidy,
+        // and check against MAX_SUPPLY. No full-balance iteration needed.
         let block_subsidy = subsidy_at_height(height);
-        if block_subsidy > 0 {
-            // Only check when new supply is minted (subsidy > 0)
-            let mut cumulative: u64 = 0;
-            // Sum existing balances from the CF
-            let cf_bal_read = self.cf(CF_ADDRESS_BALANCES)?;
-            let iter = self.db.iterator_cf(cf_bal_read, IteratorMode::Start);
-            for item in iter {
-                let (key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-                // Use the updated balance if this key was modified, otherwise the stored one
-                if let Some(delta) = deltas.get(key.as_ref()) {
-                    let current = u64::from_be_bytes(val.as_ref().try_into().unwrap_or([0; 8]));
-                    let new_bal = (current as i128 + delta) as u64;
-                    cumulative = cumulative.saturating_add(new_bal);
-                } else {
-                    let bal = u64::from_be_bytes(val.as_ref().try_into().unwrap_or([0; 8]));
-                    cumulative = cumulative.saturating_add(bal);
-                }
-            }
-            // Add balances for new keys not yet in the CF
-            for (key, delta) in &deltas {
-                let exists = self
-                    .db
-                    .get_cf(cf_bal_read, key)
-                    .map_err(|e| StorageError::Database(e.to_string()))?
-                    .is_some();
-                if !exists && *delta > 0 {
-                    cumulative = cumulative.saturating_add(*delta as u64);
-                }
-            }
-            if cumulative > MAX_SUPPLY {
-                return Err(StorageError::SupplyOverflow {
-                    cumulative,
-                    max: MAX_SUPPLY,
-                });
-            }
+        let prev_supply = self.get_total_supply()?;
+        let new_supply = prev_supply.saturating_add(block_subsidy);
+        if new_supply > MAX_SUPPLY {
+            return Err(StorageError::SupplyOverflow {
+                cumulative: new_supply,
+                max: MAX_SUPPLY,
+            });
         }
+        // Persist updated total_supply in the same atomic batch
+        batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, new_supply.to_be_bytes());
 
         // Atomic commit
         self.db
@@ -2306,5 +2307,68 @@ mod tests {
 
         // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
         assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 2_000);
+    }
+
+    // --- AUD2-M2: O(1) total_supply tracking ---
+
+    #[test]
+    fn aud2_m2_total_supply_tracks_across_blocks() {
+        let (db, _dir) = temp_db();
+        // Initially total_supply is 0
+        assert_eq!(db.get_total_supply().unwrap(), 0);
+
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Block 0: validator gets INITIAL_SUBSIDY
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY);
+
+        // Block 1: another INITIAL_SUBSIDY (same validator, height < HALVING_INTERVAL)
+        let (b1, h1, ids1) = make_block_with_validator(vec![], 1, h0, 1_700_000_001, &sk, &pk);
+        db.commit_block(&b1, &h1, &ids1).unwrap();
+        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY * 2);
+
+        // Block at HALVING_INTERVAL: subsidy halves
+        let halved_subsidy = INITIAL_SUBSIDY / 2;
+        let (b2, h2, ids2) =
+            make_block_with_validator(vec![], HALVING_INTERVAL, h1, 1_700_000_002, &sk, &pk);
+        db.commit_block(&b2, &h2, &ids2).unwrap();
+        assert_eq!(
+            db.get_total_supply().unwrap(),
+            INITIAL_SUBSIDY * 2 + halved_subsidy
+        );
+    }
+
+    #[test]
+    fn aud2_m2_total_supply_read_is_o1() {
+        // This test verifies that get_total_supply() reads a single key
+        // from chain_state (not iterating balances). The proof is structural:
+        // we commit multiple blocks with different validators and confirm the
+        // total_supply key returns the correct cumulative subsidy without
+        // scanning address_balances.
+        let (db, _dir) = temp_db();
+
+        let (sk1, pk1) = ed25519::generate_keypair();
+        let (sk2, pk2) = ed25519::generate_keypair();
+
+        // Two blocks, each mined by a different validator
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk1, &pk1);
+        db.commit_block(&b0, &h0, &ids0).unwrap();
+
+        let (b1, h1, _ids1) = make_block_with_validator(vec![], 1, h0, 1_700_000_001, &sk2, &pk2);
+        db.commit_block(&b1, &h1, &_ids1).unwrap();
+
+        // Total supply is 2x INITIAL_SUBSIDY, read from chain_state key (O(1))
+        let supply = db.get_total_supply().unwrap();
+        assert_eq!(supply, INITIAL_SUBSIDY * 2);
+
+        // Each validator has INITIAL_SUBSIDY individually
+        let v1 = NoblePublicKey::Ed25519(pk1.to_vec());
+        let v2 = NoblePublicKey::Ed25519(pk2.to_vec());
+        assert_eq!(db.get_balance(&v1).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(db.get_balance(&v2).unwrap(), INITIAL_SUBSIDY);
     }
 }

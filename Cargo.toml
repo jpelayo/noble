@@ -77,3 +77,5 @@ tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
 axum = "0.7"
 hyper = { version = "1", features = ["full"] }
 ipnet = "2"
+bip39 = { version = "2", features = ["rand"] }
+bip32 = "0.5"

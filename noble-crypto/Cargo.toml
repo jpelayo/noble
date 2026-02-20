@@ -24,6 +24,8 @@ hkdf.workspace = true
 aes-gcm.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
+bip39.workspace = true
+bip32.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

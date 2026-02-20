@@ -90,6 +90,25 @@ pub trait WalletApi {
         checksums: Vec<String>,
         fee_per_tx: Option<u64>,
     ) -> Result<SubmitBatchResponse, ErrorObjectOwned>;
+
+    /// Generate a new BIP-39 mnemonic (12 or 24 words) and create a key from it.
+    /// Returns the mnemonic phrase and the derived address.
+    /// The user MUST back up the mnemonic — it cannot be recovered from the node.
+    #[method(name = "generateMnemonic")]
+    async fn generate_mnemonic(
+        &self,
+        word_count: Option<u32>,
+        passphrase: String,
+    ) -> Result<GenerateMnemonicResponse, ErrorObjectOwned>;
+
+    /// Import an existing BIP-39 mnemonic phrase and derive the corresponding key.
+    /// If the key already exists, returns it without re-encrypting.
+    #[method(name = "importMnemonic")]
+    async fn import_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: String,
+    ) -> Result<ImportMnemonicResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -244,6 +263,53 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         Ok(SubmitTxResponse {
             tx_id: hash_to_hex(&tx_id),
             accepted: true,
+        })
+    }
+
+    async fn generate_mnemonic(
+        &self,
+        word_count: Option<u32>,
+        passphrase: String,
+    ) -> Result<GenerateMnemonicResponse, ErrorObjectOwned> {
+        let wc = word_count.unwrap_or(24) as usize;
+        if wc != 12 && wc != 24 {
+            return Err(ApiError::InvalidParam("word_count must be 12 or 24".into()).into());
+        }
+
+        let mut keystore = self.wallet_keystore.lock().unwrap();
+        let (mnemonic, pubkey) = keystore
+            .create_key_from_mnemonic(wc, &passphrase)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(GenerateMnemonicResponse {
+            mnemonic,
+            address: hex::encode(pubkey.to_wire_bytes()),
+            scheme_id: pubkey.scheme_id(),
+            word_count: wc,
+        })
+    }
+
+    async fn import_mnemonic(
+        &self,
+        mnemonic: String,
+        passphrase: String,
+    ) -> Result<ImportMnemonicResponse, ErrorObjectOwned> {
+        let mut keystore = self.wallet_keystore.lock().unwrap();
+
+        // Check if key already exists by trying to recover
+        let existing_keys: Vec<_> = keystore.list_keys().unwrap_or_default();
+        let pubkey = keystore
+            .recover_from_mnemonic(&mnemonic, &passphrase)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let already_exists = existing_keys
+            .iter()
+            .any(|k| k.to_wire_bytes() == pubkey.to_wire_bytes());
+
+        Ok(ImportMnemonicResponse {
+            address: hex::encode(pubkey.to_wire_bytes()),
+            scheme_id: pubkey.scheme_id(),
+            already_exists,
         })
     }
 

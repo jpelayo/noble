@@ -10,6 +10,7 @@
 //! - **secp256k1**: Digital signatures via the [`secp256k1`] module (Step 4)
 //! - **Multi-scheme keys**: Unified key types via the [`keys`] module (Step 5)
 
+pub mod bip137;
 pub mod ecies;
 pub mod ed25519;
 pub mod error;
@@ -22,4 +23,4 @@ pub mod signature;
 pub use error::CryptoError;
 pub use hash::{canonical_double_hash, canonical_hash, double_sha256, sha256, Hash256};
 pub use keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, NobleVerifier, SignatureEnvelope};
-pub use schemes::{is_recognized_scheme, SCHEME_ED25519, SCHEME_SECP256K1};
+pub use schemes::{is_recognized_scheme, SCHEME_BIP137, SCHEME_ED25519, SCHEME_SECP256K1};

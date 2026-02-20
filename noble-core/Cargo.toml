@@ -17,9 +17,11 @@ ed25519-dalek.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
 noble-test-utils.workspace = true
 hex.workspace = true
 proptest.workspace = true
+k256.workspace = true

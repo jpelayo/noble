@@ -215,6 +215,138 @@ impl KeyStore {
         Ok(())
     }
 
+    /// Generate a new key from a BIP-39 mnemonic phrase.
+    ///
+    /// 1. Generates a random mnemonic (12 or 24 words).
+    /// 2. Derives a seed via PBKDF2 (BIP-39 standard, empty passphrase).
+    /// 3. Derives child key at m/44'/9999'/0'/0/0 via BIP-32.
+    /// 4. Stores the derived secp256k1 key encrypted with the given passphrase.
+    /// 5. Returns the mnemonic words and the corresponding public key.
+    ///
+    /// **The mnemonic must be backed up by the user** — it cannot be recovered
+    /// from the encrypted key file.
+    pub fn create_key_from_mnemonic(
+        &mut self,
+        word_count: usize,
+        encryption_passphrase: &str,
+    ) -> Result<(String, NoblePublicKey), WalletError> {
+        Self::validate_passphrase(encryption_passphrase)?;
+
+        if word_count != 12 && word_count != 24 {
+            return Err(WalletError::Crypto(format!(
+                "word_count must be 12 or 24, got {word_count}"
+            )));
+        }
+
+        // Generate mnemonic
+        let mnemonic = bip39::Mnemonic::generate(word_count)
+            .map_err(|e| WalletError::Crypto(format!("mnemonic generation: {e}")))?;
+
+        let mnemonic_str = mnemonic.words().collect::<Vec<_>>().join(" ");
+
+        // Derive seed (empty BIP-39 passphrase by default)
+        let seed = mnemonic.to_seed("");
+
+        // Derive child key at m/44'/9999'/0'/0/0
+        let child = bip32::XPrv::derive_from_path(
+            seed,
+            &"m/44'/9999'/0'/0/0"
+                .parse()
+                .map_err(|e: bip32::Error| WalletError::Crypto(format!("derivation path: {e}")))?,
+        )
+        .map_err(|e| WalletError::Crypto(format!("BIP-32 derivation: {e}")))?;
+
+        // Extract 32-byte secret key
+        let secret_key = child.to_bytes();
+        let sk_bytes: Vec<u8> = secret_key.to_vec();
+
+        let priv_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
+        let pub_key = priv_key.public_key();
+
+        let file_path = self.key_file_path(&pub_key);
+        if file_path.exists() {
+            return Err(WalletError::DuplicateKey(hex::encode(
+                pub_key.to_wire_bytes(),
+            )));
+        }
+
+        let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
+        let json = serde_json::to_string_pretty(&encrypted)?;
+        fs::write(&file_path, &json)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        if let Some(ref mut keys) = self.unlocked_keys {
+            keys.insert(pub_key.to_wire_bytes(), priv_key);
+        }
+
+        Ok((mnemonic_str, pub_key))
+    }
+
+    /// Recover a key from an existing BIP-39 mnemonic phrase.
+    ///
+    /// 1. Parses and validates the mnemonic.
+    /// 2. Derives the same seed/path as `create_key_from_mnemonic`.
+    /// 3. If the key already exists, returns it without re-encrypting.
+    /// 4. Otherwise, encrypts and stores the derived key.
+    pub fn recover_from_mnemonic(
+        &mut self,
+        mnemonic_words: &str,
+        encryption_passphrase: &str,
+    ) -> Result<NoblePublicKey, WalletError> {
+        Self::validate_passphrase(encryption_passphrase)?;
+
+        // Parse and validate mnemonic
+        let mnemonic: bip39::Mnemonic = mnemonic_words
+            .parse()
+            .map_err(|e: bip39::Error| WalletError::Crypto(format!("invalid mnemonic: {e}")))?;
+
+        // Derive seed (empty BIP-39 passphrase)
+        let seed = mnemonic.to_seed("");
+
+        // Derive child key at m/44'/9999'/0'/0/0
+        let child = bip32::XPrv::derive_from_path(
+            seed,
+            &"m/44'/9999'/0'/0/0"
+                .parse()
+                .map_err(|e: bip32::Error| WalletError::Crypto(format!("derivation path: {e}")))?,
+        )
+        .map_err(|e| WalletError::Crypto(format!("BIP-32 derivation: {e}")))?;
+
+        let secret_key = child.to_bytes();
+        let sk_bytes: Vec<u8> = secret_key.to_vec();
+
+        let priv_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
+        let pub_key = priv_key.public_key();
+
+        let file_path = self.key_file_path(&pub_key);
+        if file_path.exists() {
+            // Key already exists — just return the public key
+            return Ok(pub_key);
+        }
+
+        // Encrypt and store
+        let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
+        let json = serde_json::to_string_pretty(&encrypted)?;
+        fs::write(&file_path, &json)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        if let Some(ref mut keys) = self.unlocked_keys {
+            keys.insert(pub_key.to_wire_bytes(), priv_key);
+        }
+
+        Ok(pub_key)
+    }
+
     /// Unlock the keystore by decrypting all key files with the given passphrase.
     /// If any key file fails to decrypt, returns `InvalidPassphrase`.
     ///
@@ -586,5 +718,67 @@ mod tests {
             0o600,
             "key file should have 0o600 permissions"
         );
+    }
+
+    // --- BIP-39 Mnemonic tests ---
+
+    #[test]
+    fn bip39_generate_24_word_mnemonic() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let (mnemonic, pk) = ks.create_key_from_mnemonic(24, "test-pass-long").unwrap();
+
+        // Should be 24 words
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 24, "expected 24 words, got {}", words.len());
+
+        // Key should be secp256k1
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
+
+        // Key should be listed
+        let keys = ks.list_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn bip39_generate_12_word_mnemonic() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let (mnemonic, pk) = ks.create_key_from_mnemonic(12, "test-pass-long").unwrap();
+
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 12, "expected 12 words, got {}", words.len());
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
+    }
+
+    #[test]
+    fn bip39_recover_same_key() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let (mnemonic, pk1) = ks.create_key_from_mnemonic(24, "test-pass-long").unwrap();
+
+        // Recover from the same mnemonic (in a new keystore to ensure fresh state)
+        let dir2 = tempdir().unwrap();
+        let mut ks2 = KeyStore::new(dir2.path().join("keys")).unwrap();
+        let pk2 = ks2
+            .recover_from_mnemonic(&mnemonic, "test-pass-long")
+            .unwrap();
+
+        assert_eq!(
+            pk1.to_wire_bytes(),
+            pk2.to_wire_bytes(),
+            "recovered key must match original"
+        );
+    }
+
+    #[test]
+    fn bip39_invalid_mnemonic_rejected() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let result = ks.recover_from_mnemonic(
+            "invalid words that are not a valid bip39 mnemonic phrase at all",
+            "test-pass-long",
+        );
+        assert!(result.is_err(), "invalid mnemonic must be rejected");
     }
 }

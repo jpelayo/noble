@@ -17,69 +17,49 @@ use crate::constants::{
 };
 use crate::encrypted_locator::ExternalAttestation;
 
-/// Organization taxonomy — makes governance model visible.
+/// Organization taxonomy — makes funding model visible.
 ///
-/// Government, for-profit, and non-profit entities are explicitly
-/// distinguished so that "state hands can be pinpointed" in the
-/// reputation system.
+/// Private and publicly-funded entities are explicitly distinguished
+/// so that "state hands can be pinpointed" in the reputation system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrgType {
-    // ── Individuals ──
+    // ── Individual ──
     Individual,
-    IndependentResearcher,
 
-    // ── Non-Profit / Academic ──
-    University,
-    ResearchLab,
-    NGO,
-    Foundation,
-    OpenSourceProject,
-    Cooperative,
-    CommunityGroup,
-    ReligiousOrganization,
+    // ── Fully privately funded ──
+    PrivateNonProfit,
+    PrivateCorporation,
+    PrivateStartup,
+    PrivateAcademic,
+    PrivateInstitution,
 
-    // ── For-Profit ──
-    Enterprise,
-    Startup,
-    InfrastructureProvider,
-    FinancialInstitution,
+    // ── Public administration ──
+    PublicNational,
+    PublicRegional,
 
-    // ── Government & State (pinpointed) ──
-    GovernmentFederal,
-    GovernmentRegional,
-    GovernmentMunicipal,
-    MilitaryOrDefense,
-    CentralBank,
-
-    // ── Institutional / Mixed ──
-    Hospital,
-    Museum,
-    MediaOutlet,
+    // ── Publicly funded ──
+    PublicSupranational,
+    PublicCorporation,
+    PublicAcademic,
+    PublicInstitution,
 }
 
 impl OrgType {
-    /// Returns the governance category for transparency.
+    /// Returns the funding category for transparency.
     pub fn governance_class(&self) -> &'static str {
         match self {
-            Self::Individual | Self::IndependentResearcher => "individual",
-            Self::University
-            | Self::ResearchLab
-            | Self::NGO
-            | Self::Foundation
-            | Self::OpenSourceProject
-            | Self::Cooperative
-            | Self::CommunityGroup
-            | Self::ReligiousOrganization => "non-profit",
-            Self::Enterprise
-            | Self::Startup
-            | Self::InfrastructureProvider
-            | Self::FinancialInstitution => "for-profit",
-            Self::GovernmentFederal
-            | Self::GovernmentRegional
-            | Self::GovernmentMunicipal
-            | Self::MilitaryOrDefense
-            | Self::CentralBank => "government",
-            Self::Hospital | Self::Museum | Self::MediaOutlet => "institution",
+            Self::Individual => "individual",
+            Self::PrivateNonProfit
+            | Self::PrivateCorporation
+            | Self::PrivateStartup
+            | Self::PrivateAcademic
+            | Self::PrivateInstitution => "private",
+            Self::PublicNational
+            | Self::PublicRegional
+            | Self::PublicSupranational
+            | Self::PublicCorporation
+            | Self::PublicAcademic
+            | Self::PublicInstitution => "public",
         }
     }
 
@@ -87,27 +67,17 @@ impl OrgType {
     pub fn all() -> &'static [OrgType] {
         &[
             Self::Individual,
-            Self::IndependentResearcher,
-            Self::University,
-            Self::ResearchLab,
-            Self::NGO,
-            Self::Foundation,
-            Self::OpenSourceProject,
-            Self::Cooperative,
-            Self::CommunityGroup,
-            Self::ReligiousOrganization,
-            Self::Enterprise,
-            Self::Startup,
-            Self::InfrastructureProvider,
-            Self::FinancialInstitution,
-            Self::GovernmentFederal,
-            Self::GovernmentRegional,
-            Self::GovernmentMunicipal,
-            Self::MilitaryOrDefense,
-            Self::CentralBank,
-            Self::Hospital,
-            Self::Museum,
-            Self::MediaOutlet,
+            Self::PrivateNonProfit,
+            Self::PrivateCorporation,
+            Self::PrivateStartup,
+            Self::PrivateAcademic,
+            Self::PrivateInstitution,
+            Self::PublicNational,
+            Self::PublicRegional,
+            Self::PublicSupranational,
+            Self::PublicCorporation,
+            Self::PublicAcademic,
+            Self::PublicInstitution,
         ]
     }
 }
@@ -410,42 +380,17 @@ mod tests {
     #[test]
     fn org_type_governance_class() {
         assert_eq!(OrgType::Individual.governance_class(), "individual");
-        assert_eq!(
-            OrgType::IndependentResearcher.governance_class(),
-            "individual"
-        );
-        assert_eq!(OrgType::University.governance_class(), "non-profit");
-        assert_eq!(OrgType::ResearchLab.governance_class(), "non-profit");
-        assert_eq!(OrgType::NGO.governance_class(), "non-profit");
-        assert_eq!(OrgType::Foundation.governance_class(), "non-profit");
-        assert_eq!(OrgType::OpenSourceProject.governance_class(), "non-profit");
-        assert_eq!(OrgType::Cooperative.governance_class(), "non-profit");
-        assert_eq!(OrgType::CommunityGroup.governance_class(), "non-profit");
-        assert_eq!(
-            OrgType::ReligiousOrganization.governance_class(),
-            "non-profit"
-        );
-        assert_eq!(OrgType::Enterprise.governance_class(), "for-profit");
-        assert_eq!(OrgType::Startup.governance_class(), "for-profit");
-        assert_eq!(
-            OrgType::InfrastructureProvider.governance_class(),
-            "for-profit"
-        );
-        assert_eq!(
-            OrgType::FinancialInstitution.governance_class(),
-            "for-profit"
-        );
-        assert_eq!(OrgType::GovernmentFederal.governance_class(), "government");
-        assert_eq!(OrgType::GovernmentRegional.governance_class(), "government");
-        assert_eq!(
-            OrgType::GovernmentMunicipal.governance_class(),
-            "government"
-        );
-        assert_eq!(OrgType::MilitaryOrDefense.governance_class(), "government");
-        assert_eq!(OrgType::CentralBank.governance_class(), "government");
-        assert_eq!(OrgType::Hospital.governance_class(), "institution");
-        assert_eq!(OrgType::Museum.governance_class(), "institution");
-        assert_eq!(OrgType::MediaOutlet.governance_class(), "institution");
+        assert_eq!(OrgType::PrivateNonProfit.governance_class(), "private");
+        assert_eq!(OrgType::PrivateCorporation.governance_class(), "private");
+        assert_eq!(OrgType::PrivateStartup.governance_class(), "private");
+        assert_eq!(OrgType::PrivateAcademic.governance_class(), "private");
+        assert_eq!(OrgType::PrivateInstitution.governance_class(), "private");
+        assert_eq!(OrgType::PublicNational.governance_class(), "public");
+        assert_eq!(OrgType::PublicRegional.governance_class(), "public");
+        assert_eq!(OrgType::PublicSupranational.governance_class(), "public");
+        assert_eq!(OrgType::PublicCorporation.governance_class(), "public");
+        assert_eq!(OrgType::PublicAcademic.governance_class(), "public");
+        assert_eq!(OrgType::PublicInstitution.governance_class(), "public");
     }
 
     #[test]
@@ -557,7 +502,7 @@ mod tests {
         let announce = NodeAnnounce::sign(
             pk.clone(),
             "validator-node".to_string(),
-            OrgType::Enterprise,
+            OrgType::PrivateCorporation,
             None,
             NodeRole::Validator,
             None,
@@ -644,16 +589,10 @@ mod tests {
 
     #[test]
     fn governance_class_covers_all_variants() {
-        // Ensure all() returns 22 variants and all have a governance class.
+        // Ensure all() returns 12 variants and all have a governance class.
         let all = OrgType::all();
-        assert_eq!(all.len(), 22);
-        let valid_classes = [
-            "individual",
-            "non-profit",
-            "for-profit",
-            "government",
-            "institution",
-        ];
+        assert_eq!(all.len(), 12);
+        let valid_classes = ["individual", "private", "public"];
         for org in all {
             let class = org.governance_class();
             assert!(
@@ -699,7 +638,7 @@ mod tests {
         let announce = NodeAnnounce::sign_with_attestation(
             pk.clone(),
             "test-node".to_string(),
-            OrgType::Enterprise,
+            OrgType::PrivateCorporation,
             Some("Acme Corp".to_string()),
             NodeRole::FullNode,
             None,

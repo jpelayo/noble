@@ -335,7 +335,7 @@ mod tests {
         let msg = GossipMessage::NodeAnnounce {
             identity_key: vec![0x00; 33],
             node_name: "test-node".into(),
-            org_type: "University".into(),
+            org_type: "PrivateAcademic".into(),
             org_name: Some("MIT".into()),
             node_role: "ArchiveNode".into(),
             contact_email: Some("test@mit.edu".into()),
@@ -364,7 +364,7 @@ mod tests {
         let msg = GossipMessage::NodeAnnounce {
             identity_key: vec![0x00; 33],
             node_name: "test-node".into(),
-            org_type: "Enterprise".into(),
+            org_type: "PrivateCorporation".into(),
             org_name: Some("Acme Corp".into()),
             node_role: "FullNode".into(),
             contact_email: None,

@@ -25,6 +25,8 @@ pub struct SigCache {
     order: VecDeque<Hash256>,
     /// Maximum number of entries.
     capacity: usize,
+    /// AUD-M3: Counter for inserts since last compaction.
+    inserts_since_compact: usize,
 }
 
 impl SigCache {
@@ -34,6 +36,7 @@ impl SigCache {
             entries: HashMap::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),
             capacity,
+            inserts_since_compact: 0,
         }
     }
 
@@ -66,6 +69,20 @@ impl SigCache {
         tracing::trace!("sigcache miss, inserting");
         self.entries.insert(tx_id, ());
         self.order.push_back(tx_id);
+
+        // AUD-M3: Compact phantom entries every 10,000 inserts
+        self.inserts_since_compact += 1;
+        if self.inserts_since_compact >= 10_000 {
+            self.compact();
+        }
+    }
+
+    /// AUD-M3: Rebuild the order deque, retaining only entries that are
+    /// still present in the entries HashMap. This removes phantom entries
+    /// left behind by `remove()` calls.
+    pub fn compact(&mut self) {
+        self.order.retain(|h| self.entries.contains_key(h));
+        self.inserts_since_compact = 0;
     }
 
     /// Remove a specific entry (e.g., when a tx is confirmed or evicted).
@@ -151,6 +168,54 @@ mod tests {
         let cache = SigCache::new(10);
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
+    }
+
+    // AUD-M3: Phantom compaction removes stale order entries
+    #[test]
+    fn compact_removes_phantoms() {
+        let mut cache = SigCache::new(100);
+        let h1 = make_hash(1);
+        let h2 = make_hash(2);
+        let h3 = make_hash(3);
+
+        cache.insert(h1);
+        cache.insert(h2);
+        cache.insert(h3);
+        assert_eq!(cache.order.len(), 3);
+
+        // Remove h1 and h2 (creates phantoms in order)
+        cache.remove(&h1);
+        cache.remove(&h2);
+        assert_eq!(cache.len(), 1); // only h3
+        assert_eq!(cache.order.len(), 3); // phantoms still in order
+
+        // Compact should remove phantoms
+        cache.compact();
+        assert_eq!(cache.order.len(), 1); // only h3 remains
+        assert!(cache.contains(&h3));
+    }
+
+    // AUD-M3: Compaction preserves all valid entries
+    #[test]
+    fn compact_preserves_valid_entries() {
+        let mut cache = SigCache::new(100);
+        for i in 0..50u64 {
+            cache.insert(make_hash(i));
+        }
+        // Remove every other entry
+        for i in (0..50u64).step_by(2) {
+            cache.remove(&make_hash(i));
+        }
+        assert_eq!(cache.len(), 25);
+        assert_eq!(cache.order.len(), 50); // 25 phantoms
+
+        cache.compact();
+        assert_eq!(cache.len(), 25);
+        assert_eq!(cache.order.len(), 25); // phantoms removed
+                                           // Verify all odd entries still present
+        for i in (1..50u64).step_by(2) {
+            assert!(cache.contains(&make_hash(i)));
+        }
     }
 
     #[test]

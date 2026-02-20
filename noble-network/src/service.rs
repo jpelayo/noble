@@ -338,6 +338,20 @@ async fn handle_swarm_event(
                 }
             }
 
+            // AUD2-H6: Check inbound subnet diversity (max 4 from same /16).
+            if direction == Direction::Inbound {
+                let inbound_addrs = peer_manager.inbound_addrs();
+                if !diversity::check_inbound_subnet_diversity(
+                    &inbound_addrs,
+                    &remote_addr,
+                    diversity::MAX_INBOUND_PER_SUBNET,
+                ) {
+                    tracing::debug!(%peer_id, %remote_addr, "rejecting inbound: subnet diversity (>4 from same /16)");
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                }
+            }
+
             if peer_manager.on_connected(peer_id, direction) {
                 peer_manager.update_addr(&peer_id, remote_addr.clone());
                 tracing::debug!(%peer_id, ?direction, "peer connected");
@@ -687,6 +701,38 @@ async fn handle_swarm_event(
                 agent = %info.agent_version,
                 "identified peer"
             );
+
+            // AUD-M5: Parse peer's protocol version and check major version compatibility.
+            // Expected format: "/noble/1.0.0/<chain_id>/v<protocol_version>"
+            let our_identify = format!(
+                "{}/{}/v{}",
+                crate::topics::IDENTIFY_PROTOCOL,
+                config.chain_id,
+                config.protocol_version,
+            );
+            // Extract the major version from our identify string (e.g. "1" from "/noble/1.0.0/...")
+            let our_major = crate::topics::IDENTIFY_PROTOCOL
+                .trim_start_matches("/noble/")
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok());
+            let peer_major = info
+                .protocol_version
+                .trim_start_matches("/noble/")
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok());
+            if let (Some(ours), Some(theirs)) = (our_major, peer_major) {
+                if ours != theirs {
+                    tracing::warn!(
+                        %peer_id,
+                        our_version = %our_identify,
+                        peer_version = %info.protocol_version,
+                        "major protocol version mismatch with peer",
+                    );
+                }
+            }
+
             // Feed identified peer addresses into Kademlia routing table.
             if config.enable_kademlia {
                 for addr in &info.listen_addrs {
@@ -1019,27 +1065,17 @@ fn parse_org_type(s: &str) -> Option<noble_core::OrgType> {
     use noble_core::OrgType;
     match s {
         "Individual" => Some(OrgType::Individual),
-        "IndependentResearcher" => Some(OrgType::IndependentResearcher),
-        "University" => Some(OrgType::University),
-        "ResearchLab" => Some(OrgType::ResearchLab),
-        "NGO" => Some(OrgType::NGO),
-        "Foundation" => Some(OrgType::Foundation),
-        "OpenSourceProject" => Some(OrgType::OpenSourceProject),
-        "Cooperative" => Some(OrgType::Cooperative),
-        "CommunityGroup" => Some(OrgType::CommunityGroup),
-        "ReligiousOrganization" => Some(OrgType::ReligiousOrganization),
-        "Enterprise" => Some(OrgType::Enterprise),
-        "Startup" => Some(OrgType::Startup),
-        "InfrastructureProvider" => Some(OrgType::InfrastructureProvider),
-        "FinancialInstitution" => Some(OrgType::FinancialInstitution),
-        "GovernmentFederal" => Some(OrgType::GovernmentFederal),
-        "GovernmentRegional" => Some(OrgType::GovernmentRegional),
-        "GovernmentMunicipal" => Some(OrgType::GovernmentMunicipal),
-        "MilitaryOrDefense" => Some(OrgType::MilitaryOrDefense),
-        "CentralBank" => Some(OrgType::CentralBank),
-        "Hospital" => Some(OrgType::Hospital),
-        "Museum" => Some(OrgType::Museum),
-        "MediaOutlet" => Some(OrgType::MediaOutlet),
+        "PrivateNonProfit" => Some(OrgType::PrivateNonProfit),
+        "PrivateCorporation" => Some(OrgType::PrivateCorporation),
+        "PrivateStartup" => Some(OrgType::PrivateStartup),
+        "PrivateAcademic" => Some(OrgType::PrivateAcademic),
+        "PrivateInstitution" => Some(OrgType::PrivateInstitution),
+        "PublicNational" => Some(OrgType::PublicNational),
+        "PublicRegional" => Some(OrgType::PublicRegional),
+        "PublicSupranational" => Some(OrgType::PublicSupranational),
+        "PublicCorporation" => Some(OrgType::PublicCorporation),
+        "PublicAcademic" => Some(OrgType::PublicAcademic),
+        "PublicInstitution" => Some(OrgType::PublicInstitution),
         _ => None,
     }
 }
@@ -1347,6 +1383,38 @@ mod tests {
         assert_eq!(
             extract_base_addr("/ip4/1.2.3.4/udp/1234"),
             "/ip4/1.2.3.4/udp/1234"
+        );
+    }
+
+    // ---- AUD2-H6: Inbound subnet diversity test ----
+
+    #[test]
+    fn inbound_subnet_diversity_rejects_5th_from_same_slash16() {
+        // The check_inbound_subnet_diversity function should reject the 5th peer
+        // from the same /16 subnet when max_per_subnet = 4.
+        let existing = vec![
+            "/ip4/10.5.1.1/tcp/8780".to_string(),
+            "/ip4/10.5.2.2/tcp/8780".to_string(),
+            "/ip4/10.5.3.3/tcp/8780".to_string(),
+            "/ip4/10.5.4.4/tcp/8780".to_string(), // 4 from 10.5.x.x
+        ];
+        // 5th from same /16 — should be rejected (max = 4).
+        assert!(
+            !diversity::check_inbound_subnet_diversity(
+                &existing,
+                "/ip4/10.5.5.5/tcp/8780",
+                diversity::MAX_INBOUND_PER_SUBNET,
+            ),
+            "5th inbound from same /16 should be rejected"
+        );
+        // A peer from a different /16 should be accepted.
+        assert!(
+            diversity::check_inbound_subnet_diversity(
+                &existing,
+                "/ip4/192.168.1.1/tcp/8780",
+                diversity::MAX_INBOUND_PER_SUBNET,
+            ),
+            "peer from different /16 should be accepted"
         );
     }
 }

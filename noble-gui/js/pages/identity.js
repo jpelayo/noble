@@ -7,18 +7,29 @@ import { formatNumber } from '../utils.js';
 
 const GOV_CLASSES = {
   individual: { label: 'Individual', color: '#6b7280' },
-  'non-profit': { label: 'Non-Profit', color: '#10b981' },
-  'for-profit': { label: 'For-Profit', color: '#3b82f6' },
-  government: { label: 'Government', color: '#ef4444' },
-  institution: { label: 'Institution', color: '#8b5cf6' },
+  private: { label: 'Private', color: '#3b82f6' },
+  public: { label: 'Public', color: '#ef4444' },
 };
 
 const ORG_TYPES = {
-  individual: ['Individual', 'IndependentResearcher'],
-  'non-profit': ['University', 'ResearchLab', 'NGO', 'Foundation', 'OpenSourceProject', 'Cooperative', 'CommunityGroup', 'ReligiousOrganization'],
-  'for-profit': ['Enterprise', 'Startup', 'InfrastructureProvider', 'FinancialInstitution'],
-  government: ['GovernmentFederal', 'GovernmentRegional', 'GovernmentMunicipal', 'MilitaryOrDefense', 'CentralBank'],
-  institution: ['Hospital', 'Museum', 'MediaOutlet'],
+  individual: ['Individual'],
+  private: ['PrivateNonProfit', 'PrivateCorporation', 'PrivateStartup', 'PrivateAcademic', 'PrivateInstitution'],
+  public: ['PublicNational', 'PublicRegional', 'PublicSupranational', 'PublicCorporation', 'PublicAcademic', 'PublicInstitution'],
+};
+
+const ORG_TYPE_LABELS = {
+  Individual: 'Individual',
+  PrivateNonProfit: 'Fully privately funded non-profit institution or NGO',
+  PrivateCorporation: 'Fully privately funded for-profit corporation',
+  PrivateStartup: 'Fully privately funded for-profit startup',
+  PrivateAcademic: 'Fully privately funded for-profit academic institution',
+  PrivateInstitution: 'Fully privately funded for-profit institution',
+  PublicNational: 'National public administration entity',
+  PublicRegional: 'Regional or municipal public administration entity',
+  PublicSupranational: 'Publicly funded supranational organization',
+  PublicCorporation: 'Publicly funded corporation or startup',
+  PublicAcademic: 'Publicly funded academic institution',
+  PublicInstitution: 'Publicly funded institution or NGO',
 };
 
 const NODE_ROLES = ['FullNode', 'Validator', 'ArchiveNode', 'LightClient', 'Gateway'];
@@ -35,6 +46,10 @@ function govBadge(govClass) {
   return `<span class="gov-badge" style="background:${info.color};color:#fff">${info.label}</span>`;
 }
 
+function orgTypeLabel(orgType) {
+  return ORG_TYPE_LABELS[orgType] || orgType.replace(/([A-Z])/g, ' $1').trim();
+}
+
 function buildOrgTypeOptions(selected) {
   let html = '';
   for (const [group, types] of Object.entries(ORG_TYPES)) {
@@ -42,7 +57,7 @@ function buildOrgTypeOptions(selected) {
     html += `<optgroup label="${label}">`;
     for (const t of types) {
       const sel = t === selected ? ' selected' : '';
-      html += `<option value="${t}"${sel}>${t.replace(/([A-Z])/g, ' $1').trim()}</option>`;
+      html += `<option value="${t}"${sel}>${orgTypeLabel(t)}</option>`;
     }
     html += '</optgroup>';
   }
@@ -216,7 +231,7 @@ export function init(root, ctx) {
         const cls = p.governance_class || govClassForOrgType(p.org_type);
         const ago = Math.floor(Date.now() / 1000 - p.last_seen);
         const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago / 60)}m ago` : `${Math.floor(ago / 3600)}h ago`;
-        const orgDisplay = (p.org_type || '').replace(/([A-Z])/g, ' $1').trim();
+        const orgDisplay = orgTypeLabel(p.org_type || '');
         const roleDisplay = (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
         const pLabel = participationLabel(p.wants_to_validate, p.wants_to_vote);
         const pkiBadge = pkiStatusBadge(p.pki_attestation);
@@ -247,7 +262,7 @@ export function init(root, ctx) {
           peerDl.innerHTML = `
             <dt>Peer ID</dt><dd class="mono">${esc(p.peer_id)}</dd>
             <dt>Node Name</dt><dd>${esc(p.node_name)}</dd>
-            <dt>Org Type</dt><dd>${(p.org_type || '').replace(/([A-Z])/g, ' $1').trim()}</dd>
+            <dt>Org Type</dt><dd>${orgTypeLabel(p.org_type || '')}</dd>
             <dt>Governance</dt><dd>${govBadge(p.governance_class || govClassForOrgType(p.org_type))}</dd>
             <dt>Role</dt><dd>${(p.node_role || '').replace(/([A-Z])/g, ' $1').trim()}</dd>
             <dt>Participation</dt><dd>${pLabel}</dd>

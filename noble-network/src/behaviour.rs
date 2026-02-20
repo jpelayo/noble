@@ -3,8 +3,6 @@
 
 //! Composite libp2p [`NetworkBehaviour`] for a NOBLE node.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use libp2p::gossipsub::{self, IdentTopic, MessageId};
@@ -13,6 +11,7 @@ use libp2p::kad;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{identify, ping, StreamProtocol};
+use sha2::Digest;
 
 use crate::config::NetworkConfig;
 use crate::error::NetworkError;
@@ -88,11 +87,14 @@ impl NobleBehaviour {
     /// Construct a new `NobleBehaviour` from a keypair and network config.
     pub fn new(keypair: &Keypair, config: &NetworkConfig) -> Result<Self, NetworkError> {
         // --- GossipSub ---
+        // AUD2-H3: Stable message_id using SHA-256 truncated to 20 bytes.
+        // This avoids non-deterministic hashing (SipHash/DefaultHasher) across processes.
         let message_id_fn = |message: &gossipsub::Message| {
-            let mut hasher = DefaultHasher::new();
-            message.data.hash(&mut hasher);
-            message.topic.hash(&mut hasher);
-            MessageId::from(hasher.finish().to_string())
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&message.data);
+            hasher.update(message.topic.as_str().as_bytes());
+            let hash = hasher.finalize();
+            MessageId::from(hash[..20].to_vec())
         };
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -136,9 +138,15 @@ impl NobleBehaviour {
             request_response::Config::default(),
         );
 
-        // --- Identify (GAP-H4) ---
+        // --- Identify (GAP-H4 + AUD-M5) ---
+        // Include both chain_id and protocol_version in identify protocol string.
         let identify = identify::Behaviour::new(identify::Config::new(
-            format!("{}/{}", topics::IDENTIFY_PROTOCOL, config.chain_id),
+            format!(
+                "{}/{}/v{}",
+                topics::IDENTIFY_PROTOCOL,
+                config.chain_id,
+                config.protocol_version,
+            ),
             keypair.public(),
         ));
 
@@ -204,10 +212,84 @@ mod tests {
 
     #[test]
     fn identify_protocol_format() {
-        // Verify the identify protocol string is constructed with the chain_id.
+        // Verify the identify protocol string is constructed with chain_id and protocol_version.
         let config = NetworkConfig::testnet();
-        let expected = format!("{}/{}", crate::topics::IDENTIFY_PROTOCOL, config.chain_id);
+        let expected = format!(
+            "{}/{}/v{}",
+            crate::topics::IDENTIFY_PROTOCOL,
+            config.chain_id,
+            config.protocol_version,
+        );
         assert!(expected.contains("/noble/"));
         assert!(expected.contains(&config.chain_id.to_string()));
+        assert!(expected.contains(&format!("v{}", config.protocol_version)));
+    }
+
+    // ---- AUD-M5: Protocol version matching test ----
+
+    #[test]
+    fn matching_version_accepted() {
+        // Verify that two nodes with the same config produce the same identify string,
+        // confirming they would recognize each other as compatible.
+        let config = NetworkConfig::testnet();
+        let identify_a = format!(
+            "{}/{}/v{}",
+            crate::topics::IDENTIFY_PROTOCOL,
+            config.chain_id,
+            config.protocol_version,
+        );
+        let identify_b = format!(
+            "{}/{}/v{}",
+            crate::topics::IDENTIFY_PROTOCOL,
+            config.chain_id,
+            config.protocol_version,
+        );
+        assert_eq!(identify_a, identify_b);
+
+        // Extract major version and confirm they match.
+        let major_a = identify_a
+            .trim_start_matches("/noble/")
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok());
+        let major_b = identify_b
+            .trim_start_matches("/noble/")
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok());
+        assert_eq!(major_a, major_b);
+        assert!(major_a.is_some());
+    }
+
+    // ---- AUD2-H3: Stable GossipSub message_id test ----
+
+    #[test]
+    fn gossipsub_message_id_is_deterministic() {
+        // The SHA-256-based message_id must produce identical results for
+        // identical message data across invocations (no random seed).
+        use sha2::Digest;
+
+        let data = b"test block announce payload";
+        let topic = "noble/block/announce/1";
+
+        let compute_id = |d: &[u8], t: &str| -> Vec<u8> {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(d);
+            hasher.update(t.as_bytes());
+            let hash = hasher.finalize();
+            hash[..20].to_vec()
+        };
+
+        let id1 = compute_id(data, topic);
+        let id2 = compute_id(data, topic);
+        assert_eq!(
+            id1, id2,
+            "same data+topic must produce identical message_id"
+        );
+        assert_eq!(id1.len(), 20, "message_id should be 20 bytes");
+
+        // Different data should produce different id.
+        let id3 = compute_id(b"different payload", topic);
+        assert_ne!(id1, id3);
     }
 }

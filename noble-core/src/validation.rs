@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use noble_codec::NobleCbor;
-use noble_crypto::{is_recognized_scheme, NoblePublicKey};
+use noble_crypto::{is_recognized_scheme, NoblePublicKey, SCHEME_BIP137};
 
 use crate::block::{Block, BlockHeader};
 use crate::constants::*;
@@ -33,6 +33,72 @@ pub struct BlockValidationContext<'a> {
     pub parent: Option<&'a BlockHeader>,
     /// The node's local trusted validator list.
     pub validator_list: &'a [NoblePublicKey],
+}
+
+/// Validate a BIP-137 (Bitcoin Signed Message) signature on a transaction (T26).
+///
+/// BIP-137 transactions use a recoverable signature format where the public key
+/// is recovered from the signature itself. The message being signed is a canonical
+/// string constructed from the transaction fields, hashed with the Bitcoin double-SHA256
+/// message format.
+///
+/// Checks:
+/// - scheme_id == SCHEME_BIP137 (0x03)
+/// - Signature length == 65 bytes
+/// - Message is reconstructed from tx fields
+/// - Public key is recovered from the recoverable signature
+/// - Recovered key matches the declared public key
+fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), ValidationError> {
+    use noble_crypto::bip137;
+
+    let sig = &tx.publisher_sig;
+
+    // Ensure correct scheme
+    if sig.scheme_id != SCHEME_BIP137 {
+        return Err(ValidationError::PublisherSigInvalid(
+            "T26: expected SCHEME_BIP137 (0x03)".to_string(),
+        ));
+    }
+
+    // Signature must be exactly 65 bytes
+    if sig.signature.len() != bip137::BIP137_SIG_LEN {
+        return Err(ValidationError::PublisherSigInvalid(format!(
+            "T26: BIP-137 signature must be {} bytes, got {}",
+            bip137::BIP137_SIG_LEN,
+            sig.signature.len()
+        )));
+    }
+
+    // Reconstruct the canonical message from tx fields
+    let message = if tx.tx_type == TX_TYPE_TRANSFER {
+        let recipient_hex = tx
+            .recipient
+            .as_ref()
+            .map(|r| hex::encode(r.to_wire_bytes()))
+            .unwrap_or_default();
+        bip137::transfer_message(
+            &recipient_hex,
+            tx.amount.unwrap_or(0),
+            tx.timestamp,
+            tx.fee,
+            tx.version,
+        )
+    } else {
+        bip137::notarization_message(&tx.checksum.to_string(), tx.timestamp, tx.fee, tx.version)
+    };
+
+    // Recover the public key from the BIP-137 signature
+    let recovered_pk = bip137::verify_bip137(&sig.signature, &message)
+        .map_err(|e| ValidationError::PublisherSigInvalid(format!("T26: {e}")))?;
+
+    // Compare recovered key with declared public key
+    if recovered_pk != sig.public_key {
+        return Err(ValidationError::PublisherSigInvalid(
+            "T26: recovered public key does not match declared signer".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validate a transaction against rules T1-T17.
@@ -105,14 +171,22 @@ pub fn validate_transaction(
         "T5: publisher scheme recognized"
     );
 
-    // T6: Publisher signature verification
+    // Compute signing message (used by T6 and T7)
     let signing_msg = tx
         .compute_signing_message()
         .map_err(|e| ValidationError::Internal(e.to_string()))?;
-    tx.publisher_sig
-        .verify_standalone(&signing_msg)
-        .map_err(|e| ValidationError::PublisherSigInvalid(e.to_string()))?;
-    tracing::trace!("T6: publisher signature verified");
+
+    // T6/T26: Publisher signature verification
+    if tx.publisher_sig.scheme_id == SCHEME_BIP137 {
+        // T26: BIP-137 recoverable signature — uses Bitcoin Signed Message format
+        validate_bip137_signature(tx, ctx.chain_id)?;
+        tracing::trace!("T26: BIP-137 publisher signature verified");
+    } else {
+        tx.publisher_sig
+            .verify_standalone(&signing_msg)
+            .map_err(|e| ValidationError::PublisherSigInvalid(e.to_string()))?;
+        tracing::trace!("T6: publisher signature verified");
+    }
 
     // T7: Additional signature verification
     for (i, sig) in tx.additional_sigs.iter().enumerate() {
@@ -1588,5 +1662,101 @@ mod tests {
             result,
             Err(ValidationError::InvalidGatewayAddress(_))
         ));
+    }
+
+    // --- T26: BIP-137 Bitcoin Signed Message ---
+
+    fn make_bip137_notarization_tx() -> (Transaction, noble_crypto::Hash256) {
+        use noble_crypto::bip137;
+        use noble_crypto::SCHEME_BIP137;
+
+        let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&sk).unwrap();
+        let compressed_pk = signing_key.verifying_key().to_sec1_bytes().to_vec();
+
+        let checksum = sha256(b"bip137 test document");
+        let timestamp = 1_700_000_000u64;
+        let fee = MIN_TX_FEE;
+
+        let message =
+            bip137::notarization_message(&checksum.to_string(), timestamp, fee, PROTOCOL_VERSION);
+        let sig = bip137::sign_bip137(&sk, &message).unwrap();
+
+        let tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_NOTARIZATION,
+            checksum,
+            timestamp,
+            fee,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_BIP137,
+                public_key: compressed_pk,
+                signature: sig.to_vec(),
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    #[test]
+    fn t26_valid_bip137_notarization_passes() {
+        let (tx, tx_id) = make_bip137_notarization_tx();
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
+    }
+
+    #[test]
+    fn t26_bip137_wrong_checksum_fails() {
+        let (mut tx, _) = make_bip137_notarization_tx();
+        // Tamper with the checksum — signature won't match
+        tx.checksum = sha256(b"tampered document");
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::PublisherSigInvalid(_))),
+            "wrong checksum must fail BIP-137 validation: {result:?}"
+        );
+    }
+
+    #[test]
+    fn t26_bip137_non_65_byte_sig_fails() {
+        use noble_crypto::SCHEME_BIP137;
+
+        let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&sk).unwrap();
+        let compressed_pk = signing_key.verifying_key().to_sec1_bytes().to_vec();
+
+        let checksum = sha256(b"short sig test");
+        let tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_NOTARIZATION,
+            checksum,
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_BIP137,
+                public_key: compressed_pk,
+                signature: vec![0u8; 32], // Wrong length
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::PublisherSigInvalid(_))),
+            "non-65-byte BIP-137 sig must be rejected: {result:?}"
+        );
     }
 }

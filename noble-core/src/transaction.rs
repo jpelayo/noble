@@ -73,6 +73,10 @@ struct SigningPayload {
     external_attestations: Vec<ExternalAttestation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gateway_address: Option<Vec<u8>>,
+    /// AUD2-H7: Chain identifier prevents cross-chain signature replay.
+    /// Default 0 = legacy (pre-Sprint 9) compatibility.
+    #[serde(default)]
+    chain_id: u32,
 }
 
 impl Transaction {
@@ -107,6 +111,38 @@ impl Transaction {
             encrypted_locator: self.encrypted_locator.clone(),
             external_attestations: self.external_attestations.clone(),
             gateway_address: self.gateway_address.clone(),
+            chain_id: 0, // legacy: no chain_id
+        };
+
+        let canonical = noble_codec::to_canonical_cbor(&payload)?;
+        Ok(sha256(&canonical).0)
+    }
+
+    /// AUD2-H7: Compute the signing message with an explicit chain_id.
+    ///
+    /// This prevents cross-chain signature replay: the same transaction signed
+    /// on "mainnet" vs "testnet" produces different signature bytes because
+    /// the chain_id is included in the signing payload.
+    pub fn compute_signing_message_for_chain(
+        &self,
+        chain_id: u32,
+    ) -> Result<[u8; 32], noble_codec::CodecError> {
+        let mut sorted_metadata = self.metadata.clone();
+        sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let payload = SigningPayload {
+            version: self.version,
+            tx_type: self.tx_type,
+            checksum: self.checksum,
+            timestamp: self.timestamp,
+            fee: self.fee,
+            recipient: self.recipient.clone(),
+            amount: self.amount,
+            metadata: sorted_metadata,
+            encrypted_locator: self.encrypted_locator.clone(),
+            external_attestations: self.external_attestations.clone(),
+            gateway_address: self.gateway_address.clone(),
+            chain_id,
         };
 
         let canonical = noble_codec::to_canonical_cbor(&payload)?;
@@ -290,6 +326,33 @@ mod tests {
         assert_ne!(
             msg_none, msg_gw,
             "signing message must change when gateway_address is set"
+        );
+    }
+
+    // AUD2-H7: chain_id in signing payload
+    #[test]
+    fn signing_message_differs_by_chain_id() {
+        let tx = make_test_tx();
+        let mainnet_msg = tx
+            .compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
+            .unwrap();
+        let testnet_msg = tx
+            .compute_signing_message_for_chain(crate::TESTNET_CHAIN_ID)
+            .unwrap();
+        assert_ne!(
+            mainnet_msg, testnet_msg,
+            "signing message must differ between chains (AUD2-H7)"
+        );
+    }
+
+    #[test]
+    fn signing_message_chain_id_zero_matches_legacy() {
+        let tx = make_test_tx();
+        let legacy = tx.compute_signing_message().unwrap();
+        let chain0 = tx.compute_signing_message_for_chain(0).unwrap();
+        assert_eq!(
+            legacy, chain0,
+            "chain_id=0 should match legacy (no chain_id) for backward compat"
         );
     }
 

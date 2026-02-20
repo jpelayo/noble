@@ -910,8 +910,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
             node_name: 'MIT Blockchain Lab',
-            org_type: 'University',
-            governance_class: 'non-profit',
+            org_type: 'PrivateAcademic',
+            governance_class: 'private',
             node_role: 'ArchiveNode',
             contact_email: 'blockchain@mit.edu',
             website: 'https://blockchain.mit.edu',
@@ -930,8 +930,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
             node_name: 'Treasury Node Alpha',
-            org_type: 'GovernmentFederal',
-            governance_class: 'government',
+            org_type: 'PublicNational',
+            governance_class: 'public',
             node_role: 'Validator',
             contact_email: 'nodes@treasury.gov',
             website: 'https://treasury.gov/blockchain',
@@ -950,8 +950,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
             node_name: 'Acme Corp Node',
-            org_type: 'Enterprise',
-            governance_class: 'for-profit',
+            org_type: 'PrivateCorporation',
+            governance_class: 'private',
             node_role: 'FullNode',
             contact_email: 'infra@acme.com',
             website: 'https://acme.com',
@@ -964,8 +964,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
             node_name: 'OpenNoble Community',
-            org_type: 'OpenSourceProject',
-            governance_class: 'non-profit',
+            org_type: 'PrivateNonProfit',
+            governance_class: 'private',
             node_role: 'FullNode',
             contact_email: 'admin@opennoble.org',
             website: 'https://opennoble.org',
@@ -978,8 +978,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
             node_name: 'City of Barcelona',
-            org_type: 'GovernmentMunicipal',
-            governance_class: 'government',
+            org_type: 'PublicRegional',
+            governance_class: 'public',
             node_role: 'Validator',
             contact_email: 'blockchain@bcn.cat',
             website: 'https://ajuntament.barcelona.cat',
@@ -992,8 +992,8 @@ export class MockRpcClient {
           {
             peer_id: '12D3KooWF6g7h8i9j0k1l2m3n4o5',
             node_name: 'National Museum Archive',
-            org_type: 'Museum',
-            governance_class: 'institution',
+            org_type: 'PublicInstitution',
+            governance_class: 'public',
             node_role: 'ArchiveNode',
             contact_email: 'digital@nationalmuseum.org',
             website: '',
@@ -1016,7 +1016,7 @@ export class MockRpcClient {
             peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
             last_addr: '/ip4/18.4.86.10/tcp/8780',
             node_name: 'MIT Blockchain Lab',
-            org_type: 'University',
+            org_type: 'PrivateAcademic',
             node_role: 'ArchiveNode',
             wants_to_validate: false,
             wants_to_vote: true,
@@ -1029,7 +1029,7 @@ export class MockRpcClient {
             peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
             last_addr: '/ip4/52.1.100.50/tcp/8780',
             node_name: 'Treasury Node Alpha',
-            org_type: 'GovernmentFederal',
+            org_type: 'PublicNational',
             node_role: 'Validator',
             wants_to_validate: true,
             wants_to_vote: true,
@@ -1042,7 +1042,7 @@ export class MockRpcClient {
             peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
             last_addr: '/ip4/203.0.113.42/tcp/8780',
             node_name: 'Acme Corp Node',
-            org_type: 'Enterprise',
+            org_type: 'PrivateCorporation',
             node_role: 'FullNode',
             wants_to_validate: false,
             wants_to_vote: false,
@@ -1068,7 +1068,7 @@ export class MockRpcClient {
             peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
             last_addr: '/ip4/198.51.100.7/tcp/8780',
             node_name: 'OpenNoble Community',
-            org_type: 'OpenSourceProject',
+            org_type: 'PrivateNonProfit',
             node_role: 'FullNode',
             wants_to_validate: true,
             wants_to_vote: false,
@@ -1081,7 +1081,7 @@ export class MockRpcClient {
             peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
             last_addr: '/ip4/85.91.200.12/tcp/8780',
             node_name: 'City of Barcelona',
-            org_type: 'GovernmentMunicipal',
+            org_type: 'PublicRegional',
             node_role: 'Validator',
             wants_to_validate: true,
             wants_to_vote: true,
@@ -1160,6 +1160,37 @@ export class MockRpcClient {
           ? `Allowed IPs updated (${newList.length} entries). Note: bind address change requires node restart.`
           : `Allowed IPs updated (${newList.length} entries)`;
         return { success: true, message: msg };
+      }
+
+      case 'noble_generateMnemonic': {
+        const wc = params.word_count || 24;
+        if (wc !== 12 && wc !== 24) throw { code: -32602, message: 'word_count must be 12 or 24' };
+        // Generate a fake mnemonic (not cryptographically valid, just for UI testing)
+        const wordList = [
+          'abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract',
+          'absurd', 'abuse', 'access', 'accident', 'account', 'accuse', 'achieve', 'acid',
+          'acoustic', 'acquire', 'across', 'act', 'action', 'actor', 'actress', 'actual',
+        ];
+        const words = [];
+        for (let i = 0; i < wc; i++) words.push(wordList[i % wordList.length]);
+        return {
+          mnemonic: words.join(' '),
+          address: '02' + randomHex(32),
+          scheme_id: 2,
+          word_count: wc,
+        };
+      }
+
+      case 'noble_importMnemonic': {
+        const words = (params.mnemonic || '').trim().split(/\s+/);
+        if (words.length !== 12 && words.length !== 24) {
+          throw { code: -32602, message: 'Mnemonic must be 12 or 24 words' };
+        }
+        return {
+          address: '02' + randomHex(32),
+          scheme_id: 2,
+          already_exists: Math.random() > 0.5,
+        };
       }
 
       case 'noble_rotateTotpSecret': {

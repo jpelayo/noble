@@ -3,7 +3,7 @@
 
 //! Consensus configuration with tunable parameters.
 
-use noble_core::{CYCLE_DURATION_SECS, MAX_BLOCK_SIZE};
+use noble_core::{CYCLE_DURATION_SECS, MAX_BLOCK_SIZE, MAX_REORG_DEPTH};
 
 /// Configuration for the consensus engine.
 #[derive(Debug, Clone)]
@@ -12,7 +12,7 @@ pub struct ConsensusConfig {
     pub cycle_duration_secs: u64,
     /// Maximum serialized block size in bytes (default: 4 MB).
     pub max_block_size: usize,
-    /// Maximum reorg depth before requesting full re-sync (default: 6).
+    /// Maximum reorg depth before requesting full re-sync (default: 144, matching noble-core).
     pub max_reorg_depth: u64,
     /// Divisor for plurality floor: leader needs ≥ total/divisor votes (default: 3 → 33%).
     pub plurality_floor_divisor: u64,
@@ -25,7 +25,7 @@ impl Default for ConsensusConfig {
         Self {
             cycle_duration_secs: CYCLE_DURATION_SECS,
             max_block_size: MAX_BLOCK_SIZE,
-            max_reorg_depth: 6,
+            max_reorg_depth: MAX_REORG_DEPTH,
             plurality_floor_divisor: 3,
             min_peers_for_consensus: 3,
         }
@@ -41,7 +41,8 @@ mod tests {
         let cfg = ConsensusConfig::default();
         assert_eq!(cfg.cycle_duration_secs, 1800);
         assert_eq!(cfg.max_block_size, 4 * 1024 * 1024);
-        assert_eq!(cfg.max_reorg_depth, 6);
+        assert_eq!(cfg.max_reorg_depth, MAX_REORG_DEPTH);
+        assert_eq!(cfg.max_reorg_depth, 144); // AUD2-H4: matches noble-core constant
         assert_eq!(cfg.plurality_floor_divisor, 3);
         assert_eq!(cfg.min_peers_for_consensus, 3);
     }

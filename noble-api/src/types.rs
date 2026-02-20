@@ -431,6 +431,23 @@ pub struct DecryptLocatorResponse {
     pub plaintext: String,
 }
 
+/// Response for `noble_generateMnemonic`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GenerateMnemonicResponse {
+    pub mnemonic: String,
+    pub address: String,
+    pub scheme_id: u8,
+    pub word_count: usize,
+}
+
+/// Response for `noble_importMnemonic`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportMnemonicResponse {
+    pub address: String,
+    pub scheme_id: u8,
+    pub already_exists: bool,
+}
+
 /// Response for `noble_getAllowedIps`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AllowedIpsResponse {

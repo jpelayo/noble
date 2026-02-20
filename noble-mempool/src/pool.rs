@@ -24,9 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_codec::NobleCbor;
-use noble_core::{
-    Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, MIN_TX_FEE, PROTOCOL_VERSION, TX_TYPE_TRANSFER,
-};
+use noble_core::{Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, PROTOCOL_VERSION, TX_TYPE_TRANSFER};
 use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey};
 
 use crate::error::MempoolError;
@@ -471,9 +469,18 @@ impl Mempool {
     }
 
     fn dynamic_min_fee(&self) -> u64 {
-        // For now, use the static minimum fee from the protocol.
-        // In future sprints, this could be adjusted based on mempool fullness.
-        MIN_TX_FEE
+        // AUD-H4: Dynamic fee based on mempool utilization
+        let pct = self.utilization_pct();
+        noble_core::dynamic_min_fee(pct)
+    }
+
+    /// Compute mempool utilization percentage (0-100).
+    pub fn utilization_pct(&self) -> u8 {
+        if noble_core::MAX_MEMPOOL_SIZE == 0 {
+            return 0;
+        }
+        let pct = (self.total_size_bytes as u128 * 100) / noble_core::MAX_MEMPOOL_SIZE as u128;
+        pct.min(100) as u8
     }
 
     fn insert_entry(&mut self, entry: MempoolEntry) {
@@ -548,7 +555,7 @@ impl Mempool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::{MetadataEntry, Transaction, PROTOCOL_VERSION};
+    use noble_core::{MetadataEntry, Transaction, MIN_TX_FEE, PROTOCOL_VERSION};
     use noble_crypto::{
         ed25519, sha256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
     };
