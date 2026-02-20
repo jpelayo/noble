@@ -21,7 +21,7 @@ use crate::config::NetworkConfig;
 use crate::diversity;
 use crate::error::NetworkError;
 use crate::messages::{
-    GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxResponse,
+    GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxRequest, TxResponse,
 };
 use crate::peer_manager::{Direction, Misbehavior, PeerManager};
 use crate::rate_limiter::TxRateLimiter;
@@ -395,89 +395,34 @@ async fn handle_swarm_event(
                     let peer_bytes = propagation_source.to_bytes().to_vec();
                     let net_event = match gossip_msg {
                         GossipMessage::BlockAnnounce { block_hash, height } => {
-                            // Dedup: skip if already seen.
-                            if !seen_blocks.insert_if_new(block_hash) {
-                                None
-                            } else {
-                                // Auto-request full block via sync RPC.
-                                let request = SyncRequest::GetBlocks {
-                                    hashes: vec![block_hash],
-                                };
-                                swarm
-                                    .behaviour_mut()
-                                    .sync_rpc
-                                    .send_request(&propagation_source, request);
-                                Some(NetworkEvent::BlockAnnounced {
-                                    peer_id: peer_bytes,
-                                    hash: block_hash,
-                                    height,
-                                })
-                            }
+                            handle_block_announce(
+                                block_hash,
+                                height,
+                                &propagation_source,
+                                peer_bytes,
+                                seen_blocks,
+                                swarm,
+                            )
                         }
-                        GossipMessage::TxAnnounce { tx_id } => {
-                            // Rate limit check.
-                            if !tx_rate_limiter.try_consume(&propagation_source) {
-                                peer_manager
-                                    .record_misbehavior(&propagation_source, Misbehavior::TxFlood);
-                                None
-                            } else if !seen_txs.insert_if_new(tx_id) {
-                                None
-                            } else {
-                                Some(NetworkEvent::TransactionAnnounced {
-                                    peer_id: peer_bytes,
-                                    tx_id,
-                                })
-                            }
-                        }
+                        GossipMessage::TxAnnounce { tx_id } => handle_tx_announce(
+                            tx_id,
+                            &propagation_source,
+                            peer_bytes,
+                            seen_txs,
+                            tx_rate_limiter,
+                            peer_manager,
+                        ),
                         GossipMessage::PorVote {
                             cycle,
                             candidate_hash,
                             voter_id,
                             signature,
                         } => {
-                            // Vote dedup (GAP-L12).
-                            let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id);
-                            if !seen_votes.insert_if_new(dedup_key) {
-                                None
-                            } else {
-                                Some(NetworkEvent::VoteReceived {
-                                    cycle,
-                                    candidate_hash,
-                                    voter_id,
-                                    signature,
-                                })
-                            }
+                            handle_por_vote(cycle, candidate_hash, voter_id, signature, seen_votes)
                         }
                         GossipMessage::PeerExchange { addrs } => {
-                            // Add received addresses to Kademlia routing table.
-                            if config.enable_kademlia {
-                                for addr_str in &addrs {
-                                    if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
-                                        // Extract peer_id from the multiaddr if present.
-                                        let pid = maddr.iter().find_map(|p| {
-                                            if let libp2p::multiaddr::Protocol::P2p(id) = p {
-                                                Some(id)
-                                            } else {
-                                                None
-                                            }
-                                        });
-                                        if let Some(pid) = pid {
-                                            swarm
-                                                .behaviour_mut()
-                                                .kad
-                                                .add_address(&pid, maddr.clone());
-                                            // Multi-port discovery: add variants for alternate ports.
-                                            for variant in generate_port_variants(&maddr) {
-                                                swarm
-                                                    .behaviour_mut()
-                                                    .kad
-                                                    .add_address(&pid, variant);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None // No NetworkEvent for peer exchange.
+                            handle_peer_exchange(&addrs, config, swarm);
+                            None
                         }
                         GossipMessage::NodeAnnounce {
                             identity_key,
@@ -500,7 +445,7 @@ async fn handle_swarm_event(
                             attestation_fingerprint,
                             attestation_data,
                         } => {
-                            match convert_and_validate_announce(
+                            let result = convert_and_validate_announce(
                                 &identity_key,
                                 &node_name,
                                 &org_type,
@@ -520,51 +465,16 @@ async fn handle_swarm_event(
                                 attestation_scope.as_deref(),
                                 attestation_fingerprint.as_deref(),
                                 attestation_data.as_deref(),
-                            ) {
-                                Ok(announce) => {
-                                    peer_manager
-                                        .update_announce(&propagation_source, announce.clone());
-                                    Some(NetworkEvent::NodeAnnounceReceived {
-                                        peer_id: peer_bytes,
-                                        announce: Box::new(announce),
-                                    })
-                                }
-                                Err(reason) => {
-                                    tracing::warn!(
-                                        %propagation_source,
-                                        %reason,
-                                        "invalid node announce"
-                                    );
-                                    peer_manager.record_misbehavior(
-                                        &propagation_source,
-                                        Misbehavior::InvalidAnnounce,
-                                    );
-                                    None
-                                }
-                            }
+                            );
+                            handle_gossip_node_announce(
+                                result,
+                                &propagation_source,
+                                peer_bytes,
+                                peer_manager,
+                            )
                         }
                         GossipMessage::DoubleProposalEvidence { evidence_bytes } => {
-                            match ciborium::from_reader::<noble_core::DoubleProposalEvidence, _>(
-                                &evidence_bytes[..],
-                            ) {
-                                Ok(evidence) => match evidence.verify() {
-                                    Ok(()) => {
-                                        tracing::warn!("valid double-proposal evidence received");
-                                        Some(NetworkEvent::EvidenceReceived {
-                                            peer_id: peer_bytes,
-                                            evidence: Box::new(evidence),
-                                        })
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(%e, "invalid evidence rejected");
-                                        None
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing::debug!(%e, "failed to decode evidence CBOR");
-                                    None
-                                }
-                            }
+                            handle_double_proposal(&evidence_bytes, peer_bytes)
                         }
                     };
                     if let Some(evt) = net_event {
@@ -675,11 +585,7 @@ async fn handle_swarm_event(
                 },
             ..
         })) => {
-            let tx = tx_provider.get_transaction(&request.tx_id);
-            let _ = swarm
-                .behaviour_mut()
-                .tx_rpc
-                .send_response(channel, TxResponse { transaction: tx });
+            handle_tx_rpc_request(tx_provider, request, channel, swarm);
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {
@@ -687,7 +593,7 @@ async fn handle_swarm_event(
             result: Ok(rtt),
             ..
         })) => {
-            peer_manager.update_latency(&peer, rtt);
+            handle_ping_event(peer_manager, &peer, rtt);
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Identify(identify::Event::Received {
@@ -748,19 +654,185 @@ async fn handle_swarm_event(
             }
         }
 
-        SwarmEvent::Behaviour(NobleBehaviourEvent::Kad(event)) => match &event {
-            kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::GetClosestPeers(Ok(ok)),
-                ..
-            } => {
-                tracing::debug!(peers_found = ok.peers.len(), "kademlia walk found peers");
-            }
-            kad::Event::RoutingUpdated { peer, .. } => {
-                tracing::debug!(%peer, "kademlia routing table updated");
-            }
-            _ => {}
-        },
+        SwarmEvent::Behaviour(NobleBehaviourEvent::Kad(event)) => {
+            handle_kad_event(&event);
+        }
 
+        _ => {}
+    }
+}
+
+/// Handle a block announce gossip message.
+fn handle_block_announce(
+    block_hash: [u8; 32],
+    height: u64,
+    source: &PeerId,
+    peer_bytes: Vec<u8>,
+    seen_blocks: &mut SeenCache,
+    swarm: &mut Swarm<NobleBehaviour>,
+) -> Option<NetworkEvent> {
+    if !seen_blocks.insert_if_new(block_hash) {
+        None
+    } else {
+        let request = SyncRequest::GetBlocks {
+            hashes: vec![block_hash],
+        };
+        swarm.behaviour_mut().sync_rpc.send_request(source, request);
+        Some(NetworkEvent::BlockAnnounced {
+            peer_id: peer_bytes,
+            hash: block_hash,
+            height,
+        })
+    }
+}
+
+/// Handle a transaction announce gossip message.
+fn handle_tx_announce(
+    tx_id: [u8; 32],
+    source: &PeerId,
+    peer_bytes: Vec<u8>,
+    seen_txs: &mut SeenCache,
+    tx_rate_limiter: &mut TxRateLimiter,
+    peer_manager: &mut PeerManager,
+) -> Option<NetworkEvent> {
+    if !tx_rate_limiter.try_consume(source) {
+        peer_manager.record_misbehavior(source, Misbehavior::TxFlood);
+        None
+    } else if !seen_txs.insert_if_new(tx_id) {
+        None
+    } else {
+        Some(NetworkEvent::TransactionAnnounced {
+            peer_id: peer_bytes,
+            tx_id,
+        })
+    }
+}
+
+/// Handle a Proof of Reputation vote gossip message.
+fn handle_por_vote(
+    cycle: u64,
+    candidate_hash: [u8; 32],
+    voter_id: Vec<u8>,
+    signature: Vec<u8>,
+    seen_votes: &mut SeenCache,
+) -> Option<NetworkEvent> {
+    let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id);
+    if !seen_votes.insert_if_new(dedup_key) {
+        None
+    } else {
+        Some(NetworkEvent::VoteReceived {
+            cycle,
+            candidate_hash,
+            voter_id,
+            signature,
+        })
+    }
+}
+
+/// Handle a peer exchange gossip message.
+fn handle_peer_exchange(
+    addrs: &[String],
+    config: &NetworkConfig,
+    swarm: &mut Swarm<NobleBehaviour>,
+) {
+    if config.enable_kademlia {
+        for addr_str in addrs {
+            if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
+                let pid = maddr.iter().find_map(|p| {
+                    if let libp2p::multiaddr::Protocol::P2p(id) = p {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(pid) = pid {
+                    swarm.behaviour_mut().kad.add_address(&pid, maddr.clone());
+                    for variant in generate_port_variants(&maddr) {
+                        swarm.behaviour_mut().kad.add_address(&pid, variant);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle a validated (or invalid) node announce result.
+fn handle_gossip_node_announce(
+    result: Result<noble_core::NodeAnnounce, String>,
+    source: &PeerId,
+    peer_bytes: Vec<u8>,
+    peer_manager: &mut PeerManager,
+) -> Option<NetworkEvent> {
+    match result {
+        Ok(announce) => {
+            peer_manager.update_announce(source, announce.clone());
+            Some(NetworkEvent::NodeAnnounceReceived {
+                peer_id: peer_bytes,
+                announce: Box::new(announce),
+            })
+        }
+        Err(reason) => {
+            tracing::warn!(%source, %reason, "invalid node announce");
+            peer_manager.record_misbehavior(source, Misbehavior::InvalidAnnounce);
+            None
+        }
+    }
+}
+
+/// Handle a double-proposal evidence gossip message.
+fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
+    match ciborium::from_reader::<noble_core::DoubleProposalEvidence, _>(evidence_bytes) {
+        Ok(evidence) => match evidence.verify() {
+            Ok(()) => {
+                tracing::warn!("valid double-proposal evidence received");
+                Some(NetworkEvent::EvidenceReceived {
+                    peer_id: peer_bytes,
+                    evidence: Box::new(evidence),
+                })
+            }
+            Err(e) => {
+                tracing::debug!(%e, "invalid evidence rejected");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::debug!(%e, "failed to decode evidence CBOR");
+            None
+        }
+    }
+}
+
+/// Handle an incoming transaction RPC request.
+fn handle_tx_rpc_request(
+    tx_provider: &Arc<dyn TxProvider>,
+    request: TxRequest,
+    channel: request_response::ResponseChannel<TxResponse>,
+    swarm: &mut Swarm<NobleBehaviour>,
+) {
+    let tx = tx_provider.get_transaction(&request.tx_id);
+    let _ = swarm
+        .behaviour_mut()
+        .tx_rpc
+        .send_response(channel, TxResponse { transaction: tx });
+}
+
+/// Handle a ping event by updating peer latency.
+fn handle_ping_event(peer_manager: &mut PeerManager, peer: &PeerId, rtt: Duration) {
+    peer_manager.update_latency(peer, rtt);
+}
+
+/// Handle a Kademlia event (logging only).
+fn handle_kad_event(event: &kad::Event) {
+    match event {
+        kad::Event::OutboundQueryProgressed {
+            result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+            ..
+        } => {
+            tracing::debug!(peers_found = ok.peers.len(), "kademlia walk found peers");
+        }
+        kad::Event::RoutingUpdated { peer, .. } => {
+            tracing::debug!(%peer, "kademlia routing table updated");
+        }
         _ => {}
     }
 }

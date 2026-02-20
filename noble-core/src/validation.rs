@@ -101,15 +101,8 @@ fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), Val
     Ok(())
 }
 
-/// Validate a transaction against rules T1-T17.
-///
-/// Returns Ok(()) if all checks pass, or the first validation error encountered.
-#[tracing::instrument(skip(tx, ctx), fields(task = "tx_validation"))]
-pub fn validate_transaction(
-    tx: &Transaction,
-    claimed_tx_id: &noble_crypto::Hash256,
-    ctx: &TxValidationContext,
-) -> Result<(), ValidationError> {
+/// Validate transaction size limits and counts (T1, T7b, T8b).
+fn validate_tx_size_and_counts(tx: &Transaction) -> Result<(), ValidationError> {
     // T7b: Limit on additional signatures (C-sigs) — cheap check before serialization
     if tx.additional_sigs.len() > MAX_ADDITIONAL_SIGS {
         return Err(ValidationError::TooManyAdditionalSigs {
@@ -129,9 +122,10 @@ pub fn validate_transaction(
     tracing::trace!("T8b: metadata entries count check passed");
 
     // T1: Size check
-    let serialized = tx
-        .to_cbor()
-        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    let serialized = tx.to_cbor().map_err(|e| {
+        tracing::debug!("transaction serialization failed: {e}");
+        ValidationError::Internal("transaction serialization failed".into())
+    })?;
     if serialized.len() > MAX_TX_SIZE {
         return Err(ValidationError::TxTooLarge {
             size: serialized.len(),
@@ -140,6 +134,14 @@ pub fn validate_transaction(
     }
     tracing::trace!(size = serialized.len(), "T1: size check passed");
 
+    Ok(())
+}
+
+/// Validate transaction protocol fields (T2, T4, T5).
+fn validate_tx_protocol_fields(
+    tx: &Transaction,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
     // T2: Version check
     if tx.version != PROTOCOL_VERSION {
         return Err(ValidationError::UnknownVersion(tx.version));
@@ -171,10 +173,19 @@ pub fn validate_transaction(
         "T5: publisher scheme recognized"
     );
 
+    Ok(())
+}
+
+/// Validate transaction signatures (T6, T7, T26).
+fn validate_tx_signatures(
+    tx: &Transaction,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
     // Compute signing message (used by T6 and T7)
-    let signing_msg = tx
-        .compute_signing_message()
-        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    let signing_msg = tx.compute_signing_message().map_err(|e| {
+        tracing::debug!("signing message computation failed: {e}");
+        ValidationError::Internal("signing message computation failed".into())
+    })?;
 
     // T6/T26: Publisher signature verification
     if tx.publisher_sig.scheme_id == SCHEME_BIP137 {
@@ -184,7 +195,10 @@ pub fn validate_transaction(
     } else {
         tx.publisher_sig
             .verify_standalone(&signing_msg)
-            .map_err(|e| ValidationError::PublisherSigInvalid(e.to_string()))?;
+            .map_err(|e| {
+                tracing::debug!("publisher signature verification failed: {e}");
+                ValidationError::PublisherSigInvalid("signature verification failed".into())
+            })?;
         tracing::trace!("T6: publisher signature verified");
     }
 
@@ -196,45 +210,24 @@ pub fn validate_transaction(
                 reason: format!("unrecognized scheme {:#04x}", sig.scheme_id),
             });
         }
-        sig.verify_standalone(&signing_msg)
-            .map_err(|e| ValidationError::AdditionalSigInvalid {
+        sig.verify_standalone(&signing_msg).map_err(|e| {
+            tracing::debug!("additional signature {i} verification failed: {e}");
+            ValidationError::AdditionalSigInvalid {
                 index: i,
-                reason: e.to_string(),
-            })?;
+                reason: "signature verification failed".into(),
+            }
+        })?;
     }
     tracing::trace!(
         count = tx.additional_sigs.len(),
         "T7: additional signatures verified"
     );
 
-    // T8 + T9: Metadata validation
-    validate_metadata(&tx.metadata)?;
-    tracing::trace!("T8/T9: metadata validation passed");
+    Ok(())
+}
 
-    // T10: tx_id verification
-    let computed_id = tx
-        .compute_tx_id(ctx.chain_id)
-        .map_err(|e| ValidationError::Internal(e.to_string()))?;
-    if computed_id != *claimed_tx_id {
-        return Err(ValidationError::TxIdMismatch {
-            claimed: claimed_tx_id.to_string(),
-            computed: computed_id.to_string(),
-        });
-    }
-    tracing::trace!("T10: tx_id verification passed");
-
-    // T11: Fee check
-    if tx.fee < MIN_TX_FEE {
-        return Err(ValidationError::FeeTooLow {
-            fee: tx.fee,
-            min_fee: MIN_TX_FEE,
-        });
-    }
-    tracing::trace!(fee = tx.fee, "T11: fee check passed");
-
-    // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
-    // which is called in T6 and T7 above.
-
+/// Validate transaction type constraints and advanced fields (T13-T25).
+fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError> {
     // T13: tx_type must be recognized
     if tx.tx_type != TX_TYPE_NOTARIZATION
         && tx.tx_type != TX_TYPE_TRANSFER
@@ -261,10 +254,10 @@ pub fn validate_transaction(
     // T24: Self-transfer rejection (C-self) — prevents balance inflation
     if tx.tx_type == TX_TYPE_TRANSFER {
         if let Some(ref recipient) = tx.recipient {
-            let sender_pk = tx
-                .publisher_sig
-                .to_noble_public_key()
-                .map_err(|e| ValidationError::Internal(format!("extracting sender key: {e}")))?;
+            let sender_pk = tx.publisher_sig.to_noble_public_key().map_err(|e| {
+                tracing::debug!("sender key extraction failed: {e}");
+                ValidationError::Internal("sender key extraction failed".into())
+            })?;
             if *recipient == sender_pk {
                 return Err(ValidationError::SelfTransfer);
             }
@@ -303,10 +296,59 @@ pub fn validate_transaction(
 
     // T25: Gateway address wire bytes validation
     if let Some(ref gw) = tx.gateway_address {
-        NoblePublicKey::from_wire_bytes(gw)
-            .map_err(|e| ValidationError::InvalidGatewayAddress(format!("bad wire bytes: {e}")))?;
+        NoblePublicKey::from_wire_bytes(gw).map_err(|e| {
+            tracing::debug!("gateway address validation failed: {e}");
+            ValidationError::InvalidGatewayAddress("invalid public key wire bytes".into())
+        })?;
     }
     tracing::trace!("T25: gateway_address check passed");
+
+    Ok(())
+}
+
+/// Validate a transaction against rules T1-T17.
+///
+/// Returns Ok(()) if all checks pass, or the first validation error encountered.
+#[tracing::instrument(skip(tx, ctx), fields(task = "tx_validation"))]
+pub fn validate_transaction(
+    tx: &Transaction,
+    claimed_tx_id: &noble_crypto::Hash256,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
+    validate_tx_size_and_counts(tx)?;
+    validate_tx_protocol_fields(tx, ctx)?;
+    validate_tx_signatures(tx, ctx)?;
+
+    // T8 + T9: Metadata validation
+    validate_metadata(&tx.metadata)?;
+    tracing::trace!("T8/T9: metadata validation passed");
+
+    // T10: tx_id verification
+    let computed_id = tx.compute_tx_id(ctx.chain_id).map_err(|e| {
+        tracing::debug!("tx_id computation failed: {e}");
+        ValidationError::Internal("tx_id computation failed".into())
+    })?;
+    if computed_id != *claimed_tx_id {
+        return Err(ValidationError::TxIdMismatch {
+            claimed: claimed_tx_id.to_string(),
+            computed: computed_id.to_string(),
+        });
+    }
+    tracing::trace!("T10: tx_id verification passed");
+
+    // T11: Fee check
+    if tx.fee < MIN_TX_FEE {
+        return Err(ValidationError::FeeTooLow {
+            fee: tx.fee,
+            min_fee: MIN_TX_FEE,
+        });
+    }
+    tracing::trace!(fee = tx.fee, "T11: fee check passed");
+
+    // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
+    // which is called in T6 and T7 above.
+
+    validate_tx_type_and_advanced(tx)?;
 
     // T18-T20: Validator identity checks deferred to consensus (needs validator list)
 
@@ -385,9 +427,10 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     let header = &block.header;
 
     // B1: Size check
-    let serialized = block
-        .to_cbor()
-        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    let serialized = block.to_cbor().map_err(|e| {
+        tracing::debug!("block serialization failed: {e}");
+        ValidationError::Internal("block serialization failed".into())
+    })?;
     if serialized.len() > MAX_BLOCK_SIZE {
         return Err(ValidationError::BlockTooLarge {
             size: serialized.len(),
@@ -398,9 +441,10 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
 
     // B2: prev_block_hash
     if let Some(parent) = ctx.parent {
-        let parent_hash = parent
-            .compute_block_hash()
-            .map_err(|e| ValidationError::Internal(e.to_string()))?;
+        let parent_hash = parent.compute_block_hash().map_err(|e| {
+            tracing::debug!("block hash computation failed: {e}");
+            ValidationError::Internal("block hash computation failed".into())
+        })?;
         if header.prev_block_hash != parent_hash {
             return Err(ValidationError::PrevHashMismatch);
         }
@@ -430,8 +474,10 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
         .transactions
         .iter()
         .map(|tx| {
-            tx.compute_tx_id(ctx.chain_id)
-                .map_err(|e| ValidationError::Internal(e.to_string()))
+            tx.compute_tx_id(ctx.chain_id).map_err(|e| {
+                tracing::debug!("tx_id computation failed: {e}");
+                ValidationError::Internal("tx_id computation failed".into())
+            })
         })
         .collect();
     let tx_ids = tx_ids?;
@@ -480,13 +526,17 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     tracing::trace!(tx_count = header.tx_count, "B7: tx_count matches");
 
     // B8: Validator signature
-    let signing_msg = header
-        .compute_signing_message()
-        .map_err(|e| ValidationError::Internal(e.to_string()))?;
+    let signing_msg = header.compute_signing_message().map_err(|e| {
+        tracing::debug!("signing message computation failed: {e}");
+        ValidationError::Internal("signing message computation failed".into())
+    })?;
     header
         .validator_id
         .verify(&signing_msg, &header.validator_sig)
-        .map_err(|e| ValidationError::ValidatorSigInvalid(e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("validator signature verification failed: {e}");
+            ValidationError::ValidatorSigInvalid("signature verification failed".into())
+        })?;
     tracing::trace!("B8: validator signature verified");
 
     // B9: Validator in list
@@ -499,9 +549,10 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
 
     // B11: All transactions valid
     for (i, tx) in block.transactions.iter().enumerate() {
-        let tx_id = tx
-            .compute_tx_id(ctx.chain_id)
-            .map_err(|e| ValidationError::Internal(e.to_string()))?;
+        let tx_id = tx.compute_tx_id(ctx.chain_id).map_err(|e| {
+            tracing::debug!("tx_id computation failed: {e}");
+            ValidationError::Internal("tx_id computation failed".into())
+        })?;
         let tx_ctx = TxValidationContext {
             chain_id: ctx.chain_id,
             current_time: ctx.current_time,

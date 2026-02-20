@@ -414,7 +414,14 @@ impl StorageEngine for RocksDbStorage {
         // and check against MAX_SUPPLY. No full-balance iteration needed.
         let block_subsidy = subsidy_at_height(height);
         let prev_supply = self.get_total_supply()?;
-        let new_supply = prev_supply.saturating_add(block_subsidy);
+        // Use checked_add to fail loudly on u64 overflow rather than silently capping.
+        let new_supply =
+            prev_supply
+                .checked_add(block_subsidy)
+                .ok_or(StorageError::SupplyOverflow {
+                    cumulative: u64::MAX,
+                    max: MAX_SUPPLY,
+                })?;
         if new_supply > MAX_SUPPLY {
             return Err(StorageError::SupplyOverflow {
                 cumulative: new_supply,

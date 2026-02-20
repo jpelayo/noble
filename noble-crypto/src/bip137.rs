@@ -74,10 +74,19 @@ pub fn sign_bip137(secret_key: &[u8], message: &str) -> Result<[u8; 65], CryptoE
             .sign_prehash_recoverable(&hash)
             .map_err(|e| CryptoError::SigningFailed(format!("BIP-137 sign: {e}")))?;
 
+    // GAP-H1 / BIP-62: normalize to low-S to prevent transaction malleability.
+    // When S is flipped, the recovery_id parity bit flips too.
+    let (normalized_sig, normalized_rid) = if let Some(low_s) = sig.normalize_s() {
+        let flipped = RecoveryId::new(recovery_id.is_y_odd() ^ true, recovery_id.is_x_reduced());
+        (low_s, flipped)
+    } else {
+        (sig, recovery_id)
+    };
+
     let mut result = [0u8; 65];
     // First byte: recovery_id + 27 (base) + 4 (compressed key flag)
-    result[0] = recovery_id.to_byte() + 27 + 4;
-    let sig_bytes = sig.to_bytes();
+    result[0] = normalized_rid.to_byte() + 27 + 4;
+    let sig_bytes = normalized_sig.to_bytes();
     result[1..33].copy_from_slice(&sig_bytes[..32]); // r
     result[33..65].copy_from_slice(&sig_bytes[32..]); // s
     Ok(result)
@@ -114,6 +123,13 @@ pub fn verify_bip137(sig: &[u8], message: &str) -> Result<Vec<u8>, CryptoError> 
 
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| CryptoError::VerificationFailed(format!("BIP-137 signature parse: {e}")))?;
+
+    // GAP-H1 / BIP-62: reject high-S signatures to prevent malleability
+    if signature.normalize_s().is_some() {
+        return Err(CryptoError::VerificationFailed(
+            "BIP-137: high-S signature rejected (BIP-62)".to_string(),
+        ));
+    }
 
     let hash = bip137_message_hash(message);
 
@@ -207,6 +223,46 @@ mod tests {
 
         // Four-byte
         assert_eq!(encode_varint(0x10000), vec![0xFE, 0x00, 0x00, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn signature_is_always_low_s() {
+        use k256::elliptic_curve::bigint::Encoding;
+        use k256::elliptic_curve::Curve;
+        let half_order = k256::Secp256k1::ORDER.shr_vartime(1);
+
+        let (sk, _) = generate_keypair();
+        for i in 0..50 {
+            let msg = format!("low-s bip137 test {i}");
+            let sig = sign_bip137(&sk, &msg).unwrap();
+            // Extract S from bytes 33..65
+            let s_uint = k256::U256::from_be_slice(&sig[33..65]);
+            assert!(s_uint <= half_order, "signature {i} has high-S value");
+            // Roundtrip still works
+            let pk = verify_bip137(&sig, &msg).unwrap();
+            assert_eq!(pk.len(), 33);
+        }
+    }
+
+    #[test]
+    fn high_s_bip137_signature_rejected() {
+        use k256::elliptic_curve::bigint::Encoding;
+        use k256::elliptic_curve::Curve;
+
+        let (sk, _) = generate_keypair();
+        let msg = "high-s bip137 test";
+        let sig = sign_bip137(&sk, msg).unwrap();
+
+        // Negate S to produce high-S variant: S' = N - S
+        let s_uint = k256::U256::from_be_slice(&sig[33..65]);
+        let order = k256::Secp256k1::ORDER;
+        let high_s = order.wrapping_sub(&s_uint);
+
+        let mut bad_sig = sig;
+        bad_sig[33..65].copy_from_slice(&high_s.to_be_bytes());
+
+        let result = verify_bip137(&bad_sig, msg);
+        assert!(result.is_err(), "high-S BIP-137 signature must be rejected");
     }
 
     #[test]

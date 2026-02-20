@@ -107,8 +107,10 @@ impl TotpValidator {
         if matched != 0 {
             if let Some(code) = matched_code {
                 let mut used = self.used_codes.lock().unwrap_or_else(|e| e.into_inner());
-                // Drain expired entries (older than 90 seconds)
-                let cutoff = Instant::now() - std::time::Duration::from_secs(90);
+                // Drain expired entries (older than 180 seconds).
+                // Window covers the full ±1 TOTP time-step acceptance range (90s)
+                // plus a safety margin to close the microsecond boundary edge case.
+                let cutoff = Instant::now() - std::time::Duration::from_secs(180);
                 while used.front().is_some_and(|(_, t)| *t < cutoff) {
                     used.pop_front();
                 }

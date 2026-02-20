@@ -60,6 +60,10 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     // RPC server security: bind address controls access (127.0.0.1 vs 0.0.0.0),
     // CORS restricts browser origins, auth layer checks TOTP tokens.
     let server = Server::builder()
+        // Explicit body size limit (2 MB). The largest valid RPC payload is a
+        // max-size CBOR transaction (~64 KB per T1); 2 MB provides headroom while
+        // preventing large-payload DoS. Overrides the jsonrpsee 10 MB default.
+        .max_request_body_size(2 * 1024 * 1024)
         .set_http_middleware(tower::ServiceBuilder::new().layer(cors).layer(auth_layer))
         .build(addr)
         .await
