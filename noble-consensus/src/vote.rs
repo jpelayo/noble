@@ -211,18 +211,20 @@ impl VoteManager {
 
     /// Compute the majority outcome.
     ///
-    /// - GAP-C6: If `total_peers < config.min_peers_for_consensus` → Indeterminate.
+    /// - GAP-C6: If `total_voters < config.min_peers_for_consensus` → Indeterminate.
     /// - Tier 1: leader > 50% → Adopt(Strong).
-    /// - Tier 2: leader ≥ total_peers / plurality_floor_divisor → Adopt(Plurality).
+    /// - Tier 2: leader ≥ total_voters / plurality_floor_divisor → Adopt(Plurality).
     /// - Tiebreaker: lower candidate_hash wins (lexicographic).
     /// - Otherwise → Indeterminate.
+    ///
+    /// C-004: `total_voters` should be the validator set size (not the peer count).
     pub fn compute_majority(
         &self,
-        total_peers: usize,
+        total_voters: usize,
         config: &ConsensusConfig,
     ) -> MigrationResult {
-        // GAP-C6: Minimum peer check
-        if total_peers < config.min_peers_for_consensus {
+        // GAP-C6: Minimum voter check
+        if total_voters < config.min_peers_for_consensus {
             return MigrationResult::Indeterminate;
         }
 
@@ -253,10 +255,10 @@ impl VoteManager {
         };
 
         // Tier 1: Strong majority (> 50%)
-        if leader_count * 2 > total_peers {
+        if leader_count * 2 > total_voters {
             info!(
                 "vote tally complete: winner = {}, strength = Strong, votes = {}/{}",
-                winner_hash, leader_count, total_peers
+                winner_hash, leader_count, total_voters
             );
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
@@ -265,11 +267,11 @@ impl VoteManager {
         }
 
         // Tier 2: Plurality floor (≥ total / divisor)
-        let floor = total_peers / config.plurality_floor_divisor as usize;
+        let floor = total_voters / config.plurality_floor_divisor as usize;
         if leader_count >= floor.max(1) {
             info!(
                 "vote tally complete: winner = {}, strength = Plurality, votes = {}/{}",
-                winner_hash, leader_count, total_peers
+                winner_hash, leader_count, total_voters
             );
             return MigrationResult::Adopt {
                 candidate_hash: winner_hash,
@@ -279,7 +281,7 @@ impl VoteManager {
 
         debug!(
             "vote tally indeterminate: leader has {}/{} votes, floor = {}",
-            leader_count, total_peers, floor
+            leader_count, total_voters, floor
         );
         MigrationResult::Indeterminate
     }

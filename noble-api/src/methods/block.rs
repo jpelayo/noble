@@ -182,13 +182,24 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
 
         let height = tip.as_ref().map(|t| t.height).unwrap_or(0);
 
-        // Total transactions is an estimate: we walk headers and sum tx_count.
-        // For a production system this would be a stored counter. For now, return height + 1
-        // as a rough proxy (most blocks have at least 1 tx) or 0 if no blocks.
-        // A simple approach: report just the height and chain_id.
+        // H-004: Compute total_transactions by summing tx_count from block headers.
+        // Walk the last `height + 1` blocks (capped at 10,000 for performance).
+        let scan_start = height.saturating_sub(9_999);
+        let mut total_tx: u64 = 0;
+        for h in scan_start..=height {
+            match storage.get_block_hash_by_height(h) {
+                Ok(bh) => {
+                    if let Ok(header) = storage.get_block_header(&bh) {
+                        total_tx += header.tx_count as u64;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
         Ok(ChainStatsResponse {
             height,
-            total_transactions: 0, // placeholder — would require a counter CF
+            total_transactions: total_tx,
             chain_id: self.chain_id,
         })
     }

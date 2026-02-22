@@ -20,7 +20,6 @@ use noble_consensus::{
     ConsensusConfig as CConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo,
     ValidatorList,
 };
-use noble_core::MAINNET_CHAIN_ID;
 use noble_crypto::Hash256;
 use noble_mempool::{BalanceLookup, ChainLookup, Mempool};
 use noble_network::{NetworkCommand, NetworkEvent};
@@ -64,6 +63,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub wallet_state: Arc<Mutex<WalletState>>,
     /// Network statistics (peer counts).
     pub network_stats: Arc<RwLock<NetworkStats>>,
+    /// Live connected peer info (H-004).
+    pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID.
     pub chain_id: u32,
     /// Timestamp when the node was started.
@@ -95,11 +96,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
+        // Resolve chain_id and genesis block from network config.
+        let chain_id = config.node.network.chain_id();
+
         // Ensure genesis block is committed if the chain is empty.
         {
             let s = storage.read().map_err(|e| format!("storage lock: {e}"))?;
             if s.get_chain_tip()?.is_none() {
-                let genesis = noble_core::genesis_block();
+                let genesis = config.node.network.genesis_block();
                 let block_hash = genesis
                     .header
                     .compute_block_hash()
@@ -107,7 +111,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let tx_ids: Vec<_> = genesis
                     .transactions
                     .iter()
-                    .map(|tx| tx.compute_tx_id(MAINNET_CHAIN_ID))
+                    .map(|tx| tx.compute_tx_id(chain_id))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| format!("genesis tx_id error: {e}"))?;
                 s.commit_block(&genesis, &block_hash, &tx_ids)?;
@@ -137,13 +141,32 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Create consensus engine (observation mode — no validator key yet).
         let consensus_config = CConsensusConfig::default();
-        let validator_list = ValidatorList::new();
+
+        // C-003: Load persisted validator list if the file exists.
+        let validator_list_path = config.consensus.validator_list_path.clone();
+        let validator_list = if validator_list_path.exists() {
+            match std::fs::read(&validator_list_path) {
+                Ok(bytes) => {
+                    use noble_codec::NobleCbor;
+                    ValidatorList::from_cbor(&bytes).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to load validator list: {e}, starting empty");
+                        ValidatorList::new()
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read validator list file: {e}, starting empty");
+                    ValidatorList::new()
+                }
+            }
+        } else {
+            ValidatorList::new()
+        };
         let mut engine = CycleEngine::new(
             consensus_config,
             validator_list,
             tip.height,
             tip.block_hash,
-            MAINNET_CHAIN_ID,
+            chain_id,
             None, // no validator key — observation mode
         );
         if let Some(header) = tip_header {
@@ -157,6 +180,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
 
         let network_stats = Arc::new(RwLock::new(NetworkStats::default()));
+        let peer_info = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
         // --- PKI identity attestation ---
         let pki_attestation = init_pki_attestation(config);
@@ -171,7 +195,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             wallet_keystore,
             wallet_state,
             network_stats,
-            chain_id: MAINNET_CHAIN_ID,
+            peer_info,
+            chain_id,
             start_time: std::time::Instant::now(),
             pki_attestation,
             ca_store,
@@ -327,6 +352,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             trace_handle,
             gateway_key,
             ip_filter: ip_filter.clone(),
+            validator_list_path: Some(config.consensus.validator_list_path.clone()),
+            peer_info: self.peer_info.clone(),
         });
 
         // --- Determine RPC bind address ---
@@ -426,6 +453,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         engine.step(CycleEvent::Tick { now })
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx);
+
+                    // H-002: Persist cycle history if a cycle boundary just occurred.
+                    if let Ok(mut engine) = self.consensus.write() {
+                        if let Some(history) = engine.take_cycle_history() {
+                            if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
+                                if let Ok(storage) = self.storage.read() {
+                                    if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
+                                        tracing::warn!("Failed to persist cycle history: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Mempool expiry sweep
@@ -484,9 +524,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if let Ok(mut engine) = self.consensus.write() {
                     engine.set_peer_count(new_count);
                 }
+                // H-004: Track peer info for getPeerInfo RPC.
+                let hex_pid = hex::encode(peer_id);
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if let Ok(mut info) = self.peer_info.write() {
+                    info.insert(
+                        hex_pid.clone(),
+                        noble_api::state::PeerInfoEntry {
+                            peer_id: hex_pid.clone(),
+                            direction: "inbound".to_string(),
+                            addr: addr.clone(),
+                            connected_at: now_ts,
+                            ban_score: 0,
+                        },
+                    );
+                }
                 let _ = peer_update_tx.send(serde_json::json!({
                     "event": "connected",
-                    "peer_id": hex::encode(peer_id),
+                    "peer_id": hex_pid,
                     "addr": addr,
                 }));
                 tracing::debug!("Peer connected: {addr}");
@@ -502,9 +560,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if let Ok(mut engine) = self.consensus.write() {
                     engine.set_peer_count(new_count);
                 }
+                // H-004: Remove from live peer info.
+                let hex_pid = hex::encode(peer_id);
+                if let Ok(mut info) = self.peer_info.write() {
+                    info.remove(&hex_pid);
+                }
                 let _ = peer_update_tx.send(serde_json::json!({
                     "event": "disconnected",
-                    "peer_id": hex::encode(peer_id),
+                    "peer_id": hex_pid,
                 }));
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
@@ -830,7 +893,7 @@ mod tests {
 
         // Chain tip should be genesis (height 0).
         assert_eq!(node.chain_height(), 0);
-        assert_eq!(node.chain_id, MAINNET_CHAIN_ID);
+        assert_eq!(node.chain_id, noble_core::MAINNET_CHAIN_ID);
 
         // Mempool should be empty.
         assert_eq!(node.mempool.lock().unwrap().len(), 0);
@@ -924,13 +987,25 @@ mod tests {
     }
 
     #[test]
-    fn node_chain_id_is_mainnet() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+    fn node_chain_id_matches_config_network() {
+        use crate::config::NetworkId;
 
-        let node = Node::init_memory(&config).unwrap();
-        assert_eq!(node.chain_id, MAINNET_CHAIN_ID);
+        for (network, expected_id) in [
+            (NetworkId::Mainnet, noble_core::MAINNET_CHAIN_ID),
+            (NetworkId::Testnet, noble_core::TESTNET_CHAIN_ID),
+            (NetworkId::Regtest, noble_core::REGTEST_CHAIN_ID),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = NodeConfig::default();
+            config.wallet.keystore_path = dir.path().join("keystore");
+            config.node.network = network;
+
+            let node = Node::init_memory(&config).unwrap();
+            assert_eq!(
+                node.chain_id, expected_id,
+                "chain_id mismatch for {network:?}"
+            );
+        }
     }
 
     #[test]

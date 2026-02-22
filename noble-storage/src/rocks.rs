@@ -1013,6 +1013,43 @@ impl StorageEngine for RocksDbStorage {
         Ok(count)
     }
 
+    // ── Cycle History (H-002) ──
+
+    fn store_cycle_history(&self, cycle: u64, data: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        // Key: "cycle_history:" + cycle number in big-endian (for natural ordering).
+        let mut key = b"cycle_history:".to_vec();
+        key.extend_from_slice(&cycle.to_be_bytes());
+        self.db
+            .put_cf(&cf, &key, data)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn get_recent_cycle_history(&self, count: usize) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        // Iterate backwards from the end of the "cycle_history:" prefix range.
+        // The prefix ends at "cycle_history;" (next byte after ':').
+        let prefix_end = b"cycle_history;".to_vec();
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix_end, Direction::Reverse));
+        let prefix = b"cycle_history:";
+        let mut entries = Vec::with_capacity(count);
+        for item in iter {
+            if entries.len() >= count {
+                break;
+            }
+            let (key, val) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            entries.push(val.to_vec());
+        }
+        Ok(entries)
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())

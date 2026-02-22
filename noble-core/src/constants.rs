@@ -27,6 +27,9 @@ pub const MAINNET_CHAIN_ID: u32 = 0x4E4F_424C;
 /// Test network chain identifier ("TSTN" in ASCII, big-endian).
 pub const TESTNET_CHAIN_ID: u32 = 0x5453_544E;
 
+/// Regression test network chain identifier ("RGST" in ASCII, big-endian).
+pub const REGTEST_CHAIN_ID: u32 = 0x5247_5354;
+
 /// Minimum transaction fee in atomic units (0.001 NOBLE = 1000 units).
 pub const MIN_TX_FEE: u64 = 1_000;
 
@@ -180,6 +183,8 @@ mod tests {
         assert_eq!(MAINNET_CHAIN_ID.to_be_bytes(), [0x4E, 0x4F, 0x42, 0x4C]);
         // "TSTN" = 0x54 0x53 0x54 0x4E
         assert_eq!(TESTNET_CHAIN_ID.to_be_bytes(), [0x54, 0x53, 0x54, 0x4E]);
+        // "RGST" = 0x52 0x47 0x53 0x54
+        assert_eq!(REGTEST_CHAIN_ID.to_be_bytes(), [0x52, 0x47, 0x53, 0x54]);
     }
 
     #[test]

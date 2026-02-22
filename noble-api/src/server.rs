@@ -19,6 +19,7 @@ use crate::methods::document::DocumentApiServer;
 use crate::methods::mempool::MempoolApiServer;
 use crate::methods::network::NetworkApiServer;
 use crate::methods::node::NodeApiServer;
+use crate::methods::subscriptions::SubscriptionApiServer;
 use crate::methods::trace::TraceApiServer;
 use crate::methods::transaction::TransactionApiServer;
 use crate::methods::wallet::WalletApiServer;
@@ -120,6 +121,9 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     module
         .merge(TraceApiServer::into_rpc(state.clone()))
         .map_err(|e| ApiError::Internal(format!("merge TraceApi: {e}")))?;
+    module
+        .merge(SubscriptionApiServer::into_rpc(state.clone()))
+        .map_err(|e| ApiError::Internal(format!("merge SubscriptionApi: {e}")))?;
 
     let handle = server.start(module);
 

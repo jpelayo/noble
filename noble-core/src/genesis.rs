@@ -29,6 +29,9 @@ const MAINNET_SEED: &[u8] = b"NOBLE-GENESIS-VALIDATOR-MAINNET-v1";
 /// Domain-separated seed for deriving the testnet genesis Ed25519 keypair.
 const TESTNET_SEED: &[u8] = b"NOBLE-GENESIS-VALIDATOR-TESTNET-v1";
 
+/// Domain-separated seed for deriving the regtest genesis Ed25519 keypair.
+const REGTEST_SEED: &[u8] = b"NOBLE-GENESIS-VALIDATOR-REGTEST-v1";
+
 /// Derive a deterministic Ed25519 keypair from a seed phrase.
 ///
 /// The secret key is `sha256(seed)`, and the public key is derived from it.
@@ -51,6 +54,19 @@ pub fn genesis_block() -> Block {
 /// Construct the testnet genesis block.
 pub fn testnet_genesis_block() -> Block {
     build_genesis(GENESIS_TIMESTAMP, TESTNET_SEED)
+}
+
+/// Construct the regtest genesis block.
+pub fn regtest_genesis_block() -> Block {
+    build_genesis(GENESIS_TIMESTAMP, REGTEST_SEED)
+}
+
+/// Compute the regtest genesis block hash.
+pub fn regtest_genesis_hash() -> Hash256 {
+    regtest_genesis_block()
+        .header
+        .compute_block_hash()
+        .expect("regtest genesis block hash computation must succeed")
 }
 
 /// Compute the mainnet genesis block hash.
@@ -147,6 +163,30 @@ mod tests {
         let mainnet = genesis_hash();
         let testnet = testnet_genesis_hash();
         assert_ne!(mainnet, testnet, "mainnet and testnet genesis must differ");
+    }
+
+    #[test]
+    fn regtest_genesis_differs_from_mainnet_and_testnet() {
+        let mainnet = genesis_hash();
+        let testnet = testnet_genesis_hash();
+        let regtest = regtest_genesis_hash();
+        assert_ne!(mainnet, regtest, "mainnet and regtest genesis must differ");
+        assert_ne!(testnet, regtest, "testnet and regtest genesis must differ");
+    }
+
+    #[test]
+    fn regtest_genesis_signature_is_cryptographically_valid() {
+        let block = regtest_genesis_block();
+        let signing_msg = block.header.compute_signing_message().unwrap();
+        let result = ed25519::verify(
+            &block.header.validator_sig.public_key,
+            &signing_msg,
+            &block.header.validator_sig.signature,
+        );
+        assert!(
+            result.is_ok(),
+            "regtest genesis signature must verify: {result:?}"
+        );
     }
 
     #[test]

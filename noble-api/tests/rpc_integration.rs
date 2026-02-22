@@ -100,6 +100,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         trace_handle: None, // trace disabled in tests
         gateway_key: None,  // no gateway in tests
         ip_filter: None,    // no IP filter in tests
+        validator_list_path: None,
+        peer_info: Arc::new(RwLock::new(std::collections::HashMap::new())),
     });
 
     (state, dir)

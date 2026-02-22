@@ -108,6 +108,15 @@ export function init(root, ctx) {
             </select>
             <div id="cs-r1-params" style="display:none;margin-bottom:var(--gap-sm)">
               <input id="cs-r1-validator-key" type="text" placeholder="Validator pubkey (hex)" style="width:100%" spellcheck="false">
+              <div id="cs-r1-subset-area" style="display:none;margin-top:var(--gap-sm)">
+                <textarea id="cs-r1-subset-keys" rows="4"
+                  placeholder="One validator pubkey (hex) per line"
+                  style="width:100%;font-family:var(--font-mono);font-size:var(--font-size-xs)"
+                  spellcheck="false"></textarea>
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">
+                  One hex pubkey per line. Rotation follows list order.
+                </div>
+              </div>
             </div>
             <div id="cs-r1-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
           </div>
@@ -125,6 +134,15 @@ export function init(root, ctx) {
             </select>
             <div id="cs-r2-params" style="display:none;margin-bottom:var(--gap-sm)">
               <input id="cs-r2-validator-key" type="text" placeholder="Validator pubkey (hex)" style="width:100%" spellcheck="false">
+              <div id="cs-r2-subset-area" style="display:none;margin-top:var(--gap-sm)">
+                <textarea id="cs-r2-subset-keys" rows="4"
+                  placeholder="One validator pubkey (hex) per line"
+                  style="width:100%;font-family:var(--font-mono);font-size:var(--font-size-xs)"
+                  spellcheck="false"></textarea>
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">
+                  One hex pubkey per line. Rotation follows list order.
+                </div>
+              </div>
             </div>
             <div id="cs-r2-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
           </div>
@@ -144,6 +162,27 @@ export function init(root, ctx) {
       </div>
       <div class="panel-body" id="cs-tallies-body">
         <div class="empty-state">No votes recorded for the current cycle.</div>
+      </div>
+    </div>
+
+    <!-- Manual Vote Casting -->
+    <div class="panel" id="cs-manual-vote-panel" style="display:none">
+      <div class="panel-header">
+        <span>Cast Manual Vote</span>
+        <span id="cs-manual-phase" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+      </div>
+      <div class="panel-body">
+        <div class="form-group">
+          <label>Candidate Block</label>
+          <select id="cs-manual-candidate" class="form-select" style="width:100%">
+            <option value="">— No candidates yet —</option>
+          </select>
+          <div class="form-hint">Candidates from the current cycle's vote tallies.</div>
+        </div>
+        <div style="display:flex;gap:var(--gap-sm);align-items:center;margin-top:var(--gap-sm)">
+          <button class="btn btn-sm" id="cs-cast-vote-btn">Cast Vote</button>
+          <span id="cs-cast-status" style="font-size:var(--font-size-xs)"></span>
+        </div>
       </div>
     </div>
 
@@ -249,14 +288,25 @@ export function init(root, ctx) {
     manual: 'Do not auto-vote. Requires manual vote via RPC or GUI each cycle.',
   };
 
-  function updateStrategyUI(select, paramsEl, descEl) {
-    const strategy = select.value;
-    descEl.textContent = STRATEGY_DESCRIPTIONS[strategy] || '';
-    paramsEl.style.display = (strategy === 'fixed_validator') ? '' : 'none';
+  function updateManualVoteVisibility() {
+    const panel = root.querySelector('#cs-manual-vote-panel');
+    const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';
+    panel.style.display = isManual ? '' : 'none';
   }
 
-  r1Select.addEventListener('change', () => updateStrategyUI(r1Select, r1Params, r1Desc));
-  r2Select.addEventListener('change', () => updateStrategyUI(r2Select, r2Params, r2Desc));
+  function updateStrategyUI(select, paramsEl, descEl, prefix) {
+    const strategy = select.value;
+    descEl.textContent = STRATEGY_DESCRIPTIONS[strategy] || '';
+    const validatorInput = root.querySelector(`#${prefix}-validator-key`);
+    const subsetArea = root.querySelector(`#${prefix}-subset-area`);
+    validatorInput.style.display = (strategy === 'fixed_validator') ? '' : 'none';
+    subsetArea.style.display = (strategy === 'subset_rotation') ? '' : 'none';
+    paramsEl.style.display = (strategy === 'fixed_validator' || strategy === 'subset_rotation') ? '' : 'none';
+    updateManualVoteVisibility();
+  }
+
+  r1Select.addEventListener('change', () => updateStrategyUI(r1Select, r1Params, r1Desc, 'cs-r1'));
+  r2Select.addEventListener('change', () => updateStrategyUI(r2Select, r2Params, r2Desc, 'cs-r2'));
 
   async function loadVotingStrategy() {
     try {
@@ -269,8 +319,14 @@ export function init(root, ctx) {
       if (result.round2_params && result.round2_params.validator_key) {
         root.querySelector('#cs-r2-validator-key').value = result.round2_params.validator_key;
       }
-      updateStrategyUI(r1Select, r1Params, r1Desc);
-      updateStrategyUI(r2Select, r2Params, r2Desc);
+      if (result.round1_params?.validators) {
+        root.querySelector('#cs-r1-subset-keys').value = result.round1_params.validators.join('\n');
+      }
+      if (result.round2_params?.validators) {
+        root.querySelector('#cs-r2-subset-keys').value = result.round2_params.validators.join('\n');
+      }
+      updateStrategyUI(r1Select, r1Params, r1Desc, 'cs-r1');
+      updateStrategyUI(r2Select, r2Params, r2Desc, 'cs-r2');
     } catch (e) {
       console.error('[consensus] load voting strategy:', e);
     }
@@ -286,6 +342,9 @@ export function init(root, ctx) {
       let r1p = null;
       if (r1Name === 'fixed_validator') {
         r1p = { validator_key: root.querySelector('#cs-r1-validator-key').value.trim() };
+      } else if (r1Name === 'subset_rotation') {
+        r1p = { validators: root.querySelector('#cs-r1-subset-keys').value
+          .split('\n').map(s => s.trim()).filter(Boolean) };
       }
       await rpc.call('noble_setVotingStrategy', { round: 1, strategy: r1Name, params: r1p });
 
@@ -294,6 +353,9 @@ export function init(root, ctx) {
       let r2p = null;
       if (r2Name === 'fixed_validator') {
         r2p = { validator_key: root.querySelector('#cs-r2-validator-key').value.trim() };
+      } else if (r2Name === 'subset_rotation') {
+        r2p = { validators: root.querySelector('#cs-r2-subset-keys').value
+          .split('\n').map(s => s.trim()).filter(Boolean) };
       }
       await rpc.call('noble_setVotingStrategy', { round: 2, strategy: r2Name, params: r2p });
 
@@ -308,25 +370,62 @@ export function init(root, ctx) {
     }
   });
 
+  // ── Manual vote cast handler ──
+  root.querySelector('#cs-cast-vote-btn').addEventListener('click', async () => {
+    const hash = root.querySelector('#cs-manual-candidate').value;
+    if (!hash) return;
+    const btn = root.querySelector('#cs-cast-vote-btn');
+    const status = root.querySelector('#cs-cast-status');
+    try {
+      btn.disabled = true;
+      await rpc.call('noble_castVote', { block_hash: hash });
+      status.textContent = 'Vote cast';
+      status.style.color = 'var(--success)';
+    } catch (e) {
+      status.textContent = e.message || 'Failed';
+      status.style.color = 'var(--error)';
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => { status.textContent = ''; }, 5000);
+    }
+  });
+
   async function loadVoteTallies() {
     try {
       const result = await rpc.call('noble_getVoteTallies');
       tallyMeta.textContent = `Cycle #${formatNumber(result.cycle)} — ${result.phase}`;
+
+      // Update manual vote phase indicator
+      const manualPhase = root.querySelector('#cs-manual-phase');
+      manualPhase.textContent = `Cycle #${formatNumber(result.cycle)} — ${result.phase}`;
+
       if (!result.tallies || result.tallies.length === 0) {
         talliesBody.innerHTML = '<div class="empty-state">No votes recorded for the current cycle.</div>';
+        // Clear manual candidate dropdown
+        const candidateSelect = root.querySelector('#cs-manual-candidate');
+        candidateSelect.innerHTML = '<option value="">— No candidates yet —</option>';
         return;
       }
       const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
       talliesBody.innerHTML = result.tallies.map(t => {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
+        const nameTag = t.validator ? `<span style="font-weight:600;font-size:var(--font-size-xs);min-width:90px">${t.validator}</span>` : '';
         return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          <span class="mono" style="font-size:var(--font-size-xs);min-width:120px">${truncateHash(t.block_hash, 8)}</span>
+          ${nameTag}<span class="mono" style="font-size:var(--font-size-xs);min-width:120px">${truncateHash(t.block_hash, 8)}</span>
           <div style="flex:1;height:8px;background:var(--bg-tertiary);border-radius:4px">
             <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
           </div>
           <span style="font-weight:600;min-width:60px;text-align:right">${t.vote_count} (${pct}%)</span>
         </div>`;
       }).join('');
+
+      // Populate manual vote candidate dropdown
+      const candidateSelect = root.querySelector('#cs-manual-candidate');
+      candidateSelect.innerHTML = '<option value="">— Select candidate —</option>' +
+        result.tallies.map(t => {
+          const name = t.validator ? `${t.validator} — ` : '';
+          return `<option value="${t.block_hash}">${name}${t.block_hash.slice(0,16)}... (${t.vote_count} votes)</option>`;
+        }).join('');
     } catch (e) {
       console.error('[consensus] load tallies:', e);
     }

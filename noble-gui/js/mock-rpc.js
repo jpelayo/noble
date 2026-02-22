@@ -719,7 +719,7 @@ export class MockRpcClient {
         };
 
       case 'noble_setVotingStrategy': {
-        const { round, strategy, params: stratParams } = args;
+        const { round, strategy, params: stratParams } = params;
         if (round === 1) {
           this._votingR1 = strategy;
           this._votingR1Params = stratParams;
@@ -742,13 +742,16 @@ export class MockRpcClient {
         const phaseLen = CYCLE_DURATION_SECS / 4;
         const phaseIndex = Math.floor(elapsed / phaseLen);
         const phases = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
-        // Generate mock tallies during Voting/Confirmation phases
-        const tallies = (phaseIndex >= 1 && phaseIndex <= 2) ? [
-          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), vote_count: 3 },
-          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), vote_count: 1 },
-        ] : [];
+        // Always return candidates so manual vote dropdown has options
+        const tallies = [
+          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), validator: 'noble-alpha', vote_count: phaseIndex >= 1 ? 3 : 0 },
+          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), validator: 'noble-beta', vote_count: phaseIndex >= 1 ? 1 : 0 },
+        ];
         return { cycle, phase: phases[phaseIndex], tallies };
       }
+
+      case 'noble_castVote':
+        return true;
 
       case 'noble_getNodeInfo':
         return {

@@ -135,6 +135,14 @@ pub trait StorageEngine {
     /// Returns the number of pruned records.
     fn prune_peer_records(&self, now: u64, max_age_secs: u64) -> Result<u32, StorageError>;
 
+    // ── Cycle History (H-002) ──
+
+    /// Store a cycle history entry, keyed by cycle number.
+    fn store_cycle_history(&self, cycle: u64, data: &[u8]) -> Result<(), StorageError>;
+
+    /// Retrieve the most recent `count` cycle history entries (newest first).
+    fn get_recent_cycle_history(&self, count: usize) -> Result<Vec<Vec<u8>>, StorageError>;
+
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
     fn close(&mut self) -> Result<(), StorageError>;

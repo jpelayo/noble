@@ -78,9 +78,27 @@ fn parse_strategy(
     }
 }
 
+use noble_codec::NobleCbor;
+
 use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
+
+/// Helper to persist the validator list to disk (C-003).
+fn persist_validator_list<S: StorageEngine + Send + Sync + 'static>(
+    state: &ApiState<S>,
+    consensus: &std::sync::RwLockWriteGuard<'_, noble_consensus::CycleEngine>,
+) -> Result<(), ErrorObjectOwned> {
+    if let Some(ref path) = state.validator_list_path {
+        let bytes = consensus
+            .validator_list()
+            .to_cbor()
+            .map_err(|e| ApiError::Internal(format!("serialize validator list: {e}")))?;
+        std::fs::write(path, &bytes)
+            .map_err(|e| ApiError::Internal(format!("persist validator list: {e}")))?;
+    }
+    Ok(())
+}
 
 #[rpc(server, namespace = "noble")]
 pub trait ConsensusApi {
@@ -101,11 +119,16 @@ pub trait ConsensusApi {
 
     /// Add a validator to the trusted set.
     #[method(name = "addValidator")]
-    async fn add_validator(&self, pubkey: String, weight: u64) -> Result<bool, ErrorObjectOwned>;
+    async fn add_validator(
+        &self,
+        public_key: String,
+        name: Option<String>,
+        weight: Option<u64>,
+    ) -> Result<bool, ErrorObjectOwned>;
 
     /// Remove a validator from the trusted set.
     #[method(name = "removeValidator")]
-    async fn remove_validator(&self, pubkey: String) -> Result<bool, ErrorObjectOwned>;
+    async fn remove_validator(&self, public_key: String) -> Result<bool, ErrorObjectOwned>;
 
     /// Get the current voting strategy for both rounds.
     #[method(name = "getVotingStrategy")]
@@ -127,6 +150,13 @@ pub trait ConsensusApi {
     /// Cast a manual vote for Round 1 (Manual strategy only).
     #[method(name = "castVote")]
     async fn cast_vote(&self, block_hash: String) -> Result<bool, ErrorObjectOwned>;
+
+    /// Get recent cycle history entries (H-002).
+    #[method(name = "getCycleHistory")]
+    async fn get_cycle_history(
+        &self,
+        count: Option<usize>,
+    ) -> Result<CycleHistoryResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -204,24 +234,56 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     async fn get_cycle_status(&self) -> Result<CycleStatusResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read().unwrap();
         let cycle = consensus.current_cycle();
-        let phase = consensus.current_phase();
-        let (phase_idx, phase_remaining, cycle_remaining) = consensus.phase_timing();
+        let (_engine_phase_idx, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
+        let engine_phase = consensus.current_phase();
+
+        // H-005: Project 2 engine phases → 4 API phases.
+        // Engine phase duration = cycle_duration / 2 = 900s.
+        // Sub-phase = engine_phase_duration / 2 = 450s.
+        // Validation → [Proposal, Voting], Reflection → [Confirmation, Finalization].
+        // engine_phase_remaining counts down from 900 to 0 within each engine phase.
+        let half_phase = noble_core::CYCLE_DURATION_SECS / 4;
+        let engine_phase_duration = noble_core::CYCLE_DURATION_SECS / 2;
+        let elapsed_in_phase = engine_phase_duration.saturating_sub(engine_phase_remaining);
+
+        let (projected_phase, projected_index, phase_remaining) = match engine_phase {
+            noble_consensus::CyclePhase::Validation => {
+                if elapsed_in_phase < half_phase {
+                    ("Proposal", 0u8, half_phase - elapsed_in_phase)
+                } else {
+                    ("Voting", 1, engine_phase_duration - elapsed_in_phase)
+                }
+            }
+            noble_consensus::CyclePhase::Reflection => {
+                if elapsed_in_phase < half_phase {
+                    ("Confirmation", 2, half_phase - elapsed_in_phase)
+                } else {
+                    ("Finalization", 3, engine_phase_duration - elapsed_in_phase)
+                }
+            }
+        };
 
         Ok(CycleStatusResponse {
             cycle_number: cycle,
-            phase: format!("{:?}", phase),
-            phase_index: phase_idx,
+            phase: projected_phase.to_string(),
+            phase_index: projected_index,
             phase_remaining_secs: phase_remaining,
             cycle_remaining_secs: cycle_remaining,
         })
     }
 
-    async fn add_validator(&self, pubkey: String, weight: u64) -> Result<bool, ErrorObjectOwned> {
+    async fn add_validator(
+        &self,
+        public_key: String,
+        name: Option<String>,
+        weight: Option<u64>,
+    ) -> Result<bool, ErrorObjectOwned> {
         let wire_bytes =
-            hex::decode(&pubkey).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+            hex::decode(&public_key).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
         let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
 
+        let effective_weight = weight.unwrap_or(100);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -229,21 +291,32 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let mut consensus = self.consensus.write().unwrap();
         consensus
             .validator_list_mut()
-            .add_validator(pk, weight, now);
+            .add_validator(pk.clone(), effective_weight, now);
+        if let Some(n) = name {
+            consensus.validator_list_mut().set_friendly_name(&pk, n);
+        }
+
+        // C-003: Persist validator list to disk.
+        persist_validator_list(self, &consensus)?;
+
         Ok(true)
     }
 
-    async fn remove_validator(&self, pubkey: String) -> Result<bool, ErrorObjectOwned> {
+    async fn remove_validator(&self, public_key: String) -> Result<bool, ErrorObjectOwned> {
         let wire_bytes =
-            hex::decode(&pubkey).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+            hex::decode(&public_key).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
         let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
 
         let mut consensus = self.consensus.write().unwrap();
         let removed = consensus.validator_list_mut().remove_validator(&pk);
         if !removed {
-            return Err(ApiError::ValidatorNotFound(pubkey).into());
+            return Err(ApiError::ValidatorNotFound(public_key).into());
         }
+
+        // C-003: Persist validator list to disk.
+        persist_validator_list(self, &consensus)?;
+
         Ok(true)
     }
 
@@ -324,5 +397,50 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // Full implementation requires engine to accept manual vote injection,
         // which will be wired when the engine processes ManualVote events.
         Ok(true)
+    }
+
+    async fn get_cycle_history(
+        &self,
+        count: Option<usize>,
+    ) -> Result<CycleHistoryResponse, ErrorObjectOwned> {
+        let limit = count.unwrap_or(10).min(100);
+        let storage = self.storage.read().unwrap();
+        let raw_entries = storage
+            .get_recent_cycle_history(limit)
+            .map_err(|e| ApiError::Internal(format!("read cycle history: {e}")))?;
+
+        let entries: Vec<CycleHistoryEntryResponse> = raw_entries
+            .into_iter()
+            .filter_map(|bytes| noble_consensus::CycleHistoryEntry::from_cbor(&bytes).ok())
+            .map(|entry| CycleHistoryEntryResponse {
+                cycle_number: entry.cycle_number,
+                status: entry.status,
+                proposals: entry
+                    .proposals
+                    .into_iter()
+                    .map(|p| CycleHistoryProposal {
+                        validator: p.validator,
+                        block_hash: hash_to_hex(&p.block_hash),
+                        tx_count: p.tx_count,
+                    })
+                    .collect(),
+                votes: entry
+                    .votes
+                    .into_iter()
+                    .map(|v| CycleHistoryVote {
+                        block_hash: hash_to_hex(&v.block_hash),
+                        validator: v.validator,
+                        vote_count: v.vote_count,
+                    })
+                    .collect(),
+                winner: entry.winner,
+                winning_hash: entry.winning_hash.map(|h| hash_to_hex(&h)),
+                disambiguation: entry.disambiguation,
+                finalized_at: entry.finalized_at,
+            })
+            .collect();
+
+        let count = entries.len();
+        Ok(CycleHistoryResponse { entries, count })
     }
 }

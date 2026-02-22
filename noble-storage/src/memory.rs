@@ -36,6 +36,8 @@ struct Inner {
     key_rotations: HashMap<Vec<u8>, (Vec<u8>, u64)>,
     /// Peer memory: identity_key_wire → PeerRecord.
     peer_records: HashMap<Vec<u8>, PeerRecord>,
+    /// Cycle history: cycle_number → CBOR-encoded CycleHistoryEntry (H-002).
+    cycle_history: BTreeMap<u64, Vec<u8>>,
     closed: bool,
 }
 
@@ -563,6 +565,29 @@ impl StorageEngine for MemoryStorage {
             .peer_records
             .retain(|_, rec| !rec.is_stale(now, max_age_secs));
         Ok((before - inner.peer_records.len()) as u32)
+    }
+
+    // ── Cycle History (H-002) ──
+
+    fn store_cycle_history(&self, cycle: u64, data: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.cycle_history.insert(cycle, data.to_vec());
+        Ok(())
+    }
+
+    fn get_recent_cycle_history(&self, count: usize) -> Result<Vec<Vec<u8>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        // BTreeMap iterates in ascending order; we want newest-first.
+        let entries: Vec<Vec<u8>> = inner
+            .cycle_history
+            .iter()
+            .rev()
+            .take(count)
+            .map(|(_, v)| v.clone())
+            .collect();
+        Ok(entries)
     }
 
     fn close(&mut self) -> Result<(), StorageError> {

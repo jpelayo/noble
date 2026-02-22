@@ -3,6 +3,7 @@
 
 //! Shared API state available to all RPC method handlers.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -23,6 +24,21 @@ pub struct NetworkStats {
     pub inbound_count: usize,
     /// Number of outbound connections.
     pub outbound_count: usize,
+}
+
+/// Metadata about a connected peer, maintained by the node event loop.
+#[derive(Debug, Clone)]
+pub struct PeerInfoEntry {
+    /// Hex-encoded peer ID.
+    pub peer_id: String,
+    /// Connection direction: "inbound" or "outbound".
+    pub direction: String,
+    /// Multiaddr of the peer.
+    pub addr: String,
+    /// Unix timestamp when the peer connected.
+    pub connected_at: u64,
+    /// Accumulated ban score.
+    pub ban_score: u32,
 }
 
 /// Shared state available to all RPC method handlers.
@@ -84,4 +100,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// IP access control filter. None = middleware not installed (localhost-only).
     pub ip_filter: Option<crate::ip_filter::IpFilter>,
+
+    /// Path to the validator list persistence file (CBOR). None = no persistence.
+    pub validator_list_path: Option<std::path::PathBuf>,
+
+    /// Live connected peer info, keyed by hex peer_id. Updated by the node event loop.
+    pub peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
 }

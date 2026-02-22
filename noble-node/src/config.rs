@@ -50,6 +50,26 @@ pub enum NetworkId {
     Regtest,
 }
 
+impl NetworkId {
+    /// Return the chain ID constant for this network.
+    pub fn chain_id(self) -> u32 {
+        match self {
+            Self::Mainnet => noble_core::MAINNET_CHAIN_ID,
+            Self::Testnet => noble_core::TESTNET_CHAIN_ID,
+            Self::Regtest => noble_core::REGTEST_CHAIN_ID,
+        }
+    }
+
+    /// Construct the genesis block for this network.
+    pub fn genesis_block(self) -> noble_core::Block {
+        match self {
+            Self::Mainnet => noble_core::genesis_block(),
+            Self::Testnet => noble_core::testnet_genesis_block(),
+            Self::Regtest => noble_core::regtest_genesis_block(),
+        }
+    }
+}
+
 /// `[node]` section — operational mode and network selection.
 #[derive(Debug, Default, Deserialize)]
 pub struct NodeSectionConfig {
@@ -546,6 +566,20 @@ mod tests {
         assert_eq!(config.api.allowed_ips.len(), 2);
         assert_eq!(config.api.allowed_ips[0], "192.168.1.0/24");
         assert_eq!(config.api.allowed_ips[1], "10.0.0.5");
+    }
+
+    #[test]
+    fn network_id_chain_id_and_genesis() {
+        assert_eq!(NetworkId::Mainnet.chain_id(), noble_core::MAINNET_CHAIN_ID);
+        assert_eq!(NetworkId::Testnet.chain_id(), noble_core::TESTNET_CHAIN_ID);
+        assert_eq!(NetworkId::Regtest.chain_id(), noble_core::REGTEST_CHAIN_ID);
+
+        // Each network produces a distinct genesis block
+        let m = NetworkId::Mainnet.genesis_block();
+        let t = NetworkId::Testnet.genesis_block();
+        let r = NetworkId::Regtest.genesis_block();
+        assert_ne!(m.header.validator_id, t.header.validator_id);
+        assert_ne!(t.header.validator_id, r.header.validator_id);
     }
 
     #[test]

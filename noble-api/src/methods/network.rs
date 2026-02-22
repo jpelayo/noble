@@ -51,7 +51,18 @@ pub trait NetworkApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState<S>> {
     async fn get_peer_info(&self) -> Result<Vec<PeerInfoResponse>, ErrorObjectOwned> {
-        Ok(vec![])
+        let info = self.peer_info.read().unwrap();
+        let peers: Vec<PeerInfoResponse> = info
+            .values()
+            .map(|entry| PeerInfoResponse {
+                peer_id: entry.peer_id.clone(),
+                direction: entry.direction.clone(),
+                connected_at: entry.connected_at,
+                ban_score: entry.ban_score,
+                last_ban_reason: None,
+            })
+            .collect();
+        Ok(peers)
     }
 
     async fn get_network_info(&self) -> Result<NetworkInfoResponse, ErrorObjectOwned> {

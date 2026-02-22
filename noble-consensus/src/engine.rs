@@ -14,6 +14,7 @@ use crate::candidate::CandidateTracker;
 use crate::config::ConsensusConfig;
 use crate::cycle::{CycleManager, CyclePhase};
 use crate::event::{CycleEvent, CycleIo};
+use crate::history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
 use crate::validator::ValidatorList;
 use crate::vote::{MigrationResult, PorVote, VoteManager};
 
@@ -59,6 +60,8 @@ pub struct CycleEngine {
     /// AUD-M7: Monotonic clock anchor (Instant, unix_timestamp) captured at creation.
     /// Used by phase_timing() to avoid NTP jumps affecting phase reporting.
     clock_anchor: (std::time::Instant, u64),
+    /// H-002: Last completed cycle's history entry, ready for persistence.
+    last_cycle_history: Option<CycleHistoryEntry>,
 }
 
 impl CycleEngine {
@@ -95,6 +98,7 @@ impl CycleEngine {
             our_validator_key: validator_key,
             total_peers: 0,
             clock_anchor: (std::time::Instant::now(), now_unix),
+            last_cycle_history: None,
         }
     }
 
@@ -152,6 +156,12 @@ impl CycleEngine {
     /// Get current vote tallies (candidate_hash → vote count).
     pub fn vote_tallies(&self) -> std::collections::HashMap<Hash256, usize> {
         self.vote_mgr.current_tallies()
+    }
+
+    /// Take the last completed cycle's history entry (H-002).
+    /// Returns `Some` once after each cycle boundary, then `None` until the next.
+    pub fn take_cycle_history(&mut self) -> Option<CycleHistoryEntry> {
+        self.last_cycle_history.take()
     }
 
     /// Update the chain tip with the full block header for proper B2/B3/B5 validation (AUD3-D6).
@@ -259,10 +269,39 @@ impl CycleEngine {
     fn handle_cycle_boundary(&mut self, completed_cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // Compute majority from votes
-        let result = self
-            .vote_mgr
-            .compute_majority(self.total_peers, &self.config);
+        // H-002: Build proposals snapshot before clearing.
+        let proposals: Vec<CycleProposal> = self
+            .candidate_tracker
+            .all_candidates()
+            .iter()
+            .map(|entry| CycleProposal {
+                validator: hex::encode(entry.block.header.validator_id.to_wire_bytes()),
+                block_hash: entry.block_hash,
+                tx_count: entry.block.header.tx_count,
+            })
+            .collect();
+
+        // H-002: Build vote tallies snapshot before clearing.
+        let tallies = self.vote_mgr.current_tallies();
+        let vote_entries: Vec<CycleVoteTally> = tallies
+            .iter()
+            .map(|(hash, count)| {
+                let validator = self
+                    .candidate_tracker
+                    .get(hash)
+                    .map(|e| hex::encode(e.block.header.validator_id.to_wire_bytes()))
+                    .unwrap_or_default();
+                CycleVoteTally {
+                    block_hash: *hash,
+                    validator,
+                    vote_count: *count,
+                }
+            })
+            .collect();
+
+        // C-004: Use validator set size as denominator (not peer count).
+        let voter_count = self.validator_list.len();
+        let result = self.vote_mgr.compute_majority(voter_count, &self.config);
 
         match result {
             MigrationResult::Adopt {
@@ -333,6 +372,47 @@ impl CycleEngine {
                 )));
             }
         }
+
+        // H-002: Record cycle history before clearing state.
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let (status, winner, winning_hash, disambiguation) = match &result {
+            MigrationResult::Adopt {
+                candidate_hash,
+                strength,
+            } => {
+                let winner_name = self
+                    .candidate_tracker
+                    .get(candidate_hash)
+                    .map(|e| hex::encode(e.block.header.validator_id.to_wire_bytes()));
+                let disamb = tallies
+                    .values()
+                    .filter(|&&c| c == tallies.values().copied().max().unwrap_or(0))
+                    .count()
+                    > 1;
+                (
+                    format!("finalized_{:?}", strength).to_lowercase(),
+                    winner_name,
+                    Some(*candidate_hash),
+                    disamb,
+                )
+            }
+            MigrationResult::Indeterminate => ("indeterminate".to_string(), None, None, false),
+        };
+
+        self.last_cycle_history = Some(CycleHistoryEntry {
+            cycle_number: completed_cycle,
+            status,
+            proposals,
+            votes: vote_entries,
+            winner,
+            winning_hash,
+            disambiguation,
+            finalized_at: now_ts,
+        });
 
         // Clear state for next cycle
         self.vote_mgr.clear();

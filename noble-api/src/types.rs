@@ -485,6 +485,42 @@ pub struct BanReasonResponse {
     pub subject: String,
 }
 
+/// A single cycle history entry in the getCycleHistory response.
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleHistoryEntryResponse {
+    pub cycle_number: u64,
+    pub status: String,
+    pub proposals: Vec<CycleHistoryProposal>,
+    pub votes: Vec<CycleHistoryVote>,
+    pub winner: Option<String>,
+    pub winning_hash: Option<String>,
+    pub disambiguation: bool,
+    pub finalized_at: u64,
+}
+
+/// A proposal within a cycle history entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleHistoryProposal {
+    pub validator: String,
+    pub block_hash: String,
+    pub tx_count: u32,
+}
+
+/// A vote tally within a cycle history entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleHistoryVote {
+    pub block_hash: String,
+    pub validator: String,
+    pub vote_count: usize,
+}
+
+/// Response for `noble_getCycleHistory`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CycleHistoryResponse {
+    pub entries: Vec<CycleHistoryEntryResponse>,
+    pub count: usize,
+}
+
 /// Response for `noble_getAllowedIps`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AllowedIpsResponse {
