@@ -58,12 +58,13 @@ pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> 
             candidate_hash,
             voter_id,
             signature,
+            peer_id,
         } => {
             // Reconstruct PorVote from wire bytes.
             let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature)?;
             Some(CycleEvent::VoteReceived {
                 vote,
-                from_peer: voter_id.clone(),
+                from_peer: peer_id.clone(),
             })
         }
         _ => None,

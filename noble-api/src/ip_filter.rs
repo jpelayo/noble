@@ -81,6 +81,20 @@ impl IpFilter {
         guard.iter().map(|n| n.to_string()).collect()
     }
 
+    /// Create a permissive filter that allows all IP addresses.
+    ///
+    /// Used when no explicit allow-list is configured so that the
+    /// `IpFilterLayer` can always be present in the middleware stack
+    /// (avoids Tower `ServiceBuilder` type gymnastics for conditional layers).
+    pub fn allow_all() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(vec![
+                "0.0.0.0/0".parse().unwrap(),
+                "::/0".parse().unwrap(),
+            ])),
+        }
+    }
+
     /// Whether the allow-list is non-empty (remote access enabled).
     pub fn has_remote_access(&self) -> bool {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());

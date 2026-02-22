@@ -168,6 +168,7 @@ mod tests {
             addr: None,
             misbehavior_window: std::collections::VecDeque::new(),
             last_misbehavior: None,
+            last_ban_reason: None,
         }
     }
 

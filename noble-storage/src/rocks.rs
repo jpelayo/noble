@@ -763,6 +763,8 @@ impl StorageEngine for RocksDbStorage {
 
         let mut balances: HashMap<Vec<u8>, i128> = HashMap::new();
         let mut replay_batch = WriteBatch::default();
+        // AUD3-D8: Track total_supply during rollback replay.
+        let mut replay_supply: u64 = 0;
 
         for h in 0..=target_height {
             let hash = self.get_block_hash_by_height(h)?;
@@ -770,6 +772,7 @@ impl StorageEngine for RocksDbStorage {
 
             let validator_key = Self::pubkey_key(&block.header.validator_id);
             let subsidy = subsidy_at_height(h) as i128;
+            replay_supply = replay_supply.saturating_add(subsidy as u64);
 
             let mut validator_fee_total: i128 = 0;
             for tx in &block.transactions {
@@ -825,6 +828,10 @@ impl StorageEngine for RocksDbStorage {
                 replay_batch.put_cf(cf_balances, key, (*balance as u64).to_be_bytes());
             }
         }
+
+        // AUD3-D8: Persist total_supply so get_total_supply() is correct after rollback.
+        let cf_state = self.cf(CF_CHAIN_STATE)?;
+        replay_batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, replay_supply.to_be_bytes());
 
         self.db
             .write(replay_batch)

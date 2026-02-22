@@ -229,6 +229,8 @@ pub struct PeerInfoResponse {
     pub peer_id: String,
     pub direction: String,
     pub connected_at: u64,
+    pub ban_score: u32,
+    pub last_ban_reason: Option<BanReasonResponse>,
 }
 
 /// Response for `noble_getNetworkInfo`.
@@ -446,6 +448,41 @@ pub struct ImportMnemonicResponse {
     pub address: String,
     pub scheme_id: u8,
     pub already_exists: bool,
+}
+
+/// Response for `noble_getVotingStrategy`.
+#[derive(Debug, Clone, Serialize)]
+pub struct VotingStrategyResponse {
+    /// Strategy name for Round 1 (Reflection): first_valid, fixed_validator, etc.
+    pub round1_strategy: String,
+    /// Optional parameters for Round 1 strategy (e.g. validator_key for fixed_validator).
+    pub round1_params: serde_json::Value,
+    /// Strategy name for Round 2 (Confirmation).
+    pub round2_strategy: String,
+    /// Optional parameters for Round 2 strategy.
+    pub round2_params: serde_json::Value,
+}
+
+/// A single entry in the vote tally.
+#[derive(Debug, Clone, Serialize)]
+pub struct VoteTallyEntry {
+    pub block_hash: String,
+    pub vote_count: usize,
+}
+
+/// Response for `noble_getVoteTallies`.
+#[derive(Debug, Clone, Serialize)]
+pub struct VoteTalliesResponse {
+    pub cycle: u64,
+    pub phase: String,
+    pub tallies: Vec<VoteTallyEntry>,
+}
+
+/// Ban reason response for peer info.
+#[derive(Debug, Clone, Serialize)]
+pub struct BanReasonResponse {
+    pub category: String,
+    pub subject: String,
 }
 
 /// Response for `noble_getAllowedIps`.

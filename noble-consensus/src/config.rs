@@ -5,6 +5,8 @@
 
 use noble_core::{CYCLE_DURATION_SECS, MAX_BLOCK_SIZE, MAX_REORG_DEPTH};
 
+use crate::strategy::VotingStrategy;
+
 /// Configuration for the consensus engine.
 #[derive(Debug, Clone)]
 pub struct ConsensusConfig {
@@ -18,6 +20,10 @@ pub struct ConsensusConfig {
     pub plurality_floor_divisor: u64,
     /// Minimum connected peers required for consensus participation (GAP-C6, default: 3).
     pub min_peers_for_consensus: usize,
+    /// Voting strategy for Round 1 (Reflection phase). Default: FirstValid.
+    pub voting_strategy: VotingStrategy,
+    /// Voting strategy for Round 2 (Confirmation phase). Default: FollowMajority.
+    pub confirmation_strategy: VotingStrategy,
 }
 
 impl Default for ConsensusConfig {
@@ -28,6 +34,8 @@ impl Default for ConsensusConfig {
             max_reorg_depth: MAX_REORG_DEPTH,
             plurality_floor_divisor: 3,
             min_peers_for_consensus: 3,
+            voting_strategy: VotingStrategy::FirstValid,
+            confirmation_strategy: VotingStrategy::FollowMajority,
         }
     }
 }

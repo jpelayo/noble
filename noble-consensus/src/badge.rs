@@ -94,6 +94,8 @@ pub enum RevocationReason {
     ProtocolAbuse,
     /// Extended absence beyond suspension threshold.
     ExtendedAbsence,
+    /// Node identity misrepresentation (false name, false org_type, impersonation).
+    Misrepresentation,
     /// Other reason (free-text).
     Other,
 }

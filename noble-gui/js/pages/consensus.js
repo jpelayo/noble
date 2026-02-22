@@ -86,6 +86,67 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Voting Strategy Configuration -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Voting Strategy</span>
+        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)">Per-round strategy configuration</span>
+      </div>
+      <div class="panel-body">
+        <div class="split-layout">
+          <div>
+            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 1 — REFLECTION</div>
+            <select id="cs-r1-strategy" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
+              <option value="first_valid">First Valid</option>
+              <option value="fixed_validator">Fixed Validator</option>
+              <option value="round_robin">Round Robin</option>
+              <option value="subset_rotation">Subset Rotation</option>
+              <option value="random">Random</option>
+              <option value="weighted_reputation">Weighted Reputation</option>
+              <option value="follow_majority">Follow Majority</option>
+              <option value="manual">Manual</option>
+            </select>
+            <div id="cs-r1-params" style="display:none;margin-bottom:var(--gap-sm)">
+              <input id="cs-r1-validator-key" type="text" placeholder="Validator pubkey (hex)" style="width:100%" spellcheck="false">
+            </div>
+            <div id="cs-r1-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
+          </div>
+          <div>
+            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 2 — CONFIRMATION</div>
+            <select id="cs-r2-strategy" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
+              <option value="first_valid">First Valid</option>
+              <option value="fixed_validator">Fixed Validator</option>
+              <option value="round_robin">Round Robin</option>
+              <option value="subset_rotation">Subset Rotation</option>
+              <option value="random">Random</option>
+              <option value="weighted_reputation">Weighted Reputation</option>
+              <option value="follow_majority">Follow Majority</option>
+              <option value="manual">Manual</option>
+            </select>
+            <div id="cs-r2-params" style="display:none;margin-bottom:var(--gap-sm)">
+              <input id="cs-r2-validator-key" type="text" placeholder="Validator pubkey (hex)" style="width:100%" spellcheck="false">
+            </div>
+            <div id="cs-r2-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
+          </div>
+        </div>
+        <div style="margin-top:var(--gap);display:flex;align-items:center;gap:var(--gap-sm)">
+          <button class="btn btn-sm" id="cs-save-strategy">Save Strategy</button>
+          <span id="cs-strategy-status" style="font-size:var(--font-size-xs);color:var(--success)"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vote Tallies -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Live Vote Tallies</span>
+        <span id="cs-tally-meta" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+      </div>
+      <div class="panel-body" id="cs-tallies-body">
+        <div class="empty-state">No votes recorded for the current cycle.</div>
+      </div>
+    </div>
+
     <!-- Accepted Validator Registry -->
     <div class="panel">
       <div class="panel-header">
@@ -164,6 +225,112 @@ export function init(root, ctx) {
   const candidatesTbody = root.querySelector('#cs-candidates');
   const csCandidateCount = root.querySelector('#cs-candidate-count');
   const candidatesEmpty = root.querySelector('#cs-candidates-empty');
+
+  // Voting strategy DOM refs
+  const r1Select = root.querySelector('#cs-r1-strategy');
+  const r2Select = root.querySelector('#cs-r2-strategy');
+  const r1Params = root.querySelector('#cs-r1-params');
+  const r2Params = root.querySelector('#cs-r2-params');
+  const r1Desc = root.querySelector('#cs-r1-desc');
+  const r2Desc = root.querySelector('#cs-r2-desc');
+  const saveStrategyBtn = root.querySelector('#cs-save-strategy');
+  const strategyStatus = root.querySelector('#cs-strategy-status');
+  const tallyMeta = root.querySelector('#cs-tally-meta');
+  const talliesBody = root.querySelector('#cs-tallies-body');
+
+  const STRATEGY_DESCRIPTIONS = {
+    first_valid: 'Vote for the first valid block received. Fast but biased toward low-latency validators.',
+    fixed_validator: 'Always vote for a specific validator. Falls back to first valid if they don\'t propose.',
+    round_robin: 'Rotate through validators in sorted order each cycle.',
+    subset_rotation: 'Rotate through a user-defined subset of preferred validators.',
+    random: 'Randomly select among valid candidates (deterministic per cycle).',
+    weighted_reputation: 'Vote for the candidate from the highest-weight validator.',
+    follow_majority: 'Wait for tallies, then vote for the leading candidate.',
+    manual: 'Do not auto-vote. Requires manual vote via RPC or GUI each cycle.',
+  };
+
+  function updateStrategyUI(select, paramsEl, descEl) {
+    const strategy = select.value;
+    descEl.textContent = STRATEGY_DESCRIPTIONS[strategy] || '';
+    paramsEl.style.display = (strategy === 'fixed_validator') ? '' : 'none';
+  }
+
+  r1Select.addEventListener('change', () => updateStrategyUI(r1Select, r1Params, r1Desc));
+  r2Select.addEventListener('change', () => updateStrategyUI(r2Select, r2Params, r2Desc));
+
+  async function loadVotingStrategy() {
+    try {
+      const result = await rpc.call('noble_getVotingStrategy');
+      r1Select.value = result.round1_strategy;
+      r2Select.value = result.round2_strategy;
+      if (result.round1_params && result.round1_params.validator_key) {
+        root.querySelector('#cs-r1-validator-key').value = result.round1_params.validator_key;
+      }
+      if (result.round2_params && result.round2_params.validator_key) {
+        root.querySelector('#cs-r2-validator-key').value = result.round2_params.validator_key;
+      }
+      updateStrategyUI(r1Select, r1Params, r1Desc);
+      updateStrategyUI(r2Select, r2Params, r2Desc);
+    } catch (e) {
+      console.error('[consensus] load voting strategy:', e);
+    }
+  }
+
+  saveStrategyBtn.addEventListener('click', async () => {
+    try {
+      saveStrategyBtn.disabled = true;
+      strategyStatus.textContent = '';
+
+      // Save Round 1
+      const r1Name = r1Select.value;
+      let r1p = null;
+      if (r1Name === 'fixed_validator') {
+        r1p = { validator_key: root.querySelector('#cs-r1-validator-key').value.trim() };
+      }
+      await rpc.call('noble_setVotingStrategy', { round: 1, strategy: r1Name, params: r1p });
+
+      // Save Round 2
+      const r2Name = r2Select.value;
+      let r2p = null;
+      if (r2Name === 'fixed_validator') {
+        r2p = { validator_key: root.querySelector('#cs-r2-validator-key').value.trim() };
+      }
+      await rpc.call('noble_setVotingStrategy', { round: 2, strategy: r2Name, params: r2p });
+
+      strategyStatus.textContent = 'Saved';
+      setTimeout(() => { strategyStatus.textContent = ''; }, 3000);
+    } catch (e) {
+      strategyStatus.style.color = 'var(--error)';
+      strategyStatus.textContent = e.message || 'Failed';
+      setTimeout(() => { strategyStatus.textContent = ''; strategyStatus.style.color = 'var(--success)'; }, 5000);
+    } finally {
+      saveStrategyBtn.disabled = false;
+    }
+  });
+
+  async function loadVoteTallies() {
+    try {
+      const result = await rpc.call('noble_getVoteTallies');
+      tallyMeta.textContent = `Cycle #${formatNumber(result.cycle)} — ${result.phase}`;
+      if (!result.tallies || result.tallies.length === 0) {
+        talliesBody.innerHTML = '<div class="empty-state">No votes recorded for the current cycle.</div>';
+        return;
+      }
+      const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
+      talliesBody.innerHTML = result.tallies.map(t => {
+        const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
+        return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
+          <span class="mono" style="font-size:var(--font-size-xs);min-width:120px">${truncateHash(t.block_hash, 8)}</span>
+          <div style="flex:1;height:8px;background:var(--bg-tertiary);border-radius:4px">
+            <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
+          </div>
+          <span style="font-weight:600;min-width:60px;text-align:right">${t.vote_count} (${pct}%)</span>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      console.error('[consensus] load tallies:', e);
+    }
+  }
 
   const PHASES = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
 
@@ -779,6 +946,7 @@ export function init(root, ctx) {
   ws.subscribe('cyclePhaseChange', (status) => {
     updateCycleDisplay(status);
     loadTimeline();
+    loadVoteTallies();
   });
   unsubs.push(() => ws.unsubscribe('cyclePhaseChange'));
 
@@ -787,6 +955,8 @@ export function init(root, ctx) {
   loadTimeline();
   loadValidators();
   loadCandidates();
+  loadVotingStrategy();
+  loadVoteTallies();
 
   return {
     destroy() {

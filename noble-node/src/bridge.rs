@@ -23,15 +23,18 @@ pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> 
             from_peer: peer_id.clone(),
         }),
         NetworkEvent::VoteReceived {
+            peer_id,
             cycle,
             candidate_hash,
             voter_id,
             signature,
         } => {
             let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature)?;
+            // AUD3-D9: Use transport PeerId (not voter_id from the vote payload)
+            // so the consensus engine can compare against known peer identities.
             Some(CycleEvent::VoteReceived {
                 vote,
-                from_peer: voter_id.clone(),
+                from_peer: peer_id.clone(),
             })
         }
         _ => None,
@@ -261,6 +264,7 @@ mod tests {
             candidate_hash: *vote.candidate_hash.as_bytes(),
             voter_id: pub_key.to_wire_bytes(),
             signature: vote_to_signature_bytes(&vote),
+            peer_id: vec![0xAA; 32],
         };
 
         let cycle_event = network_event_to_cycle_event(&event);

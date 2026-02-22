@@ -127,17 +127,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 height: 0,
             });
 
+        // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
+        let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
+            let s = storage.read().map_err(|e| format!("storage lock: {e}"))?;
+            s.get_block_header(&tip.block_hash).ok()
+        } else {
+            None
+        };
+
         // Create consensus engine (observation mode — no validator key yet).
         let consensus_config = CConsensusConfig::default();
         let validator_list = ValidatorList::new();
-        let consensus = Arc::new(RwLock::new(CycleEngine::new(
+        let mut engine = CycleEngine::new(
             consensus_config,
             validator_list,
             tip.height,
             tip.block_hash,
             MAINNET_CHAIN_ID,
             None, // no validator key — observation mode
-        )));
+        );
+        if let Some(header) = tip_header {
+            engine.update_tip_with_header(header);
+        }
+        let consensus = Arc::new(RwLock::new(engine));
 
         // Create wallet keystore.
         let keystore = KeyStore::new(&config.wallet.keystore_path)?;
@@ -548,9 +560,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
 
-                    // Update consensus tip
+                    // AUD3-D5/D6: Update consensus tip with full header for B2/B3/B5/B6 validation.
                     if let Ok(mut engine) = self.consensus.write() {
-                        engine.update_tip(block.header.height, block_hash);
+                        engine.update_tip_with_header(block.header.clone());
                     }
 
                     // Remove committed txs from mempool
@@ -696,8 +708,7 @@ pub fn init_totp_validator(
             "TOTP auth: new secret generated at {}",
             secret_path.display()
         );
-        tracing::info!("TOTP secret (base32): {}", base32);
-        tracing::info!("otpauth URI: {}", v.otpauth_uri("NOBLE Node"));
+        // Security: TOTP secret is persisted to file only — never logged.
         (v, base32)
     };
 

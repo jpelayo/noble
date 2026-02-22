@@ -113,6 +113,131 @@ impl RpcRateLimiter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tower Layer / Service
+// ---------------------------------------------------------------------------
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use http::{Request, Response, StatusCode};
+use http_body_util::{BodyExt, Full};
+use tower::{Layer, Service};
+
+use crate::error::RATE_LIMITED;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Tower [`Layer`] that produces [`RateLimitService`] instances.
+#[derive(Clone)]
+pub struct RateLimitLayer {
+    limiter: Option<Arc<RpcRateLimiter>>,
+}
+
+impl RateLimitLayer {
+    /// Create a new rate-limit layer.
+    ///
+    /// Pass `None` to disable rate limiting (all requests pass through).
+    pub fn new(limiter: Option<Arc<RpcRateLimiter>>) -> Self {
+        Self { limiter }
+    }
+}
+
+impl<S> Layer<S> for RateLimitLayer {
+    type Service = RateLimitService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RateLimitService {
+            inner,
+            limiter: self.limiter.clone(),
+        }
+    }
+}
+
+/// Tower [`Service`] that checks per-IP rate limits before forwarding requests.
+#[derive(Clone)]
+pub struct RateLimitService<S> {
+    inner: S,
+    limiter: Option<Arc<RpcRateLimiter>>,
+}
+
+impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for RateLimitService<S>
+where
+    S: Service<Request<ReqBody>, Response = Response<ResBody>> + Clone + Send + 'static,
+    S::Future: Send,
+    S::Error: Send,
+    ReqBody: Send + 'static,
+    ResBody: http_body::Body<Data = Bytes> + Send + 'static,
+    ResBody::Error: Into<BoxError>,
+{
+    type Response = Response<http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>>;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        // If no limiter is configured, pass through.
+        let Some(ref limiter) = self.limiter else {
+            let fut = self.inner.call(req);
+            return Box::pin(async move {
+                let resp = fut.await?;
+                Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
+            });
+        };
+
+        // Extract client IP from request extensions.
+        let client_ip = req
+            .extensions()
+            .get::<std::net::SocketAddr>()
+            .map(|addr| addr.ip());
+
+        // Check rate limit if we can determine the IP.
+        if let Some(ip) = client_ip {
+            if !limiter.try_acquire(ip) {
+                tracing::warn!(task = "rate_limit", ip = %ip, "rate limited");
+                return Box::pin(async move {
+                    let resp = rate_limited_response();
+                    Ok(resp.map(|b| {
+                        b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
+                            .boxed_unsync()
+                    }))
+                });
+            }
+        }
+
+        // Allowed — forward to inner service.
+        let fut = self.inner.call(req);
+        Box::pin(async move {
+            let resp = fut.await?;
+            Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
+        })
+    }
+}
+
+/// Construct a `429 Too Many Requests` response containing a JSON-RPC error.
+fn rate_limited_response() -> Response<Full<Bytes>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": RATE_LIMITED,
+            "message": "rate limited"
+        },
+        "id": null
+    });
+
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "application/json")
+        .body(Full::from(Bytes::from(body.to_string())))
+        .expect("static response must build")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

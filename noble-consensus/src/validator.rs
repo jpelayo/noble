@@ -212,6 +212,20 @@ impl ValidatorList {
         self.entries.is_empty()
     }
 
+    /// Return validator wire-key bytes sorted lexicographically.
+    ///
+    /// Used by the `RoundRobin` voting strategy for deterministic rotation.
+    pub fn sorted_validator_keys(&self) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    /// Look up the weight of a validator by its wire-format key bytes.
+    pub fn weight_of_wire(&self, wire_bytes: &[u8]) -> Option<u64> {
+        self.entries.get(wire_bytes).map(|e| e.weight)
+    }
+
     /// Schedule a key rotation with a grace period.
     ///
     /// During the grace period (`rotation_cycle..rotation_cycle + grace_cycles`),

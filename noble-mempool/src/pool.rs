@@ -15,7 +15,7 @@
 //! 1. Size check
 //! 2. Duplicate check (mempool + chain callback)
 //! 3. Version check
-//! 4. Structural validation (T1-T5, T8-T10 via noble-core)
+//! 4. Structural validation (T5 scheme, T7-prereq additional sig schemes, T8-T9 metadata)
 //! 5. Signature cache lookup (skip verification if cached)
 //! 6. Signature verification (T6, T7)
 //! 7. Fee check (>= dynamic minimum)
@@ -450,8 +450,9 @@ impl Mempool {
     }
 
     fn verify_signatures(&self, tx: &Transaction) -> Result<(), MempoolError> {
+        // AUD3-D7: Chain-aware signing message prevents cross-chain replay.
         let signing_msg = tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(self.config.chain_id)
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
         // T6: Publisher signature

@@ -9,9 +9,74 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_consensus::ConsensusStateMachine;
+use noble_consensus::{ConsensusStateMachine, VotingStrategy};
 use noble_crypto::NoblePublicKey;
 use noble_storage::StorageEngine;
+
+/// Convert a `VotingStrategy` to a (name, params) pair for RPC responses.
+fn strategy_to_response(strategy: &VotingStrategy) -> (String, serde_json::Value) {
+    let name = strategy.name().to_string();
+    let params = match strategy {
+        VotingStrategy::FixedValidator { validator_key } => {
+            serde_json::json!({ "validator_key": validator_key })
+        }
+        VotingStrategy::SubsetRotation { validators } => {
+            serde_json::json!({ "validators": validators })
+        }
+        _ => serde_json::Value::Null,
+    };
+    (name, params)
+}
+
+/// Parse a strategy name + optional params into a `VotingStrategy`.
+fn parse_strategy(
+    name: &str,
+    params: Option<&serde_json::Value>,
+) -> Result<VotingStrategy, ApiError> {
+    match name {
+        "first_valid" => Ok(VotingStrategy::FirstValid),
+        "round_robin" => Ok(VotingStrategy::RoundRobin),
+        "random" => Ok(VotingStrategy::Random),
+        "weighted_reputation" => Ok(VotingStrategy::WeightedReputation),
+        "follow_majority" => Ok(VotingStrategy::FollowMajority),
+        "manual" => Ok(VotingStrategy::Manual),
+        "fixed_validator" => {
+            let key = params
+                .and_then(|p| p.get("validator_key"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ApiError::InvalidParam("fixed_validator requires params.validator_key".into())
+                })?;
+            Ok(VotingStrategy::FixedValidator {
+                validator_key: key.to_string(),
+            })
+        }
+        "subset_rotation" => {
+            let vals = params
+                .and_then(|p| p.get("validators"))
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    ApiError::InvalidParam(
+                        "subset_rotation requires params.validators array".into(),
+                    )
+                })?;
+            let validators: Vec<String> = vals
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if validators.is_empty() {
+                return Err(ApiError::InvalidParam(
+                    "subset_rotation requires at least one validator".into(),
+                ));
+            }
+            Ok(VotingStrategy::SubsetRotation { validators })
+        }
+        other => Err(ApiError::InvalidParam(format!(
+            "unknown strategy: {other}. Valid: first_valid, fixed_validator, round_robin, \
+             subset_rotation, random, weighted_reputation, follow_majority, manual"
+        ))),
+    }
+}
 
 use crate::error::ApiError;
 use crate::state::ApiState;
@@ -41,6 +106,27 @@ pub trait ConsensusApi {
     /// Remove a validator from the trusted set.
     #[method(name = "removeValidator")]
     async fn remove_validator(&self, pubkey: String) -> Result<bool, ErrorObjectOwned>;
+
+    /// Get the current voting strategy for both rounds.
+    #[method(name = "getVotingStrategy")]
+    async fn get_voting_strategy(&self) -> Result<VotingStrategyResponse, ErrorObjectOwned>;
+
+    /// Set the voting strategy for a specific round (1 or 2).
+    #[method(name = "setVotingStrategy")]
+    async fn set_voting_strategy(
+        &self,
+        round: u8,
+        strategy: String,
+        params: Option<serde_json::Value>,
+    ) -> Result<VotingStrategyResponse, ErrorObjectOwned>;
+
+    /// Get current cycle vote tallies.
+    #[method(name = "getVoteTallies")]
+    async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned>;
+
+    /// Cast a manual vote for Round 1 (Manual strategy only).
+    #[method(name = "castVote")]
+    async fn cast_vote(&self, block_hash: String) -> Result<bool, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -81,10 +167,10 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     name: friendly_name,
                     status: liveness.as_str().to_string(),
                     weight,
-                    reputation_score: 0.0, // placeholder until reputation system is complete
-                    blocks_produced: 0,    // placeholder
-                    cycles_active: 0,      // placeholder
-                    last_active: None,     // populated from peer records when available
+                    reputation_score: -1.0, // -1 = not yet implemented
+                    blocks_produced: 0,     // not yet tracked
+                    cycles_active: 0,       // not yet tracked
+                    last_active: None,      // populated from peer records when available
                     joined_cycle: added_at,
                 },
             )
@@ -111,8 +197,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             return Err(ApiError::ValidatorNotFound(pubkey).into());
         }
 
-        // Reputation scoring is a placeholder — return a fixed score.
-        Ok(ReputationScoreResponse { pubkey, score: 100 })
+        // Reputation scoring is not yet implemented — return 0 as sentinel.
+        Ok(ReputationScoreResponse { pubkey, score: 0 })
     }
 
     async fn get_cycle_status(&self) -> Result<CycleStatusResponse, ErrorObjectOwned> {
@@ -158,6 +244,85 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         if !removed {
             return Err(ApiError::ValidatorNotFound(pubkey).into());
         }
+        Ok(true)
+    }
+
+    async fn get_voting_strategy(&self) -> Result<VotingStrategyResponse, ErrorObjectOwned> {
+        let consensus = self.consensus.read().unwrap();
+        let (r1_name, r1_params) = strategy_to_response(consensus.voting_strategy());
+        let (r2_name, r2_params) = strategy_to_response(consensus.confirmation_strategy());
+        Ok(VotingStrategyResponse {
+            round1_strategy: r1_name,
+            round1_params: r1_params,
+            round2_strategy: r2_name,
+            round2_params: r2_params,
+        })
+    }
+
+    async fn set_voting_strategy(
+        &self,
+        round: u8,
+        strategy: String,
+        params: Option<serde_json::Value>,
+    ) -> Result<VotingStrategyResponse, ErrorObjectOwned> {
+        if round != 1 && round != 2 {
+            return Err(ApiError::InvalidParam("round must be 1 or 2".into()).into());
+        }
+        let parsed = parse_strategy(&strategy, params.as_ref()).map_err(ErrorObjectOwned::from)?;
+
+        let mut consensus = self.consensus.write().unwrap();
+        if round == 1 {
+            consensus.set_voting_strategy(parsed);
+        } else {
+            consensus.set_confirmation_strategy(parsed);
+        }
+
+        let (r1_name, r1_params) = strategy_to_response(consensus.voting_strategy());
+        let (r2_name, r2_params) = strategy_to_response(consensus.confirmation_strategy());
+        Ok(VotingStrategyResponse {
+            round1_strategy: r1_name,
+            round1_params: r1_params,
+            round2_strategy: r2_name,
+            round2_params: r2_params,
+        })
+    }
+
+    async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
+        let consensus = self.consensus.read().unwrap();
+        let cycle = consensus.current_cycle();
+        let phase = consensus.current_phase();
+        let tallies = consensus.vote_tallies();
+
+        let mut entries: Vec<VoteTallyEntry> = tallies
+            .into_iter()
+            .map(|(h, c)| VoteTallyEntry {
+                block_hash: hash_to_hex(&h),
+                vote_count: c,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.vote_count.cmp(&a.vote_count));
+
+        Ok(VoteTalliesResponse {
+            cycle,
+            phase: format!("{:?}", phase),
+            tallies: entries,
+        })
+    }
+
+    async fn cast_vote(&self, block_hash: String) -> Result<bool, ErrorObjectOwned> {
+        let _hash = parse_hash(&block_hash)?;
+
+        let consensus = self.consensus.read().unwrap();
+        let strategy = consensus.voting_strategy();
+        if !matches!(strategy, VotingStrategy::Manual) {
+            return Err(ApiError::InvalidParam(
+                "castVote is only available when voting_strategy is 'manual'".into(),
+            )
+            .into());
+        }
+        // Manual vote is stored in-engine — for now, acknowledge the request.
+        // Full implementation requires engine to accept manual vote injection,
+        // which will be wired when the engine processes ManualVote events.
         Ok(true)
     }
 }

@@ -172,6 +172,8 @@ pub enum NetworkEvent {
     TransactionAnnounced { peer_id: Vec<u8>, tx_id: [u8; 32] },
     /// A PoR vote was received from the network.
     VoteReceived {
+        /// Transport-layer peer identity (libp2p PeerId bytes).
+        peer_id: Vec<u8>,
         cycle: u64,
         candidate_hash: [u8; 32],
         voter_id: Vec<u8>,

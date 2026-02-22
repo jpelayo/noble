@@ -181,11 +181,13 @@ fn validate_tx_signatures(
     tx: &Transaction,
     ctx: &TxValidationContext,
 ) -> Result<(), ValidationError> {
-    // Compute signing message (used by T6 and T7)
-    let signing_msg = tx.compute_signing_message().map_err(|e| {
-        tracing::debug!("signing message computation failed: {e}");
-        ValidationError::Internal("signing message computation failed".into())
-    })?;
+    // AUD3-D7: Chain-aware signing message prevents cross-chain replay.
+    let signing_msg = tx
+        .compute_signing_message_for_chain(ctx.chain_id)
+        .map_err(|e| {
+            tracing::debug!("signing message computation failed: {e}");
+            ValidationError::Internal("signing message computation failed".into())
+        })?;
 
     // T6/T26: Publisher signature verification
     if tx.publisher_sig.scheme_id == SCHEME_BIP137 {
@@ -620,7 +622,9 @@ mod tests {
             gateway_address: None,
         };
 
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         (tx, tx_id)
@@ -663,7 +667,9 @@ mod tests {
         tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW + 1;
         // Re-sign with new timestamp
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -679,7 +685,9 @@ mod tests {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW; // At the boundary
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -753,7 +761,9 @@ mod tests {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.fee = MIN_TX_FEE - 1;
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -958,7 +968,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         (tx, tx_id)
@@ -970,7 +982,9 @@ mod tests {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.tx_type = 0xFF;
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1015,7 +1029,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1050,7 +1066,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1085,7 +1103,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1120,7 +1140,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1155,7 +1177,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1188,7 +1212,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1309,7 +1335,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1354,7 +1382,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -1395,7 +1425,9 @@ mod tests {
             external_attestations: vec![attestation],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1436,7 +1468,9 @@ mod tests {
             external_attestations: vec![attestation],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -1469,7 +1503,9 @@ mod tests {
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Add MAX_ADDITIONAL_SIGS + 1 valid signatures
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         for _ in 0..=MAX_ADDITIONAL_SIGS {
             let (extra_sk, _) = ed25519::generate_keypair();
             let extra_priv = NoblePrivateKey::Ed25519(extra_sk);
@@ -1497,7 +1533,9 @@ mod tests {
                 value: b"val".to_vec(),
             });
         }
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1579,7 +1617,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1614,7 +1654,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -1626,7 +1668,9 @@ mod tests {
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.fee = 0; // Invalid fee, but don't re-sign (will fail T11)
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 
@@ -1673,7 +1717,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: Some(gw_wire),
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 
@@ -1704,7 +1750,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: Some(vec![0xFF, 0x01, 0x02]), // invalid wire bytes
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 

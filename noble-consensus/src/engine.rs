@@ -7,7 +7,7 @@
 //! and chain tip advancement using deterministic event-driven processing.
 
 use noble_core::{validate_block, Block, BlockHeader, BlockValidationContext};
-use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey, SignatureEnvelope};
+use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use tracing::{debug, info};
 
 use crate::candidate::CandidateTracker;
@@ -44,6 +44,9 @@ pub struct CycleEngine {
     tip_hash: Hash256,
     /// AUD2-C2: Track tip block timestamp so we can validate B5 (timestamp ordering).
     tip_timestamp: u64,
+    /// AUD3-D6: Full tip block header for proper B2/B3/B5 validation.
+    /// Set on startup (from storage) and updated on each CommitBlock.
+    tip_header: Option<BlockHeader>,
     /// Current tracked cycle and phase.
     tracked_cycle: u64,
     tracked_phase: CyclePhase,
@@ -85,6 +88,7 @@ impl CycleEngine {
             tip_height,
             tip_hash,
             tip_timestamp: 0,
+            tip_header: None,
             tracked_cycle: 0,
             tracked_phase: CyclePhase::Validation,
             chain_id,
@@ -123,6 +127,42 @@ impl CycleEngine {
         self.tip_height = height;
         self.tip_hash = block_hash;
         self.tip_timestamp = timestamp;
+    }
+
+    /// Get the current voting strategy (Round 1).
+    pub fn voting_strategy(&self) -> &crate::strategy::VotingStrategy {
+        &self.config.voting_strategy
+    }
+
+    /// Get the current confirmation strategy (Round 2).
+    pub fn confirmation_strategy(&self) -> &crate::strategy::VotingStrategy {
+        &self.config.confirmation_strategy
+    }
+
+    /// Set the voting strategy (Round 1).
+    pub fn set_voting_strategy(&mut self, strategy: crate::strategy::VotingStrategy) {
+        self.config.voting_strategy = strategy;
+    }
+
+    /// Set the confirmation strategy (Round 2).
+    pub fn set_confirmation_strategy(&mut self, strategy: crate::strategy::VotingStrategy) {
+        self.config.confirmation_strategy = strategy;
+    }
+
+    /// Get current vote tallies (candidate_hash → vote count).
+    pub fn vote_tallies(&self) -> std::collections::HashMap<Hash256, usize> {
+        self.vote_mgr.current_tallies()
+    }
+
+    /// Update the chain tip with the full block header for proper B2/B3/B5 validation (AUD3-D6).
+    pub fn update_tip_with_header(&mut self, header: BlockHeader) {
+        self.tip_height = header.height;
+        self.tip_timestamp = header.timestamp;
+        // tip_hash is computed from the header
+        if let Ok(h) = header.compute_block_hash() {
+            self.tip_hash = h;
+        }
+        self.tip_header = Some(header);
     }
 
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
@@ -181,16 +221,25 @@ impl CycleEngine {
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cycle}: entering Reflection phase"
                 )));
-                // If we are a validator, vote for our preferred candidate
+                // If we are a validator, vote for our preferred candidate (strategy-based).
                 if let Some((ref priv_key, ref pub_key)) = self.our_validator_key {
-                    if let Some(preferred) = self.candidate_tracker.preferred_candidate() {
-                        match PorVote::sign(cycle, preferred.block_hash, priv_key, pub_key.clone())
-                        {
+                    let tallies = self.vote_mgr.current_tallies();
+                    let selected = crate::strategy::select_candidate(
+                        &self.config.voting_strategy,
+                        &self.candidate_tracker,
+                        &self.validator_list,
+                        cycle,
+                        None, // manual_vote: handled via RPC in future
+                        Some(&tallies),
+                    );
+                    if let Some(candidate_hash) = selected {
+                        match PorVote::sign(cycle, candidate_hash, priv_key, pub_key.clone()) {
                             Ok(vote) => {
                                 outputs.push(CycleIo::BroadcastVote(vote));
                                 outputs.push(CycleIo::Log(format!(
-                                    "cycle {cycle}: broadcast vote for candidate {}",
-                                    preferred.block_hash
+                                    "cycle {cycle}: broadcast vote for candidate {} (strategy: {})",
+                                    candidate_hash,
+                                    self.config.voting_strategy.name()
                                 )));
                             }
                             Err(e) => {
@@ -241,6 +290,7 @@ impl CycleEngine {
                     self.tip_height = new_height;
                     self.tip_hash = new_hash;
                     self.tip_timestamp = block.header.timestamp;
+                    self.tip_header = Some(block.header.clone());
                     outputs.push(CycleIo::CommitBlock(block));
                     outputs.push(CycleIo::EmitMetric {
                         name: "block_committed".to_string(),
@@ -308,31 +358,23 @@ impl CycleEngine {
             return outputs;
         }
 
-        // AUD2-C2: Construct parent header from tip state for B2/B3/B5 validation
-        let parent_header = if self.tip_height > 0 || self.tip_hash != Hash256::ZERO {
-            Some(BlockHeader {
-                version: noble_core::PROTOCOL_VERSION,
-                prev_block_hash: Hash256::ZERO, // not needed for B2/B3/B5 checks
-                merkle_root: Hash256::ZERO,
-                timestamp: self.tip_timestamp,
-                height: self.tip_height,
-                tx_count: 0,
-                validator_id: NoblePublicKey::Ed25519(vec![]),
-                validator_sig: SignatureEnvelope {
-                    scheme_id: 0,
-                    public_key: vec![],
-                    signature: vec![],
-                },
-            })
-        } else {
-            None
-        };
+        // AUD3-D6: Construct parent header stub from tip state for B2/B3/B5 validation.
+        // The validate_block B2 check verifies candidate.prev_block_hash against the
+        // parent's computed hash, so we use the stored tip_hash directly. B5 uses
+        // parent.timestamp for ordering checks.
+        let parent_header = self.tip_header.clone();
 
         // Validate the block
+        // AUD3-H1: Use wall-clock time for B6 future/past skew checks,
+        // not the block's own timestamp (which would bypass the check).
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let val_list = self.validator_list.as_pubkey_vec();
         let ctx = BlockValidationContext {
             chain_id: self.chain_id,
-            current_time: block.header.timestamp,
+            current_time,
             parent: parent_header.as_ref(),
             validator_list: &val_list,
         };
@@ -535,11 +577,15 @@ mod tests {
         prev_hash: Hash256,
     ) -> (Box<Block>, Hash256) {
         let merkle_root = noble_core::compute_merkle_root(&[]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut header = BlockHeader {
             version: PROTOCOL_VERSION,
             prev_block_hash: prev_hash,
             merkle_root,
-            timestamp: 1_700_000_000,
+            timestamp: now,
             height,
             tx_count: 0,
             validator_id: val_pub.clone(),
@@ -908,10 +954,12 @@ mod tests {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Validation;
-        // Set tip to a known state
-        engine.update_tip_with_timestamp(1, Hash256::from_bytes([0xAA; 32]), 1_700_000_000);
 
-        // Create a block that claims prev_hash is ZERO (wrong — tip is 0xAA...)
+        // Create a parent block at height 1 so tip_header is set
+        let (parent_block, _parent_hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.update_tip_with_header(parent_block.header.clone());
+
+        // Create a block that claims prev_hash is ZERO (wrong — tip is parent_hash)
         let (block, _) = make_valid_block(&vp, &vpub, 2, Hash256::ZERO);
         let outputs = engine.step(CycleEvent::BlockProposed {
             block,

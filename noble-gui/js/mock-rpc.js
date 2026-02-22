@@ -248,13 +248,21 @@ const PEER_IDS = Array.from({ length: 23 }, (_, i) =>
 );
 
 function makePeers(chainHeight) {
-  return PEER_IDS.map((peerId, i) => ({
-    peer_id: peerId,
-    direction: i < 8 ? 'Outbound' : 'Inbound',
-    ban_score: i === 22 ? 15 : i === 21 ? 5 : 0,
-    chain_tip: [chainHeight - (i % 3), deterministicHash(chainHeight - (i % 3))],
-    latency_ms: 20 + Math.floor(Math.random() * 180),
-  }));
+  const BAN_REASONS = [
+    { category: 'InvalidTransaction', subject: 'failed T8: metadata key too long (128 chars max)' },
+    { category: 'ProtocolViolation', subject: 'chain_id mismatch: expected 1, got 42' },
+  ];
+  return PEER_IDS.map((peerId, i) => {
+    const banScore = i === 22 ? 15 : i === 21 ? 5 : 0;
+    return {
+      peer_id: peerId,
+      direction: i < 8 ? 'Outbound' : 'Inbound',
+      ban_score: banScore,
+      last_ban_reason: banScore > 0 ? BAN_REASONS[i % BAN_REASONS.length] : null,
+      chain_tip: [chainHeight - (i % 3), deterministicHash(chainHeight - (i % 3))],
+      latency_ms: 20 + Math.floor(Math.random() * 180),
+    };
+  });
 }
 
 // ── Generate Linked Chain ──
@@ -700,6 +708,46 @@ export class MockRpcClient {
         }
 
         return { cycles };
+      }
+
+      case 'noble_getVotingStrategy':
+        return {
+          round1_strategy: this._votingR1 || 'first_valid',
+          round1_params: this._votingR1Params || null,
+          round2_strategy: this._votingR2 || 'follow_majority',
+          round2_params: this._votingR2Params || null,
+        };
+
+      case 'noble_setVotingStrategy': {
+        const { round, strategy, params: stratParams } = args;
+        if (round === 1) {
+          this._votingR1 = strategy;
+          this._votingR1Params = stratParams;
+        } else {
+          this._votingR2 = strategy;
+          this._votingR2Params = stratParams;
+        }
+        return {
+          round1_strategy: this._votingR1 || 'first_valid',
+          round1_params: this._votingR1Params || null,
+          round2_strategy: this._votingR2 || 'follow_majority',
+          round2_params: this._votingR2Params || null,
+        };
+      }
+
+      case 'noble_getVoteTallies': {
+        const now = Math.floor(Date.now() / 1000);
+        const cycle = Math.floor(now / CYCLE_DURATION_SECS);
+        const elapsed = now % CYCLE_DURATION_SECS;
+        const phaseLen = CYCLE_DURATION_SECS / 4;
+        const phaseIndex = Math.floor(elapsed / phaseLen);
+        const phases = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
+        // Generate mock tallies during Voting/Confirmation phases
+        const tallies = (phaseIndex >= 1 && phaseIndex <= 2) ? [
+          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), vote_count: 3 },
+          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), vote_count: 1 },
+        ] : [];
+        return { cycle, phase: phases[phaseIndex], tallies };
       }
 
       case 'noble_getNodeInfo':

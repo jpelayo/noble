@@ -11,6 +11,7 @@ use jsonrpsee::RpcModule;
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
+use crate::ip_filter::{IpFilter, IpFilterLayer};
 use crate::methods::address::AddressApiServer;
 use crate::methods::block::BlockApiServer;
 use crate::methods::consensus::ConsensusApiServer;
@@ -22,6 +23,7 @@ use crate::methods::trace::TraceApiServer;
 use crate::methods::transaction::TransactionApiServer;
 use crate::methods::wallet::WalletApiServer;
 use crate::middleware::AuthLayer;
+use crate::rate_limit::RateLimitLayer;
 use crate::state::ApiState;
 
 /// Start the JSON-RPC server on the given address (e.g. "127.0.0.1:8783").
@@ -36,6 +38,13 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     addr: &str,
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
     let auth_layer = AuthLayer::new(state.totp_validator.clone());
+
+    // AUD3-D2: Always layer IpFilter — use allow_all() fallback when no list configured.
+    let ip_filter = state.ip_filter.clone().unwrap_or_else(IpFilter::allow_all);
+    let ip_filter_layer = IpFilterLayer::new(ip_filter);
+
+    // AUD3-D3: Always layer RateLimiter — pass-through when None.
+    let rate_limit_layer = RateLimitLayer::new(state.rate_limiter.clone());
 
     // CORS: permissive when remote access is enabled (IP filter provides security),
     // restrictive to the local GUI origin when localhost-only.
@@ -57,14 +66,23 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
             .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
     };
 
-    // RPC server security: bind address controls access (127.0.0.1 vs 0.0.0.0),
-    // CORS restricts browser origins, auth layer checks TOTP tokens.
+    // RPC server security stack (applied in order):
+    //   1. CORS — browser origin control
+    //   2. IP filter — allow-list access control
+    //   3. Rate limiter — per-IP token bucket
+    //   4. Auth — TOTP bearer token validation
     let server = Server::builder()
         // Explicit body size limit (2 MB). The largest valid RPC payload is a
         // max-size CBOR transaction (~64 KB per T1); 2 MB provides headroom while
         // preventing large-payload DoS. Overrides the jsonrpsee 10 MB default.
         .max_request_body_size(2 * 1024 * 1024)
-        .set_http_middleware(tower::ServiceBuilder::new().layer(cors).layer(auth_layer))
+        .set_http_middleware(
+            tower::ServiceBuilder::new()
+                .layer(cors)
+                .layer(ip_filter_layer)
+                .layer(rate_limit_layer)
+                .layer(auth_layer),
+        )
         .build(addr)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to bind server: {e}")))?;

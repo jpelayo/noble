@@ -198,6 +198,17 @@ impl VoteManager {
         Ok(true)
     }
 
+    /// Return current vote counts per candidate hash.
+    ///
+    /// Used by voting strategies (e.g. FollowMajority) to observe the
+    /// emerging consensus before casting their own vote.
+    pub fn current_tallies(&self) -> HashMap<Hash256, usize> {
+        self.votes
+            .iter()
+            .map(|(hash, peers)| (*hash, peers.len()))
+            .collect()
+    }
+
     /// Compute the majority outcome.
     ///
     /// - GAP-C6: If `total_peers < config.min_peers_for_consensus` → Indeterminate.

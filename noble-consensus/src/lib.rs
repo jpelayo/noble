@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod event;
 pub mod proposal;
+pub mod strategy;
 pub mod validator;
 pub mod vote;
 
@@ -24,5 +25,6 @@ pub use engine::{ConsensusStateMachine, CycleEngine};
 pub use error::ConsensusError;
 pub use event::{CycleEvent, CycleIo};
 pub use proposal::propose_block;
+pub use strategy::VotingStrategy;
 pub use validator::{PendingRotation, ValidatorList, ValidatorLiveness};
 pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteError, VoteManager};

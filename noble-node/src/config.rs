@@ -83,6 +83,28 @@ pub struct StorageConfig {
 pub struct ConsensusConfig {
     pub validator_key_path: String,
     pub validator_list_path: PathBuf,
+    /// Voting strategy for Round 1 (Reflection phase).
+    /// Values: first_valid, fixed_validator, round_robin, subset_rotation,
+    ///         random, weighted_reputation, follow_majority, manual
+    #[serde(default = "default_voting_strategy")]
+    pub voting_strategy: String,
+    /// Voting strategy for Round 2 (Confirmation phase).
+    #[serde(default = "default_confirmation_strategy")]
+    pub confirmation_strategy: String,
+    /// For fixed_validator strategy: hex pubkey of preferred validator.
+    #[serde(default)]
+    pub voting_preferred_validator: String,
+    /// For subset_rotation strategy: hex pubkeys of preferred validators.
+    #[serde(default)]
+    pub voting_subset: Vec<String>,
+}
+
+fn default_voting_strategy() -> String {
+    "first_valid".to_string()
+}
+
+fn default_confirmation_strategy() -> String {
+    "follow_majority".to_string()
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -97,6 +119,8 @@ impl std::fmt::Debug for ConsensusConfig {
                 },
             )
             .field("validator_list_path", &self.validator_list_path)
+            .field("voting_strategy", &self.voting_strategy)
+            .field("confirmation_strategy", &self.confirmation_strategy)
             .finish()
     }
 }
@@ -277,6 +301,10 @@ impl Default for ConsensusConfig {
         Self {
             validator_key_path: String::new(),
             validator_list_path: PathBuf::from("validators.txt"),
+            voting_strategy: default_voting_strategy(),
+            confirmation_strategy: default_confirmation_strategy(),
+            voting_preferred_validator: String::new(),
+            voting_subset: Vec::new(),
         }
     }
 }
@@ -352,6 +380,10 @@ mod tests {
         let config = ConsensusConfig {
             validator_key_path: "/secret/validator.key".to_string(),
             validator_list_path: std::path::PathBuf::from("validators.txt"),
+            voting_strategy: default_voting_strategy(),
+            confirmation_strategy: default_confirmation_strategy(),
+            voting_preferred_validator: String::new(),
+            voting_subset: Vec::new(),
         };
         let debug_str = format!("{config:?}");
         assert!(

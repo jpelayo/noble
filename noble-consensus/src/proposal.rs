@@ -90,6 +90,13 @@ mod tests {
         (priv_key, pub_key)
     }
 
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     fn make_test_tx(doc: &[u8], fee: u64) -> Transaction {
         let (sk, pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk);
@@ -98,7 +105,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             tx_type: 0,
             checksum,
-            timestamp: 1_700_000_000,
+            timestamp: now_secs(),
             fee,
             recipient: None,
             amount: None,
@@ -113,7 +120,9 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         };
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         tx
     }
@@ -125,7 +134,7 @@ mod tests {
             &[],
             Hash256::ZERO,
             1,
-            1_700_000_000,
+            now_secs(),
             MAINNET_CHAIN_ID,
             &val_priv,
             &val_pub,
@@ -150,7 +159,7 @@ mod tests {
             &txs,
             Hash256::ZERO,
             1,
-            1_700_000_000,
+            now_secs(),
             MAINNET_CHAIN_ID,
             &val_priv,
             &val_pub,
@@ -175,7 +184,7 @@ mod tests {
             &txs,
             Hash256::ZERO,
             1,
-            1_700_000_000,
+            now_secs(),
             MAINNET_CHAIN_ID,
             &val_priv,
             &val_pub,
@@ -194,11 +203,12 @@ mod tests {
         let (val_priv, val_pub) = make_validator();
         let tx = make_test_tx(b"validated_doc", MIN_TX_FEE);
 
+        let now = now_secs();
         let block = propose_block(
             &[tx],
             Hash256::ZERO,
             0,
-            1_700_000_000,
+            now,
             MAINNET_CHAIN_ID,
             &val_priv,
             &val_pub,
@@ -208,7 +218,7 @@ mod tests {
 
         let ctx = noble_core::BlockValidationContext {
             chain_id: MAINNET_CHAIN_ID,
-            current_time: 1_700_000_000,
+            current_time: now,
             parent: None,
             validator_list: &[val_pub],
         };

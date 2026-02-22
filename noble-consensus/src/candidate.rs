@@ -136,6 +136,20 @@ impl CandidateTracker {
             .collect()
     }
 
+    /// Return all candidates for the current cycle, ordered by received_at.
+    pub fn all_candidates(&self) -> Vec<&CandidateEntry> {
+        let mut entries: Vec<&CandidateEntry> = self.candidates.values().collect();
+        entries.sort_by_key(|c| c.order);
+        entries
+    }
+
+    /// Return the validator wire bytes for a candidate block hash.
+    pub fn validator_of(&self, block_hash: &Hash256) -> Option<Vec<u8>> {
+        self.candidates
+            .get(block_hash)
+            .map(|e| e.block.header.validator_id.to_wire_bytes())
+    }
+
     /// Number of candidates currently tracked.
     pub fn len(&self) -> usize {
         self.candidates.len()

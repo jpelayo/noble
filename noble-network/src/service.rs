@@ -23,7 +23,7 @@ use crate::error::NetworkError;
 use crate::messages::{
     GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxRequest, TxResponse,
 };
-use crate::peer_manager::{Direction, Misbehavior, PeerManager};
+use crate::peer_manager::{BanCategory, BanReason, Direction, PeerManager};
 use crate::rate_limiter::TxRateLimiter;
 use crate::seen_cache::{self, SeenCache};
 use crate::topics;
@@ -417,9 +417,14 @@ async fn handle_swarm_event(
                             candidate_hash,
                             voter_id,
                             signature,
-                        } => {
-                            handle_por_vote(cycle, candidate_hash, voter_id, signature, seen_votes)
-                        }
+                        } => handle_por_vote(
+                            peer_bytes.clone(),
+                            cycle,
+                            candidate_hash,
+                            voter_id,
+                            signature,
+                            seen_votes,
+                        ),
                         GossipMessage::PeerExchange { addrs } => {
                             handle_peer_exchange(&addrs, config, swarm);
                             None
@@ -492,8 +497,13 @@ async fn handle_swarm_event(
                 }
                 Err(e) => {
                     tracing::warn!(%propagation_source, err = %e, "invalid gossip message");
-                    peer_manager
-                        .record_misbehavior(&propagation_source, Misbehavior::ProtocolViolation);
+                    peer_manager.record_misbehavior(
+                        &propagation_source,
+                        BanReason::new(
+                            BanCategory::ProtocolViolation,
+                            format!("malformed gossip: {e}"),
+                        ),
+                    );
                     let _ = swarm
                         .behaviour_mut()
                         .gossip
@@ -561,7 +571,16 @@ async fn handle_swarm_event(
                             local_chain_id = config.chain_id,
                             "chain/protocol mismatch — disconnecting"
                         );
-                        if peer_manager.record_misbehavior(&peer, Misbehavior::ProtocolViolation) {
+                        if peer_manager.record_misbehavior(
+                            &peer,
+                            BanReason::new(
+                                BanCategory::ProtocolViolation,
+                                format!(
+                                    "chain_id mismatch: expected {}, got {}",
+                                    config.chain_id, chain_id
+                                ),
+                            ),
+                        ) {
                             let _ = swarm.disconnect_peer_id(peer);
                             let _ = event_tx
                                 .send(NetworkEvent::PeerBanned {
@@ -696,7 +715,10 @@ fn handle_tx_announce(
     peer_manager: &mut PeerManager,
 ) -> Option<NetworkEvent> {
     if !tx_rate_limiter.try_consume(source) {
-        peer_manager.record_misbehavior(source, Misbehavior::TxFlood);
+        peer_manager.record_misbehavior(
+            source,
+            BanReason::new(BanCategory::TxFlood, "tx relay rate limit exceeded"),
+        );
         None
     } else if !seen_txs.insert_if_new(tx_id) {
         None
@@ -710,6 +732,7 @@ fn handle_tx_announce(
 
 /// Handle a Proof of Reputation vote gossip message.
 fn handle_por_vote(
+    peer_id: Vec<u8>,
     cycle: u64,
     candidate_hash: [u8; 32],
     voter_id: Vec<u8>,
@@ -720,7 +743,10 @@ fn handle_por_vote(
     if !seen_votes.insert_if_new(dedup_key) {
         None
     } else {
+        // AUD3-D9: Include transport PeerId so the consensus engine can verify
+        // that the vote source matches the claimed voter identity.
         Some(NetworkEvent::VoteReceived {
+            peer_id,
             cycle,
             candidate_hash,
             voter_id,
@@ -773,7 +799,13 @@ fn handle_gossip_node_announce(
         }
         Err(reason) => {
             tracing::warn!(%source, %reason, "invalid node announce");
-            peer_manager.record_misbehavior(source, Misbehavior::InvalidAnnounce);
+            peer_manager.record_misbehavior(
+                source,
+                BanReason::new(
+                    BanCategory::InvalidAnnounce,
+                    format!("invalid announce: {reason}"),
+                ),
+            );
             None
         }
     }
@@ -1061,7 +1093,13 @@ async fn handle_command(
 
         NetworkCommand::BanPeer(peer_bytes) => {
             if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
-                peer_manager.record_misbehavior(&pid, Misbehavior::DuplicateProposal);
+                peer_manager.record_misbehavior(
+                    &pid,
+                    BanReason::new(
+                        BanCategory::DuplicateProposal,
+                        "ban command from consensus engine",
+                    ),
+                );
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }

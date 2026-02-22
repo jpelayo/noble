@@ -114,7 +114,13 @@ async fn three_nodes_complete_consensus_cycle() {
 
     // Simulate a consensus cycle using direct engine stepping.
     // 1. Tick to enter Validation phase.
-    let now = 1_700_000_000u64;
+    // Align to cycle start (offset=0) so the tick deterministically enters
+    // Validation phase (first half of the 10-second cycle).
+    let raw_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let now = raw_now - (raw_now % 10);
     node1.step(CycleEvent::Tick { now }).await;
     node2.step(CycleEvent::Tick { now }).await;
     node3.step(CycleEvent::Tick { now }).await;

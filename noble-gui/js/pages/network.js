@@ -52,6 +52,7 @@ export function init(root, ctx) {
               <th>Peer ID</th>
               <th>Direction</th>
               <th>Ban Score</th>
+              <th>Ban Reason</th>
               <th>Chain Tip</th>
               <th>Latency</th>
             </tr>
@@ -110,10 +111,15 @@ export function init(root, ctx) {
       const tr = document.createElement('tr');
       const tipHeight = peer.chain_tip ? peer.chain_tip[0] : '?';
       const dirClass = peer.direction === 'Inbound' ? 'inbound' : 'outbound';
+      const banReason = peer.last_ban_reason
+        ? `<span title="${peer.last_ban_reason.subject || ''}" style="cursor:help">${peer.last_ban_reason.category}</span>`
+        : '<span style="color:var(--text-muted)">&mdash;</span>';
+      const banScoreColor = (peer.ban_score || 0) > 50 ? 'var(--error)' : (peer.ban_score || 0) > 0 ? 'var(--warning)' : 'var(--text-muted)';
       tr.innerHTML = `
         <td class="mono">${truncateHash(peer.peer_id, 8)}</td>
         <td><span class="badge ${dirClass}">${peer.direction}</span></td>
-        <td>${peer.ban_score}</td>
+        <td style="color:${banScoreColor};font-weight:600">${peer.ban_score || 0}</td>
+        <td style="font-size:var(--font-size-xs)">${banReason}</td>
         <td>${formatNumber(tipHeight)}</td>
         <td>${peer.latency_ms}ms</td>
       `;

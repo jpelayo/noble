@@ -96,26 +96,9 @@ impl Transaction {
     /// The signing payload includes checksum, timestamp, fee, and sorted metadata.
     /// Fee is included for atomic commitment (no tx malleability).
     pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
-        let mut sorted_metadata = self.metadata.clone();
-        sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
-
-        let payload = SigningPayload {
-            version: self.version,
-            tx_type: self.tx_type,
-            checksum: self.checksum,
-            timestamp: self.timestamp,
-            fee: self.fee,
-            recipient: self.recipient.clone(),
-            amount: self.amount,
-            metadata: sorted_metadata,
-            encrypted_locator: self.encrypted_locator.clone(),
-            external_attestations: self.external_attestations.clone(),
-            gateway_address: self.gateway_address.clone(),
-            chain_id: 0, // legacy: no chain_id
-        };
-
-        let canonical = noble_codec::to_canonical_cbor(&payload)?;
-        Ok(sha256(&canonical).0)
+        // AUD3-D7: Default to MAINNET_CHAIN_ID for cross-chain replay protection.
+        // The blockchain has never run, so no backward compat concern.
+        self.compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
     }
 
     /// AUD2-H7: Compute the signing message with an explicit chain_id.
@@ -346,13 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn signing_message_chain_id_zero_matches_legacy() {
+    fn signing_message_default_matches_mainnet() {
         let tx = make_test_tx();
-        let legacy = tx.compute_signing_message().unwrap();
-        let chain0 = tx.compute_signing_message_for_chain(0).unwrap();
+        let default_msg = tx.compute_signing_message().unwrap();
+        let mainnet_msg = tx
+            .compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
+            .unwrap();
         assert_eq!(
-            legacy, chain0,
-            "chain_id=0 should match legacy (no chain_id) for backward compat"
+            default_msg, mainnet_msg,
+            "default signing message should use MAINNET_CHAIN_ID"
         );
     }
 

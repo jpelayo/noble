@@ -42,6 +42,20 @@ validator_key_path = ""
 # Path to the local validator list file (one public key per line).
 validator_list_path = "validators.txt"
 
+# Voting strategy for Round 1 (Reflection phase).
+# Options: first_valid, fixed_validator, round_robin, subset_rotation,
+#          random, weighted_reputation, follow_majority, manual
+voting_strategy = "first_valid"
+
+# Voting strategy for Round 2 (Confirmation phase).
+confirmation_strategy = "follow_majority"
+
+# For fixed_validator strategy: hex pubkey of preferred validator.
+# voting_preferred_validator = ""
+
+# For subset_rotation strategy: comma-separated hex pubkeys.
+# voting_subset = []
+
 [api]
 # JSON-RPC HTTP server bind address.
 rpc_addr = "127.0.0.1:8783"
