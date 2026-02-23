@@ -23,6 +23,7 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 candidate_hash: *vote.candidate_hash.as_bytes(),
                 voter_id: vote.voter_pubkey.to_wire_bytes(),
                 signature: vote_to_signature_bytes(&vote),
+                round: vote.round,
             }]
         }
         CycleIo::BanPeer { peer_id, .. } => {
@@ -59,9 +60,10 @@ pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> 
             voter_id,
             signature,
             peer_id,
+            round,
         } => {
             // Reconstruct PorVote from wire bytes.
-            let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature)?;
+            let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature, *round)?;
             Some(CycleEvent::VoteReceived {
                 vote,
                 from_peer: peer_id.clone(),
@@ -85,8 +87,9 @@ pub fn wire_to_por_vote_public(
     candidate_hash: &[u8; 32],
     voter_id: &[u8],
     signature_bytes: &[u8],
+    round: u8,
 ) -> Option<PorVote> {
-    wire_to_por_vote(cycle, candidate_hash, voter_id, signature_bytes)
+    wire_to_por_vote(cycle, candidate_hash, voter_id, signature_bytes, round)
 }
 
 fn wire_to_por_vote(
@@ -94,6 +97,7 @@ fn wire_to_por_vote(
     candidate_hash: &[u8; 32],
     voter_id: &[u8],
     signature_bytes: &[u8],
+    round: u8,
 ) -> Option<PorVote> {
     let voter_pubkey = NoblePublicKey::from_wire_bytes(voter_id).ok()?;
     let candidate_hash = Hash256(*candidate_hash);
@@ -105,6 +109,7 @@ fn wire_to_por_vote(
         candidate_hash,
         voter_pubkey,
         signature,
+        round,
     })
 }
 
@@ -163,7 +168,7 @@ mod tests {
         let wire_hash = *original.candidate_hash.as_bytes();
 
         // Convert back.
-        let recovered = wire_to_por_vote(5, &wire_hash, &wire_voter_id, &wire_sig).unwrap();
+        let recovered = wire_to_por_vote(5, &wire_hash, &wire_voter_id, &wire_sig, 1).unwrap();
         assert_eq!(recovered.cycle, 5);
         assert_eq!(recovered.candidate_hash, original.candidate_hash);
         // Verify the recovered vote.

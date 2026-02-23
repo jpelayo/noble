@@ -38,6 +38,30 @@ pub trait DocumentApi {
     ) -> Result<DocumentHistoryResponse, ErrorObjectOwned>;
 }
 
+/// Build `RegistrationRecord`s from a list of tx_ids using storage lookups.
+fn build_registration_records<S: StorageEngine>(
+    storage: &S,
+    tx_ids: &[noble_crypto::Hash256],
+) -> Vec<RegistrationRecord> {
+    let mut records = Vec::with_capacity(tx_ids.len());
+    for tx_id in tx_ids {
+        let block_height = storage
+            .get_transaction_location(tx_id)
+            .map(|(h, _)| h)
+            .unwrap_or(0);
+        let timestamp = storage
+            .get_transaction(tx_id)
+            .map(|tx| tx.timestamp)
+            .unwrap_or(0);
+        records.push(RegistrationRecord {
+            block_height,
+            tx_id: hash_to_hex(tx_id),
+            timestamp,
+        });
+    }
+    records
+}
+
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiState<S>> {
     async fn lookup_checksum(
@@ -50,13 +74,10 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
             .lookup_checksum(&checksum_hash)
             .map_err(ApiError::from)?;
 
-        if tx_ids.is_empty() {
-            return Err(ApiError::ChecksumNotFound(checksum).into());
-        }
-
+        let records = build_registration_records(&*storage, &tx_ids);
         Ok(ChecksumLookupResponse {
-            checksum,
-            registrations: tx_ids.iter().map(hash_to_hex).collect(),
+            found: !tx_ids.is_empty(),
+            records,
         })
     }
 
@@ -70,10 +91,14 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
             .lookup_checksum(&checksum_hash)
             .map_err(ApiError::from)?;
 
+        let records = build_registration_records(&*storage, &tx_ids);
+        let first_seen = records.iter().map(|r| r.timestamp).min();
+
         Ok(VerifyDocumentResponse {
             checksum,
-            found: !tx_ids.is_empty(),
-            registration_count: tx_ids.len(),
+            registered: !tx_ids.is_empty(),
+            registrations: records,
+            first_seen,
         })
     }
 
@@ -91,16 +116,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
             return Err(ApiError::ChecksumNotFound(checksum).into());
         }
 
-        let mut transactions = Vec::with_capacity(tx_ids.len());
-        for tx_id in &tx_ids {
-            if let Ok(tx) = storage.get_transaction(tx_id) {
-                transactions.push(tx_to_response(&tx, &hash_to_hex(tx_id)));
-            }
-        }
-
-        Ok(DocumentHistoryResponse {
-            checksum,
-            transactions,
-        })
+        let history = build_registration_records(&*storage, &tx_ids);
+        Ok(DocumentHistoryResponse { checksum, history })
     }
 }

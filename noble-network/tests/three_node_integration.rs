@@ -248,7 +248,7 @@ fn vote_dedup_prevents_double_counting() {
     let voter_id = vec![1, 2, 3];
     let cycle = 10u64;
 
-    let key = vote_dedup_key(cycle, &voter_id);
+    let key = vote_dedup_key(cycle, &voter_id, 1);
 
     // First vote: new
     assert!(seen.insert_if_new(key));
@@ -257,12 +257,20 @@ fn vote_dedup_prevents_double_counting() {
 
     // Different voter in same cycle: new
     let other_voter = vec![4, 5, 6];
-    let key2 = vote_dedup_key(cycle, &other_voter);
+    let key2 = vote_dedup_key(cycle, &other_voter, 1);
     assert!(seen.insert_if_new(key2));
 
     // Same voter in different cycle: new
-    let key3 = vote_dedup_key(cycle + 1, &voter_id);
+    let key3 = vote_dedup_key(cycle + 1, &voter_id, 1);
     assert!(seen.insert_if_new(key3));
+
+    // Same voter, same cycle, different round (R2): new — must not be suppressed
+    let key4 = vote_dedup_key(cycle, &voter_id, 2);
+    assert_ne!(key, key4, "R1 and R2 dedup keys must differ");
+    assert!(
+        seen.insert_if_new(key4),
+        "R2 vote must not be suppressed as R1 duplicate"
+    );
 }
 
 /// Invalid block triggers ban via consensus engine.
@@ -333,7 +341,7 @@ fn vote_wire_roundtrip_preserves_signature() {
     let sig_wire = noble_codec::NobleCbor::to_cbor(&vote.signature).unwrap();
     let hash_wire = *vote.candidate_hash.as_bytes();
 
-    let recovered = harness::wire_to_por_vote_public(42, &hash_wire, &voter_wire, &sig_wire);
+    let recovered = harness::wire_to_por_vote_public(42, &hash_wire, &voter_wire, &sig_wire, 1);
     assert!(recovered.is_some());
     let recovered = recovered.unwrap();
     assert!(recovered.verify().is_ok(), "recovered vote should verify");

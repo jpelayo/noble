@@ -383,19 +383,18 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn cast_vote(&self, block_hash: String) -> Result<bool, ErrorObjectOwned> {
-        let _hash = parse_hash(&block_hash)?;
+        let hash = parse_hash(&block_hash)?;
 
-        let consensus = self.consensus.read().unwrap();
-        let strategy = consensus.voting_strategy();
+        let mut consensus = self.consensus.write().unwrap();
+        let strategy = consensus.voting_strategy().clone();
         if !matches!(strategy, VotingStrategy::Manual) {
             return Err(ApiError::InvalidParam(
                 "castVote is only available when voting_strategy is 'manual'".into(),
             )
             .into());
         }
-        // Manual vote is stored in-engine — for now, acknowledge the request.
-        // Full implementation requires engine to accept manual vote injection,
-        // which will be wired when the engine processes ManualVote events.
+        // P1.3: Inject the manual vote target into the consensus engine.
+        consensus.set_manual_vote(hash);
         Ok(true)
     }
 

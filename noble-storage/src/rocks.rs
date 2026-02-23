@@ -321,10 +321,12 @@ impl StorageEngine for RocksDbStorage {
             batch.put_cf(cf_tx, tx_id.as_bytes(), &value);
         }
 
-        // checksum_index CF: checksum → merge-append tx_id
+        // checksum_index CF: checksum → merge-append tx_id (notarizations only)
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
         for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
-            batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
+            if tx.tx_type == noble_core::TX_TYPE_NOTARIZATION {
+                batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
+            }
         }
 
         // chain_state CF: tip_hash and tip_height

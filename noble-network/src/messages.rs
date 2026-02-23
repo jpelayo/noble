@@ -11,6 +11,10 @@
 use noble_core::{Block, BlockHeader, DoubleProposalEvidence, NodeAnnounce, Transaction};
 use serde::{Deserialize, Serialize};
 
+fn default_round() -> u8 {
+    1
+}
+
 // ---------------------------------------------------------------------------
 // Request-Response: sync protocol (/noble/sync/1.0.0)
 // ---------------------------------------------------------------------------
@@ -85,6 +89,9 @@ pub enum GossipMessage {
         candidate_hash: [u8; 32],
         voter_id: Vec<u8>,
         signature: Vec<u8>,
+        /// Voting round: 1 = R1, 2 = R2. Default: 1.
+        #[serde(default = "default_round")]
+        round: u8,
     },
     /// Exchange known peer addresses (sent on `TOPIC_PEER_EXCHANGE`).
     PeerExchange { addrs: Vec<String> },
@@ -142,6 +149,8 @@ pub enum NetworkCommand {
         candidate_hash: [u8; 32],
         voter_id: Vec<u8>,
         signature: Vec<u8>,
+        /// Voting round: 1 = R1, 2 = R2. Default: 1.
+        round: u8,
     },
     /// Request a specific block from a peer.
     RequestBlock { peer_id: Vec<u8>, hash: [u8; 32] },
@@ -178,6 +187,8 @@ pub enum NetworkEvent {
         candidate_hash: [u8; 32],
         voter_id: Vec<u8>,
         signature: Vec<u8>,
+        /// Voting round: 1 = R1, 2 = R2. Default: 1.
+        round: u8,
     },
     /// A full block was received (via request-response or sync).
     BlockReceived { peer_id: Vec<u8>, block: Block },
@@ -423,10 +434,30 @@ mod tests {
             candidate_hash: [0xFF; 32],
             voter_id: vec![1, 2, 3],
             signature: vec![4, 5, 6],
+            round: 1,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
         let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn gossip_por_vote_r2_roundtrip() {
+        let msg = GossipMessage::PorVote {
+            cycle: 7,
+            candidate_hash: [0xFF; 32],
+            voter_id: vec![1, 2, 3],
+            signature: vec![4, 5, 6],
+            round: 2,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(msg, decoded);
+        match decoded {
+            GossipMessage::PorVote { round, .. } => assert_eq!(round, 2),
+            _ => panic!("expected PorVote"),
+        }
     }
 }

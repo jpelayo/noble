@@ -28,8 +28,9 @@ pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> 
             candidate_hash,
             voter_id,
             signature,
+            round,
         } => {
-            let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature)?;
+            let vote = wire_to_por_vote(*cycle, candidate_hash, voter_id, signature, *round)?;
             // AUD3-D9: Use transport PeerId (not voter_id from the vote payload)
             // so the consensus engine can compare against known peer identities.
             Some(CycleEvent::VoteReceived {
@@ -56,6 +57,7 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 candidate_hash: *vote.candidate_hash.as_bytes(),
                 voter_id: vote.voter_pubkey.to_wire_bytes(),
                 signature: vote_to_signature_bytes(&vote),
+                round: vote.round,
             }]
         }
         CycleIo::BanPeer { peer_id, .. } => {
@@ -91,6 +93,7 @@ pub fn wire_to_por_vote(
     candidate_hash: &[u8; 32],
     voter_id: &[u8],
     signature_bytes: &[u8],
+    round: u8,
 ) -> Option<PorVote> {
     let voter_pubkey = NoblePublicKey::from_wire_bytes(voter_id).ok()?;
     let candidate_hash = Hash256(*candidate_hash);
@@ -101,6 +104,7 @@ pub fn wire_to_por_vote(
         candidate_hash,
         voter_pubkey,
         signature,
+        round,
     })
 }
 
@@ -156,9 +160,27 @@ mod tests {
         let wire_sig = vote_to_signature_bytes(&original);
         let wire_hash = *original.candidate_hash.as_bytes();
 
-        let recovered = wire_to_por_vote(5, &wire_hash, &wire_voter_id, &wire_sig).unwrap();
+        let recovered =
+            wire_to_por_vote(5, &wire_hash, &wire_voter_id, &wire_sig, original.round).unwrap();
         assert_eq!(recovered.cycle, 5);
         assert_eq!(recovered.candidate_hash, original.candidate_hash);
+        assert_eq!(recovered.round, 1);
+        assert!(recovered.verify().is_ok());
+    }
+
+    #[test]
+    fn vote_r2_roundtrip_wire_conversion() {
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+        let original = PorVote::sign_round(5, Hash256([0xBB; 32]), 2, &priv_key, pub_key).unwrap();
+
+        let wire_voter_id = original.voter_pubkey.to_wire_bytes();
+        let wire_sig = vote_to_signature_bytes(&original);
+        let wire_hash = *original.candidate_hash.as_bytes();
+
+        let recovered = wire_to_por_vote(5, &wire_hash, &wire_voter_id, &wire_sig, 2).unwrap();
+        assert_eq!(recovered.round, 2);
         assert!(recovered.verify().is_ok());
     }
 
@@ -265,6 +287,7 @@ mod tests {
             voter_id: pub_key.to_wire_bytes(),
             signature: vote_to_signature_bytes(&vote),
             peer_id: vec![0xAA; 32],
+            round: 1,
         };
 
         let cycle_event = network_event_to_cycle_event(&event);

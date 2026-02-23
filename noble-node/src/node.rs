@@ -139,8 +139,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
-        // Create consensus engine (observation mode — no validator key yet).
-        let consensus_config = CConsensusConfig::default();
+        // --- Load validator key (if configured) ---
+        let validator_key = load_validator_key(&config.consensus.validator_key_path);
+
+        // --- Build consensus config from TOML ---
+        let consensus_config = build_consensus_config(config);
 
         // C-003: Load persisted validator list if the file exists.
         let validator_list_path = config.consensus.validator_list_path.clone();
@@ -167,7 +170,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tip.height,
             tip.block_hash,
             chain_id,
-            None, // no validator key — observation mode
+            validator_key,
         );
         if let Some(header) = tip_header {
             engine.update_tip_with_header(header);
@@ -675,6 +678,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 CycleIo::SetTimer { duration_secs } => {
                     tracing::debug!("consensus timer: {duration_secs}s (handled by tick interval)");
                 }
+                CycleIo::RequestMempoolTransactions { max_count } => {
+                    // P0.3: Read mempool transactions and feed them back to consensus.
+                    let txs: Vec<noble_core::Transaction> = {
+                        let mempool = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+                        mempool
+                            .iter_by_fee_desc()
+                            .take(max_count)
+                            .map(|entry| entry.tx.clone())
+                            .collect()
+                    };
+                    let actions = {
+                        let mut engine = self.consensus.write().unwrap_or_else(|e| e.into_inner());
+                        engine.step(CycleEvent::MempoolTransactions(txs))
+                    };
+                    // Recursively process any actions from the proposal
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx);
+                }
                 other => {
                     // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network
                     let cmds = bridge::cycle_io_to_network_commands(other);
@@ -705,6 +725,112 @@ struct StorageBalanceLookupAdapter<'a, S: StorageEngine> {
 impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
     fn get_balance(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
         self.storage.get_balance(pubkey).unwrap_or(0)
+    }
+}
+
+/// Load a validator private key from a raw key file.
+///
+/// The file must contain exactly 33 bytes: `[scheme_id(1) || private_key(32)]`.
+/// Returns `Some((private_key, public_key))` on success, `None` if the path is
+/// empty or the file cannot be loaded.
+fn load_validator_key(
+    path: &str,
+) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
+    if path.is_empty() {
+        tracing::info!("Observer mode: no validator key configured");
+        return None;
+    }
+
+    let key_path = std::path::Path::new(path);
+    if !key_path.exists() {
+        tracing::warn!(
+            "Validator key file not found: {} — running in observer mode",
+            path
+        );
+        return None;
+    }
+
+    let raw = match std::fs::read(key_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Failed to read validator key file: {e}");
+            return None;
+        }
+    };
+
+    if raw.len() != 33 {
+        tracing::error!(
+            "Invalid validator key file: expected 33 bytes (1 scheme_id + 32 key), got {}",
+            raw.len()
+        );
+        return None;
+    }
+
+    let scheme_id = raw[0];
+    let key_bytes = &raw[1..33];
+    let private_key = match scheme_id {
+        noble_crypto::SCHEME_ED25519 => noble_crypto::NoblePrivateKey::Ed25519(key_bytes.to_vec()),
+        noble_crypto::SCHEME_SECP256K1 => {
+            noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec())
+        }
+        _ => {
+            tracing::error!("Unknown key scheme_id in validator key file: {scheme_id:#04x}");
+            return None;
+        }
+    };
+
+    let public_key = private_key.public_key();
+    tracing::info!(
+        "Validator mode enabled: {}",
+        hex::encode(public_key.to_wire_bytes())
+    );
+    Some((private_key, public_key))
+}
+
+/// Build a `ConsensusConfig` from the parsed TOML node configuration.
+fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
+    let voting_strategy = parse_voting_strategy(
+        &config.consensus.voting_strategy,
+        &config.consensus.voting_preferred_validator,
+        &config.consensus.voting_subset,
+    );
+    let confirmation_strategy = parse_voting_strategy(
+        &config.consensus.confirmation_strategy,
+        &config.consensus.voting_preferred_validator,
+        &config.consensus.voting_subset,
+    );
+
+    CConsensusConfig {
+        voting_strategy,
+        confirmation_strategy,
+        ..CConsensusConfig::default()
+    }
+}
+
+/// Parse a voting strategy name + optional params into a `VotingStrategy`.
+fn parse_voting_strategy(
+    name: &str,
+    preferred_validator: &str,
+    subset: &[String],
+) -> noble_consensus::VotingStrategy {
+    use noble_consensus::VotingStrategy;
+    match name {
+        "first_valid" => VotingStrategy::FirstValid,
+        "round_robin" => VotingStrategy::RoundRobin,
+        "random" => VotingStrategy::Random,
+        "weighted_reputation" => VotingStrategy::WeightedReputation,
+        "follow_majority" => VotingStrategy::FollowMajority,
+        "manual" => VotingStrategy::Manual,
+        "fixed_validator" => VotingStrategy::FixedValidator {
+            validator_key: preferred_validator.to_string(),
+        },
+        "subset_rotation" => VotingStrategy::SubsetRotation {
+            validators: subset.to_vec(),
+        },
+        other => {
+            tracing::warn!("Unknown voting strategy '{other}', falling back to first_valid");
+            VotingStrategy::FirstValid
+        }
     }
 }
 

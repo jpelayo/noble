@@ -252,11 +252,19 @@ async fn lookup_checksum_not_found() {
 
     // A random checksum that was never registered
     let fake_checksum = "aa".repeat(32);
-    let result: Result<serde_json::Value, _> = client
+    let result: serde_json::Value = client
         .request("noble_lookupChecksum", rpc_params![&fake_checksum])
-        .await;
+        .await
+        .expect("lookupChecksum should return a response, not an error");
 
-    assert!(result.is_err());
+    assert_eq!(
+        result["found"], false,
+        "unknown checksum should return found: false"
+    );
+    assert!(
+        result["records"].as_array().unwrap().is_empty(),
+        "records should be empty"
+    );
 }
 
 // ---------------------------------------------------------------------------

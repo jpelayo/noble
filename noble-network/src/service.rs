@@ -417,12 +417,14 @@ async fn handle_swarm_event(
                             candidate_hash,
                             voter_id,
                             signature,
+                            round,
                         } => handle_por_vote(
                             peer_bytes.clone(),
                             cycle,
                             candidate_hash,
                             voter_id,
                             signature,
+                            round,
                             seen_votes,
                         ),
                         GossipMessage::PeerExchange { addrs } => {
@@ -737,9 +739,10 @@ fn handle_por_vote(
     candidate_hash: [u8; 32],
     voter_id: Vec<u8>,
     signature: Vec<u8>,
+    round: u8,
     seen_votes: &mut SeenCache,
 ) -> Option<NetworkEvent> {
-    let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id);
+    let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id, round);
     if !seen_votes.insert_if_new(dedup_key) {
         None
     } else {
@@ -751,6 +754,7 @@ fn handle_por_vote(
             candidate_hash,
             voter_id,
             signature,
+            round,
         })
     }
 }
@@ -979,12 +983,14 @@ async fn handle_command(
             candidate_hash,
             voter_id,
             signature,
+            round,
         } => {
             let msg = GossipMessage::PorVote {
                 cycle,
                 candidate_hash,
                 voter_id,
                 signature,
+                round,
             };
             if let Ok(data) = codec::encode_gossip(&msg) {
                 let topic = IdentTopic::new(topics::TOPIC_POR_VOTE);

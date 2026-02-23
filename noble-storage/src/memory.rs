@@ -84,15 +84,18 @@ impl StorageEngine for MemoryStorage {
             inner.transactions.insert(*tx_id, tx.clone());
             inner.tx_locations.insert(*tx_id, (height, offset as u32));
 
-            let entry = inner.checksum_index.entry(tx.checksum).or_default();
-            if entry.len() >= MAX_CHECKSUM_REGISTRATIONS {
-                return Err(StorageError::ChecksumIndexFull {
-                    checksum: tx.checksum.to_string(),
-                    count: entry.len(),
-                    max: MAX_CHECKSUM_REGISTRATIONS,
-                });
+            // Only index checksums for notarization transactions (defense-in-depth)
+            if tx.tx_type == noble_core::TX_TYPE_NOTARIZATION {
+                let entry = inner.checksum_index.entry(tx.checksum).or_default();
+                if entry.len() >= MAX_CHECKSUM_REGISTRATIONS {
+                    return Err(StorageError::ChecksumIndexFull {
+                        checksum: tx.checksum.to_string(),
+                        count: entry.len(),
+                        max: MAX_CHECKSUM_REGISTRATIONS,
+                    });
+                }
+                entry.push(*tx_id);
             }
-            entry.push(*tx_id);
         }
 
         // --- Balance accumulator (GAP-H19) ---

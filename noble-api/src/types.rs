@@ -190,11 +190,19 @@ pub struct SubmitTxResponse {
     pub accepted: bool,
 }
 
+/// A single document registration record with block context.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistrationRecord {
+    pub block_height: u64,
+    pub tx_id: String,
+    pub timestamp: u64,
+}
+
 /// Response for `noble_lookupChecksum`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChecksumLookupResponse {
-    pub checksum: String,
-    pub registrations: Vec<String>,
+    pub found: bool,
+    pub records: Vec<RegistrationRecord>,
 }
 
 /// Response for `noble_getChainStats`.
@@ -401,15 +409,16 @@ pub struct TransactionReceiptResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyDocumentResponse {
     pub checksum: String,
-    pub found: bool,
-    pub registration_count: usize,
+    pub registered: bool,
+    pub registrations: Vec<RegistrationRecord>,
+    pub first_seen: Option<u64>,
 }
 
 /// Response for `noble_getDocumentHistory`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentHistoryResponse {
     pub checksum: String,
-    pub transactions: Vec<TransactionResponse>,
+    pub history: Vec<RegistrationRecord>,
 }
 
 /// Response for `noble_getReputationScore` (placeholder).

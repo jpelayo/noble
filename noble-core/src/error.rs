@@ -190,6 +190,18 @@ pub enum ValidationError {
     #[error("T25: invalid gateway_address: {0}")]
     InvalidGatewayAddress(String),
 
+    /// T27: Transfer transaction has a non-zero checksum (must be Hash256::ZERO).
+    #[error("T27: transfer tx must have zero checksum")]
+    TransferWithNonZeroChecksum,
+
+    /// T28: Notarization transaction has a zero checksum (must be non-zero).
+    #[error("T28: notarization tx must have non-zero checksum")]
+    NotarizationWithZeroChecksum,
+
+    /// T27b: Non-document transaction has a non-zero checksum.
+    #[error("T27b: non-document tx (type {0:#04x}) must have zero checksum")]
+    NonDocumentWithChecksum(u8),
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

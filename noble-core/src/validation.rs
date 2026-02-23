@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use noble_codec::NobleCbor;
-use noble_crypto::{is_recognized_scheme, NoblePublicKey, SCHEME_BIP137};
+use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey, SCHEME_BIP137};
 
 use crate::block::{Block, BlockHeader};
 use crate::constants::*;
@@ -251,6 +251,12 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
     }
     tracing::trace!("T15: transfer amount check passed");
 
+    // T27: Transfer must have zero checksum (document registration field is meaningless)
+    if tx.tx_type == TX_TYPE_TRANSFER && tx.checksum != Hash256::ZERO {
+        return Err(ValidationError::TransferWithNonZeroChecksum);
+    }
+    tracing::trace!("T27: transfer checksum check passed");
+
     // T16: Balance check is deferred to commit time (needs chain state)
 
     // T24: Self-transfer rejection (C-self) — prevents balance inflation
@@ -272,6 +278,12 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
         return Err(ValidationError::NotarizationHasTransferFields);
     }
     tracing::trace!("T17: notarization transfer-field check passed");
+
+    // T28: Notarization must have non-zero checksum (the whole point of a notarization)
+    if tx.tx_type == TX_TYPE_NOTARIZATION && tx.checksum == Hash256::ZERO {
+        return Err(ValidationError::NotarizationWithZeroChecksum);
+    }
+    tracing::trace!("T28: notarization checksum check passed");
 
     // T22: encrypted_locator only allowed on notarization
     if tx.tx_type != TX_TYPE_NOTARIZATION && tx.encrypted_locator.is_some() {
@@ -295,6 +307,19 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
         return Err(ValidationError::KeyRotationMissingNewKey);
     }
     tracing::trace!("T17b/T21: key rotation checks passed");
+
+    // T27b: Non-document types (key rotation, badge proposal/vote/revocation) must have zero checksum
+    if matches!(
+        tx.tx_type,
+        TX_TYPE_KEY_ROTATION
+            | TX_TYPE_BADGE_PROPOSAL
+            | TX_TYPE_BADGE_VOTE
+            | TX_TYPE_BADGE_REVOCATION
+    ) && tx.checksum != Hash256::ZERO
+    {
+        return Err(ValidationError::NonDocumentWithChecksum(tx.tx_type));
+    }
+    tracing::trace!("T27b: non-document checksum check passed");
 
     // T25: Gateway address wire bytes validation
     if let Some(ref gw) = tx.gateway_address {
@@ -1856,6 +1881,126 @@ mod tests {
         assert!(
             matches!(result, Err(ValidationError::PublisherSigInvalid(_))),
             "non-65-byte BIP-137 sig must be rejected: {result:?}"
+        );
+    }
+
+    // --- T27: Transfer with non-zero checksum ---
+
+    #[test]
+    fn t27_transfer_nonzero_checksum_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recipient_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: sha256(b"should not be here"), // non-zero checksum on transfer
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: Some(100_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::TransferWithNonZeroChecksum)),
+            "transfer with non-zero checksum must be rejected: {result:?}"
+        );
+    }
+
+    // --- T28: Notarization with zero checksum ---
+
+    #[test]
+    fn t28_notarization_zero_checksum_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_NOTARIZATION,
+            checksum: Hash256::ZERO, // zero checksum on notarization
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(result, Err(ValidationError::NotarizationWithZeroChecksum)),
+            "notarization with zero checksum must be rejected: {result:?}"
+        );
+    }
+
+    // --- T27b: Key rotation with non-zero checksum ---
+
+    #[test]
+    fn t27b_key_rotation_nonzero_checksum_rejected() {
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, new_pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_KEY_ROTATION,
+            checksum: sha256(b"should not be here"), // non-zero checksum on key rotation
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recipient),
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(
+            matches!(
+                result,
+                Err(ValidationError::NonDocumentWithChecksum(
+                    TX_TYPE_KEY_ROTATION
+                ))
+            ),
+            "key rotation with non-zero checksum must be rejected: {result:?}"
         );
     }
 }

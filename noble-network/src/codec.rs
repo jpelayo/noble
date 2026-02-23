@@ -68,6 +68,7 @@ mod tests {
             candidate_hash: [0x33; 32],
             voter_id: vec![10, 20, 30],
             signature: vec![40, 50, 60],
+            round: 1,
         };
         let encoded = encode_gossip(&msg).unwrap();
         let decoded = decode_gossip(&encoded).unwrap();

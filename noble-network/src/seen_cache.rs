@@ -96,13 +96,15 @@ impl SeenCache {
 
 /// Compute a deterministic dedup key for a PoR vote.
 ///
-/// The key is `SHA-256(cycle_le_bytes || voter_id_bytes)`, ensuring that
-/// the same voter voting in the same cycle always produces the same key.
-pub fn vote_dedup_key(cycle: u64, voter_id: &[u8]) -> [u8; 32] {
+/// The key is `SHA-256(cycle_le_bytes || voter_id_bytes || round)`, ensuring that
+/// the same voter voting in the same cycle and round always produces the same key.
+/// Different rounds produce distinct keys so R2 votes are not suppressed as R1 duplicates.
+pub fn vote_dedup_key(cycle: u64, voter_id: &[u8], round: u8) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(cycle.to_le_bytes());
     hasher.update(voter_id);
+    hasher.update([round]);
     hasher.finalize().into()
 }
 
@@ -166,22 +168,32 @@ mod tests {
 
     #[test]
     fn vote_dedup_key_deterministic() {
-        let key1 = vote_dedup_key(5, &[1, 2, 3]);
-        let key2 = vote_dedup_key(5, &[1, 2, 3]);
+        let key1 = vote_dedup_key(5, &[1, 2, 3], 1);
+        let key2 = vote_dedup_key(5, &[1, 2, 3], 1);
         assert_eq!(key1, key2);
     }
 
     #[test]
     fn vote_dedup_key_different_cycle() {
-        let key1 = vote_dedup_key(5, &[1, 2, 3]);
-        let key2 = vote_dedup_key(6, &[1, 2, 3]);
+        let key1 = vote_dedup_key(5, &[1, 2, 3], 1);
+        let key2 = vote_dedup_key(6, &[1, 2, 3], 1);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn vote_dedup_key_different_voter() {
-        let key1 = vote_dedup_key(5, &[1, 2, 3]);
-        let key2 = vote_dedup_key(5, &[4, 5, 6]);
+        let key1 = vote_dedup_key(5, &[1, 2, 3], 1);
+        let key2 = vote_dedup_key(5, &[4, 5, 6], 1);
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn vote_dedup_key_different_round() {
+        let key1 = vote_dedup_key(5, &[1, 2, 3], 1);
+        let key2 = vote_dedup_key(5, &[1, 2, 3], 2);
+        assert_ne!(
+            key1, key2,
+            "same cycle+voter but different round must produce different keys"
+        );
     }
 }

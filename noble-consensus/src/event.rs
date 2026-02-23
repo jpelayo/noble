@@ -25,6 +25,8 @@ pub enum CycleEvent {
     VoteReceived { vote: PorVote, from_peer: Vec<u8> },
     /// Timer tick with the current timestamp.
     Tick { now: u64 },
+    /// Response from node: mempool transactions for block proposal (P0.3).
+    MempoolTransactions(Vec<Transaction>),
 }
 
 /// Output actions emitted by the consensus engine.
@@ -51,4 +53,6 @@ pub enum CycleIo {
     EmitMetric { name: String, value: f64 },
     /// Log a message.
     Log(String),
+    /// Request mempool transactions from the node for block proposal (P0.3).
+    RequestMempoolTransactions { max_count: usize },
 }

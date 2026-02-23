@@ -62,6 +62,10 @@ pub struct CycleEngine {
     clock_anchor: (std::time::Instant, u64),
     /// H-002: Last completed cycle's history entry, ready for persistence.
     last_cycle_history: Option<CycleHistoryEntry>,
+    /// P1.3: Manual vote target for the Manual voting strategy (set via castVote RPC).
+    manual_vote: Option<Hash256>,
+    /// P1.2: Whether an R2 confirmation vote has been cast this cycle.
+    r2_vote_cast: bool,
 }
 
 impl CycleEngine {
@@ -99,6 +103,8 @@ impl CycleEngine {
             total_peers: 0,
             clock_anchor: (std::time::Instant::now(), now_unix),
             last_cycle_history: None,
+            manual_vote: None,
+            r2_vote_cast: false,
         }
     }
 
@@ -197,6 +203,17 @@ impl CycleEngine {
             outputs.extend(self.handle_phase_transition(new_cycle, new_phase));
         }
 
+        // P1.2: Cast R2 confirmation vote at Reflection midpoint.
+        if new_phase == CyclePhase::Reflection && !self.r2_vote_cast {
+            let phase_duration = self.config.cycle_duration_secs / 2;
+            let phase_remaining = self.cycle_mgr.seconds_until_phase_change(now);
+            let elapsed_in_phase = phase_duration.saturating_sub(phase_remaining);
+            // Cast R2 at or past the midpoint of the Reflection phase.
+            if elapsed_in_phase >= phase_duration / 2 {
+                outputs.extend(self.cast_r2_vote(new_cycle));
+            }
+        }
+
         // Schedule next timer
         let next_timer = self
             .cycle_mgr
@@ -226,20 +243,26 @@ impl CycleEngine {
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cycle}: entering Validation phase"
                 )));
+                // P0.3: If we are a validator, request mempool txs for block proposal.
+                if self.our_validator_key.is_some() {
+                    outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+                }
             }
             CyclePhase::Reflection => {
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cycle}: entering Reflection phase"
                 )));
-                // If we are a validator, vote for our preferred candidate (strategy-based).
+                // If we are a validator, cast R1 vote for our preferred candidate.
                 if let Some((ref priv_key, ref pub_key)) = self.our_validator_key {
                     let tallies = self.vote_mgr.current_tallies();
+                    // P1.3: Pass manual_vote to strategy selector
+                    let manual = self.manual_vote.take();
                     let selected = crate::strategy::select_candidate(
                         &self.config.voting_strategy,
                         &self.candidate_tracker,
                         &self.validator_list,
                         cycle,
-                        None, // manual_vote: handled via RPC in future
+                        manual,
                         Some(&tallies),
                     );
                     if let Some(candidate_hash) = selected {
@@ -247,7 +270,7 @@ impl CycleEngine {
                             Ok(vote) => {
                                 outputs.push(CycleIo::BroadcastVote(vote));
                                 outputs.push(CycleIo::Log(format!(
-                                    "cycle {cycle}: broadcast vote for candidate {} (strategy: {})",
+                                    "cycle {cycle}: broadcast R1 vote for candidate {} (strategy: {})",
                                     candidate_hash,
                                     self.config.voting_strategy.name()
                                 )));
@@ -418,6 +441,7 @@ impl CycleEngine {
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
+        self.r2_vote_cast = false;
 
         outputs
     }
@@ -561,6 +585,143 @@ impl CycleEngine {
 
         outputs
     }
+
+    /// P0.3: Handle mempool transactions response — build and broadcast a block proposal.
+    fn handle_mempool_transactions(&mut self, txs: Vec<noble_core::Transaction>) -> Vec<CycleIo> {
+        let mut outputs = Vec::new();
+
+        // Only propose during Validation phase
+        if self.tracked_phase != CyclePhase::Validation {
+            return outputs;
+        }
+
+        let (ref priv_key, ref pub_key) = match &self.our_validator_key {
+            Some(kp) => kp,
+            None => return outputs,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match crate::proposal::propose_block(
+            &txs,
+            self.tip_hash,
+            self.tip_height + 1,
+            now,
+            self.chain_id,
+            priv_key,
+            pub_key,
+            self.config.max_block_size,
+        ) {
+            Ok(block) => {
+                // P0-3: Validate self-proposed block before broadcast (same checks as remote proposals).
+                let current_time = now;
+                let val_list = self.validator_list.as_pubkey_vec();
+                let ctx = BlockValidationContext {
+                    chain_id: self.chain_id,
+                    current_time,
+                    parent: self.tip_header.as_ref(),
+                    validator_list: &val_list,
+                };
+                if let Err(e) = validate_block(&block, &ctx) {
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {}: self-proposed block failed validation: {e}",
+                        self.tracked_cycle
+                    )));
+                    return outputs;
+                }
+
+                let block_hash = match block.header.compute_block_hash() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        outputs.push(CycleIo::Log(format!(
+                            "failed to compute proposed block hash: {e}"
+                        )));
+                        return outputs;
+                    }
+                };
+                // Add to our own candidate tracker
+                let block_box = Box::new(block);
+                if let Err(e) =
+                    self.candidate_tracker
+                        .add_candidate(block_box.clone(), block_hash, 0)
+                {
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {}: failed to add self-proposed candidate: {e}",
+                        self.tracked_cycle
+                    )));
+                    return outputs;
+                }
+                outputs.push(CycleIo::BroadcastBlock(block_box));
+                outputs.push(CycleIo::Log(format!(
+                    "cycle {}: proposed block {} ({} txs) at height {}",
+                    self.tracked_cycle,
+                    block_hash,
+                    txs.len(),
+                    self.tip_height + 1
+                )));
+            }
+            Err(e) => {
+                outputs.push(CycleIo::Log(format!(
+                    "cycle {}: failed to propose block: {e}",
+                    self.tracked_cycle
+                )));
+            }
+        }
+
+        outputs
+    }
+
+    /// P1.2: Cast an R2 confirmation vote based on R1 tallies.
+    fn cast_r2_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
+        let mut outputs = Vec::new();
+        self.r2_vote_cast = true;
+
+        let (ref priv_key, ref pub_key) = match &self.our_validator_key {
+            Some(kp) => kp,
+            None => return outputs,
+        };
+
+        // Use confirmation_strategy applied to current R1 tallies.
+        let tallies = self.vote_mgr.current_tallies();
+        let selected = crate::strategy::select_candidate(
+            &self.config.confirmation_strategy,
+            &self.candidate_tracker,
+            &self.validator_list,
+            cycle,
+            None,
+            Some(&tallies),
+        );
+
+        if let Some(candidate_hash) = selected {
+            match PorVote::sign_round(cycle, candidate_hash, 2, priv_key, pub_key.clone()) {
+                Ok(vote) => {
+                    // Record our own R2 vote
+                    let _ = self.vote_mgr.record_vote(b"self", &vote);
+                    outputs.push(CycleIo::BroadcastVote(vote));
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {cycle}: broadcast R2 confirmation vote for {} (strategy: {})",
+                        candidate_hash,
+                        self.config.confirmation_strategy.name()
+                    )));
+                }
+                Err(e) => {
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {cycle}: failed to sign R2 vote: {e}"
+                    )));
+                }
+            }
+        }
+
+        outputs
+    }
+
+    /// Set a manual vote target for the Manual voting strategy (P1.3).
+    pub fn set_manual_vote(&mut self, hash: Hash256) {
+        self.manual_vote = Some(hash);
+    }
 }
 
 impl ConsensusStateMachine for CycleEngine {
@@ -585,6 +746,7 @@ impl ConsensusStateMachine for CycleEngine {
             CycleEvent::VoteReceived { vote, from_peer } => {
                 self.handle_vote_received(vote, from_peer)
             }
+            CycleEvent::MempoolTransactions(txs) => self.handle_mempool_transactions(txs),
         }
     }
 
@@ -619,6 +781,7 @@ impl ConsensusStateMachine for CycleEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::VotingStrategy;
     use noble_core::{BlockHeader, MAINNET_CHAIN_ID, PROTOCOL_VERSION};
     use noble_crypto::{ed25519, NobleSigner, SignatureEnvelope, SCHEME_ED25519};
 
@@ -1016,6 +1179,167 @@ mod tests {
         })
     }
 
+    // --- P0.3: Block proposal emission ---
+
+    #[test]
+    fn validator_requests_mempool_on_validation_entry() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+        let outputs = engine.step(CycleEvent::PhaseTransition {
+            cycle: 1,
+            new_phase: CyclePhase::Validation,
+        });
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, CycleIo::RequestMempoolTransactions { .. })),
+            "validator should request mempool txs on Validation entry"
+        );
+    }
+
+    #[test]
+    fn observer_does_not_request_mempool() {
+        let (_vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub], 5);
+        let outputs = engine.step(CycleEvent::PhaseTransition {
+            cycle: 1,
+            new_phase: CyclePhase::Validation,
+        });
+        assert!(
+            !outputs
+                .iter()
+                .any(|o| matches!(o, CycleIo::RequestMempoolTransactions { .. })),
+            "observer should NOT request mempool txs"
+        );
+    }
+
+    #[test]
+    fn mempool_transactions_produces_block_proposal() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+        engine.tracked_phase = CyclePhase::Validation;
+
+        let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, CycleIo::BroadcastBlock(_))),
+            "should broadcast proposed block"
+        );
+        assert_eq!(
+            engine.candidate_tracker.len(),
+            1,
+            "should add to own candidates"
+        );
+    }
+
+    // --- P1.3: Manual vote injection ---
+
+    #[test]
+    fn manual_vote_injection() {
+        let (vp, vpub) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let target_hash = Hash256::from_bytes([0xAA; 32]);
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub, vpub2.clone()], 5);
+        engine.set_voting_strategy(VotingStrategy::Manual);
+        engine.set_manual_vote(target_hash);
+
+        // Add a candidate so the tracker isn't empty
+        engine.tracked_phase = CyclePhase::Validation;
+        let (block, _hash) = make_valid_block(&vp2, &vpub2, 0, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"p1".to_vec(),
+        });
+
+        // Transition to Reflection — should use the manual vote hash
+        let outputs = engine.step(CycleEvent::PhaseTransition {
+            cycle: 0,
+            new_phase: CyclePhase::Reflection,
+        });
+
+        let vote_broadcast = outputs
+            .iter()
+            .find(|o| matches!(o, CycleIo::BroadcastVote(_)));
+        assert!(vote_broadcast.is_some(), "manual vote should broadcast");
+        if let Some(CycleIo::BroadcastVote(vote)) = vote_broadcast {
+            assert_eq!(
+                vote.candidate_hash, target_hash,
+                "should vote for manual target"
+            );
+        }
+    }
+
+    // --- P1.2: Two-round voting ---
+
+    #[test]
+    fn r2_vote_cast_at_reflection_midpoint() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+
+        // Move to Reflection phase
+        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_cycle = 1;
+        engine.r2_vote_cast = false;
+
+        // Simulate tick at Reflection midpoint
+        // cycle_duration=1800, phase_duration=900, midpoint=450s into Reflection
+        // Reflection starts at 900s in cycle, midpoint at 1350s
+        let now = 1800 + 900 + 450; // cycle 1 start + validation + midpoint
+        let _outputs = engine.step(CycleEvent::Tick { now });
+
+        // R2 should have been broadcast (even though no candidates exist,
+        // the strategy returns None and no vote is emitted in that case).
+        // The r2_vote_cast flag should be set.
+        assert!(
+            engine.r2_vote_cast,
+            "r2_vote_cast should be set after midpoint tick"
+        );
+    }
+
+    #[test]
+    fn r2_vote_override_at_cycle_boundary() {
+        let (vp, vpub) = make_validator();
+        let voters: Vec<_> = (0..5).map(|_| make_validator()).collect();
+        let mut all_validators: Vec<NoblePublicKey> = vec![vpub.clone()];
+        all_validators.extend(voters.iter().map(|(_, pk)| pk.clone()));
+        let mut engine = make_engine(None, &all_validators, 7);
+
+        // Propose a candidate
+        engine.tracked_phase = CyclePhase::Validation;
+        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"p1".to_vec(),
+        });
+
+        // R1 votes: 2 out of 6 validators → not Strong
+        engine.tracked_phase = CyclePhase::Reflection;
+        for (i, (vk, vpk)) in voters[..2].iter().enumerate() {
+            let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
+            engine.step(CycleEvent::VoteReceived {
+                vote,
+                from_peer: vec![i as u8 + 10],
+            });
+        }
+
+        // R2 votes: 4 out of 6 → Strong majority → should override
+        for (i, (vk, vpk)) in voters[..4].iter().enumerate() {
+            let vote = PorVote::sign_round(0, hash, 2, vk, vpk.clone()).unwrap();
+            engine.step(CycleEvent::VoteReceived {
+                vote,
+                from_peer: vec![i as u8 + 20],
+            });
+        }
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(
+            has_commit(&outputs),
+            "R2 Strong majority should commit block"
+        );
+        assert_eq!(engine.tip_height, 1);
+    }
+
     // --- AUD-M7: Monotonic phase_timing ---
 
     #[test]
@@ -1093,5 +1417,60 @@ mod tests {
             "valid validator's vote should be accepted"
         );
         assert_eq!(engine.vote_mgr.total_votes(), 1);
+    }
+
+    // --- P0-3: Self-proposed block validation ---
+
+    #[test]
+    fn self_proposed_block_is_validated() {
+        // A validator engine should validate its own block before broadcasting it.
+        // When the validator is in the validator list, the block passes validation
+        // and is broadcast.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+        engine.tracked_phase = CyclePhase::Validation;
+
+        let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
+        let has_broadcast = outputs
+            .iter()
+            .any(|o| matches!(o, CycleIo::BroadcastBlock(_)));
+        assert!(
+            has_broadcast,
+            "self-proposed block should pass validation and be broadcast"
+        );
+        assert_eq!(
+            engine.candidate_tracker.len(),
+            1,
+            "validated block should be added to candidate tracker"
+        );
+    }
+
+    #[test]
+    fn self_proposed_block_rejected_if_not_in_validator_list() {
+        // A validator whose key is NOT in the validator list should fail B9 check
+        // and not broadcast.
+        let (vp, vpub) = make_validator();
+        let (_other_priv, other_pub) = make_validator();
+        // Engine has vp as validator key, but only other_pub is in the list
+        let mut engine = make_engine(Some((vp, vpub)), &[other_pub], 5);
+        engine.tracked_phase = CyclePhase::Validation;
+
+        let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
+        let has_broadcast = outputs
+            .iter()
+            .any(|o| matches!(o, CycleIo::BroadcastBlock(_)));
+        assert!(
+            !has_broadcast,
+            "block from non-trusted validator should not be broadcast"
+        );
+        assert!(
+            has_log_containing(&outputs, "failed validation"),
+            "should log validation failure"
+        );
+        assert_eq!(
+            engine.candidate_tracker.len(),
+            0,
+            "rejected block should not be in candidate tracker"
+        );
     }
 }

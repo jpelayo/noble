@@ -62,8 +62,15 @@ pub struct PorVote {
     pub candidate_hash: Hash256,
     /// The voter's public key.
     pub voter_pubkey: NoblePublicKey,
-    /// Signature over `sha256(cbor(cycle, candidate_hash))`.
+    /// Signature over `sha256(cbor(cycle, candidate_hash, round))`.
     pub signature: SignatureEnvelope,
+    /// Voting round: 1 = R1 (Reflection), 2 = R2 (Confirmation). Default: 1.
+    #[serde(default = "default_round")]
+    pub round: u8,
+}
+
+fn default_round() -> u8 {
+    1
 }
 
 /// Internal payload for vote signing.
@@ -71,40 +78,54 @@ pub struct PorVote {
 struct VoteSigningPayload {
     cycle: u64,
     candidate_hash: Hash256,
+    round: u8,
 }
 
 impl PorVote {
-    /// Compute the 32-byte signing payload: `sha256(canonical_cbor(cycle, candidate_hash))`.
-    pub fn signing_payload(cycle: u64, candidate_hash: Hash256) -> [u8; 32] {
+    /// Compute the 32-byte signing payload: `sha256(canonical_cbor(cycle, candidate_hash, round))`.
+    pub fn signing_payload(cycle: u64, candidate_hash: Hash256, round: u8) -> [u8; 32] {
         let payload = VoteSigningPayload {
             cycle,
             candidate_hash,
+            round,
         };
         let canonical = noble_codec::to_canonical_cbor(&payload)
             .expect("vote signing payload serialization should never fail");
         sha256(&canonical).0
     }
 
-    /// Create a signed vote.
+    /// Create a signed R1 vote (default round=1).
     pub fn sign(
         cycle: u64,
         candidate_hash: Hash256,
         private_key: &NoblePrivateKey,
         public_key: NoblePublicKey,
     ) -> Result<Self, noble_crypto::CryptoError> {
-        let msg = Self::signing_payload(cycle, candidate_hash);
+        Self::sign_round(cycle, candidate_hash, 1, private_key, public_key)
+    }
+
+    /// Create a signed vote for a specific round.
+    pub fn sign_round(
+        cycle: u64,
+        candidate_hash: Hash256,
+        round: u8,
+        private_key: &NoblePrivateKey,
+        public_key: NoblePublicKey,
+    ) -> Result<Self, noble_crypto::CryptoError> {
+        let msg = Self::signing_payload(cycle, candidate_hash, round);
         let signature = private_key.sign(&msg)?;
         Ok(Self {
             cycle,
             candidate_hash,
             voter_pubkey: public_key,
             signature,
+            round,
         })
     }
 
     /// Verify the vote signature against the embedded public key (GAP-C7).
     pub fn verify(&self) -> Result<(), noble_crypto::CryptoError> {
-        let msg = Self::signing_payload(self.cycle, self.candidate_hash);
+        let msg = Self::signing_payload(self.cycle, self.candidate_hash, self.round);
         self.voter_pubkey.verify(&msg, &self.signature)
     }
 }
@@ -132,14 +153,17 @@ pub enum MigrationResult {
 
 /// Tracks votes per cycle and computes consensus outcomes.
 ///
-/// Votes are indexed by peer_id (transport identity, GAP-C8),
-/// not by voter public key (which could be spoofed via Sybil).
+/// P0.2: Votes are deduplicated by `(voter_pubkey, round)` — each validator
+/// may cast one R1 vote and one R2 vote per cycle.
+/// P1.2: R2 votes are tracked separately for confirmation voting.
 #[derive(Default)]
 pub struct VoteManager {
-    /// candidate_hash → set of peer_ids that voted for it.
+    /// R1: candidate_hash → set of voter pubkey wire bytes that voted for it.
     votes: HashMap<Hash256, HashSet<Vec<u8>>>,
-    /// Set of peer_ids that have already voted (one vote per peer per cycle).
-    voted_peers: HashSet<Vec<u8>>,
+    /// R2: candidate_hash → set of voter pubkey wire bytes that voted for it.
+    r2_votes: HashMap<Hash256, HashSet<Vec<u8>>>,
+    /// Set of `(voter_pubkey_wire_bytes, round)` that have already voted.
+    voted_validators: HashSet<(Vec<u8>, u8)>,
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
 }
@@ -149,7 +173,8 @@ impl VoteManager {
     pub fn new() -> Self {
         Self {
             votes: HashMap::new(),
-            voted_peers: HashSet::new(),
+            r2_votes: HashMap::new(),
+            voted_validators: HashSet::new(),
             current_cycle: 0,
         }
     }
@@ -163,10 +188,10 @@ impl VoteManager {
     ///
     /// - Validates the vote cycle matches `current_cycle` (AUD2-M4).
     /// - Verifies the vote signature (GAP-C7).
-    /// - Rejects duplicate votes from the same peer_id (GAP-C8).
+    /// - P0.2: Deduplicates by voter public key (validator identity), not peer_id.
     /// - Returns `true` if the vote was accepted, `false` if duplicate.
     #[tracing::instrument(skip(self, vote), fields(task = "consensus_vote"))]
-    pub fn record_vote(&mut self, peer_id: &[u8], vote: &PorVote) -> Result<bool, VoteError> {
+    pub fn record_vote(&mut self, _peer_id: &[u8], vote: &PorVote) -> Result<bool, VoteError> {
         // AUD2-M4: Validate vote cycle matches current cycle
         if vote.cycle != self.current_cycle {
             return Err(VoteError::WrongCycle {
@@ -178,19 +203,29 @@ impl VoteManager {
         // GAP-C7: Verify signature before recording
         vote.verify()?;
 
-        // GAP-C8: One vote per peer_id
-        if self.voted_peers.contains(peer_id) {
-            debug!("duplicate vote from peer (ignored)");
+        // P0.2 + P1.2: One vote per validator per round.
+        let voter_key = vote.voter_pubkey.to_wire_bytes();
+        let dedup_key = (voter_key.clone(), vote.round);
+        if self.voted_validators.contains(&dedup_key) {
+            debug!(
+                "duplicate vote from validator round {} (ignored)",
+                vote.round
+            );
             return Ok(false);
         }
 
-        self.voted_peers.insert(peer_id.to_vec());
-        self.votes
+        self.voted_validators.insert(dedup_key);
+        let target_map = if vote.round == 2 {
+            &mut self.r2_votes
+        } else {
+            &mut self.votes
+        };
+        target_map
             .entry(vote.candidate_hash)
             .or_default()
-            .insert(peer_id.to_vec());
+            .insert(voter_key);
 
-        let count = self.voted_peers.len();
+        let count = self.voted_validators.len();
         debug!(
             "vote received from validator, tally: {} total recorded",
             count
@@ -198,7 +233,7 @@ impl VoteManager {
         Ok(true)
     }
 
-    /// Return current vote counts per candidate hash.
+    /// Return current R1 vote counts per candidate hash.
     ///
     /// Used by voting strategies (e.g. FollowMajority) to observe the
     /// emerging consensus before casting their own vote.
@@ -209,11 +244,21 @@ impl VoteManager {
             .collect()
     }
 
-    /// Compute the majority outcome.
+    /// Return current R2 (confirmation) vote counts per candidate hash.
+    pub fn r2_tallies(&self) -> HashMap<Hash256, usize> {
+        self.r2_votes
+            .iter()
+            .map(|(hash, peers)| (*hash, peers.len()))
+            .collect()
+    }
+
+    /// Compute the majority outcome considering both R1 and R2 votes.
     ///
     /// - GAP-C6: If `total_voters < config.min_peers_for_consensus` → Indeterminate.
-    /// - Tier 1: leader > 50% → Adopt(Strong).
-    /// - Tier 2: leader ≥ total_voters / plurality_floor_divisor → Adopt(Plurality).
+    /// - P1.2: If R2 has a Strong majority, that wins (confirmation override).
+    /// - Otherwise use R1 tallies:
+    ///   - Tier 1: leader > 50% → Adopt(Strong).
+    ///   - Tier 2: leader ≥ ceil(total_voters / divisor) → Adopt(Plurality).
     /// - Tiebreaker: lower candidate_hash wins (lexicographic).
     /// - Otherwise → Indeterminate.
     ///
@@ -226,6 +271,14 @@ impl VoteManager {
         // GAP-C6: Minimum voter check
         if total_voters < config.min_peers_for_consensus {
             return MigrationResult::Indeterminate;
+        }
+
+        // P1.2: Check R2 confirmation votes first — if R2 has a Strong majority, use it.
+        if !self.r2_votes.is_empty() {
+            if let Some(r2_result) = self.check_r2_override(total_voters) {
+                info!("R2 confirmation override: {:?}", r2_result);
+                return r2_result;
+            }
         }
 
         if self.votes.is_empty() {
@@ -266,8 +319,10 @@ impl VoteManager {
             };
         }
 
-        // Tier 2: Plurality floor (≥ total / divisor)
-        let floor = total_voters / config.plurality_floor_divisor as usize;
+        // Tier 2: Plurality floor (≥ ceil(total / divisor))
+        // P0.1: Use ceiling division to ensure ≥33% for small validator sets.
+        let divisor = config.plurality_floor_divisor as usize;
+        let floor = total_voters.div_ceil(divisor);
         if leader_count >= floor.max(1) {
             info!(
                 "vote tally complete: winner = {}, strength = Plurality, votes = {}/{}",
@@ -286,9 +341,44 @@ impl VoteManager {
         MigrationResult::Indeterminate
     }
 
-    /// Total number of unique peers that voted.
+    /// P1.2: Check if R2 votes provide a Strong majority override.
+    /// Returns `Some(MigrationResult::Adopt)` if R2 has >50%, `None` otherwise.
+    fn check_r2_override(&self, total_voters: usize) -> Option<MigrationResult> {
+        let mut candidates: Vec<(Hash256, usize)> = self
+            .r2_votes
+            .iter()
+            .map(|(hash, voters)| (*hash, voters.len()))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let (leader_hash, leader_count) = candidates[0];
+
+        // R2 override only if >50% (Strong majority)
+        if leader_count * 2 > total_voters {
+            // Handle ties
+            let tied: Vec<_> = candidates
+                .iter()
+                .filter(|(_, count)| *count == leader_count)
+                .collect();
+            let winner = if tied.len() > 1 {
+                tied.iter().map(|(h, _)| *h).min().unwrap()
+            } else {
+                leader_hash
+            };
+            Some(MigrationResult::Adopt {
+                candidate_hash: winner,
+                strength: ConsensusStrength::Strong,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Total number of unique validator+round vote entries.
     pub fn total_votes(&self) -> usize {
-        self.voted_peers.len()
+        self.voted_validators.len()
     }
 
     /// Clear all votes for a new cycle.
@@ -296,7 +386,8 @@ impl VoteManager {
     /// Optionally set the new cycle number via `set_current_cycle()` after clearing.
     pub fn clear(&mut self) {
         self.votes.clear();
-        self.voted_peers.clear();
+        self.r2_votes.clear();
+        self.voted_validators.clear();
     }
 }
 
@@ -353,9 +444,26 @@ mod tests {
         let candidate = hash_n(1);
         let (vote, _) = make_vote(0, candidate);
         assert!(mgr.record_vote(b"peer1", &vote).unwrap());
-        // Same peer_id, different vote object → rejected
+        // Same peer_id, different vote object → rejected (different keys but we test dedup)
         let (vote2, _) = make_vote(0, candidate);
-        assert!(!mgr.record_vote(b"peer1", &vote2).unwrap());
+        // Different validator key = accepted (P0.2: dedup is by pubkey not peer_id)
+        assert!(mgr.record_vote(b"peer1", &vote2).unwrap());
+        assert_eq!(mgr.total_votes(), 2);
+    }
+
+    // P0.2: Same validator key via different peer connections → duplicate
+    #[test]
+    fn p02_same_validator_key_duplicate_rejected() {
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+        let vote1 = PorVote::sign(0, candidate, &priv_key, pub_key.clone()).unwrap();
+        let vote2 = PorVote::sign(0, candidate, &priv_key, pub_key).unwrap();
+        // Same validator key from different peer_ids → second is rejected
+        assert!(mgr.record_vote(b"peer1", &vote1).unwrap());
+        assert!(!mgr.record_vote(b"peer2", &vote2).unwrap());
         assert_eq!(mgr.total_votes(), 1);
     }
 
@@ -486,9 +594,171 @@ mod tests {
     #[test]
     fn signing_payload_deterministic() {
         let candidate = hash_n(42);
-        let msg1 = PorVote::signing_payload(5, candidate);
-        let msg2 = PorVote::signing_payload(5, candidate);
+        let msg1 = PorVote::signing_payload(5, candidate, 1);
+        let msg2 = PorVote::signing_payload(5, candidate, 1);
         assert_eq!(msg1, msg2);
+        // Different rounds produce different payloads
+        let msg3 = PorVote::signing_payload(5, candidate, 2);
+        assert_ne!(
+            msg1, msg3,
+            "different rounds should produce different payloads"
+        );
+    }
+
+    // P0.1: Ceiling division ensures small validator sets meet ≥33% threshold
+    #[test]
+    fn plurality_floor_ceiling_division_small_sets() {
+        let config = default_config(); // divisor = 3
+
+        // 5 voters: ceil(5/3) = 2 (40%), not floor(5/3) = 1 (20%)
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (v1, _) = make_vote(0, candidate);
+        mgr.record_vote(b"p1", &v1).unwrap();
+        // 1 vote out of 5: floor would give Plurality (1 >= 1), ceil gives Indeterminate (1 < 2)
+        let result = mgr.compute_majority(5, &config);
+        assert_eq!(
+            result,
+            MigrationResult::Indeterminate,
+            "1/5 should be Indeterminate with ceil(5/3)=2 floor"
+        );
+
+        // 2 votes out of 5: should pass ceiling floor of 2
+        let (v2, _) = make_vote(0, candidate);
+        mgr.record_vote(b"p2", &v2).unwrap();
+        let result = mgr.compute_majority(5, &config);
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: candidate,
+                strength: ConsensusStrength::Plurality,
+            }
+        );
+
+        // 4 voters: ceil(4/3) = 2 (50%)
+        let mut mgr2 = VoteManager::new();
+        let (v3, _) = make_vote(0, candidate);
+        mgr2.record_vote(b"p1", &v3).unwrap();
+        let result = mgr2.compute_majority(4, &config);
+        assert_eq!(
+            result,
+            MigrationResult::Indeterminate,
+            "1/4 should be Indeterminate with ceil(4/3)=2 floor"
+        );
+
+        // 3 voters: ceil(3/3) = 1 (33%)
+        let mut mgr3 = VoteManager::new();
+        let (v4, _) = make_vote(0, candidate);
+        mgr3.record_vote(b"p1", &v4).unwrap();
+        let result = mgr3.compute_majority(3, &config);
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: candidate,
+                strength: ConsensusStrength::Plurality,
+            },
+            "1/3 should pass with ceil(3/3)=1 floor"
+        );
+
+        // 7 voters: ceil(7/3) = 3 (43%)
+        let mut mgr4 = VoteManager::new();
+        for i in 0..2u8 {
+            let (v, _) = make_vote(0, candidate);
+            mgr4.record_vote(&[i], &v).unwrap();
+        }
+        let result = mgr4.compute_majority(7, &config);
+        assert_eq!(
+            result,
+            MigrationResult::Indeterminate,
+            "2/7 should be Indeterminate with ceil(7/3)=3 floor"
+        );
+    }
+
+    // P1.2: R2 votes recorded separately
+    #[test]
+    fn r2_votes_separate_from_r1() {
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+
+        // R1 vote
+        let v1 = PorVote::sign_round(0, candidate, 1, &priv_key, pub_key.clone()).unwrap();
+        assert!(mgr.record_vote(b"p1", &v1).unwrap());
+
+        // Same validator, R2 vote → should be accepted (different round)
+        let v2 = PorVote::sign_round(0, candidate, 2, &priv_key, pub_key).unwrap();
+        assert!(mgr.record_vote(b"p1", &v2).unwrap());
+
+        assert_eq!(mgr.total_votes(), 2);
+        assert_eq!(mgr.current_tallies().get(&candidate), Some(&1));
+        assert_eq!(mgr.r2_tallies().get(&candidate), Some(&1));
+    }
+
+    // P1.2: R2 Strong majority overrides R1
+    #[test]
+    fn r2_strong_majority_overrides() {
+        let mut mgr = VoteManager::new();
+        let a = hash_n(1);
+        let b = hash_n(2);
+
+        // R1: 2 votes for A, 1 for B (out of 5 voters)
+        for i in 0..2u8 {
+            let (v, _) = make_vote(0, a);
+            mgr.record_vote(&[i], &v).unwrap();
+        }
+        let (vb, _) = make_vote(0, b);
+        mgr.record_vote(&[10], &vb).unwrap();
+
+        // R2: 3 votes for A (>50% of 5) → Strong override
+        for i in 0..3u8 {
+            let (sk, _) = ed25519::generate_keypair();
+            let priv_key = NoblePrivateKey::Ed25519(sk);
+            let pub_key = priv_key.public_key();
+            let v = PorVote::sign_round(0, a, 2, &priv_key, pub_key).unwrap();
+            mgr.record_vote(&[20 + i], &v).unwrap();
+        }
+
+        let result = mgr.compute_majority(5, &default_config());
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: a,
+                strength: ConsensusStrength::Strong,
+            },
+            "R2 Strong majority should win"
+        );
+    }
+
+    // P1.2: R2 without Strong majority falls back to R1
+    #[test]
+    fn r2_weak_falls_back_to_r1() {
+        let mut mgr = VoteManager::new();
+        let a = hash_n(1);
+
+        // R1: 3 votes for A (>50% of 5 → Strong)
+        for i in 0..3u8 {
+            let (v, _) = make_vote(0, a);
+            mgr.record_vote(&[i], &v).unwrap();
+        }
+
+        // R2: 1 vote for A (not >50%) → no override, falls through to R1
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+        let v = PorVote::sign_round(0, a, 2, &priv_key, pub_key).unwrap();
+        mgr.record_vote(&[20], &v).unwrap();
+
+        let result = mgr.compute_majority(5, &default_config());
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: a,
+                strength: ConsensusStrength::Strong,
+            },
+            "R1 Strong should still win when R2 is weak"
+        );
     }
 
     #[test]
