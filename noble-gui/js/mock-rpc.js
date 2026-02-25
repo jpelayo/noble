@@ -341,8 +341,10 @@ export class MockRpcClient {
   #authToken = null;
   #totpSecret = null;
   #allowedIps = [];
+  #mockFirstRun = false;
+  #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
-  constructor({ latencyMin = 50, latencyMax = 150 } = {}) {
+  constructor({ latencyMin = 50, latencyMax = 150, firstRun = false } = {}) {
     const { blocks, txIndex, checksumIndex } = generateChain(100);
     this.#chain = { blocks, txIndex, checksumIndex };
     this.#mempool = generateMempool(50, 99);
@@ -350,6 +352,7 @@ export class MockRpcClient {
     this.#validators = [...VALIDATORS]; // mutable copy per instance
     this.#latencyMin = latencyMin;
     this.#latencyMax = latencyMax;
+    this.#mockFirstRun = firstRun;
   }
 
   /** Enable/disable mock auth. When enabled, setAuthToken must be called first. */
@@ -480,7 +483,55 @@ export class MockRpcClient {
         }
         // Mock: return a deterministic URL based on the checksum
         const mockUrl = `https://storage.example.com/docs/${entry.tx.checksum.slice(0, 16)}.pdf`;
-        return { tx_id: params.tx_id, plaintext: mockUrl };
+        return {
+          tx_id: params.tx_id,
+          plaintext: mockUrl,
+          locator_metadata: {
+            has_locator: true,
+            recipient_count: entry.tx.locator_recipient_count || 1,
+            encryption_scheme: 'ECIES-X25519',
+          },
+        };
+      }
+
+      case 'noble_getSetupStatus':
+        return { setup_complete: !this.#mockFirstRun };
+
+      case 'noble_uploadPkcs12': {
+        if (!params.file_data || !params.passphrase) {
+          throw { code: -32602, message: 'Missing file_data or passphrase' };
+        }
+        const cn = 'Acme Corp';
+        const fp = deterministicHash(42).slice(0, 40);
+        return {
+          success: true,
+          cn,
+          fingerprint: fp,
+          expiry: '2027-03-15T00:00:00Z',
+          chain_length: 3,
+          issuer_cn: 'DigiCert Global Root G2',
+        };
+      }
+
+      case 'noble_bindPkiIdentity': {
+        if (!params.fingerprint) throw { code: -32602, message: 'Missing fingerprint' };
+        const now = Math.floor(Date.now() / 1000);
+        this.#pkiStatus = {
+          configured: true,
+          cn: 'Acme Corp',
+          fingerprint: params.fingerprint,
+          expiry: '2027-03-15T00:00:00Z',
+          bound_at: now,
+        };
+        return { success: true, bound_at: now };
+      }
+
+      case 'noble_getPkiStatus':
+        return this.#pkiStatus;
+
+      case 'noble_removePkiBinding': {
+        this.#pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
+        return { success: true };
       }
 
       case 'noble_estimateFee':
@@ -758,6 +809,7 @@ export class MockRpcClient {
           version: '0.1.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
+          network: 'mainnet',
           uptime_secs: 86400 * 3 + 7200 + 1800,
           storage_bytes: 256 * 1024 * 1024,
           storage_capacity_bytes: 1024 * 1024 * 1024,
@@ -765,9 +817,25 @@ export class MockRpcClient {
           ws_port: 8784,
           p2p_port: 8780,
           data_dir: '/var/noble/data',
+          totp_enabled: this.#authEnabled,
         };
 
       case 'noble_getWalletInfo': {
+        // First-run mode: no keys yet
+        if (this.#mockFirstRun) {
+          return {
+            key_count: 0,
+            public_key: null,
+            address: null,
+            balance: 0,
+            available: 0,
+            pending: 0,
+            total_earned: 0,
+            total_outgoing: 0,
+            blocks_validated: 0,
+            first_active: null,
+          };
+        }
         const walletKey = this.#validators[0].public_key;
         const keyBytes = walletKey.Ed25519 || walletKey.Secp256k1 || [];
         const keyHex = keyBytes.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -790,6 +858,7 @@ export class MockRpcClient {
         const available = Math.max(0, balance - pending);
 
         return {
+          key_count: 1,
           public_key: walletKey,
           address,
           balance,
@@ -1224,6 +1293,8 @@ export class MockRpcClient {
         ];
         const words = [];
         for (let i = 0; i < wc; i++) words.push(wordList[i % wordList.length]);
+        // First-run complete after wallet creation
+        this.#mockFirstRun = false;
         return {
           mnemonic: words.join(' '),
           address: '02' + randomHex(32),
@@ -1237,6 +1308,8 @@ export class MockRpcClient {
         if (words.length !== 12 && words.length !== 24) {
           throw { code: -32602, message: 'Mnemonic must be 12 or 24 words' };
         }
+        // First-run complete after wallet import
+        this.#mockFirstRun = false;
         return {
           address: '02' + randomHex(32),
           scheme_id: 2,

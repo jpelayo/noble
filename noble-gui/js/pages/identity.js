@@ -154,6 +154,13 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <div class="panel" id="pki-panel">
+      <div class="panel-header">PKI Identity</div>
+      <div class="panel-body" id="pki-body">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
     <div id="id-peer-detail" class="panel" style="display:none">
       <div class="panel-header">Peer Details</div>
       <div class="panel-body">
@@ -267,6 +274,203 @@ export function init(root, ctx) {
     }
   }
 
+  // --- PKI Identity Management ---
+
+  function copyToClipboard(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      const prev = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.disabled = true;
+      setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 1500);
+    }).catch(() => {
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    });
+  }
+
+  async function loadPkiStatus() {
+    const pkiBody = root.querySelector('#pki-body');
+    try {
+      const status = await rpc.call('noble_getPkiStatus');
+      if (status.configured) {
+        renderPkiBound(pkiBody, status);
+      } else {
+        renderPkiUpload(pkiBody);
+      }
+    } catch {
+      renderPkiUpload(pkiBody);
+    }
+  }
+
+  function renderPkiBound(container, status) {
+    const fpShort = (status.fingerprint || '').slice(0, 16) + '...';
+    const expiryDate = status.expiry ? new Date(status.expiry * 1000).toLocaleDateString() : 'N/A';
+    const boundDate = status.bound_at ? new Date(status.bound_at * 1000).toLocaleString() : 'N/A';
+
+    container.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <span class="badge-pki-verified">Verified</span>
+        <span style="color:var(--text-secondary)">PKI Identity is configured</span>
+      </div>
+      <dl class="detail-grid" style="margin-bottom:16px">
+        <dt>Certificate CN</dt><dd>${esc(status.cn || 'Unknown')}</dd>
+        <dt>Fingerprint</dt>
+        <dd style="display:flex;align-items:center;gap:6px">
+          <span class="mono">${esc(fpShort)}</span>
+          <button type="button" class="btn" id="pki-copy-fp" style="padding:2px 8px;font-size:0.8em">Copy</button>
+        </dd>
+        <dt>Expiry</dt><dd>${expiryDate}</dd>
+        <dt>Certificate Chain</dt><dd>Certificate chain: ${formatNumber(status.chain_length || 0)} certificates</dd>
+        <dt>Bound At</dt><dd>${boundDate}</dd>
+      </dl>
+      <button type="button" class="btn btn-danger" id="pki-remove">Remove PKI Binding</button>
+    `;
+
+    container.querySelector('#pki-copy-fp').addEventListener('click', function() {
+      copyToClipboard(status.fingerprint || '', this);
+    });
+
+    container.querySelector('#pki-remove').addEventListener('click', async function() {
+      if (!confirm('Remove your PKI identity binding? This will clear the certificate association from your node.')) return;
+      this.disabled = true;
+      this.textContent = 'Removing...';
+      try {
+        await rpc.call('noble_removePkiBinding');
+        renderPkiUpload(container);
+      } catch (err) {
+        this.disabled = false;
+        this.textContent = 'Remove PKI Binding';
+        const errMsg = document.createElement('div');
+        errMsg.style.cssText = 'color:var(--danger);margin-top:8px';
+        errMsg.textContent = `Error: ${err.message || err}`;
+        container.appendChild(errMsg);
+        setTimeout(() => errMsg.remove(), 5000);
+      }
+    });
+  }
+
+  function renderPkiUpload(container) {
+    container.innerHTML = `
+      <div style="color:var(--text-secondary);margin-bottom:16px">PKI Identity: Not configured</div>
+      <div class="form-group">
+        <label for="pki-file">PKCS#12 Certificate File</label>
+        <input type="file" id="pki-file" accept=".p12,.pfx" style="padding:6px 0">
+      </div>
+      <div class="form-group">
+        <label for="pki-pass">Passphrase</label>
+        <input type="password" id="pki-pass" autocomplete="off" spellcheck="false" placeholder="Certificate passphrase">
+      </div>
+      <button type="button" class="btn btn-primary" id="pki-upload">Upload &amp; Inspect</button>
+      <span id="pki-status" class="form-status"></span>
+    `;
+
+    container.querySelector('#pki-upload').addEventListener('click', async function() {
+      const fileInput = container.querySelector('#pki-file');
+      const passInput = container.querySelector('#pki-pass');
+      const statusSpan = container.querySelector('#pki-status');
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        statusSpan.textContent = 'Please select a .p12 or .pfx file';
+        statusSpan.style.color = 'var(--danger)';
+        return;
+      }
+
+      const file = fileInput.files[0];
+      this.disabled = true;
+      statusSpan.textContent = 'Reading file...';
+      statusSpan.style.color = 'var(--text-secondary)';
+
+      try {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        // Convert to base64 — use a loop to avoid call stack overflow on large files
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+          binary += String.fromCharCode.apply(null, chunk);
+        }
+        const base64 = btoa(binary);
+
+        const passphrase = passInput.value;
+
+        statusSpan.textContent = 'Uploading...';
+        const result = await rpc.call('noble_uploadPkcs12', { file_data: base64, passphrase });
+
+        // Wipe passphrase from DOM immediately
+        passInput.value = 'x'.repeat(passInput.value.length);
+        passInput.value = '';
+        // Clear file input
+        fileInput.value = '';
+
+        if (result.success) {
+          renderPkiConfirm(container, result);
+        } else {
+          statusSpan.textContent = `Error: ${result.error || 'Upload failed'}`;
+          statusSpan.style.color = 'var(--danger)';
+          this.disabled = false;
+        }
+      } catch (err) {
+        // Wipe passphrase on error too
+        passInput.value = 'x'.repeat(passInput.value.length);
+        passInput.value = '';
+        fileInput.value = '';
+
+        statusSpan.textContent = `Error: ${err.message || err}`;
+        statusSpan.style.color = 'var(--danger)';
+        this.disabled = false;
+      }
+    });
+  }
+
+  function renderPkiConfirm(container, result) {
+    const fpShort = (result.fingerprint || '').slice(0, 16) + '...';
+    const expiryDate = result.expiry ? new Date(result.expiry * 1000).toLocaleDateString() : 'N/A';
+
+    container.innerHTML = `
+      <div style="color:var(--success);margin-bottom:16px;font-weight:600">Certificate inspected successfully</div>
+      <dl class="detail-grid" style="margin-bottom:16px">
+        <dt>Certificate CN</dt><dd>${esc(result.cn || 'Unknown')}</dd>
+        <dt>Fingerprint</dt>
+        <dd style="display:flex;align-items:center;gap:6px">
+          <span class="mono">${esc(fpShort)}</span>
+          <button type="button" class="btn" id="pki-confirm-copy-fp" style="padding:2px 8px;font-size:0.8em">Copy</button>
+        </dd>
+        <dt>Expiry</dt><dd>${expiryDate}</dd>
+        <dt>Certificate Chain</dt><dd>Certificate chain: ${formatNumber(result.chain_length || 0)} certificates</dd>
+      </dl>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn btn-primary" id="pki-confirm-bind">Confirm Binding</button>
+        <button type="button" class="btn" id="pki-confirm-cancel">Cancel</button>
+      </div>
+      <span id="pki-confirm-status" class="form-status"></span>
+    `;
+
+    container.querySelector('#pki-confirm-copy-fp').addEventListener('click', function() {
+      copyToClipboard(result.fingerprint || '', this);
+    });
+
+    container.querySelector('#pki-confirm-bind').addEventListener('click', async function() {
+      this.disabled = true;
+      const statusSpan = container.querySelector('#pki-confirm-status');
+      statusSpan.textContent = 'Binding...';
+      statusSpan.style.color = 'var(--text-secondary)';
+      try {
+        await rpc.call('noble_bindPkiIdentity', { fingerprint: result.fingerprint });
+        // Reload to show bound state
+        await loadPkiStatus();
+      } catch (err) {
+        statusSpan.textContent = `Error: ${err.message || err}`;
+        statusSpan.style.color = 'var(--danger)';
+        this.disabled = false;
+      }
+    });
+
+    container.querySelector('#pki-confirm-cancel').addEventListener('click', () => {
+      renderPkiUpload(container);
+    });
+  }
+
   // Save & broadcast
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -296,6 +500,7 @@ export function init(root, ctx) {
 
   loadIdentity();
   loadPeers();
+  loadPkiStatus();
 
   // Refresh peers every 30s
   const peerInterval = setInterval(loadPeers, 30_000);

@@ -5,11 +5,11 @@
 //!
 //! Deserialized from `noble.toml`. Each section maps to a subsystem.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Top-level node configuration.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct NodeConfig {
     /// Node operational mode and network selection.
     #[serde(default)]
@@ -28,7 +28,7 @@ pub struct NodeConfig {
 }
 
 /// Operational role of the node binary.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationalRole {
     /// Full validating node that produces blocks and casts votes.
@@ -41,7 +41,7 @@ pub enum OperationalRole {
 }
 
 /// Network the node connects to.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkId {
     #[default]
@@ -71,7 +71,7 @@ impl NetworkId {
 }
 
 /// `[node]` section — operational mode and network selection.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct NodeSectionConfig {
     /// Operational role: validator, observer, or light.
     #[serde(default)]
@@ -82,7 +82,7 @@ pub struct NodeSectionConfig {
 }
 
 /// P2P networking configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct NetworkConfig {
     pub listen_addr: String,
     pub seeds: Vec<String>,
@@ -91,7 +91,7 @@ pub struct NetworkConfig {
 }
 
 /// RocksDB storage configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub cache_size_mb: u32,
@@ -99,7 +99,7 @@ pub struct StorageConfig {
 }
 
 /// PoR consensus configuration.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ConsensusConfig {
     pub validator_key_path: String,
     pub validator_list_path: PathBuf,
@@ -146,7 +146,7 @@ impl std::fmt::Debug for ConsensusConfig {
 }
 
 /// JSON-RPC and WebSocket API configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiConfig {
     pub rpc_addr: String,
     pub ws_addr: String,
@@ -178,13 +178,13 @@ fn default_gui_addr() -> String {
 }
 
 /// Wallet keystore configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WalletConfig {
     pub keystore_path: PathBuf,
 }
 
 /// Logging configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LoggingConfig {
     pub level: String,
     pub file: String,
@@ -192,14 +192,14 @@ pub struct LoggingConfig {
 }
 
 /// Prometheus metrics configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MetricsConfig {
     pub prometheus_addr: String,
     pub enabled: bool,
 }
 
 /// Runtime tracing configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TraceConfig {
     /// Maximum number of entries in the RAM ring buffer.
     #[serde(default = "default_buffer_capacity")]
@@ -230,7 +230,7 @@ impl Default for TraceConfig {
 }
 
 /// Node identity configuration for PoR self-identification broadcasts.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct IdentityConfig {
     pub node_name: String,
     pub org_type: String,
@@ -603,6 +603,131 @@ mod tests {
             let p: Partial = toml::from_str(&toml_str).unwrap();
             assert_eq!(p.node.role, expected_role, "role={role_str}");
             assert_eq!(p.node.network, NetworkId::Testnet);
+        }
+    }
+
+    // ── TOML round-trip tests (Part E5) ──
+
+    #[test]
+    fn node_config_default_round_trips_through_toml() {
+        let original = NodeConfig::default();
+        let toml_str = toml::to_string_pretty(&original).expect("serialize default config");
+        let parsed: NodeConfig =
+            toml::from_str(&toml_str).expect("deserialize round-tripped config");
+
+        assert_eq!(parsed.node.role, original.node.role);
+        assert_eq!(parsed.node.network, original.node.network);
+        assert_eq!(parsed.network.listen_addr, original.network.listen_addr);
+        assert_eq!(parsed.network.max_peers, original.network.max_peers);
+        assert_eq!(parsed.storage.cache_size_mb, original.storage.cache_size_mb);
+        assert_eq!(parsed.storage.compression, original.storage.compression);
+        assert_eq!(parsed.api.rpc_addr, original.api.rpc_addr);
+        assert_eq!(parsed.api.ws_addr, original.api.ws_addr);
+        assert_eq!(parsed.api.gui_addr, original.api.gui_addr);
+        assert_eq!(parsed.api.totp_enabled, original.api.totp_enabled);
+        assert_eq!(parsed.logging.level, original.logging.level);
+        assert_eq!(parsed.metrics.enabled, original.metrics.enabled);
+        assert_eq!(parsed.identity.org_type, original.identity.org_type);
+        assert_eq!(parsed.identity.node_role, original.identity.node_role);
+        assert_eq!(parsed.trace.buffer_capacity, original.trace.buffer_capacity);
+        assert_eq!(parsed.trace.initial_filter, original.trace.initial_filter);
+    }
+
+    #[test]
+    fn node_config_with_values_round_trips() {
+        let mut config = NodeConfig::default();
+        config.node.role = OperationalRole::Validator;
+        config.node.network = NetworkId::Testnet;
+        config.network.listen_addr = "/ip4/0.0.0.0/tcp/9999".to_string();
+        config.network.max_peers = 100;
+        config.network.seeds = vec![
+            "/ip4/1.2.3.4/tcp/8780".to_string(),
+            "/ip4/5.6.7.8/tcp/8780".to_string(),
+        ];
+        config.storage.data_dir = PathBuf::from("/var/noble/data");
+        config.storage.cache_size_mb = 512;
+        config.storage.compression = false;
+        config.consensus.validator_key_path = "validator.key".to_string();
+        config.consensus.voting_strategy = "round_robin".to_string();
+        config.api.totp_enabled = true;
+        config.api.totp_secret_file = "totp.secret".to_string();
+        config.api.allowed_ips = vec!["192.168.1.0/24".to_string()];
+        config.identity.node_name = "test-node".to_string();
+        config.identity.org_type = "PrivateCorporation".to_string();
+        config.identity.wants_to_validate = true;
+        config.identity.wants_to_vote = true;
+        config.trace.buffer_capacity = 100_000;
+        config.trace.stderr_enabled = true;
+
+        let toml_str = toml::to_string_pretty(&config).expect("serialize");
+        let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
+
+        assert_eq!(parsed.node.role, OperationalRole::Validator);
+        assert_eq!(parsed.node.network, NetworkId::Testnet);
+        assert_eq!(parsed.network.listen_addr, "/ip4/0.0.0.0/tcp/9999");
+        assert_eq!(parsed.network.max_peers, 100);
+        assert_eq!(parsed.network.seeds.len(), 2);
+        assert_eq!(parsed.storage.data_dir, PathBuf::from("/var/noble/data"));
+        assert_eq!(parsed.storage.cache_size_mb, 512);
+        assert!(!parsed.storage.compression);
+        assert_eq!(parsed.consensus.validator_key_path, "validator.key");
+        assert_eq!(parsed.consensus.voting_strategy, "round_robin");
+        assert!(parsed.api.totp_enabled);
+        assert_eq!(parsed.api.totp_secret_file, "totp.secret");
+        assert_eq!(parsed.api.allowed_ips, vec!["192.168.1.0/24"]);
+        assert_eq!(parsed.identity.node_name, "test-node");
+        assert!(parsed.identity.wants_to_validate);
+        assert!(parsed.identity.wants_to_vote);
+        assert_eq!(parsed.trace.buffer_capacity, 100_000);
+        assert!(parsed.trace.stderr_enabled);
+    }
+
+    #[test]
+    fn serialized_config_contains_all_sections() {
+        let config = NodeConfig::default();
+        let toml_str = toml::to_string_pretty(&config).expect("serialize");
+
+        assert!(toml_str.contains("[node]"), "missing [node]");
+        assert!(toml_str.contains("[network]"), "missing [network]");
+        assert!(toml_str.contains("[storage]"), "missing [storage]");
+        assert!(toml_str.contains("[consensus]"), "missing [consensus]");
+        assert!(toml_str.contains("[api]"), "missing [api]");
+        assert!(toml_str.contains("[wallet]"), "missing [wallet]");
+        assert!(toml_str.contains("[logging]"), "missing [logging]");
+        assert!(toml_str.contains("[metrics]"), "missing [metrics]");
+        assert!(toml_str.contains("[identity]"), "missing [identity]");
+        assert!(toml_str.contains("[trace]"), "missing [trace]");
+    }
+
+    #[test]
+    fn all_network_variants_round_trip() {
+        for (variant, expected_str) in [
+            (NetworkId::Mainnet, "mainnet"),
+            (NetworkId::Testnet, "testnet"),
+            (NetworkId::Regtest, "regtest"),
+        ] {
+            let mut config = NodeConfig::default();
+            config.node.network = variant;
+            let toml_str = toml::to_string_pretty(&config).expect("serialize");
+            assert!(toml_str.contains(expected_str), "expected '{expected_str}'");
+            let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
+            assert_eq!(parsed.node.network, variant);
+        }
+    }
+
+    #[test]
+    fn all_role_variants_round_trip() {
+        for (variant, expected_str) in [
+            (OperationalRole::Validator, "validator"),
+            (OperationalRole::Observer, "observer"),
+            (OperationalRole::Light, "light"),
+        ] {
+            let mut config = NodeConfig::default();
+            config.node.role = variant;
+            let toml_str = toml::to_string_pretty(&config).expect("serialize");
+            assert!(toml_str.contains(expected_str), "expected '{expected_str}'");
+            let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
+            assert_eq!(parsed.node.role, variant);
         }
     }
 }

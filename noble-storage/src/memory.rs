@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn subsidy_credited_to_validator() {
         let store = MemoryStorage::new();
-        let (block, block_hash, tx_ids) = make_block(vec![], 0, Hash256::ZERO, 1_700_000_000);
+        let (block, block_hash, tx_ids) = make_block(vec![], 1, Hash256::ZERO, 1_700_000_000);
         let validator = block.header.validator_id.clone();
         store.commit_block(&block, &block_hash, &tx_ids).unwrap();
         assert_eq!(store.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
@@ -943,11 +943,11 @@ mod tests {
         let store = MemoryStorage::new();
         let (val_sk, val_pk) = ed25519::generate_keypair();
 
-        // Create a funded sender first (via block 0 subsidy as validator)
+        // Create a funded sender first (via block 1 subsidy as validator)
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -960,7 +960,7 @@ mod tests {
         let (tx2, id2) = make_signed_tx(&sender_sk, &sender_pk, b"doc2", 1_700_000_001);
         let (block1, hash1, ids1) = make_block_with_validator(
             vec![(tx1, id1), (tx2, id2)],
-            1,
+            2,
             hash0,
             1_700_000_001,
             &val_sk,
@@ -980,11 +980,11 @@ mod tests {
     fn notarization_debits_sender_fee() {
         let store = MemoryStorage::new();
 
-        // Fund sender as validator of block 0 (gets subsidy)
+        // Fund sender as validator of block 1 (gets subsidy)
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -998,7 +998,7 @@ mod tests {
         // Block 1: sender submits a notarization (different validator)
         let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
         let fee = tx1.fee;
-        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 1, hash0, 1_700_000_001);
+        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 2, hash0, 1_700_000_001);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         assert_eq!(
@@ -1011,11 +1011,11 @@ mod tests {
     fn transfer_debits_sender_credits_recipient() {
         let store = MemoryStorage::new();
 
-        // Fund sender as validator of block 0
+        // Fund sender as validator of block 1
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1036,7 +1036,7 @@ mod tests {
             fee,
             1_700_000_001,
         );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 1, hash0, 1_700_000_001);
+        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
@@ -1077,10 +1077,10 @@ mod tests {
     fn balance_overflow_fails() {
         let store = MemoryStorage::new();
 
-        // Block 0: empty block so validator gets subsidy
+        // Block 1: empty block so validator gets subsidy
         let (val_sk, val_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
+            make_block_with_validator(vec![], 1, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
         store.commit_block(&block0, &hash0, &ids0).unwrap();
 
         // Manually set balance to near u64::MAX
@@ -1090,9 +1090,9 @@ mod tests {
             inner.balances.insert(val_pub, u64::MAX - 10);
         }
 
-        // Block 1: validator gets another subsidy → overflow
+        // Block 2: validator gets another subsidy → overflow
         let (block1, hash1, ids1) =
-            make_block_with_validator(vec![], 1, hash0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![], 2, hash0, 1_700_000_001, &val_sk, &val_pk);
         let result = store.commit_block(&block1, &hash1, &ids1);
         assert!(matches!(result, Err(StorageError::BalanceOverflow { .. })));
     }
@@ -1105,7 +1105,7 @@ mod tests {
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1114,7 +1114,7 @@ mod tests {
         store.commit_block(&block0, &hash0, &ids0).unwrap();
 
         let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
-        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 1, hash0, 1_700_000_001);
+        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 2, hash0, 1_700_000_001);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
@@ -1130,7 +1130,7 @@ mod tests {
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1148,7 +1148,7 @@ mod tests {
             1_000,
             1_700_000_001,
         );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 1, hash0, 1_700_000_001);
+        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
@@ -1170,7 +1170,7 @@ mod tests {
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1181,7 +1181,7 @@ mod tests {
         // 3 blocks with 1 notarization each
         let mut prev_hash = hash0;
         let mut all_ids = vec![];
-        for i in 1..=3 {
+        for i in 2..=4 {
             let (tx, id) = make_signed_tx(
                 &sender_sk,
                 &sender_pk,
@@ -1226,7 +1226,7 @@ mod tests {
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1236,7 +1236,7 @@ mod tests {
 
         let mut prev_hash = hash0;
         let mut expected_order = vec![];
-        for i in 1..=3 {
+        for i in 2..=4 {
             let (tx, id) = make_signed_tx(
                 &sender_sk,
                 &sender_pk,
@@ -1267,7 +1267,7 @@ mod tests {
         let (val_sk, val_pk) = ed25519::generate_keypair();
 
         let mut prev_hash = Hash256::ZERO;
-        for h in 0..3 {
+        for h in 1..4 {
             let (block, hash, ids) = make_block_with_validator(
                 vec![],
                 h,
@@ -1292,7 +1292,7 @@ mod tests {
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1314,7 +1314,7 @@ mod tests {
             1_700_000_001,
         );
         let (block1, hash1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 1, hash0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 2, hash0, 1_700_000_001, &val_sk, &val_pk);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
@@ -1325,11 +1325,11 @@ mod tests {
     fn self_transfer_balance_correct() {
         let store = MemoryStorage::new();
 
-        // Fund sender as validator of block 0
+        // Fund sender as validator of block 1
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1349,7 +1349,7 @@ mod tests {
             fee,
             1_700_000_001,
         );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 1, hash0, 1_700_000_001);
+        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         // Self-transfer: net effect is -fee only (amount cancels out)
@@ -1388,15 +1388,17 @@ mod tests {
         let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
 
         let mut prev = Hash256::ZERO;
-        for h in 0..3u64 {
+        for h in 0..4u64 {
             let (b, hash, ids) =
                 make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
             store.commit_block(&b, &hash, &ids).unwrap();
             prev = hash;
         }
 
+        // Heights 0..=3: height 0 gives 0 subsidy, heights 1-3 give INITIAL_SUBSIDY each
         assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
-        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        store.rollback_to_height(2, MAINNET_CHAIN_ID).unwrap();
+        // After rollback to height 2: heights 0,1,2 remain; 0 gives 0, 1-2 give INITIAL_SUBSIDY each
         assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 2);
     }
 
@@ -1720,10 +1722,10 @@ mod tests {
         let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
         let gw_wire = gw_key.to_wire_bytes();
 
-        // Block 0: fund sender
+        // Block 1: fund sender
         let (b0, h0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1742,7 +1744,7 @@ mod tests {
             Some(gw_wire),
         );
         let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
@@ -1763,7 +1765,7 @@ mod tests {
 
         let (b0, h0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1781,7 +1783,7 @@ mod tests {
             Some(gw_wire),
         );
         let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
@@ -1796,7 +1798,7 @@ mod tests {
 
         let (b0, h0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1814,7 +1816,7 @@ mod tests {
             None,
         );
         let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
@@ -1834,7 +1836,7 @@ mod tests {
 
         let (b0, h0, ids0) = make_block_with_validator(
             vec![],
-            0,
+            1,
             Hash256::ZERO,
             1_700_000_000,
             &sender_sk,
@@ -1851,7 +1853,7 @@ mod tests {
             Some(val_wire),
         );
         let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 1, h0, 1_700_000_001, &val_sk, &val_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000

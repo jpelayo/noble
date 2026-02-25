@@ -245,7 +245,7 @@ impl KeyStore {
         let mnemonic_str = mnemonic.words().collect::<Vec<_>>().join(" ");
 
         // Derive seed (empty BIP-39 passphrase by default)
-        let seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed("");
 
         // Derive child key at m/44'/9999'/0'/0/0
         let child = bip32::XPrv::derive_from_path(
@@ -254,23 +254,29 @@ impl KeyStore {
                 .parse()
                 .map_err(|e: bip32::Error| WalletError::Crypto(format!("derivation path: {e}")))?,
         )
-        .map_err(|e| WalletError::Crypto(format!("BIP-32 derivation: {e}")))?;
+        .map_err(|e| {
+            seed.zeroize();
+            WalletError::Crypto(format!("BIP-32 derivation: {e}"))
+        })?;
+        seed.zeroize();
 
         // Extract 32-byte secret key
         let secret_key = child.to_bytes();
-        let sk_bytes: Vec<u8> = secret_key.to_vec();
+        let mut sk_bytes: Vec<u8> = secret_key.to_vec();
 
         let priv_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
         let pub_key = priv_key.public_key();
 
         let file_path = self.key_file_path(&pub_key);
         if file_path.exists() {
+            sk_bytes.zeroize();
             return Err(WalletError::DuplicateKey(hex::encode(
                 pub_key.to_wire_bytes(),
             )));
         }
 
         let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
+        sk_bytes.zeroize();
         let json = serde_json::to_string_pretty(&encrypted)?;
         fs::write(&file_path, &json)?;
 
@@ -306,7 +312,7 @@ impl KeyStore {
             .map_err(|e: bip39::Error| WalletError::Crypto(format!("invalid mnemonic: {e}")))?;
 
         // Derive seed (empty BIP-39 passphrase)
-        let seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed("");
 
         // Derive child key at m/44'/9999'/0'/0/0
         let child = bip32::XPrv::derive_from_path(
@@ -315,22 +321,28 @@ impl KeyStore {
                 .parse()
                 .map_err(|e: bip32::Error| WalletError::Crypto(format!("derivation path: {e}")))?,
         )
-        .map_err(|e| WalletError::Crypto(format!("BIP-32 derivation: {e}")))?;
+        .map_err(|e| {
+            seed.zeroize();
+            WalletError::Crypto(format!("BIP-32 derivation: {e}"))
+        })?;
+        seed.zeroize();
 
         let secret_key = child.to_bytes();
-        let sk_bytes: Vec<u8> = secret_key.to_vec();
+        let mut sk_bytes: Vec<u8> = secret_key.to_vec();
 
         let priv_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
         let pub_key = priv_key.public_key();
 
         let file_path = self.key_file_path(&pub_key);
         if file_path.exists() {
-            // Key already exists — just return the public key
+            // Key already exists — zeroize and return the public key
+            sk_bytes.zeroize();
             return Ok(pub_key);
         }
 
         // Encrypt and store
         let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
+        sk_bytes.zeroize();
         let json = serde_json::to_string_pretty(&encrypted)?;
         fs::write(&file_path, &json)?;
 

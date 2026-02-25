@@ -5,6 +5,7 @@
  */
 
 import { formatNumber, formatFee, formatTimestamp, timeAgo, truncateHash, bytesToHex } from '../utils.js';
+import { createPassphraseForm, createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
 
 export function init(root, ctx) {
   const { rpc, ws } = ctx;
@@ -101,39 +102,13 @@ export function init(root, ctx) {
     <!-- Mnemonic Wallet Management -->
     <div class="panel">
       <div class="panel-header">Mnemonic Wallet</div>
-      <div class="panel-body">
+      <div class="panel-body" id="w-mnemonic-panel">
         <div style="display:flex;gap:var(--gap);flex-wrap:wrap;margin-bottom:var(--gap)">
           <button id="w-generate-btn" class="btn btn-primary" style="padding:8px 16px">Generate New Wallet</button>
           <button id="w-import-btn" class="btn btn-secondary" style="padding:8px 16px">Import from Mnemonic</button>
         </div>
-        <div id="w-mnemonic-result" style="display:none">
-          <div style="padding:var(--gap);background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
-            <div style="font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)">
-              Backup Your Mnemonic Phrase
-            </div>
-            <div id="w-mnemonic-words" class="mono" style="font-size:var(--font-size-sm);line-height:2;padding:var(--gap-sm);background:var(--bg-primary);border-radius:var(--radius-sm);user-select:all;word-spacing:4px"></div>
-            <div style="font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)">
-              Write these words down and store them securely. They cannot be recovered from the node.
-            </div>
-            <div style="margin-top:var(--gap-sm)">
-              <dt style="font-size:var(--font-size-xs);color:var(--text-muted)">Derived Address</dt>
-              <dd id="w-mnemonic-address" class="mono" style="font-size:var(--font-size-sm)"></dd>
-            </div>
-          </div>
-        </div>
-        <div id="w-import-form" style="display:none;margin-top:var(--gap)">
-          <div style="padding:var(--gap);background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
-            <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm)">Enter Mnemonic Phrase</label>
-            <textarea id="w-import-words" rows="3" style="width:100%;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical" placeholder="Enter your 12 or 24 word mnemonic phrase..."></textarea>
-            <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-top:var(--gap-sm);margin-bottom:var(--gap-xs)">Encryption Passphrase</label>
-            <input id="w-import-pass" type="password" style="width:100%;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:6px var(--gap-sm);font-size:var(--font-size-sm)" placeholder="At least 12 characters..." />
-            <div style="margin-top:var(--gap-sm);display:flex;gap:var(--gap-sm)">
-              <button id="w-import-submit" class="btn btn-primary" style="padding:6px 12px">Import</button>
-              <button id="w-import-cancel" class="btn btn-secondary" style="padding:6px 12px">Cancel</button>
-            </div>
-            <div id="w-import-result" style="display:none;margin-top:var(--gap-sm);font-size:var(--font-size-sm)"></div>
-          </div>
-        </div>
+        <div id="w-generate-area"></div>
+        <div id="w-import-area"></div>
       </div>
     </div>
 
@@ -331,83 +306,152 @@ export function init(root, ctx) {
   // Filter change
   wFilter.addEventListener('change', () => { currentPage = 0; renderTransactions(); });
 
-  // ── Mnemonic wallet management ──
+  // ── Mnemonic wallet management (security-hardened) ──
   const generateBtn = root.querySelector('#w-generate-btn');
   const importBtn = root.querySelector('#w-import-btn');
-  const mnemonicResult = root.querySelector('#w-mnemonic-result');
-  const mnemonicWords = root.querySelector('#w-mnemonic-words');
-  const mnemonicAddress = root.querySelector('#w-mnemonic-address');
-  const importForm = root.querySelector('#w-import-form');
-  const importWordsInput = root.querySelector('#w-import-words');
-  const importPassInput = root.querySelector('#w-import-pass');
-  const importSubmit = root.querySelector('#w-import-submit');
-  const importCancel = root.querySelector('#w-import-cancel');
-  const importResult = root.querySelector('#w-import-result');
+  const generateArea = root.querySelector('#w-generate-area');
+  const importArea = root.querySelector('#w-import-area');
+  const mnemonicPanel = root.querySelector('#w-mnemonic-panel');
+  let activeGenerateForm = null;
+  let activeImportForm = null;
+  let autoClearHandle = null;
 
-  generateBtn.addEventListener('click', async () => {
-    const passphrase = prompt('Enter encryption passphrase (min 12 characters):');
-    if (!passphrase) return;
-    if (passphrase.length < 12) {
-      alert('Passphrase must be at least 12 characters.');
-      return;
-    }
-    try {
-      generateBtn.disabled = true;
-      generateBtn.textContent = 'Generating...';
-      const result = await rpc.call('noble_generateMnemonic', {
-        word_count: 24,
-        passphrase,
-      });
-      mnemonicWords.textContent = result.mnemonic;
-      mnemonicAddress.textContent = result.address;
-      mnemonicResult.style.display = 'block';
-      importForm.style.display = 'none';
-    } catch (e) {
-      alert('Failed to generate mnemonic: ' + (e.message || e));
-    } finally {
-      generateBtn.disabled = false;
-      generateBtn.textContent = 'Generate New Wallet';
-    }
+  generateBtn.addEventListener('click', () => {
+    // Collapse import, toggle generate
+    if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; importArea.innerHTML = ''; }
+    if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; generateArea.innerHTML = ''; return; }
+
+    generateArea.innerHTML = '';
+    activeGenerateForm = createPassphraseForm(generateArea, {
+      submitLabel: 'Generate Wallet',
+      onSubmit: async (passphrase) => {
+        try {
+          generateBtn.disabled = true;
+          generateBtn.textContent = 'Generating...';
+          const result = await rpc.call('noble_generateMnemonic', {
+            word_count: 24,
+            passphrase,
+          });
+          // Wipe passphrase form
+          if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; }
+          generateArea.innerHTML = '';
+
+          // Show mnemonic in secure grid
+          const words = result.mnemonic.split(/\s+/);
+          const header = document.createElement('div');
+          header.style.cssText = 'font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)';
+          header.textContent = 'Backup Your Mnemonic Phrase';
+          generateArea.appendChild(header);
+
+          const gridEl = createMnemonicGrid(generateArea, words);
+
+          const warning = document.createElement('div');
+          warning.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)';
+          warning.textContent = 'Write these words down and store them securely. They cannot be recovered from the node.';
+          generateArea.appendChild(warning);
+
+          // Auto-clear timer (5 minutes)
+          autoClearHandle = startAutoClearTimer(generateArea, gridEl, 300_000);
+
+          // Derived address
+          const addrEl = document.createElement('div');
+          addrEl.style.cssText = 'margin-top:var(--gap-sm)';
+          addrEl.innerHTML = `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">Derived Address</span><br><span class="mono" style="font-size:var(--font-size-sm)">${result.address}</span>`;
+          generateArea.appendChild(addrEl);
+
+        } catch (e) {
+          const err = document.createElement('div');
+          err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
+          err.textContent = 'Failed to generate: ' + (e.message || e);
+          generateArea.appendChild(err);
+        } finally {
+          generateBtn.disabled = false;
+          generateBtn.textContent = 'Generate New Wallet';
+        }
+      },
+    });
   });
 
   importBtn.addEventListener('click', () => {
-    importForm.style.display = importForm.style.display === 'none' ? 'block' : 'none';
-    mnemonicResult.style.display = 'none';
-    importResult.style.display = 'none';
-  });
+    // Collapse generate, toggle import
+    if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; generateArea.innerHTML = ''; }
+    if (autoClearHandle) { autoClearHandle.stop(); autoClearHandle = null; }
+    if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; importArea.innerHTML = ''; return; }
 
-  importCancel.addEventListener('click', () => {
-    importForm.style.display = 'none';
-    importResult.style.display = 'none';
-  });
+    importArea.innerHTML = '';
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'padding:var(--gap);background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
 
-  importSubmit.addEventListener('click', async () => {
-    const words = importWordsInput.value.trim();
-    const passphrase = importPassInput.value;
-    if (!words) { alert('Please enter your mnemonic phrase.'); return; }
-    if (passphrase.length < 12) { alert('Passphrase must be at least 12 characters.'); return; }
-    try {
-      importSubmit.disabled = true;
-      importSubmit.textContent = 'Importing...';
-      const result = await rpc.call('noble_importMnemonic', {
-        mnemonic: words,
-        passphrase,
-      });
-      importResult.style.display = 'block';
-      if (result.already_exists) {
-        importResult.innerHTML = `<span style="color:var(--warning)">Key already exists.</span> Address: <span class="mono">${result.address}</span>`;
-      } else {
-        importResult.innerHTML = `<span style="color:var(--success)">Key imported successfully.</span> Address: <span class="mono">${result.address}</span>`;
-      }
-      importWordsInput.value = '';
-      importPassInput.value = '';
-    } catch (e) {
-      importResult.style.display = 'block';
-      importResult.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
-    } finally {
-      importSubmit.disabled = false;
-      importSubmit.textContent = 'Import';
-    }
+    const label = document.createElement('label');
+    label.style.cssText = 'font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm)';
+    label.textContent = 'Enter Mnemonic Phrase';
+    wrapper.appendChild(label);
+
+    const textarea = document.createElement('textarea');
+    textarea.rows = 3;
+    textarea.autocomplete = 'off';
+    textarea.spellcheck = false;
+    textarea.placeholder = 'Enter your 12 or 24 word mnemonic phrase...';
+    textarea.style.cssText = 'width:100%;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical';
+    wrapper.appendChild(textarea);
+
+    const passArea = document.createElement('div');
+    passArea.style.cssText = 'margin-top:var(--gap-sm)';
+    wrapper.appendChild(passArea);
+
+    const resultEl = document.createElement('div');
+    resultEl.style.cssText = 'display:none;margin-top:var(--gap-sm);font-size:var(--font-size-sm)';
+    wrapper.appendChild(resultEl);
+
+    importArea.appendChild(wrapper);
+
+    const passForm = createPassphraseForm(passArea, {
+      submitLabel: 'Import',
+      onSubmit: async (passphrase) => {
+        const words = textarea.value.trim();
+        if (!words) { resultEl.style.display = 'block'; resultEl.innerHTML = '<span style="color:var(--error)">Please enter your mnemonic phrase.</span>'; return; }
+        try {
+          const result = await rpc.call('noble_importMnemonic', {
+            mnemonic: words,
+            passphrase,
+          });
+          // Wipe inputs
+          wipeInput(textarea);
+          if (passForm) passForm.destroy();
+
+          resultEl.style.display = 'block';
+          if (result.already_exists) {
+            resultEl.innerHTML = `<span style="color:var(--warning)">Key already exists.</span> Address: <span class="mono">${result.address}</span>`;
+          } else {
+            resultEl.innerHTML = `<span style="color:var(--success)">Key imported successfully.</span> Address: <span class="mono">${result.address}</span>`;
+          }
+        } catch (e) {
+          resultEl.style.display = 'block';
+          resultEl.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
+        }
+      },
+    });
+
+    // Cancel — wipe and hide
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary';
+    cancelBtn.style.cssText = 'padding:6px 12px;margin-top:var(--gap-sm)';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => {
+      wipeInput(textarea);
+      if (passForm) passForm.destroy();
+      importArea.innerHTML = '';
+      activeImportForm = null;
+    });
+    wrapper.appendChild(cancelBtn);
+
+    activeImportForm = {
+      destroy() {
+        wipeInput(textarea);
+        if (passForm) passForm.destroy();
+        wrapper.remove();
+      },
+    };
   });
 
   // WS: refresh on new block (might include new subsidy)
@@ -419,6 +463,10 @@ export function init(root, ctx) {
   return {
     destroy() {
       unsubs.forEach(fn => { try { fn(); } catch {} });
+      if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; }
+      if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; }
+      if (autoClearHandle) { autoClearHandle.stop(); autoClearHandle = null; }
+      destroySecureElements(mnemonicPanel);
     },
   };
 }

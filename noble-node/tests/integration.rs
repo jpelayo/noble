@@ -123,7 +123,7 @@ fn storage_only_indexes_notarization_checksums() {
     key_rotation.publisher_sig = priv_key.sign(&msg).unwrap();
     let key_rotation_id = key_rotation.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 
-    // Build and commit block (validator == signer, so subsidy covers fees)
+    // Build and commit block at height 1 (genesis height 0 has zero subsidy)
     let transactions = vec![notarization, key_rotation];
     let tx_ids = vec![notarization_id, key_rotation_id];
     let merkle_root = noble_core::compute_merkle_root(&tx_ids);
@@ -133,7 +133,7 @@ fn storage_only_indexes_notarization_checksums() {
         prev_block_hash: Hash256::ZERO,
         merkle_root,
         timestamp: 1_700_000_000,
-        height: 0,
+        height: 1,
         tx_count: 2,
         validator_id: val_pub,
         validator_sig: SignatureEnvelope {

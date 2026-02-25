@@ -27,6 +27,7 @@ import * as healthPage from './pages/health.js';
 import * as identityPage from './pages/identity.js';
 import * as tracePage from './pages/trace.js';
 import * as settingsPage from './pages/settings.js';
+import * as setupPage from './pages/setup.js';
 
 // ── Status change handler ──
 function onStatusChange(status) {
@@ -144,6 +145,7 @@ router
   .add('/identity', identityPage)
   .add('/trace', tracePage)
   .add('/settings', settingsPage)
+  .add('/setup', setupPage)
   .start();
 
 // ── Auth prompt ──
@@ -232,6 +234,14 @@ async function bootstrap() {
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
     state.cyclePhase = cycleStatus.phase;
+
+    // First-run detection: redirect to setup wizard if no wallet key exists
+    try {
+      const walletInfo = await rpc.call('noble_getWalletInfo');
+      if (walletInfo.key_count === 0 && location.hash !== '#/setup') {
+        location.hash = '#/setup';
+      }
+    } catch { /* wallet RPC not available — skip first-run check */ }
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();

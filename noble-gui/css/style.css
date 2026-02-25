@@ -861,3 +861,99 @@ body {
   background: var(--bg-secondary, #374151);
   color: var(--text-secondary, #9ca3af);
 }
+
+/* ── Checksum hero block (tx-detail) ── */
+.checksum-hero {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: var(--gap-lg) var(--gap);
+  margin-bottom: var(--gap-lg);
+  text-align: center;
+}
+
+.checksum-hero__label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: var(--gap-sm);
+}
+
+.checksum-hero__value {
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  word-break: break-all;
+  line-height: 1.4;
+  color: var(--text-primary);
+  padding: var(--gap-sm) 0;
+}
+
+.checksum-hero__muted {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.checksum-hero__actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--gap-sm);
+  margin-top: var(--gap);
+}
+
+.checksum-hero__actions .btn-link {
+  background: none;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.checksum-hero__actions .btn-link:hover {
+  text-decoration: underline;
+  background: none;
+}
+
+.checksum-hero__locator {
+  margin-top: var(--gap);
+  padding-top: var(--gap-sm);
+  border-top: 1px solid var(--border);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-sm);
+}
+
+.checksum-hero__locator a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.checksum-hero__locator a:hover {
+  text-decoration: underline;
+}
+
+/* ── Mnemonic grid ── */
+.mnemonic-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap-xs);
+  padding: var(--gap-sm);
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.mnemonic-cell {
+  padding: var(--gap-xs) var(--gap-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  text-align: center;
+  user-select: all;
+}

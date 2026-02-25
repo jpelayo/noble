@@ -41,12 +41,23 @@ export class Router {
   }
 
   #resolve() {
-    const hash = location.hash.slice(1) || '/';
+    const raw = location.hash.slice(1) || '/';
+    const [path, queryStr] = raw.split('?', 2);
+    const hash = path || '/';
+
+    // Parse query parameters from hash
+    const query = {};
+    if (queryStr) {
+      for (const part of queryStr.split('&')) {
+        const [k, v] = part.split('=', 2);
+        if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
+      }
+    }
 
     for (const route of this.#routes) {
       const match = hash.match(route.regex);
       if (match) {
-        const params = {};
+        const params = { ...query };
         route.paramNames.forEach((name, i) => {
           params[name] = decodeURIComponent(match[i + 1]);
         });

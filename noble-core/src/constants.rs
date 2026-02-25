@@ -164,8 +164,13 @@ pub fn dynamic_min_fee(utilization_pct: u8) -> u64 {
 }
 
 /// Compute block subsidy at a given height.
+/// Returns 0 for the genesis block (height 0) because the genesis validator key
+/// is deterministically derived and publicly known. First subsidy is at height 1.
 /// Returns 0 when all halvings are exhausted (after 64 halvings).
 pub fn subsidy_at_height(height: u64) -> u64 {
+    if height == 0 {
+        return 0;
+    }
     let halvings = height / HALVING_INTERVAL;
     if halvings >= 64 {
         return 0;
@@ -199,10 +204,32 @@ mod tests {
     }
 
     #[test]
-    fn subsidy_at_genesis() {
-        assert_eq!(subsidy_at_height(0), INITIAL_SUBSIDY);
+    fn subsidy_at_genesis_is_zero() {
+        // Genesis block subsidy is zero — the genesis validator key is publicly derivable
+        assert_eq!(subsidy_at_height(0), 0);
+        // First subsidy-bearing block is height 1
         assert_eq!(subsidy_at_height(1), INITIAL_SUBSIDY);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL - 1), INITIAL_SUBSIDY);
+    }
+
+    #[test]
+    fn total_supply_is_deterministic_and_below_max() {
+        let mut total: u128 = 0;
+        for epoch in 0u64..64 {
+            let subsidy = INITIAL_SUBSIDY >> epoch;
+            if subsidy == 0 {
+                break;
+            }
+            // Epoch 0 has 209,999 blocks (height 0 excluded), epochs 1+ have 210,000
+            let blocks = if epoch == 0 {
+                HALVING_INTERVAL - 1
+            } else {
+                HALVING_INTERVAL
+            };
+            total += subsidy as u128 * blocks as u128;
+        }
+        assert_eq!(total, 20_999_947_480_000u128);
+        assert!(total < MAX_SUPPLY as u128);
     }
 
     #[test]

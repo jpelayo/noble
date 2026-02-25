@@ -41,14 +41,58 @@ export function init(root, ctx) {
     }
 
     const tx = txResult.tx;
+    const isZeroChecksum = /^0+$/.test(tx.checksum);
 
-    // Detail grid
+    // ── Checksum hero block ──
+    const heroEl = document.createElement('div');
+    heroEl.className = 'checksum-hero';
+    if (isZeroChecksum) {
+      heroEl.innerHTML = `
+        <div class="checksum-hero__label" style="opacity:0.5">Document Checksum</div>
+        <div class="checksum-hero__muted">No document checksum (non-notarization transaction)</div>
+      `;
+    } else {
+      heroEl.innerHTML = `
+        <div class="checksum-hero__label">Document Checksum</div>
+        <div class="checksum-hero__value mono">${tx.checksum}</div>
+        <div class="checksum-hero__actions">
+          <button class="btn btn-sm" id="copy-checksum" title="Copy checksum">Copy</button>
+          <a href="#/verify?checksum=${tx.checksum}" class="btn btn-sm btn-link">Verify this document &rarr;</a>
+        </div>
+      `;
+    }
+    root.appendChild(heroEl);
+
+    // Copy button handler
+    const copyBtn = root.querySelector('#copy-checksum');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(tx.checksum).then(() => {
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+        });
+      });
+    }
+
+    // ── Encrypted locator indicator ──
+    if (tx.has_encrypted_locator) {
+      const locatorEl = document.createElement('div');
+      locatorEl.className = 'checksum-hero__locator';
+      const recipientCount = tx.locator_recipient_count || 1;
+      locatorEl.innerHTML = `
+        <span class="badge badge-encrypted">Encrypted Locator</span>
+        Available (${recipientCount} recipient${recipientCount !== 1 ? 's' : ''})
+        &mdash; <a href="#/verify?tab=locator&tx=${txResult.tx_id}">Decrypt &rarr;</a>
+      `;
+      heroEl.appendChild(locatorEl);
+    }
+
+    // ── Detail grid (checksum removed — shown in hero above) ──
     const grid = document.createElement('dl');
     grid.className = 'detail-grid';
     grid.innerHTML = `
       <dt>Transaction ID</dt><dd class="mono">${txResult.tx_id}</dd>
       <dt>Version</dt><dd>${tx.version}</dd>
-      <dt>Checksum</dt><dd class="mono">${tx.checksum}</dd>
       <dt>Timestamp</dt><dd>${formatTimestamp(tx.timestamp)}</dd>
       <dt>Fee</dt><dd>${formatFee(tx.fee)} (${tx.fee} atomic)</dd>
       ${tx.gateway_address ? `
