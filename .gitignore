@@ -39,3 +39,63 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+
+# Xcode project file (contains signing team IDs)
+*.xcodeproj/project.pbxproj
+
+# Xcode user-specific files
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Xcode build state
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+*.xcodeproj/xcshareddata/xcschemes/xcschememanagement.plist
+
+# Build products
+build/
+DerivedData/
+
+# Code signing
+*.mobileprovision
+*.provisionprofile
+ExportOptions.plist
+
+# Archives
+*.xcarchive
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+
+# CocoaPods (if ever used)
+Pods/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# macOS
+.AppleDouble
+.LSOverride
+._*
+
+# Crashlytics
+crashlytics-build.properties
+crashlytics.properties
+fabric.properties
+
+# Markdown files (except README)
+!README.md
+
+
+# App-specific secrets
+*.xcconfig.local
+Secrets.swift
+
+# Entitlements (contain team IDs and private signing info)
+*.entitlements
