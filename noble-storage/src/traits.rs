@@ -135,6 +135,27 @@ pub trait StorageEngine {
     /// Returns the number of pruned records.
     fn prune_peer_records(&self, now: u64, max_age_secs: u64) -> Result<u32, StorageError>;
 
+    // ── Version Chain ──
+
+    /// Look up all tx_ids that are next-versions referencing a given prev_checksum.
+    /// Returns empty vec if no successors exist.
+    fn lookup_version_successors(
+        &self,
+        prev_checksum: &Hash256,
+    ) -> Result<Vec<Hash256>, StorageError>;
+
+    /// Check whether at least one notarization exists for this checksum on-chain.
+    fn has_checksum(&self, checksum: &Hash256) -> Result<bool, StorageError> {
+        self.lookup_checksum(checksum).map(|v| !v.is_empty())
+    }
+
+    // ── Publisher Index ──
+
+    /// Look up all tx_ids published (notarizations) by a given public key.
+    /// `pubkey_wire` is the wire-format key bytes ([scheme_id || raw_key]).
+    /// Returns empty vec if no documents exist for this publisher.
+    fn lookup_by_publisher(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError>;
+
     // ── Cycle History (H-002) ──
 
     /// Store a cycle history entry, keyed by cycle number.

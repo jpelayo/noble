@@ -141,6 +141,12 @@ pub const MAX_ATTESTATION_DATA_SIZE: usize = 8192;
 /// The PKCS#7 signature signs: `sha256(PKI_BIND_DOMAIN_TAG || identity_key_bytes)`.
 pub const PKI_BIND_DOMAIN_TAG: &[u8] = b"NOBLE-PKI-BIND-v1";
 
+/// Well-known metadata key: hex-encoded checksum of the previous document version.
+pub const META_KEY_PREV_CHECKSUM: &str = "doc:prev_checksum";
+
+/// Well-known metadata key: version ordinal (UTF-8 positive integer string).
+pub const META_KEY_VERSION: &str = "doc:version";
+
 /// Known-good block hashes at specific heights for fast initial sync.
 /// Populated after mainnet launch; empty during pre-launch development.
 pub const CHECKPOINTS: &[(u64, &str)] = &[];

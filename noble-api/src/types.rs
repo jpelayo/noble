@@ -196,6 +196,12 @@ pub struct RegistrationRecord {
     pub block_height: u64,
     pub tx_id: String,
     pub timestamp: u64,
+    /// `doc:version` metadata value, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// `doc:prev_checksum` metadata value (hex), if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_checksum: Option<String>,
 }
 
 /// Response for `noble_lookupChecksum`.
@@ -203,6 +209,8 @@ pub struct RegistrationRecord {
 pub struct ChecksumLookupResponse {
     pub found: bool,
     pub records: Vec<RegistrationRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_chain: Option<Vec<VersionEntry>>,
 }
 
 /// Response for `noble_getChainStats`.
@@ -412,6 +420,8 @@ pub struct VerifyDocumentResponse {
     pub registered: bool,
     pub registrations: Vec<RegistrationRecord>,
     pub first_seen: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_chain: Option<Vec<VersionEntry>>,
 }
 
 /// Response for `noble_getDocumentHistory`.
@@ -419,6 +429,43 @@ pub struct VerifyDocumentResponse {
 pub struct DocumentHistoryResponse {
     pub checksum: String,
     pub history: Vec<RegistrationRecord>,
+}
+
+/// A single entry in a document version chain.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionEntry {
+    pub checksum: String,
+    pub tx_id: String,
+    pub block_height: u64,
+    pub timestamp: u64,
+    pub version: Option<u32>,
+}
+
+/// Response for `noble_getDocumentVersions`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentVersionsResponse {
+    pub root_checksum: String,
+    pub versions: Vec<VersionEntry>,
+    pub count: usize,
+}
+
+/// A single document record returned by publisher search.
+#[derive(Debug, Clone, Serialize)]
+pub struct PublisherDocumentRecord {
+    pub tx_id: String,
+    pub checksum: String,
+    pub block_height: u64,
+    pub timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+}
+
+/// Response for `noble_getDocumentsByPublisher`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsByPublisherResponse {
+    pub publisher: String,
+    pub documents: Vec<PublisherDocumentRecord>,
+    pub count: usize,
 }
 
 /// Response for `noble_getReputationScore` (placeholder).

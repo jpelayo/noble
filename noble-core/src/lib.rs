@@ -26,7 +26,7 @@ pub use genesis::{
     testnet_genesis_block, testnet_genesis_hash,
 };
 pub use merkle::{compute_merkle_root, MerkleProof};
-pub use metadata::{validate_metadata, MetadataEntry};
+pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};
 pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeRole, OrgType};
 pub use peer_record::PeerRecord;
 pub use transaction::Transaction;

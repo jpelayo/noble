@@ -202,6 +202,14 @@ pub enum ValidationError {
     #[error("T27b: non-document tx (type {0:#04x}) must have zero checksum")]
     NonDocumentWithChecksum(u8),
 
+    /// T29: `doc:prev_checksum` value is not a valid 64-char hex-encoded hash.
+    #[error("T29: invalid doc:prev_checksum value: {0}")]
+    InvalidPrevChecksum(String),
+
+    /// T30: Version metadata consistency violation.
+    #[error("T30: version metadata inconsistency: {0}")]
+    VersionMetadataInconsistent(String),
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

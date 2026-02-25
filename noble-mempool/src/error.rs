@@ -50,6 +50,10 @@ pub enum MempoolError {
     #[error("step 8: mempool at capacity")]
     AtCapacity,
 
+    /// Step 2.6: doc:prev_checksum references a checksum not found on-chain.
+    #[error("step 2.6: doc:prev_checksum not found on-chain: {0}")]
+    PrevChecksumNotFound(String),
+
     /// Internal error (codec, crypto, etc.).
     #[error("internal: {0}")]
     Internal(String),

@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-use noble_core::constants::{subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, TX_TYPE_TRANSFER};
+use noble_core::constants::{
+    subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM, TX_TYPE_NOTARIZATION,
+    TX_TYPE_TRANSFER,
+};
 use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
@@ -38,6 +41,10 @@ struct Inner {
     peer_records: HashMap<Vec<u8>, PeerRecord>,
     /// Cycle history: cycle_number → CBOR-encoded CycleHistoryEntry (H-002).
     cycle_history: BTreeMap<u64, Vec<u8>>,
+    /// Version chain: prev_checksum → list of tx_ids that reference it via doc:prev_checksum.
+    version_chain: HashMap<Hash256, Vec<Hash256>>,
+    /// Publisher index: pubkey_wire_bytes → list of notarization tx_ids.
+    publisher_index: HashMap<Vec<u8>, Vec<Hash256>>,
     closed: bool,
 }
 
@@ -95,6 +102,37 @@ impl StorageEngine for MemoryStorage {
                     });
                 }
                 entry.push(*tx_id);
+            }
+        }
+
+        // --- Version chain indexing + publisher index ---
+        for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
+            if tx.tx_type == TX_TYPE_NOTARIZATION {
+                if let Some(prev_hex) = tx
+                    .metadata
+                    .iter()
+                    .find(|m| m.key == META_KEY_PREV_CHECKSUM)
+                    .and_then(|m| std::str::from_utf8(&m.value).ok())
+                {
+                    if let Ok(prev_hash) = Hash256::from_hex(prev_hex) {
+                        inner
+                            .version_chain
+                            .entry(prev_hash)
+                            .or_default()
+                            .push(*tx_id);
+                    }
+                }
+
+                // publisher_index: pubkey_wire → list of notarization tx_ids
+                let publisher_wire = tx
+                    .publisher_sig
+                    .to_noble_public_key()
+                    .map_err(|e| StorageError::Codec(e.to_string()))?
+                    .to_wire_bytes();
+                let pub_entry = inner.publisher_index.entry(publisher_wire).or_default();
+                if pub_entry.len() < MAX_CHECKSUM_REGISTRATIONS {
+                    pub_entry.push(*tx_id);
+                }
             }
         }
 
@@ -355,9 +393,11 @@ impl StorageEngine for MemoryStorage {
             }
         }
 
-        // Clear balances and history — replay from genesis
+        // Clear balances, history, version chain, and publisher index — replay from genesis
         inner.balances.clear();
         inner.address_history.clear();
+        inner.version_chain.clear();
+        inner.publisher_index.clear();
 
         // Replay balances from 0..=target_height
         for h in 0..=target_height {
@@ -420,6 +460,42 @@ impl StorageEngine for MemoryStorage {
                 inner
                     .address_history
                     .insert((sender_wire, h, offset as u32), tx_id);
+            }
+
+            // Replay version chain and publisher index
+            for tx in &block.transactions {
+                if tx.tx_type == TX_TYPE_NOTARIZATION {
+                    let tx_id = tx
+                        .compute_tx_id(chain_id)
+                        .map_err(|e| StorageError::Codec(e.to_string()))?;
+
+                    if let Some(prev_hex) = tx
+                        .metadata
+                        .iter()
+                        .find(|m| m.key == META_KEY_PREV_CHECKSUM)
+                        .and_then(|m| std::str::from_utf8(&m.value).ok())
+                    {
+                        if let Ok(prev_hash) = Hash256::from_hex(prev_hex) {
+                            inner
+                                .version_chain
+                                .entry(prev_hash)
+                                .or_default()
+                                .push(tx_id);
+                        }
+                    }
+
+                    // Rebuild publisher_index
+                    let publisher_wire = tx
+                        .publisher_sig
+                        .to_noble_public_key()
+                        .map_err(|e| StorageError::Codec(e.to_string()))?
+                        .to_wire_bytes();
+                    inner
+                        .publisher_index
+                        .entry(publisher_wire)
+                        .or_default()
+                        .push(tx_id);
+                }
             }
 
             for (pubkey, delta) in &deltas {
@@ -568,6 +644,33 @@ impl StorageEngine for MemoryStorage {
             .peer_records
             .retain(|_, rec| !rec.is_stale(now, max_age_secs));
         Ok((before - inner.peer_records.len()) as u32)
+    }
+
+    // ── Version Chain ──
+
+    fn lookup_version_successors(
+        &self,
+        prev_checksum: &Hash256,
+    ) -> Result<Vec<Hash256>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner
+            .version_chain
+            .get(prev_checksum)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    // ── Publisher Index ──
+
+    fn lookup_by_publisher(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner
+            .publisher_index
+            .get(pubkey_wire)
+            .cloned()
+            .unwrap_or_default())
     }
 
     // ── Cycle History (H-002) ──
@@ -1861,5 +1964,378 @@ mod tests {
             store.get_balance(&val_pub).unwrap(),
             INITIAL_SUBSIDY + 2_000
         );
+    }
+
+    // --- Version chain tests ---
+
+    fn make_versioned_notarization(
+        sk: &[u8],
+        pk: &[u8],
+        doc: &[u8],
+        prev_checksum: Option<&Hash256>,
+        version: Option<u32>,
+        timestamp: u64,
+    ) -> (Transaction, Hash256) {
+        use noble_core::constants::{META_KEY_PREV_CHECKSUM, META_KEY_VERSION};
+        use noble_core::MetadataEntry;
+
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let checksum = sha256(doc);
+        let mut metadata = Vec::new();
+        if let Some(prev) = prev_checksum {
+            metadata.push(MetadataEntry {
+                key: META_KEY_PREV_CHECKSUM.to_string(),
+                value: prev.to_string().into_bytes(),
+            });
+        }
+        if let Some(v) = version {
+            metadata.push(MetadataEntry {
+                key: META_KEY_VERSION.to_string(),
+                value: v.to_string().into_bytes(),
+            });
+        }
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum,
+            timestamp,
+            fee: 1_000,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata,
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        (tx, tx_id)
+    }
+
+    #[test]
+    fn version_chain_indexed_on_commit() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Block 0: v1 notarization (no prev_checksum)
+        let (tx1, tx_id1) =
+            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_000);
+        let v1_checksum = tx1.checksum;
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![(tx1, tx_id1)],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sk,
+            &pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: v2 notarization referencing v1's checksum
+        let (tx2, tx_id2) = make_versioned_notarization(
+            &sk,
+            &pk,
+            b"doc_v2",
+            Some(&v1_checksum),
+            Some(2),
+            1_700_000_001,
+        );
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx2, tx_id2)], 1, h0, 1_700_000_001, &sk, &pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // v1_checksum should have tx_id2 as a successor
+        let successors = store.lookup_version_successors(&v1_checksum).unwrap();
+        assert_eq!(successors.len(), 1);
+        assert_eq!(successors[0], tx_id2);
+    }
+
+    #[test]
+    fn version_chain_empty_for_non_versioned() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Commit a normal notarization without version metadata
+        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"plain_doc", 1_700_000_000);
+        let checksum = tx.checksum;
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // No successors for a plain document
+        let successors = store.lookup_version_successors(&checksum).unwrap();
+        assert!(successors.is_empty());
+    }
+
+    #[test]
+    fn version_chain_multiple_successors() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Block 0: v1
+        let (tx1, tx_id1) =
+            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_000);
+        let v1_checksum = tx1.checksum;
+        let (b0, h0, ids0) = make_block_with_validator(
+            vec![(tx1, tx_id1)],
+            0,
+            Hash256::ZERO,
+            1_700_000_000,
+            &sk,
+            &pk,
+        );
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: two different v2s referencing same v1 checksum (fork)
+        let (tx2a, tx_id2a) = make_versioned_notarization(
+            &sk,
+            &pk,
+            b"doc_v2a",
+            Some(&v1_checksum),
+            Some(2),
+            1_700_000_001,
+        );
+        let (tx2b, tx_id2b) = make_versioned_notarization(
+            &sk,
+            &pk,
+            b"doc_v2b",
+            Some(&v1_checksum),
+            Some(2),
+            1_700_000_002,
+        );
+        let (b1, h1, ids1) = make_block_with_validator(
+            vec![(tx2a, tx_id2a), (tx2b, tx_id2b)],
+            1,
+            h0,
+            1_700_000_001,
+            &sk,
+            &pk,
+        );
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let successors = store.lookup_version_successors(&v1_checksum).unwrap();
+        assert_eq!(successors.len(), 2);
+        assert!(successors.contains(&tx_id2a));
+        assert!(successors.contains(&tx_id2b));
+    }
+
+    #[test]
+    fn version_chain_rollback_cleans_index() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Block 0: empty genesis
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: v1 notarization
+        let (tx1, tx_id1) =
+            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_001);
+        let v1_checksum = tx1.checksum;
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx1, tx_id1)], 1, h0, 1_700_000_001, &sk, &pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // Block 2: v2 referencing v1
+        let (tx2, tx_id2) = make_versioned_notarization(
+            &sk,
+            &pk,
+            b"doc_v2",
+            Some(&v1_checksum),
+            Some(2),
+            1_700_000_002,
+        );
+        let (b2, h2, ids2) =
+            make_block_with_validator(vec![(tx2, tx_id2)], 2, h1, 1_700_000_002, &sk, &pk);
+        store.commit_block(&b2, &h2, &ids2).unwrap();
+
+        // Verify version chain exists
+        assert_eq!(
+            store.lookup_version_successors(&v1_checksum).unwrap().len(),
+            1
+        );
+
+        // Rollback to height 1 (removes block 2 which has the v2)
+        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+
+        // Version chain should be empty after rollback
+        let successors = store.lookup_version_successors(&v1_checksum).unwrap();
+        assert!(successors.is_empty());
+    }
+
+    // ── Publisher Index Tests ──
+
+    #[test]
+    fn publisher_index_populated_on_commit() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let wire = pub_key.to_wire_bytes();
+
+        // Block 0: empty genesis
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: two notarizations from same key
+        let (tx1, tx_id1) =
+            make_versioned_notarization(&sk, &pk, b"doc_a", None, Some(1), 1_700_000_001);
+        let (tx2, tx_id2) =
+            make_versioned_notarization(&sk, &pk, b"doc_b", None, Some(1), 1_700_000_001);
+        let (b1, h1, ids1) = make_block_with_validator(
+            vec![(tx1, tx_id1), (tx2, tx_id2)],
+            1,
+            h0,
+            1_700_000_001,
+            &sk,
+            &pk,
+        );
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        let results = store.lookup_by_publisher(&wire).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&tx_id1));
+        assert!(results.contains(&tx_id2));
+    }
+
+    #[test]
+    fn publisher_index_empty_for_unknown_key() {
+        let store = MemoryStorage::new();
+        let unknown_wire = vec![0x01; 33]; // fake Ed25519 wire key
+        let results = store.lookup_by_publisher(&unknown_wire).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn publisher_index_ignores_transfers() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let wire = pub_key.to_wire_bytes();
+
+        let (_sk2, pk2) = ed25519::generate_keypair();
+        let recipient = NoblePublicKey::Ed25519(pk2.clone());
+
+        // Block 0: genesis with subsidy
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: transfer only (no notarization)
+        let (tx_t, tx_id_t) = make_transfer_tx(&sk, &pk, &recipient, 100, 1_000, 1_700_000_001);
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx_t, tx_id_t)], 1, h0, 1_700_000_001, &sk, &pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // Publisher index should be empty — transfers are not indexed
+        let results = store.lookup_by_publisher(&wire).unwrap();
+        assert!(results.is_empty());
+
+        // Also check recipient
+        let wire2 = recipient.to_wire_bytes();
+        let results2 = store.lookup_by_publisher(&wire2).unwrap();
+        assert!(results2.is_empty());
+    }
+
+    #[test]
+    fn publisher_index_multiple_publishers() {
+        let store = MemoryStorage::new();
+
+        let (sk_a, pk_a) = ed25519::generate_keypair();
+        let pub_a = NoblePublicKey::Ed25519(pk_a.clone());
+        let wire_a = pub_a.to_wire_bytes();
+
+        let (sk_b, pk_b) = ed25519::generate_keypair();
+        let pub_b = NoblePublicKey::Ed25519(pk_b.clone());
+        let wire_b = pub_b.to_wire_bytes();
+
+        // Block 0: empty genesis (subsidy(0)=0)
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk_a, &pk_a);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: empty — A gets subsidy(1) as validator
+        let (b1, h1, ids1) = make_block_with_validator(vec![], 1, h0, 1_700_000_001, &sk_a, &pk_a);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // Block 2: empty — B gets subsidy(2) as validator
+        let (b2, h2, ids2) = make_block_with_validator(vec![], 2, h1, 1_700_000_002, &sk_b, &pk_b);
+        store.commit_block(&b2, &h2, &ids2).unwrap();
+
+        // Block 3: notarization from A (A has subsidy from block 1)
+        let (tx_a, tx_id_a) =
+            make_versioned_notarization(&sk_a, &pk_a, b"doc_by_a", None, Some(1), 1_700_000_003);
+        let (b3, h3, ids3) =
+            make_block_with_validator(vec![(tx_a, tx_id_a)], 3, h2, 1_700_000_003, &sk_b, &pk_b);
+        store.commit_block(&b3, &h3, &ids3).unwrap();
+
+        // Block 4: notarization from B (B has subsidy from blocks 2+3)
+        let (tx_b, tx_id_b) =
+            make_versioned_notarization(&sk_b, &pk_b, b"doc_by_b", None, Some(1), 1_700_000_004);
+        let (b4, _h4, ids4) =
+            make_block_with_validator(vec![(tx_b, tx_id_b)], 4, h3, 1_700_000_004, &sk_a, &pk_a);
+        store.commit_block(&b4, &_h4, &ids4).unwrap();
+
+        // Each publisher should only see their own tx_id
+        let results_a = store.lookup_by_publisher(&wire_a).unwrap();
+        assert_eq!(results_a.len(), 1);
+        assert_eq!(results_a[0], tx_id_a);
+
+        let results_b = store.lookup_by_publisher(&wire_b).unwrap();
+        assert_eq!(results_b.len(), 1);
+        assert_eq!(results_b[0], tx_id_b);
+    }
+
+    #[test]
+    fn publisher_index_rollback_clears_and_replays() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let wire = pub_key.to_wire_bytes();
+
+        // Block 0: empty genesis
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Block 1: notarization A
+        let (tx1, tx_id1) =
+            make_versioned_notarization(&sk, &pk, b"doc_1", None, Some(1), 1_700_000_001);
+        let (b1, h1, ids1) =
+            make_block_with_validator(vec![(tx1, tx_id1)], 1, h0, 1_700_000_001, &sk, &pk);
+        store.commit_block(&b1, &h1, &ids1).unwrap();
+
+        // Block 2: notarization B
+        let (tx2, tx_id2) =
+            make_versioned_notarization(&sk, &pk, b"doc_2", None, Some(1), 1_700_000_002);
+        let (b2, h2, ids2) =
+            make_block_with_validator(vec![(tx2, tx_id2)], 2, h1, 1_700_000_002, &sk, &pk);
+        store.commit_block(&b2, &h2, &ids2).unwrap();
+
+        // Block 3: notarization C
+        let (tx3, tx_id3) =
+            make_versioned_notarization(&sk, &pk, b"doc_3", None, Some(1), 1_700_000_003);
+        let (b3, _h3, ids3) =
+            make_block_with_validator(vec![(tx3, tx_id3)], 3, h2, 1_700_000_003, &sk, &pk);
+        store.commit_block(&b3, &_h3, &ids3).unwrap();
+
+        // Before rollback: 3 tx_ids
+        assert_eq!(store.lookup_by_publisher(&wire).unwrap().len(), 3);
+
+        // Rollback to height 1 (removes blocks 2 and 3)
+        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+
+        // After rollback: only tx_id1 from block 1
+        let results = store.lookup_by_publisher(&wire).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], tx_id1);
     }
 }

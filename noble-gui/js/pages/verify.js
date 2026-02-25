@@ -1,6 +1,6 @@
 /**
  * NOBLE Dashboard — Document Verification Page
- * Two tabs: Verify by Checksum | Decrypt Locator
+ * Three tabs: Verify by Checksum | Decrypt Locator | Search by Publisher
  */
 
 import { truncateHash, formatTimestamp, isHex64 } from '../utils.js';
@@ -9,19 +9,23 @@ export function init(root, ctx) {
   const { rpc, params } = ctx;
 
   // Determine initial tab from query params
-  const initialTab = params.tab === 'locator' ? 'locator' : 'checksum';
+  const initialTab = params.tab === 'locator' ? 'locator'
+    : params.tab === 'publisher' ? 'publisher'
+    : 'checksum';
   const prefillChecksum = params.checksum || '';
   const prefillTx = params.tx || '';
+  const prefillPublisher = params.publisher || '';
 
   root.innerHTML = `
     <div class="page-header">
       <h1>Document Verification</h1>
-      <p>Verify document integrity or decrypt encrypted locators</p>
+      <p>Verify document integrity, decrypt locators, or search by publisher</p>
     </div>
 
     <div class="verify-tabs" style="display:flex;gap:0;margin-bottom:var(--gap-lg);border-bottom:2px solid var(--border)">
       <button class="verify-tab" data-tab="checksum" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Verify by Checksum</button>
       <button class="verify-tab" data-tab="locator" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Decrypt Locator</button>
+      <button class="verify-tab" data-tab="publisher" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Search by Publisher</button>
     </div>
 
     <!-- Checksum tab -->
@@ -54,6 +58,23 @@ export function init(root, ctx) {
         </div>
       </div>
     </div>
+
+    <!-- Publisher tab -->
+    <div id="tab-publisher" class="verify-tab-content" style="display:none">
+      <div class="panel">
+        <div class="panel-header">Search Documents by Publisher</div>
+        <div class="panel-body">
+          <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)">
+            Enter a publisher's public key (hex) to find all documents they have registered on the NOBLE blockchain.
+          </p>
+          <div class="search-bar">
+            <input type="text" id="publisher-input" placeholder="Publisher public key (hex)..." value="${esc(prefillPublisher)}" />
+            <button id="publisher-btn">Search</button>
+          </div>
+          <div id="publisher-result"></div>
+        </div>
+      </div>
+    </div>
   `;
 
   // ── Tab switching ──
@@ -61,6 +82,7 @@ export function init(root, ctx) {
   const tabContents = {
     checksum: root.querySelector('#tab-checksum'),
     locator: root.querySelector('#tab-locator'),
+    publisher: root.querySelector('#tab-publisher'),
   };
 
   function switchTab(name) {
@@ -181,6 +203,40 @@ export function init(root, ctx) {
         });
       });
 
+      // ── Inline version chain from enriched response ──
+      if (res.version_chain && res.version_chain.length > 1) {
+        const versionDiv = document.createElement('div');
+        versionDiv.style.marginTop = 'var(--gap-lg)';
+        let versionRows = '';
+        for (const v of res.version_chain) {
+          const isCurrent = v.checksum === checksum;
+          versionRows += `
+            <tr class="${isCurrent ? '' : 'clickable'}" data-txid="${v.tx_id}" style="${isCurrent ? 'background:var(--bg-tertiary)' : ''}">
+              <td>${v.version || '—'}</td>
+              <td>${v.block_height}</td>
+              <td>${formatTimestamp(v.timestamp)}</td>
+              <td class="mono">${truncateHash(v.checksum)}</td>
+              <td class="mono">${truncateHash(v.tx_id)}</td>
+              <td>${isCurrent ? '<span class="badge confirmed">Current</span>' : ''}</td>
+            </tr>
+          `;
+        }
+        versionDiv.innerHTML = `
+          <h4 style="margin-bottom:var(--gap-sm)">Version Chain (${res.version_chain.length} version${res.version_chain.length > 1 ? 's' : ''})</h4>
+          <table class="data-table">
+            <thead><tr><th>Ver.</th><th>Block</th><th>Timestamp</th><th>Checksum</th><th>Transaction</th><th></th></tr></thead>
+            <tbody>${versionRows}</tbody>
+          </table>
+        `;
+        result.appendChild(versionDiv);
+
+        versionDiv.querySelectorAll('tr.clickable').forEach(tr => {
+          tr.addEventListener('click', () => {
+            location.hash = `#/tx/${tr.dataset.txid}`;
+          });
+        });
+      }
+
     } catch (e) {
       result.innerHTML = `<div class="empty-state">Verification error: ${e.message || e}</div>`;
     }
@@ -277,6 +333,82 @@ export function init(root, ctx) {
   // Auto-decrypt if tx was prefilled via query param
   if (prefillTx && isHex64(prefillTx)) {
     decryptLocator();
+  }
+
+  // ── Publisher search ──
+  const publisherInput = root.querySelector('#publisher-input');
+  const publisherBtn = root.querySelector('#publisher-btn');
+  const publisherResult = root.querySelector('#publisher-result');
+
+  async function searchPublisher() {
+    const pubkey = publisherInput.value.trim();
+    if (!pubkey) return;
+
+    if (!/^[0-9a-fA-F]{64,68}$/.test(pubkey)) {
+      publisherResult.innerHTML = '<div class="empty-state">Please enter a valid hex public key (64-68 characters)</div>';
+      return;
+    }
+
+    publisherResult.innerHTML = '<div class="empty-state">Searching...</div>';
+
+    try {
+      const res = await rpc.call('noble_getDocumentsByPublisher', { public_key: pubkey });
+
+      if (!res.documents || res.documents.length === 0) {
+        publisherResult.innerHTML = `
+          <div style="padding:var(--gap-lg);text-align:center">
+            <div style="font-size:2rem;color:var(--text-muted);margin-bottom:var(--gap)">&#128269;</div>
+            <h3 style="color:var(--text-secondary)">No Documents Found</h3>
+            <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
+              No notarizations found for this publisher key.
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      let rows = '';
+      for (const doc of res.documents) {
+        rows += `
+          <tr class="clickable" data-txid="${doc.tx_id}">
+            <td>${doc.block_height}</td>
+            <td>${formatTimestamp(doc.timestamp)}</td>
+            <td class="mono">${truncateHash(doc.checksum)}</td>
+            <td class="mono">${truncateHash(doc.tx_id)}</td>
+            <td>${doc.version || '—'}</td>
+          </tr>
+        `;
+      }
+
+      publisherResult.innerHTML = `
+        <div style="padding:var(--gap);text-align:center;margin-bottom:var(--gap)">
+          <p style="color:var(--text-secondary);font-size:var(--font-size-sm)">
+            Found <strong>${res.count}</strong> document(s) by this publisher
+          </p>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Block</th><th>Timestamp</th><th>Checksum</th><th>Transaction</th><th>Version</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+
+      publisherResult.querySelectorAll('tr.clickable').forEach(tr => {
+        tr.addEventListener('click', () => {
+          location.hash = `#/tx/${tr.dataset.txid}`;
+        });
+      });
+
+    } catch (e) {
+      publisherResult.innerHTML = `<div class="empty-state">Search error: ${e.message || e}</div>`;
+    }
+  }
+
+  publisherBtn.addEventListener('click', searchPublisher);
+  publisherInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchPublisher(); });
+
+  // Auto-search if publisher was prefilled via query param
+  if (prefillPublisher) {
+    searchPublisher();
   }
 
   return { destroy() {} };

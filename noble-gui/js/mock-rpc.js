@@ -30,6 +30,10 @@ function randomBytes(len) {
   return Array.from(crypto.getRandomValues(new Uint8Array(len)));
 }
 
+function bytesToHexLocal(arr) {
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 function hashFromHeight(height) {
   // Deterministic hash based on height for reproducibility
   const base = height.toString(16).padStart(8, '0');
@@ -271,8 +275,13 @@ function generateChain(numBlocks) {
   const blocks = [];
   const txIndex = new Map();    // tx_id → { block_height, tx }
   const checksumIndex = new Map(); // checksum → [{ block_height, tx_id, timestamp }]
+  const versionChainIndex = new Map(); // prev_checksum → [successor_tx_id]
+  const publisherIndex = new Map(); // signerHex → [{ tx_id, checksum, block_height, timestamp, version }]
 
   let prevHash = '0'.repeat(64); // genesis prev_block_hash
+
+  // Collect checksums for version chain linking (populated in first pass)
+  const allChecksums = [];
 
   for (let h = 0; h < numBlocks; h++) {
     const timestamp = GENESIS_TIMESTAMP + h * CYCLE_DURATION_SECS;
@@ -282,6 +291,21 @@ function generateChain(numBlocks) {
     const transactions = [];
     for (let t = 0; t < txCount; t++) {
       const tx = makeTransaction(h * 100 + t, timestamp - 60 + t);
+
+      // ~10% of notarization txs (h > 10) are versioned docs referencing an earlier checksum
+      let version = null;
+      let prevChecksum = null;
+      if (h > 10 && t % 10 === 3 && allChecksums.length > 5) {
+        // Pick a deterministic earlier checksum as prev_checksum
+        const prevIdx = (h * 7 + t * 3) % allChecksums.length;
+        prevChecksum = allChecksums[prevIdx];
+        version = 2 + (h % 5); // versions 2-6
+        tx.metadata.push(
+          { key: 'doc:prev_checksum', value: Array.from(new TextEncoder().encode(prevChecksum)) },
+          { key: 'doc:version', value: Array.from(new TextEncoder().encode(String(version))) },
+        );
+      }
+
       transactions.push(tx);
 
       const txId = deterministicHash((h * 100 + t) * 23);
@@ -296,7 +320,30 @@ function generateChain(numBlocks) {
         locator_recipient_count: tx.locator_recipient_count,
         attestation_count: tx.attestation_count,
         attestations: tx.attestations,
+        version,
+        prev_checksum: prevChecksum,
       });
+
+      // Build version chain index
+      if (prevChecksum) {
+        if (!versionChainIndex.has(prevChecksum)) versionChainIndex.set(prevChecksum, []);
+        versionChainIndex.get(prevChecksum).push(txId);
+      }
+
+      // Build publisher index (notarization txs only, tx_type=0)
+      if (tx.tx_type === 0) {
+        const signerHex = bytesToHexLocal(tx.publisher_sig.public_key);
+        if (!publisherIndex.has(signerHex)) publisherIndex.set(signerHex, []);
+        publisherIndex.get(signerHex).push({
+          tx_id: txId,
+          checksum: tx.checksum,
+          block_height: h,
+          timestamp: tx.timestamp,
+          version,
+        });
+      }
+
+      allChecksums.push(tx.checksum);
     }
 
     const header = makeBlockHeader(h, prevHash, txCount, timestamp, validatorSeed);
@@ -306,7 +353,7 @@ function generateChain(numBlocks) {
     prevHash = blockHash;
   }
 
-  return { blocks, txIndex, checksumIndex };
+  return { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex };
 }
 
 // ── Generate Mock Mempool ──
@@ -345,8 +392,8 @@ export class MockRpcClient {
   #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
   constructor({ latencyMin = 50, latencyMax = 150, firstRun = false } = {}) {
-    const { blocks, txIndex, checksumIndex } = generateChain(100);
-    this.#chain = { blocks, txIndex, checksumIndex };
+    const { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex } = generateChain(100);
+    this.#chain = { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex };
     this.#mempool = generateMempool(50, 99);
     this.#peers = makePeers(99);
     this.#validators = [...VALIDATORS]; // mutable copy per instance
@@ -369,6 +416,53 @@ export class MockRpcClient {
 
   /** Check whether an auth token is currently set. */
   hasAuthToken() { return this.#authToken !== null; }
+
+  /** Build a version chain via BFS starting from a root checksum. Returns null if no chain. */
+  #buildVersionChain(checksum) {
+    const rootRecords = this.#chain.checksumIndex.get(checksum);
+    if (!rootRecords || rootRecords.length === 0) return null;
+
+    const successors = this.#chain.versionChainIndex.get(checksum) || [];
+    const hasPrev = rootRecords[0].prev_checksum != null;
+
+    // No chain if no successors and root doesn't reference a prev_checksum
+    if (successors.length === 0 && !hasPrev) return null;
+
+    const first = rootRecords[0];
+    const versions = [{
+      checksum,
+      tx_id: first.tx_id,
+      block_height: first.block_height,
+      timestamp: first.timestamp,
+      version: first.version || 1,
+    }];
+    const queue = [checksum];
+    const visited = new Set([checksum]);
+    while (queue.length > 0 && versions.length < 100) {
+      const current = queue.shift();
+      const succTxIds = this.#chain.versionChainIndex.get(current) || [];
+      for (const succTxId of succTxIds) {
+        if (versions.length >= 100) break;
+        const entry = this.#chain.txIndex.get(succTxId);
+        if (!entry) continue;
+        const succChecksum = entry.tx.checksum;
+        const verMeta = entry.tx.metadata.find(m => m.key === 'doc:version');
+        const ver = verMeta ? parseInt(new TextDecoder().decode(new Uint8Array(verMeta.value)), 10) : null;
+        versions.push({
+          checksum: succChecksum,
+          tx_id: succTxId,
+          block_height: entry.block_height,
+          timestamp: entry.tx.timestamp,
+          version: ver,
+        });
+        if (!visited.has(succChecksum)) {
+          visited.add(succChecksum);
+          queue.push(succChecksum);
+        }
+      }
+    }
+    return versions;
+  }
 
   get chainHeight() {
     return this.#chain.blocks.length - 1;
@@ -456,23 +550,41 @@ export class MockRpcClient {
 
       case 'noble_lookupChecksum': {
         const records = this.#chain.checksumIndex.get(params.checksum);
-        if (!records || records.length === 0) return { found: false, records: [] };
-        return { found: true, records };
+        if (!records || records.length === 0) return { found: false, records: [], version_chain: null };
+        const vc = this.#buildVersionChain(params.checksum);
+        return { found: true, records, version_chain: vc };
       }
 
       case 'noble_verifyDocument': {
         const records = this.#chain.checksumIndex.get(params.checksum);
+        const vc = (records && records.length > 0) ? this.#buildVersionChain(params.checksum) : null;
         return {
           checksum: params.checksum,
           registered: !!records && records.length > 0,
           registrations: records || [],
           first_seen: records?.[0]?.timestamp ?? null,
+          version_chain: vc,
         };
       }
 
       case 'noble_getDocumentHistory': {
         const records = this.#chain.checksumIndex.get(params.checksum);
         return { checksum: params.checksum, history: records || [] };
+      }
+
+      case 'noble_getDocumentVersions': {
+        const rootRecords = this.#chain.checksumIndex.get(params.checksum);
+        if (!rootRecords || rootRecords.length === 0) {
+          throw { code: -32602, message: 'Checksum not found' };
+        }
+        const versions = this.#buildVersionChain(params.checksum) || [];
+        return { root_checksum: params.checksum, versions, count: versions.length };
+      }
+
+      case 'noble_getDocumentsByPublisher': {
+        const pubkey = params.public_key;
+        const docs = this.#chain.publisherIndex.get(pubkey) || [];
+        return { publisher: pubkey, documents: docs, count: docs.length };
       }
 
       case 'noble_decryptLocator': {
@@ -1445,6 +1557,19 @@ export class MockRpcClient {
         tx_id: txId,
         timestamp: tx.timestamp,
       });
+
+      // Update publisher index (notarization txs only)
+      if (tx.tx_type === 0) {
+        const signerHex = bytesToHexLocal(tx.publisher_sig.public_key);
+        if (!this.#chain.publisherIndex.has(signerHex)) this.#chain.publisherIndex.set(signerHex, []);
+        this.#chain.publisherIndex.get(signerHex).push({
+          tx_id: txId,
+          checksum: tx.checksum,
+          block_height: h,
+          timestamp: tx.timestamp,
+          version: null,
+        });
+      }
     }
 
     const header = makeBlockHeader(h, prevHash, txCount, timestamp, validatorSeed);

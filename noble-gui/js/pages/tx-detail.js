@@ -74,6 +74,49 @@ export function init(root, ctx) {
       });
     }
 
+    // ── Version badge (from metadata) ──
+    const versionMeta = tx.metadata.find(m => m.key === 'doc:version');
+    const prevChecksumMeta = tx.metadata.find(m => m.key === 'doc:prev_checksum');
+    if (versionMeta || prevChecksumMeta) {
+      const versionEl = document.createElement('div');
+      versionEl.className = 'checksum-hero__version';
+      const verValue = versionMeta ? decodeHexOrUtf8(versionMeta.value) : null;
+      const prevValue = prevChecksumMeta ? decodeHexOrUtf8(prevChecksumMeta.value) : null;
+      let html = '';
+      if (verValue) {
+        html += `<span class="badge badge-version">v${esc(verValue)}</span> `;
+      }
+      if (prevValue) {
+        html += `<span style="font-size:var(--font-size-xs);color:var(--text-secondary)">Previous version: <a href="#/verify?checksum=${esc(prevValue)}" class="mono">${truncateHash(prevValue, 12)}</a></span>`;
+      }
+      versionEl.innerHTML = html;
+      heroEl.appendChild(versionEl);
+    }
+
+    // Check for successors (next versions)
+    if (!isZeroChecksum) {
+      try {
+        const versionsRes = await rpc.call('noble_getDocumentVersions', { checksum: tx.checksum });
+        if (versionsRes.count > 1) {
+          const nextVersions = versionsRes.versions.filter(v => v.checksum !== tx.checksum);
+          if (nextVersions.length > 0) {
+            const nextEl = document.createElement('div');
+            nextEl.className = 'checksum-hero__next-versions';
+            nextEl.innerHTML = `
+              <span style="font-size:var(--font-size-xs);color:var(--text-secondary)">
+                Newer version${nextVersions.length > 1 ? 's' : ''}:
+                ${nextVersions.slice(0, 3).map(v =>
+                  `<a href="#/tx/${v.tx_id}" class="mono">${v.version ? 'v' + v.version : truncateHash(v.tx_id, 8)}</a>`
+                ).join(', ')}
+                ${nextVersions.length > 3 ? `<span>+${nextVersions.length - 3} more</span>` : ''}
+              </span>
+            `;
+            heroEl.appendChild(nextEl);
+          }
+        }
+      } catch { /* version chain lookup not critical */ }
+    }
+
     // ── Encrypted locator indicator ──
     if (tx.has_encrypted_locator) {
       const locatorEl = document.createElement('div');
@@ -113,7 +156,7 @@ export function init(root, ctx) {
       <div class="panel-body">
         <dl class="detail-grid">
           <dt>Scheme</dt><dd>${formatScheme(tx.publisher_sig.scheme_id)}</dd>
-          <dt>Public Key</dt><dd class="mono">${bytesToHex(tx.publisher_sig.public_key)}</dd>
+          <dt>Public Key</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${bytesToHex(tx.publisher_sig.public_key)}" title="View all documents by this publisher">${bytesToHex(tx.publisher_sig.public_key)}</a></dd>
           <dt>Signature</dt><dd class="mono">${bytesToHex(tx.publisher_sig.signature)}</dd>
         </dl>
       </div>
@@ -163,4 +206,30 @@ export function init(root, ctx) {
 
   load();
   return { destroy() {} };
+}
+
+/** Escape HTML to prevent XSS */
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/** Decode a metadata value that may be hex-encoded UTF-8 or an array of byte values */
+function decodeHexOrUtf8(value) {
+  if (Array.isArray(value)) {
+    return new TextDecoder().decode(new Uint8Array(value));
+  }
+  if (typeof value === 'string') {
+    // Try hex decode
+    try {
+      const bytes = [];
+      for (let i = 0; i < value.length; i += 2) {
+        bytes.push(parseInt(value.substring(i, i + 2), 16));
+      }
+      return new TextDecoder().decode(new Uint8Array(bytes));
+    } catch { return value; }
+  }
+  return String(value);
 }

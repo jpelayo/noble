@@ -24,7 +24,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_codec::NobleCbor;
-use noble_core::{Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, PROTOCOL_VERSION, TX_TYPE_TRANSFER};
+use noble_core::{
+    Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
+    TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
+};
 use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey};
 
 use crate::error::MempoolError;
@@ -88,6 +91,12 @@ pub struct MempoolEntry {
 pub trait ChainLookup {
     /// Returns `true` if the transaction is already confirmed on-chain.
     fn is_confirmed(&self, tx_id: &Hash256) -> bool;
+
+    /// Returns true if at least one notarization exists for this checksum on-chain.
+    /// Default: false (for tests that don't need version chain validation).
+    fn has_checksum(&self, _checksum: &Hash256) -> bool {
+        false
+    }
 }
 
 /// A no-op chain lookup that never reports duplicates.
@@ -282,6 +291,22 @@ impl Mempool {
                     count,
                     max: self.config.max_per_sender,
                 });
+            }
+        }
+
+        // Step 2.6: Version chain — if doc:prev_checksum is present, verify it exists on-chain
+        if tx.tx_type == TX_TYPE_NOTARIZATION {
+            if let Some(prev_hex) = tx
+                .metadata
+                .iter()
+                .find(|m| m.key == META_KEY_PREV_CHECKSUM)
+                .and_then(|m| std::str::from_utf8(&m.value).ok())
+            {
+                if let Ok(prev_hash) = Hash256::from_hex(prev_hex) {
+                    if !chain.has_checksum(&prev_hash) {
+                        return Err(MempoolError::PrevChecksumNotFound(prev_hex.to_string()));
+                    }
+                }
             }
         }
 
@@ -1202,5 +1227,107 @@ mod tests {
         let (_sk, pk) = ed25519::generate_keypair();
         let pubkey = noble_crypto::NoblePublicKey::Ed25519(pk.to_vec());
         assert_eq!(pool.pending_debit(&pubkey), 0);
+    }
+
+    // --- Step 2.6: Version chain validation ---
+
+    fn make_versioned_notarization(
+        sk: &[u8],
+        pk: &[u8],
+        doc: &[u8],
+        fee: u64,
+        version: Option<&str>,
+        prev_checksum: Option<&str>,
+    ) -> Transaction {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let checksum = sha256(doc);
+        let mut metadata = vec![];
+        if let Some(v) = version {
+            metadata.push(MetadataEntry {
+                key: noble_core::META_KEY_VERSION.into(),
+                value: v.as_bytes().to_vec(),
+            });
+        }
+        if let Some(pc) = prev_checksum {
+            metadata.push(MetadataEntry {
+                key: noble_core::META_KEY_PREV_CHECKSUM.into(),
+                value: pc.as_bytes().to_vec(),
+            });
+        }
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            checksum,
+            timestamp: 1_700_000_000,
+            fee,
+            recipient: None,
+            amount: None,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata,
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx
+    }
+
+    #[test]
+    fn step2_6_prev_checksum_not_on_chain_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let prev_hex = "aa".repeat(32);
+        let tx =
+            make_versioned_notarization(&sk, &pk, b"v2doc", MIN_TX_FEE, Some("2"), Some(&prev_hex));
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
+        assert!(
+            matches!(result, Err(MempoolError::PrevChecksumNotFound(_))),
+            "expected PrevChecksumNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn step2_6_prev_checksum_on_chain_accepted() {
+        struct ChecksumExists(Hash256);
+        impl ChainLookup for ChecksumExists {
+            fn is_confirmed(&self, _tx_id: &Hash256) -> bool {
+                false
+            }
+            fn has_checksum(&self, checksum: &Hash256) -> bool {
+                *checksum == self.0
+            }
+        }
+
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        let prev_hex = "aa".repeat(32);
+        let prev_hash = Hash256::from_hex(&prev_hex).unwrap();
+        let chain = ChecksumExists(prev_hash);
+        let tx = make_versioned_notarization(
+            &sk,
+            &pk,
+            b"v2doc2",
+            MIN_TX_FEE,
+            Some("2"),
+            Some(&prev_hex),
+        );
+        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoBalanceLookup);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn step2_6_no_version_metadata_skipped() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = ed25519::generate_keypair();
+        // Normal notarization without any version metadata
+        let tx = make_signed_tx(&sk, &pk, b"normal_doc", MIN_TX_FEE);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 }

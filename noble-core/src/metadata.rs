@@ -7,7 +7,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN};
+use crate::constants::{
+    MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN, META_KEY_PREV_CHECKSUM, META_KEY_VERSION,
+};
 use crate::error::ValidationError;
 
 /// A key-value metadata entry attached to a transaction.
@@ -62,6 +64,85 @@ pub fn validate_metadata(entries: &[MetadataEntry]) -> Result<(), ValidationErro
     for entry in entries {
         if !seen.insert(&entry.key) {
             return Err(ValidationError::DuplicateMetadataKey(entry.key.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate version metadata consistency (T29/T30).
+///
+/// Rules (stateless — no chain lookup needed):
+/// - If `doc:prev_checksum` is present: must be valid 64-char hex, and `doc:version` must be > 1
+/// - If `doc:version` is present: must parse as positive integer 1..=u32::MAX;
+///   if value is "1", `doc:prev_checksum` must NOT be present
+/// - If neither key is present → no constraints (backward compatible)
+pub fn validate_version_metadata(entries: &[MetadataEntry]) -> Result<(), ValidationError> {
+    let prev_checksum = entries.iter().find(|m| m.key == META_KEY_PREV_CHECKSUM);
+    let version = entries.iter().find(|m| m.key == META_KEY_VERSION);
+
+    // If neither key is present, nothing to validate
+    if prev_checksum.is_none() && version.is_none() {
+        return Ok(());
+    }
+
+    // Validate doc:version if present
+    if let Some(ver_entry) = version {
+        let ver_str = std::str::from_utf8(&ver_entry.value).map_err(|_| {
+            ValidationError::VersionMetadataInconsistent(
+                "doc:version value is not valid UTF-8".into(),
+            )
+        })?;
+        let ver_num: u32 = ver_str.parse().map_err(|_| {
+            ValidationError::VersionMetadataInconsistent(format!(
+                "doc:version must be a positive integer, got '{ver_str}'"
+            ))
+        })?;
+        if ver_num == 0 {
+            return Err(ValidationError::VersionMetadataInconsistent(
+                "doc:version must be >= 1".into(),
+            ));
+        }
+        // v1 must NOT have prev_checksum
+        if ver_num == 1 && prev_checksum.is_some() {
+            return Err(ValidationError::VersionMetadataInconsistent(
+                "doc:version=1 must not have doc:prev_checksum".into(),
+            ));
+        }
+    }
+
+    // Validate doc:prev_checksum if present
+    if let Some(prev_entry) = prev_checksum {
+        let prev_str = std::str::from_utf8(&prev_entry.value)
+            .map_err(|_| ValidationError::InvalidPrevChecksum("value is not valid UTF-8".into()))?;
+        // Must be exactly 64 hex characters
+        if prev_str.len() != 64 {
+            return Err(ValidationError::InvalidPrevChecksum(format!(
+                "expected 64 hex chars, got {}",
+                prev_str.len()
+            )));
+        }
+        if !prev_str.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ValidationError::InvalidPrevChecksum(
+                "contains non-hex characters".into(),
+            ));
+        }
+        // doc:version must also be present and > 1
+        match version {
+            None => {
+                return Err(ValidationError::VersionMetadataInconsistent(
+                    "doc:prev_checksum requires doc:version".into(),
+                ));
+            }
+            Some(ver_entry) => {
+                let ver_str = std::str::from_utf8(&ver_entry.value).unwrap_or("?");
+                let ver_num: u32 = ver_str.parse().unwrap_or(0);
+                if ver_num <= 1 {
+                    return Err(ValidationError::VersionMetadataInconsistent(
+                        "doc:prev_checksum requires doc:version > 1".into(),
+                    ));
+                }
+            }
         }
     }
 
@@ -166,5 +247,148 @@ mod tests {
         let bytes = entry.to_cbor().unwrap();
         let decoded = MetadataEntry::from_cbor(&bytes).unwrap();
         assert_eq!(entry, decoded);
+    }
+
+    // --- Version metadata validation (T29/T30) ---
+
+    #[test]
+    fn version_metadata_absent_is_ok() {
+        let entries = vec![MetadataEntry {
+            key: "doc_type".into(),
+            value: b"report".to_vec(),
+        }];
+        assert!(validate_version_metadata(&entries).is_ok());
+        assert!(validate_version_metadata(&[]).is_ok());
+    }
+
+    #[test]
+    fn version_v1_explicit_ok() {
+        let entries = vec![MetadataEntry {
+            key: META_KEY_VERSION.into(),
+            value: b"1".to_vec(),
+        }];
+        assert!(validate_version_metadata(&entries).is_ok());
+    }
+
+    #[test]
+    fn version_v2_with_prev_ok() {
+        let prev_hex = "aa".repeat(32); // 64 hex chars
+        let entries = vec![
+            MetadataEntry {
+                key: META_KEY_VERSION.into(),
+                value: b"2".to_vec(),
+            },
+            MetadataEntry {
+                key: META_KEY_PREV_CHECKSUM.into(),
+                value: prev_hex.as_bytes().to_vec(),
+            },
+        ];
+        assert!(validate_version_metadata(&entries).is_ok());
+    }
+
+    #[test]
+    fn version_prev_without_version_rejected() {
+        let prev_hex = "bb".repeat(32);
+        let entries = vec![MetadataEntry {
+            key: META_KEY_PREV_CHECKSUM.into(),
+            value: prev_hex.as_bytes().to_vec(),
+        }];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::VersionMetadataInconsistent(_))
+        ));
+    }
+
+    #[test]
+    fn version_v1_with_prev_rejected() {
+        let prev_hex = "cc".repeat(32);
+        let entries = vec![
+            MetadataEntry {
+                key: META_KEY_VERSION.into(),
+                value: b"1".to_vec(),
+            },
+            MetadataEntry {
+                key: META_KEY_PREV_CHECKSUM.into(),
+                value: prev_hex.as_bytes().to_vec(),
+            },
+        ];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::VersionMetadataInconsistent(_))
+        ));
+    }
+
+    #[test]
+    fn version_prev_bad_hex_rejected() {
+        let bad_hex = "zz".repeat(32); // non-hex
+        let entries = vec![
+            MetadataEntry {
+                key: META_KEY_VERSION.into(),
+                value: b"2".to_vec(),
+            },
+            MetadataEntry {
+                key: META_KEY_PREV_CHECKSUM.into(),
+                value: bad_hex.as_bytes().to_vec(),
+            },
+        ];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::InvalidPrevChecksum(_))
+        ));
+    }
+
+    #[test]
+    fn version_prev_wrong_length_rejected() {
+        let short_hex = "aa".repeat(31); // 62 chars, not 64
+        let entries = vec![
+            MetadataEntry {
+                key: META_KEY_VERSION.into(),
+                value: b"2".to_vec(),
+            },
+            MetadataEntry {
+                key: META_KEY_PREV_CHECKSUM.into(),
+                value: short_hex.as_bytes().to_vec(),
+            },
+        ];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::InvalidPrevChecksum(_))
+        ));
+    }
+
+    #[test]
+    fn version_zero_rejected() {
+        let entries = vec![MetadataEntry {
+            key: META_KEY_VERSION.into(),
+            value: b"0".to_vec(),
+        }];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::VersionMetadataInconsistent(_))
+        ));
+    }
+
+    #[test]
+    fn version_non_numeric_rejected() {
+        let entries = vec![MetadataEntry {
+            key: META_KEY_VERSION.into(),
+            value: b"abc".to_vec(),
+        }];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::VersionMetadataInconsistent(_))
+        ));
+    }
+
+    #[test]
+    fn version_negative_rejected() {
+        let entries = vec![MetadataEntry {
+            key: META_KEY_VERSION.into(),
+            value: b"-1".to_vec(),
+        }];
+        assert!(matches!(
+            validate_version_metadata(&entries),
+            Err(ValidationError::VersionMetadataInconsistent(_))
+        ));
     }
 }

@@ -58,6 +58,6 @@ mod tests {
 
         let addr: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
         let listener_id = swarm.listen_on(addr).unwrap();
-        assert!(listener_id.to_string().len() > 0);
+        assert!(!listener_id.to_string().is_empty());
     }
 }

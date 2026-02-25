@@ -12,7 +12,7 @@ use crate::block::{Block, BlockHeader};
 use crate::constants::*;
 use crate::error::ValidationError;
 use crate::merkle::compute_merkle_root;
-use crate::metadata::validate_metadata;
+use crate::metadata::{validate_metadata, validate_version_metadata};
 use crate::transaction::Transaction;
 
 /// Context needed for transaction validation.
@@ -349,6 +349,12 @@ pub fn validate_transaction(
     // T8 + T9: Metadata validation
     validate_metadata(&tx.metadata)?;
     tracing::trace!("T8/T9: metadata validation passed");
+
+    // T29/T30: Version metadata validation (only for notarizations)
+    if tx.tx_type == TX_TYPE_NOTARIZATION {
+        validate_version_metadata(&tx.metadata)?;
+        tracing::trace!("T29/T30: version metadata validation passed");
+    }
 
     // T10: tx_id verification
     let computed_id = tx.compute_tx_id(ctx.chain_id).map_err(|e| {

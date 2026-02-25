@@ -290,6 +290,13 @@ body {
   font-size: var(--font-size-xs);
   word-break: break-all;
 }
+.mono a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.mono a:hover {
+  text-decoration: underline;
+}
 
 /* ── Detail grid (block/tx detail) ── */
 .detail-grid {
@@ -934,6 +941,24 @@ body {
 }
 .checksum-hero__locator a:hover {
   text-decoration: underline;
+}
+.checksum-hero__version {
+  margin-top: var(--gap-xs);
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+.checksum-hero__next-versions {
+  margin-top: var(--gap-xs);
+}
+.badge-version {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
 }
 
 /* ── Mnemonic grid ── */
