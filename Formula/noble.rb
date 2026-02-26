@@ -23,12 +23,16 @@ class Noble < Formula
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
   depends_on "rust" => :build
+  depends_on "openssl@3"            # openssl-sys crate
 
   on_linux do
     depends_on "llvm" => :build     # bindgen (librocksdb-sys) needs libclang via llvm
   end
 
   def install
+    # openssl-sys needs the brew openssl prefix; pkg-config alone is unreliable on Linux.
+    ENV["OPENSSL_DIR"] = Formula["openssl@3"].opt_prefix
+
     # Build all three binaries in release mode.
     system "cargo", "build", "--release",
            "--bin", "noble-node",
