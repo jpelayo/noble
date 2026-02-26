@@ -180,7 +180,7 @@ impl NobleMetrics {
 
 /// Start a lightweight HTTP server that serves `/metrics` in Prometheus text format.
 ///
-/// Binds to `addr` (e.g. `"127.0.0.1:9615"`) and serves `GET /metrics`.
+/// Binds to `addr` (e.g. `"127.0.0.1:8786"`) and serves `GET /metrics`.
 /// Returns a `JoinHandle` so the caller can manage the task.
 pub async fn start_metrics_server(
     addr: &str,

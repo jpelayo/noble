@@ -107,10 +107,11 @@ rotation = "daily"
 
 [metrics]
 # Prometheus metrics endpoint bind address.
-prometheus_addr = "127.0.0.1:9615"
+prometheus_addr = "127.0.0.1:8786"
 
-# Enable or disable metrics collection.
-enabled = true
+# Enable or disable metrics collection and the /metrics HTTP endpoint.
+# Disabled by default — enable via CLI setup wizard or dashboard settings.
+enabled = false
 
 [trace]
 # Maximum entries in the RAM ring buffer (no disk I/O).

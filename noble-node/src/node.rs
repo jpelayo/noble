@@ -1312,7 +1312,7 @@ mod tests {
         assert_eq!(config.network.max_peers, 50);
         assert_eq!(config.api.rpc_addr, "127.0.0.1:8783");
         assert_eq!(config.logging.level, "info");
-        assert!(config.metrics.enabled);
+        assert!(!config.metrics.enabled);
     }
 
     #[test]

@@ -452,8 +452,8 @@ impl Default for LoggingConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            prometheus_addr: "127.0.0.1:9615".to_string(),
-            enabled: true,
+            prometheus_addr: "127.0.0.1:8786".to_string(),
+            enabled: false,
         }
     }
 }
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(config.api.ws_addr, "127.0.0.1:8784");
         assert_eq!(config.api.gui_addr, "127.0.0.1:8785");
         assert_eq!(config.logging.level, "info");
-        assert!(config.metrics.enabled);
+        assert!(!config.metrics.enabled);
         assert_eq!(config.identity.org_type, "Individual");
         assert_eq!(config.identity.node_role, "FullNode");
         assert!(config.identity.node_name.is_empty());
@@ -565,8 +565,8 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:9615"
-            enabled = true
+            prometheus_addr = "127.0.0.1:8786"
+            enabled = false
 
             [identity]
             node_name = ""
@@ -588,6 +588,10 @@ mod tests {
         assert_eq!(config.rpc_addr, "127.0.0.1:8783");
         assert_eq!(config.ws_addr, "127.0.0.1:8784");
         assert_eq!(config.gui_addr, "127.0.0.1:8785");
+
+        let metrics = MetricsConfig::default();
+        assert_eq!(metrics.prometheus_addr, "127.0.0.1:8786");
+        assert!(!metrics.enabled, "metrics should be disabled by default");
 
         let net = NetworkConfig::default();
         assert_eq!(net.listen_addr, "/ip4/0.0.0.0/tcp/8780");
@@ -636,8 +640,8 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:9615"
-            enabled = true
+            prometheus_addr = "127.0.0.1:8786"
+            enabled = false
 
             [identity]
             node_name = ""
