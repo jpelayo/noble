@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use noble_core::CYCLE_DURATION_SECS;
+
 /// Top-level node configuration.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct NodeConfig {
@@ -120,6 +122,14 @@ pub struct ConsensusConfig {
     /// For subset_rotation strategy: hex pubkeys of preferred validators.
     #[serde(default)]
     pub voting_subset: Vec<String>,
+    /// Minimum validators required for consensus participation (default: 1).
+    /// Raise this for stricter safety on large networks.
+    #[serde(default = "default_min_peers")]
+    pub min_peers_for_consensus: usize,
+    /// Consensus cycle duration in seconds (default: 1800 = 30 min).
+    /// Reduce for testing (e.g. 60 for 1-minute cycles).
+    #[serde(default = "default_cycle_duration")]
+    pub cycle_duration_secs: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -128,6 +138,14 @@ fn default_voting_strategy() -> String {
 
 fn default_confirmation_strategy() -> String {
     "follow_majority".to_string()
+}
+
+fn default_min_peers() -> usize {
+    1
+}
+
+fn default_cycle_duration() -> u64 {
+    CYCLE_DURATION_SECS
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -410,6 +428,8 @@ impl Default for ConsensusConfig {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
+            min_peers_for_consensus: default_min_peers(),
+            cycle_duration_secs: default_cycle_duration(),
         }
     }
 }
@@ -490,6 +510,8 @@ mod tests {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
+            min_peers_for_consensus: default_min_peers(),
+            cycle_duration_secs: default_cycle_duration(),
         };
         let debug_str = format!("{config:?}");
         assert!(
@@ -819,5 +841,51 @@ mod tests {
             let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
             assert_eq!(parsed.node.role, variant);
         }
+    }
+
+    #[test]
+    fn consensus_config_min_peers_default_is_one() {
+        let config = ConsensusConfig::default();
+        assert_eq!(config.min_peers_for_consensus, 1);
+    }
+
+    #[test]
+    fn consensus_config_cycle_duration_default_is_1800() {
+        let config = ConsensusConfig::default();
+        assert_eq!(config.cycle_duration_secs, 1800);
+    }
+
+    #[test]
+    fn consensus_config_new_fields_round_trip() {
+        let toml_str = r#"
+            [consensus]
+            validator_key_path = ""
+            validator_list_path = "validators.txt"
+            min_peers_for_consensus = 2
+            cycle_duration_secs = 60
+        "#;
+        #[derive(serde::Deserialize)]
+        struct Partial {
+            consensus: ConsensusConfig,
+        }
+        let p: Partial = toml::from_str(toml_str).expect("parse");
+        assert_eq!(p.consensus.min_peers_for_consensus, 2);
+        assert_eq!(p.consensus.cycle_duration_secs, 60);
+    }
+
+    #[test]
+    fn consensus_config_new_fields_default_when_absent() {
+        let toml_str = r#"
+            [consensus]
+            validator_key_path = ""
+            validator_list_path = "validators.txt"
+        "#;
+        #[derive(serde::Deserialize)]
+        struct Partial {
+            consensus: ConsensusConfig,
+        }
+        let p: Partial = toml::from_str(toml_str).expect("parse");
+        assert_eq!(p.consensus.min_peers_for_consensus, 1);
+        assert_eq!(p.consensus.cycle_duration_secs, 1800);
     }
 }

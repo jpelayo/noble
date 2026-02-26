@@ -59,6 +59,26 @@ enum Commands {
         #[arg(long)]
         data_dir: PathBuf,
     },
+
+    /// Generate a new validator keypair and write it to a 33-byte key file.
+    ///
+    /// File format: [scheme_id(1) || private_key(32)]. Permissions set to 0o600.
+    /// The public key hex is printed to stdout for use in validators.txt.
+    GenerateKey {
+        /// Output file path for the 33-byte validator key.
+        #[arg(long, default_value = "validator.key")]
+        output: PathBuf,
+        /// Key scheme: ed25519 (default) or secp256k1.
+        #[arg(long, default_value = "ed25519")]
+        scheme: String,
+    },
+
+    /// Read a validator key file and print the derived public key hex.
+    ShowKey {
+        /// Path to the 33-byte validator key file.
+        #[arg(long, default_value = "validator.key")]
+        key_file: PathBuf,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -90,6 +110,8 @@ fn main() {
         } => cmd_genesis(output, network, json),
         Commands::Benchmark { suite } => cmd_benchmark(suite),
         Commands::ValidateChain { data_dir } => cmd_validate_chain(data_dir),
+        Commands::GenerateKey { output, scheme } => cmd_generate_key(output, scheme),
+        Commands::ShowKey { key_file } => cmd_show_key(key_file),
     }
 }
 
@@ -331,6 +353,110 @@ fn cmd_validate_chain(data_dir: PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
+// generate-key
+// ---------------------------------------------------------------------------
+
+fn cmd_generate_key(output: PathBuf, scheme: String) {
+    use noble_crypto::{NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1};
+
+    let (scheme_id, private_key) = match scheme.as_str() {
+        "ed25519" => {
+            let (sk, _) = noble_crypto::ed25519::generate_keypair();
+            (SCHEME_ED25519, NoblePrivateKey::Ed25519(sk))
+        }
+        "secp256k1" => {
+            let (sk, _) = noble_crypto::secp256k1::generate_keypair();
+            (SCHEME_SECP256K1, NoblePrivateKey::Secp256k1(sk))
+        }
+        other => {
+            eprintln!("Error: unknown key scheme '{other}'. Use 'ed25519' or 'secp256k1'.");
+            std::process::exit(1);
+        }
+    };
+
+    // Build the 33-byte file: [scheme_id || private_key_bytes]
+    let key_bytes = match &private_key {
+        NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
+    };
+    let mut raw = Vec::with_capacity(33);
+    raw.push(scheme_id);
+    raw.extend_from_slice(&key_bytes);
+    assert_eq!(raw.len(), 33, "key file must be exactly 33 bytes");
+
+    // Write with restricted permissions (0o600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&output)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(&raw)
+            })
+            .unwrap_or_else(|e| {
+                eprintln!("Error: failed to write key file: {e}");
+                std::process::exit(1);
+            });
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&output, &raw).unwrap_or_else(|e| {
+            eprintln!("Error: failed to write key file: {e}");
+            std::process::exit(1);
+        });
+    }
+
+    let public_key = private_key.public_key();
+    let pubkey_hex = hex::encode(public_key.to_wire_bytes());
+
+    eprintln!("Generated {} validator key: {}", scheme, output.display());
+    eprintln!("Add this public key to validators.txt:");
+    println!("{pubkey_hex}");
+}
+
+// ---------------------------------------------------------------------------
+// show-key
+// ---------------------------------------------------------------------------
+
+fn cmd_show_key(key_file: PathBuf) {
+    use noble_crypto::NoblePrivateKey;
+
+    let raw = fs::read(&key_file).unwrap_or_else(|e| {
+        eprintln!("Error: failed to read key file '{}': {e}", key_file.display());
+        std::process::exit(1);
+    });
+
+    if raw.len() != 33 {
+        eprintln!(
+            "Error: invalid key file '{}': expected 33 bytes, got {}",
+            key_file.display(),
+            raw.len()
+        );
+        std::process::exit(1);
+    }
+
+    let scheme_id = raw[0];
+    let key_bytes = raw[1..].to_vec();
+
+    let private_key = match scheme_id {
+        noble_crypto::SCHEME_ED25519 => NoblePrivateKey::Ed25519(key_bytes),
+        noble_crypto::SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(key_bytes),
+        other => {
+            eprintln!("Error: unknown scheme_id {other:#04x} in key file.");
+            std::process::exit(1);
+        }
+    };
+
+    let public_key = private_key.public_key();
+    let pubkey_hex = hex::encode(public_key.to_wire_bytes());
+    println!("{pubkey_hex}");
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -390,5 +516,91 @@ mod tests {
         let storage = RocksDbStorage::open(dir.path()).expect("open empty RocksDB");
         let tip = storage.get_chain_tip().expect("read chain tip");
         assert!(tip.is_none(), "empty DB should have no chain tip");
+    }
+
+    #[test]
+    fn generate_key_ed25519_produces_valid_file() {
+        use noble_crypto::{NoblePrivateKey, SCHEME_ED25519};
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key_path = dir.path().join("validator.key");
+
+        // Generate keypair and write 33-byte file
+        let (sk, _) = noble_crypto::ed25519::generate_keypair();
+        let private_key = NoblePrivateKey::Ed25519(sk);
+        let key_bytes = match &private_key {
+            NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
+        };
+        let mut raw = Vec::with_capacity(33);
+        raw.push(SCHEME_ED25519);
+        raw.extend_from_slice(&key_bytes);
+        fs::write(&key_path, &raw).expect("write key file");
+
+        // Read back and verify round-trip
+        let read_back = fs::read(&key_path).expect("read key file");
+        assert_eq!(read_back.len(), 33);
+        assert_eq!(read_back[0], SCHEME_ED25519);
+
+        // Reconstruct private key and derive pubkey
+        let sk2 = NoblePrivateKey::Ed25519(read_back[1..].to_vec());
+        let pk2 = sk2.public_key();
+        let pk_orig = private_key.public_key();
+        assert_eq!(pk2.to_wire_bytes(), pk_orig.to_wire_bytes());
+    }
+
+    #[test]
+    fn generate_key_secp256k1_produces_valid_file() {
+        use noble_crypto::{NoblePrivateKey, SCHEME_SECP256K1};
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key_path = dir.path().join("validator.key");
+
+        let (sk, _) = noble_crypto::secp256k1::generate_keypair();
+        let private_key = NoblePrivateKey::Secp256k1(sk);
+        let key_bytes = match &private_key {
+            NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
+        };
+        let mut raw = Vec::with_capacity(33);
+        raw.push(SCHEME_SECP256K1);
+        raw.extend_from_slice(&key_bytes);
+        fs::write(&key_path, &raw).expect("write key file");
+
+        let read_back = fs::read(&key_path).expect("read key file");
+        assert_eq!(read_back.len(), 33);
+        assert_eq!(read_back[0], SCHEME_SECP256K1);
+
+        let sk2 = NoblePrivateKey::Secp256k1(read_back[1..].to_vec());
+        let pk2 = sk2.public_key();
+        let pk_orig = private_key.public_key();
+        assert_eq!(pk2.to_wire_bytes(), pk_orig.to_wire_bytes());
+    }
+
+    #[test]
+    fn show_key_reads_and_derives_pubkey() {
+        use noble_crypto::{NoblePrivateKey, SCHEME_ED25519};
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key_path = dir.path().join("validator.key");
+
+        let (sk_bytes, expected_pk_bytes) = noble_crypto::ed25519::generate_keypair();
+
+        // Write key file
+        let mut raw = vec![SCHEME_ED25519];
+        raw.extend_from_slice(&sk_bytes);
+        fs::write(&key_path, &raw).expect("write key file");
+
+        // Simulate show-key logic
+        let file_bytes = fs::read(&key_path).expect("read key file");
+        assert_eq!(file_bytes.len(), 33);
+        let scheme_id = file_bytes[0];
+        let key_bytes = file_bytes[1..].to_vec();
+        let private_key = match scheme_id {
+            SCHEME_ED25519 => NoblePrivateKey::Ed25519(key_bytes),
+            _ => panic!("unexpected scheme"),
+        };
+        let pubkey_hex = hex::encode(private_key.public_key().to_wire_bytes());
+        let expected_hex = hex::encode({
+            let mut wire = vec![SCHEME_ED25519];
+            wire.extend_from_slice(&expected_pk_bytes);
+            wire
+        });
+        assert_eq!(pubkey_hex, expected_hex);
     }
 }

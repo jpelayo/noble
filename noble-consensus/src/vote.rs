@@ -483,10 +483,30 @@ mod tests {
         let candidate = hash_n(1);
         let (vote, _) = make_vote(0, candidate);
         mgr.record_vote(b"peer1", &vote).unwrap();
-        // total_peers=2 < min_peers=3 → Indeterminate
+        // GAP-C6: min_peers_for_consensus gate still enforced when configured above default.
+        // Use explicit config with min_peers=3; total_peers=2 < 3 → Indeterminate.
+        let config = ConsensusConfig {
+            min_peers_for_consensus: 3,
+            ..ConsensusConfig::default()
+        };
         assert_eq!(
-            mgr.compute_majority(2, &default_config()),
+            mgr.compute_majority(2, &config),
             MigrationResult::Indeterminate
+        );
+    }
+
+    #[test]
+    fn gap_c6_single_validator_default_config_can_commit() {
+        // With default min_peers_for_consensus=1, a sole validator can finalize blocks.
+        // 1 voter / 1 total → plurality floor = ceil(1/3) = 1 → Adopt.
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (vote, _) = make_vote(0, candidate);
+        mgr.record_vote(b"peer1", &vote).unwrap();
+        let result = mgr.compute_majority(1, &default_config());
+        assert!(
+            matches!(result, MigrationResult::Adopt { .. }),
+            "1 validator should be able to commit with default config, got {result:?}"
         );
     }
 

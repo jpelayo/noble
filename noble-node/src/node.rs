@@ -958,9 +958,28 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         &config.consensus.voting_subset,
     );
 
+    // A5: Guard against zero/invalid values.
+    let cycle_duration_secs = if config.consensus.cycle_duration_secs == 0 {
+        tracing::error!(
+            task = "config_load",
+            "cycle_duration_secs=0 is invalid; using default 1800"
+        );
+        noble_core::CYCLE_DURATION_SECS
+    } else {
+        config.consensus.cycle_duration_secs
+    };
+    if config.consensus.min_peers_for_consensus == 0 {
+        tracing::warn!(
+            task = "config_load",
+            "min_peers_for_consensus=0: node will finalize blocks with zero validators"
+        );
+    }
+
     CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
+        min_peers_for_consensus: config.consensus.min_peers_for_consensus,
+        cycle_duration_secs,
         ..CConsensusConfig::default()
     }
 }

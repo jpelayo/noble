@@ -56,6 +56,15 @@ confirmation_strategy = "follow_majority"
 # For subset_rotation strategy: comma-separated hex pubkeys.
 # voting_subset = []
 
+# Minimum validators required for consensus participation (default: 1).
+# The plurality floor (ceil(N/3) votes required) scales safely for any count.
+# Raise this for stricter safety on large production networks.
+# min_peers_for_consensus = 1
+
+# Consensus cycle duration in seconds (default: 1800 = 30 min).
+# Reduce for testing environments (e.g. cycle_duration_secs = 60).
+# cycle_duration_secs = 1800
+
 [api]
 # JSON-RPC HTTP server bind address.
 rpc_addr = "127.0.0.1:8783"
