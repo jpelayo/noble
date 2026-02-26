@@ -37,8 +37,13 @@ function onStatusChange(status) {
 
 // ── Initialize RPC layer (real or mock) ──
 const params = new URLSearchParams(window.location.search);
-const rpcUrl = params.get('rpc');
+let rpcUrl = params.get('rpc');
 const wsUrl = params.get('ws');
+
+// Auto-detect RPC endpoint when served over HTTP (not file://).
+if (!rpcUrl && window.location.protocol.startsWith('http')) {
+  rpcUrl = `http://${window.location.hostname}:8783`;
+}
 
 let rpc, ws;
 if (rpcUrl) {

@@ -158,6 +158,41 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let defaults = existing.unwrap_or_default();
 
     // -----------------------------------------------------------------------
+    // Remote Access (preamble — asked before numbered steps)
+    // -----------------------------------------------------------------------
+    section_header("◆", "Remote Access");
+
+    println!("  Allow remote connections to the Dashboard GUI and JSON-RPC API.");
+    println!("  Enter IP addresses or CIDR blocks (127.0.0.1 is always allowed).");
+    println!("  Leave empty for localhost-only access.");
+    println!();
+
+    let allowed_ips_str: String = Input::new()
+        .with_prompt("Allowed IPs (comma-separated, e.g. 10.0.0.0/8)")
+        .default(defaults.api.allowed_ips.join(", "))
+        .allow_empty(true)
+        .interact_text()?;
+
+    let mut allowed_ips: Vec<String> = allowed_ips_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Validate using the same parser the node uses at runtime.
+    if !allowed_ips.is_empty() {
+        if let Err(e) = noble_api::ip_filter::IpFilter::new(&allowed_ips) {
+            println!("  Warning: {e}");
+            println!("  Continuing with localhost-only access.");
+            allowed_ips.clear();
+        } else {
+            println!();
+            println!("  Remote access enabled. After setup, the dashboard GUI will");
+            println!("  be available at http://<this-host>:8785");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Step 1: Network & Name
     // -----------------------------------------------------------------------
     section_header("1", "Network & Name");
@@ -555,7 +590,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             totp_secret_file,
             gui_addr: defaults.api.gui_addr.clone(),
             gui_dir: defaults.api.gui_dir.clone(),
-            allowed_ips: defaults.api.allowed_ips.clone(),
+            allowed_ips: allowed_ips.clone(),
         },
         wallet: WalletConfig {
             keystore_path: PathBuf::from("keystore"),
@@ -966,6 +1001,11 @@ fn print_summary(config: &NodeConfig, config_path: &str) {
     summary_line("RPC", &config.api.rpc_addr);
     summary_line("WebSocket", &config.api.ws_addr);
     summary_line("GUI", &config.api.gui_addr);
+    if !config.api.allowed_ips.is_empty() {
+        summary_line("Remote access", &config.api.allowed_ips.join(", "));
+    } else {
+        summary_line("Remote access", "localhost only");
+    }
     summary_line(
         "TOTP auth",
         if config.api.totp_enabled {

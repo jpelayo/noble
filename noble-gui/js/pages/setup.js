@@ -582,15 +582,22 @@ export function init(root, ctx) {
         <div style="text-align:center;padding:var(--gap-xl)">
           <div style="font-size:3rem;color:var(--success);margin-bottom:var(--gap)">&#10004;</div>
           <h2 style="color:var(--success);margin-bottom:var(--gap-sm)">Setup Complete!</h2>
-          <p style="color:var(--text-secondary)">Your node is configured and ready.</p>
-          <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap)">Redirecting to dashboard in 3 seconds...</p>
+          <p style="color:var(--text-secondary)">Your node identity has been saved.</p>
+          <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-top:var(--gap);text-align:left;font-size:var(--font-size-sm)">
+            <p style="margin-bottom:var(--gap-sm)"><strong>Next steps:</strong></p>
+            <ol style="margin:0;padding-left:1.5em;color:var(--text-secondary)">
+              <li>Edit <code>noble.toml</code> to set <code>allowed_ips</code> for persistent remote access</li>
+              <li>Restart the node: <code>brew services restart noble</code></li>
+            </ol>
+          </div>
+          <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap)">Redirecting to dashboard in 5 seconds...</p>
           <a href="#/" class="btn" style="margin-top:var(--gap-lg);display:inline-block">Go to Dashboard</a>
         </div>
       `;
       backBtn.style.display = 'none';
       nextBtn.style.display = 'none';
 
-      setTimeout(() => { location.hash = '#/'; }, 3000);
+      setTimeout(() => { location.hash = '#/'; }, 5000);
     } catch (e) {
       body.innerHTML += `<div style="color:var(--error);margin-top:var(--gap)">Setup error: ${e.message || e}</div>`;
       nextBtn.disabled = false;

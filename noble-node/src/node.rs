@@ -346,7 +346,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let (peer_update_tx, _) = broadcast::channel(64);
 
         // --- IP access control ---
-        let ip_filter = if config.api.allowed_ips.is_empty() {
+        let setup_mode = !config.storage.data_dir.join("identity.json").exists();
+
+        let ip_filter = if setup_mode {
+            tracing::warn!(
+                task = "node_startup",
+                "SETUP MODE: No identity.json found — GUI/RPC bound to 0.0.0.0 (all interfaces)"
+            );
+            tracing::warn!(
+                task = "node_startup",
+                "Complete the setup wizard at http://<this-host>:8785, then restart the node"
+            );
+            Some(noble_api::ip_filter::IpFilter::allow_all())
+        } else if config.api.allowed_ips.is_empty() {
             None
         } else {
             match noble_api::ip_filter::IpFilter::new(&config.api.allowed_ips) {
