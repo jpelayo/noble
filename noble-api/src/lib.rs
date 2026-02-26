@@ -19,14 +19,14 @@ pub mod server;
 pub use error::ApiError;
 pub use rate_limit::RpcRateLimiter;
 pub use server::start_server;
-pub use state::{ApiState, NetworkStats};
+pub use state::{ApiState, NetworkStats, NodeIdentityData};
 
 /// API version string, included in the `X-Noble-API-Version` response header
 /// and returned by `noble_getApiVersion`.
 pub const API_VERSION: &str = "1.0";
 
 /// Number of registered RPC methods (excluding subscriptions).
-pub const API_METHOD_COUNT: u32 = 39;
+pub const API_METHOD_COUNT: u32 = 41;
 
 #[cfg(test)]
 mod tests {
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn api_method_count_is_reasonable() {
-        // We have 39 RPC methods registered; guard against accidental reset.
-        assert!(API_METHOD_COUNT >= 38, "expected at least 38 RPC methods");
+        // We have 41 RPC methods registered; guard against accidental reset.
+        assert!(API_METHOD_COUNT >= 41, "expected at least 41 RPC methods");
     }
 }

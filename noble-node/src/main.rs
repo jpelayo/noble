@@ -245,6 +245,15 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: bool) {
+    // --- Setup gate ---------------------------------------------------------
+    // If no config file exists, offer the setup wizard before doing anything.
+    if !std::path::Path::new(config_path).exists() {
+        if !setup::prompt_missing_config(config_path) {
+            return; // User chose Exit, or setup failed.
+        }
+        // Setup completed — config file now exists; fall through to load it.
+    }
+
     // Load config first (before tracing init, so we can read [trace] config).
     let config = match config::NodeConfig::from_file(std::path::Path::new(config_path)) {
         Ok(c) => c,

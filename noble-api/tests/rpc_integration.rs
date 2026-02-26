@@ -26,7 +26,7 @@ use noble_api::methods::network::NetworkApiServer;
 use noble_api::methods::node::NodeApiServer;
 use noble_api::methods::transaction::TransactionApiServer;
 use noble_api::methods::wallet::WalletApiServer;
-use noble_api::{ApiState, NetworkStats};
+use noble_api::{ApiState, NetworkStats, NodeIdentityData};
 
 use noble_consensus::{ConsensusConfig, CycleEngine, ValidatorList};
 use noble_core::{genesis_block, MAINNET_CHAIN_ID};
@@ -105,6 +105,18 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         ip_filter: None, // no IP filter in tests
         validator_list_path: None,
         peer_info: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        node_identity: Arc::new(RwLock::new(NodeIdentityData {
+            node_name: String::new(),
+            org_type: "Individual".to_string(),
+            org_name: String::new(),
+            node_role: "FullNode".to_string(),
+            contact_email: String::new(),
+            website: String::new(),
+            host_address: String::new(),
+            wants_to_validate: false,
+            wants_to_vote: false,
+        })),
+        identity_path: None,
     });
 
     (state, dir)

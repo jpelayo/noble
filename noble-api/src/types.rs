@@ -4,7 +4,7 @@
 //! JSON-serializable response structs for the NOBLE RPC API.
 
 use jsonrpsee::types::ErrorObjectOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use noble_core::{Block, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
@@ -666,6 +666,26 @@ pub struct PruningStatusResponse {
     pub transactions_removed: u64,
     pub lowest_full_height: u64,
     pub more_remaining: bool,
+}
+
+/// Response for `noble_getNodeIdentity`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeIdentityResponse {
+    pub node_name: String,
+    pub org_type: String,
+    pub org_name: String,
+    pub node_role: String,
+    pub contact_email: String,
+    pub website: String,
+    pub host_address: String,
+    pub wants_to_validate: bool,
+    pub wants_to_vote: bool,
+}
+
+/// Response for `noble_setNodeIdentity`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetNodeIdentityResponse {
+    pub success: bool,
 }
 
 #[cfg(test)]

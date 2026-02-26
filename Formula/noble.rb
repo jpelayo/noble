@@ -29,7 +29,7 @@ class Noble < Formula
   depends_on "rust" => :build
 
   on_linux do
-    depends_on "clang" => :build    # bindgen (librocksdb-sys) needs libclang
+    depends_on "llvm" => :build     # bindgen (librocksdb-sys) needs libclang via llvm
   end
 
   def install

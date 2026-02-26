@@ -982,3 +982,17 @@ body {
   text-align: center;
   user-select: all;
 }
+
+/* ── Setup banner (observer-mode first-run prompt) ── */
+.setup-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--gap-sm) var(--gap);
+  background: var(--warning-bg, rgba(255, 193, 7, 0.15));
+  border: 1px solid var(--warning, #ffc107);
+  border-radius: var(--radius);
+  margin-bottom: var(--gap);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}

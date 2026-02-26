@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input, Password, Select};
+use noble_crypto::{ed25519, secp256k1, NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1};
 
 use crate::config::{
     ApiConfig, ConsensusConfig, GatewayConfig, IdentityConfig, LoggingConfig, MetricsConfig,
@@ -79,9 +80,63 @@ const WALLET_CHOICES: &[&str] = &[
     "Skip wallet setup",
 ];
 
+const KEY_SCHEME_CHOICES: &[&str] = &[
+    "Ed25519   (recommended — fast, compact)",
+    "secp256k1 (Bitcoin-compatible)",
+];
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+/// Called by `run_node()` when the config file is absent.
+///
+/// Prints a warning and offers:
+///   [1] Run setup wizard
+///   [2] Exit
+///
+/// Returns `true` if setup completed and the node should proceed to start.
+/// Returns `false` if the user chose to exit or setup failed.
+pub fn prompt_missing_config(config_path: &str) -> bool {
+    println!("{BANNER}");
+    println!("  ─────────────────────────────────────────");
+    println!("  WARNING: Node not configured");
+    println!("  ─────────────────────────────────────────");
+    println!();
+    println!("  Configuration file not found:");
+    println!("    {config_path}");
+    println!();
+    println!("  NOBLE requires a valid noble.toml before it can start.");
+    println!("  The setup wizard takes about 2 minutes.");
+    println!();
+
+    let choices = &["Run setup wizard", "Exit"];
+    let sel = Select::new()
+        .with_prompt("What would you like to do?")
+        .items(choices)
+        .default(0)
+        .interact()
+        .unwrap_or(1);
+
+    println!();
+
+    if sel == 0 {
+        match run_setup(config_path) {
+            Ok(()) => {
+                println!("  Starting node...");
+                println!();
+                true
+            }
+            Err(e) => {
+                eprintln!("  Setup failed: {e}");
+                false
+            }
+        }
+    } else {
+        println!("  Exiting. Run `noble-node setup` when you are ready to configure.");
+        false
+    }
+}
 
 /// Run the interactive setup wizard.
 ///
@@ -160,7 +215,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         _ => (OperationalRole::Observer, false, false, "FullNode"),
     };
 
-    // Prompt for validator key path if the role produces blocks.
+    // Prompt for validator key path if the role produces blocks,
+    // then offer to generate the key inline if the file doesn't exist.
     let mut validator_key_path = defaults.consensus.validator_key_path.clone();
     if wants_validate {
         validator_key_path = Input::new()
@@ -171,6 +227,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 validator_key_path
             })
             .interact_text()?;
+
+        maybe_generate_validator_key(&validator_key_path)?;
     }
 
     // -----------------------------------------------------------------------
@@ -564,6 +622,26 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::write(config_file, &toml_str)?;
 
+    // Also persist identity.json to data_dir so the node's canonical identity
+    // source is up-to-date from the first boot (same file used by noble_setNodeIdentity).
+    let data_dir_path = std::path::PathBuf::from(&data_dir);
+    if let Ok(identity_json) = serde_json::to_string_pretty(&noble_api::state::NodeIdentityData {
+        node_name: config.identity.node_name.clone(),
+        org_type: config.identity.org_type.clone(),
+        org_name: config.identity.org_name.clone(),
+        node_role: config.identity.node_role.clone(),
+        contact_email: config.identity.contact_email.clone(),
+        website: config.identity.website.clone(),
+        host_address: config.identity.host_address.clone(),
+        wants_to_validate: config.identity.wants_to_validate,
+        wants_to_vote: config.identity.wants_to_vote,
+    }) {
+        fs::create_dir_all(&data_dir_path)?;
+        let identity_path = data_dir_path.join("identity.json");
+        fs::write(&identity_path, &identity_json)?;
+        println!("  Identity written to: {}", identity_path.display());
+    }
+
     println!();
     println!("  Configuration written to: {config_path}");
     println!();
@@ -705,6 +783,122 @@ fn verify_mnemonic_words(mnemonic: &str) -> Result<(), Box<dyn std::error::Error
 
     println!("  All words verified correctly.");
     Ok(())
+}
+
+/// If the key file exists, display its public key.
+/// If it doesn't exist, offer to generate it inline.
+fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let key_path = Path::new(path);
+
+    if key_path.exists() {
+        // Key already present — show its public key so the operator can add it to validators.txt.
+        println!();
+        match read_validator_pubkey(key_path) {
+            Some(pk_hex) => {
+                println!("  Key file found: {path}");
+                println!("  Public key:");
+                println!("    {pk_hex}");
+            }
+            None => {
+                println!("  WARNING: Key file found but could not be parsed: {path}");
+                println!("  Delete it and re-run setup to generate a fresh key.");
+            }
+        }
+        println!();
+        return Ok(());
+    }
+
+    println!();
+    println!("  No key file at '{path}'.");
+    println!();
+
+    let generate = Confirm::new()
+        .with_prompt("Generate a new validator key now?")
+        .default(true)
+        .interact()?;
+
+    if !generate {
+        println!();
+        println!("  Skipped. Generate later with:");
+        println!("    noble-tool generate-key --output {path}");
+        println!();
+        return Ok(());
+    }
+
+    let scheme_sel = Select::new()
+        .with_prompt("Key scheme")
+        .items(KEY_SCHEME_CHOICES)
+        .default(0)
+        .interact()?;
+
+    let (scheme_id, private_key) = match scheme_sel {
+        0 => {
+            let (sk, _) = ed25519::generate_keypair();
+            (SCHEME_ED25519, NoblePrivateKey::Ed25519(sk))
+        }
+        _ => {
+            let (sk, _) = secp256k1::generate_keypair();
+            (SCHEME_SECP256K1, NoblePrivateKey::Secp256k1(sk))
+        }
+    };
+
+    // Build 33-byte key file: [scheme_id || private_key_bytes].
+    let key_bytes = match &private_key {
+        NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
+    };
+    let mut raw = Vec::with_capacity(33);
+    raw.push(scheme_id);
+    raw.extend_from_slice(&key_bytes);
+
+    if let Some(parent) = key_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(key_path)?;
+        file.write_all(&raw)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(key_path, &raw)?;
+    }
+
+    let pubkey_hex = hex::encode(private_key.public_key().to_wire_bytes());
+
+    println!();
+    println!("  Validator key written to: {path}  (permissions: 0600)");
+    println!();
+    println!("  Public key — add this line to validators.txt on every node:");
+    println!();
+    println!("    {pubkey_hex}");
+    println!();
+
+    Ok(())
+}
+
+/// Read a 33-byte validator key file and derive its public key hex.
+/// Returns `None` if the file is malformed or the scheme is unrecognised.
+fn read_validator_pubkey(key_path: &Path) -> Option<String> {
+    let raw = fs::read(key_path).ok()?;
+    if raw.len() != 33 {
+        return None;
+    }
+    let private_key = match raw[0] {
+        SCHEME_ED25519 => NoblePrivateKey::Ed25519(raw[1..].to_vec()),
+        SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
+        _ => return None,
+    };
+    Some(hex::encode(private_key.public_key().to_wire_bytes()))
 }
 
 /// Infer the role selection index from existing config values.

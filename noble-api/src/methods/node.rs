@@ -13,7 +13,7 @@ use noble_storage::StorageEngine;
 
 use crate::auth::TotpValidator;
 use crate::error::ApiError;
-use crate::state::ApiState;
+use crate::state::{ApiState, NodeIdentityData};
 use crate::types::*;
 
 #[rpc(server, namespace = "noble")]
@@ -65,6 +65,25 @@ pub trait NodeApi {
         &self,
         public_key: String,
     ) -> Result<RotateGatewayKeyResponse, ErrorObjectOwned>;
+
+    /// Get the current node identity configuration.
+    #[method(name = "getNodeIdentity")]
+    async fn get_node_identity(&self) -> Result<NodeIdentityResponse, ErrorObjectOwned>;
+
+    /// Update the node identity configuration and persist to identity.json.
+    #[method(name = "setNodeIdentity")]
+    async fn set_node_identity(
+        &self,
+        node_name: String,
+        org_type: String,
+        org_name: Option<String>,
+        node_role: String,
+        contact_email: Option<String>,
+        website: Option<String>,
+        host_address: Option<String>,
+        wants_to_validate: bool,
+        wants_to_vote: bool,
+    ) -> Result<SetNodeIdentityResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -256,5 +275,69 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             success: true,
             message,
         })
+    }
+
+    async fn get_node_identity(&self) -> Result<NodeIdentityResponse, ErrorObjectOwned> {
+        let id = self.node_identity.read();
+        Ok(NodeIdentityResponse {
+            node_name: id.node_name.clone(),
+            org_type: id.org_type.clone(),
+            org_name: id.org_name.clone(),
+            node_role: id.node_role.clone(),
+            contact_email: id.contact_email.clone(),
+            website: id.website.clone(),
+            host_address: id.host_address.clone(),
+            wants_to_validate: id.wants_to_validate,
+            wants_to_vote: id.wants_to_vote,
+        })
+    }
+
+    async fn set_node_identity(
+        &self,
+        node_name: String,
+        org_type: String,
+        org_name: Option<String>,
+        node_role: String,
+        contact_email: Option<String>,
+        website: Option<String>,
+        host_address: Option<String>,
+        wants_to_validate: bool,
+        wants_to_vote: bool,
+    ) -> Result<SetNodeIdentityResponse, ErrorObjectOwned> {
+        if node_name.trim().is_empty() {
+            return Err(ApiError::InvalidParam("node_name must not be empty".into()).into());
+        }
+
+        let new_identity = NodeIdentityData {
+            node_name,
+            org_type,
+            org_name: org_name.unwrap_or_default(),
+            node_role,
+            contact_email: contact_email.unwrap_or_default(),
+            website: website.unwrap_or_default(),
+            host_address: host_address.unwrap_or_default(),
+            wants_to_validate,
+            wants_to_vote,
+        };
+
+        // Persist to identity.json atomically.
+        if let Some(path) = &self.identity_path {
+            let json = serde_json::to_string_pretty(&new_identity)
+                .map_err(|e| ApiError::Internal(format!("serialize identity: {e}")))?;
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, json.as_bytes())
+                .map_err(|e| ApiError::Internal(format!("write identity tmp: {e}")))?;
+            std::fs::rename(&tmp, path)
+                .map_err(|e| ApiError::Internal(format!("rename identity file: {e}")))?;
+            tracing::info!(task = "identity", "Node identity persisted to {}", path.display());
+        }
+
+        // Update in-memory state.
+        {
+            let mut id = self.node_identity.write();
+            *id = new_identity;
+        }
+
+        Ok(SetNodeIdentityResponse { success: true })
     }
 }

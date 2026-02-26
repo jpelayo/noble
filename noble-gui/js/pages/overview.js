@@ -65,6 +65,23 @@ export function init(root, ctx) {
     </div>
   `;
 
+  // Check if node is configured as validator; show banner if observer-only.
+  (async () => {
+    try {
+      const ident = await rpc.call('noble_getNodeIdentity');
+      if (!ident.wants_to_validate && !ident.wants_to_vote) {
+        const banner = document.createElement('div');
+        banner.className = 'setup-banner';
+        banner.innerHTML = `
+          <span>This node is running as an observer — not configured as a validator.</span>
+          <a href="#/setup" class="btn btn-sm">Configure Node</a>
+        `;
+        const header = root.querySelector('.page-header');
+        if (header) header.after(banner);
+      }
+    } catch { /* RPC not available — skip banner */ }
+  })();
+
   const ovHeight = root.querySelector('#ov-height');
   const ovPeers = root.querySelector('#ov-peers');
   const ovMempool = root.querySelector('#ov-mempool');

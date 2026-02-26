@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
 use noble_api::auth::TotpValidator;
-use noble_api::state::ApiState;
+use noble_api::state::{ApiState, NodeIdentityData};
 use noble_api::NetworkStats;
 use noble_consensus::{
     ConsensusConfig as CConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo,
@@ -371,6 +371,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
 
+        // --- Load node identity ---
+        let node_identity = load_identity(config);
+        let identity_path = config.storage.data_dir.join("identity.json");
+
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
             storage: self.storage.clone(),
@@ -407,6 +411,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             ip_filter: ip_filter.clone(),
             validator_list_path: Some(config.consensus.validator_list_path.clone()),
             peer_info: self.peer_info.clone(),
+            node_identity: Arc::new(RwLock::new(node_identity)),
+            identity_path: Some(identity_path),
         });
 
         // --- Determine RPC bind address ---
@@ -943,6 +949,49 @@ fn load_validator_key(
         hex::encode(public_key.to_wire_bytes())
     );
     Some((private_key, public_key))
+}
+
+/// Load node identity from `data_dir/identity.json`, falling back to `noble.toml` defaults.
+///
+/// `identity.json` is the canonical persistence layer written by both the CLI wizard
+/// and `noble_setNodeIdentity`. On first boot it won't exist, so the toml [identity]
+/// section provides the initial values.
+fn load_identity(config: &NodeConfig) -> NodeIdentityData {
+    let identity_path = config.storage.data_dir.join("identity.json");
+    if identity_path.exists() {
+        match std::fs::read_to_string(&identity_path) {
+            Ok(json) => match serde_json::from_str::<NodeIdentityData>(&json) {
+                Ok(id) => {
+                    tracing::info!(
+                        task = "config_load",
+                        "Loaded identity from {}",
+                        identity_path.display()
+                    );
+                    return id;
+                }
+                Err(e) => tracing::warn!(
+                    task = "config_load",
+                    "Invalid identity.json: {e} — using noble.toml defaults"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                task = "config_load",
+                "Failed to read identity.json: {e} — using noble.toml defaults"
+            ),
+        }
+    }
+    // Fallback: build from noble.toml [identity] section.
+    NodeIdentityData {
+        node_name: config.identity.node_name.clone(),
+        org_type: config.identity.org_type.clone(),
+        org_name: config.identity.org_name.clone(),
+        node_role: config.identity.node_role.clone(),
+        contact_email: config.identity.contact_email.clone(),
+        website: config.identity.website.clone(),
+        host_address: config.identity.host_address.clone(),
+        wants_to_validate: config.identity.wants_to_validate,
+        wants_to_vote: config.identity.wants_to_vote,
+    }
 }
 
 /// Build a `ConsensusConfig` from the parsed TOML node configuration.

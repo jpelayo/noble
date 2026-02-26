@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 
 use tokio::sync::{broadcast, mpsc};
 
@@ -16,6 +17,26 @@ use noble_mempool::Mempool;
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
 use noble_wallet::{KeyStore, WalletState};
+
+/// Node identity — persisted to `data_dir/identity.json`, mutable via RPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeIdentityData {
+    pub node_name: String,
+    pub org_type: String,
+    #[serde(default)]
+    pub org_name: String,
+    pub node_role: String,
+    #[serde(default)]
+    pub contact_email: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub host_address: String,
+    #[serde(default)]
+    pub wants_to_validate: bool,
+    #[serde(default)]
+    pub wants_to_vote: bool,
+}
 
 /// Network statistics maintained by the node event loop.
 #[derive(Debug, Clone, Default)]
@@ -122,4 +143,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Live connected peer info, keyed by hex peer_id. Updated by the node event loop. **Lock order: 6 (PeerInfo).**
     pub peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
+
+    /// Mutable node identity. Loaded from identity.json (or noble.toml fallback).
+    pub node_identity: Arc<RwLock<NodeIdentityData>>,
+    /// Path to identity.json for persistence. None = no persistence.
+    pub identity_path: Option<std::path::PathBuf>,
 }
