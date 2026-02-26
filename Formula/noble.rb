@@ -57,14 +57,36 @@ class Noble < Formula
   end
 
   def post_install
-    # Create runtime directories.
     (var/"noble/data").mkpath
     (var/"noble/keystore").mkpath
     (var/"noble/logs").mkpath
 
-    # Copy sample config if no config exists yet.
     unless (etc/"noble/noble.toml").exist?
-      cp etc/"noble/noble.toml.sample", etc/"noble/noble.toml"
+      config = (etc/"noble/noble.toml.sample").read
+
+      # Inject absolute Homebrew paths (replace relative defaults).
+      config.gsub!('data_dir = "data"', "data_dir = \"#{var}/noble/data\"")
+      config.gsub!('keystore_path = "keystore"', "keystore_path = \"#{var}/noble/keystore\"")
+
+      # Interactive CIDR prompt (skipped in non-TTY environments like CI).
+      if $stdin.tty?
+        puts
+        puts "  Remote access — allow connections to the Dashboard GUI and JSON-RPC API."
+        puts "  Enter IP addresses or CIDR blocks (comma-separated)."
+        puts "  Press Enter for localhost-only access."
+        puts
+        print "  Allowed IPs (e.g. 10.0.0.0/8): "
+        input = $stdin.gets.chomp.strip
+        unless input.empty?
+          cidrs = input.split(",").map { |s| "\"#{s.strip}\"" }.join(", ")
+          config.gsub!('allowed_ips = []', "allowed_ips = [#{cidrs}]")
+          puts
+          puts "  Remote access enabled. After starting, the dashboard will be at:"
+          puts "  http://<this-host>:8785"
+        end
+      end
+
+      (etc/"noble/noble.toml").write(config)
     end
   end
 
@@ -82,41 +104,24 @@ class Noble < Formula
 
   def caveats
     <<~EOS
-      NOBLE blockchain node installed successfully.
+      Get started:
 
-      Configuration:  #{etc}/noble/noble.toml
-      Data directory: #{var}/noble/data
-      Keystore:       #{var}/noble/keystore
-      Logs:           #{var}/log/noble-node.log
-      GUI files:      #{prefix}/noble-gui/
+        noble-node setup               # configure identity, wallet, TOTP
+        brew services start noble       # start as background service
 
-      Port summary:
-        8780  P2P (libp2p TCP + Noise + Yamux)
-        8783  JSON-RPC HTTP
-        8784  WebSocket subscriptions
-        8785  Dashboard GUI
-        8786  Prometheus /metrics (disabled by default)
+      Or on a headless server (GUI-first):
 
-      Quick start:
-        # Edit configuration
-        $EDITOR #{etc}/noble/noble.toml
+        brew services start noble       # starts in setup mode
+        open http://<server-ip>:8785    # complete wizard in browser
 
-        # Run interactively
-        noble-node run #{etc}/noble/noble.toml
+      Paths:
+        Config:    #{etc}/noble/noble.toml
+        Data:      #{var}/noble/data
+        Keystore:  #{var}/noble/keystore
+        Logs:      #{var}/log/noble-node.log
+        GUI:       #{prefix}/noble-gui/
 
-        # Or run as a background service
-        brew services start noble
-
-        # Check status
-        noble-node status
-
-        # Stop background service
-        brew services stop noble
-
-      Tools:
-        noble-tool genesis --output genesis.cbor
-        noble-tool benchmark --suite all
-        noble-tool validate-chain --data-dir #{var}/noble/data
+      Ports:  8780 P2P · 8783 RPC · 8784 WS · 8785 GUI
     EOS
   end
 
