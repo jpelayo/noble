@@ -11,18 +11,14 @@
 #   brew install --HEAD --formula Formula/noble.rb
 #
 # Install from remote:
-#   brew tap noble-protocol/noble https://github.com/InfiniteContext/NOBLEv1
-#   brew install --HEAD noble-protocol/noble/noble
-#
-# Or without tap:
-#   brew install --HEAD --formula \
-#     https://raw.githubusercontent.com/InfiniteContext/NOBLEv1/main/Formula/noble.rb
+#   brew tap jpelayo/noble https://github.com/jpelayo/noble.git
+#   brew install --HEAD jpelayo/noble/noble
 
 class Noble < Formula
   desc "NOBLE blockchain node — Proof of Reputation consensus protocol"
-  homepage "https://github.com/InfiniteContext/NOBLEv1"
+  homepage "https://github.com/jpelayo/noble"
   license "Apache-2.0"
-  head "https://github.com/InfiniteContext/NOBLEv1.git", branch: "main"
+  head "https://github.com/jpelayo/noble.git", branch: "main"
 
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
