@@ -727,33 +727,8 @@ fn load_existing_config(path: &str) -> Option<NodeConfig> {
 }
 
 /// Determine the platform-aware default data directory.
-///
-/// - macOS: `~/Library/Application Support/NOBLE/data`
-/// - Linux: `~/.noble/data` (non-root) or `/var/lib/noble/data` (root)
-/// - Windows: `{AppData}/NOBLE/data`
 fn platform_data_dir() -> PathBuf {
-    match std::env::consts::OS {
-        "macos" => dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("NOBLE")
-            .join("data"),
-        "linux" => {
-            let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
-            if is_root {
-                PathBuf::from("/var/lib/noble/data")
-            } else {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".noble")
-                    .join("data")
-            }
-        }
-        "windows" => dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("NOBLE")
-            .join("data"),
-        _ => PathBuf::from("data"),
-    }
+    noble_core::paths::platform_data_dir()
 }
 
 /// Prompt for wallet encryption passphrase with confirmation and min-length.

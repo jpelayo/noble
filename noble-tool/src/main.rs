@@ -18,6 +18,24 @@ use noble_crypto::{ed25519, secp256k1, sha256, Hash256};
 use noble_storage::{RocksDbStorage, StorageEngine};
 
 // ---------------------------------------------------------------------------
+// Platform-aware path helpers
+// ---------------------------------------------------------------------------
+
+fn default_genesis_output() -> PathBuf {
+    noble_core::paths::platform_genesis_path()
+}
+
+fn default_data_dir() -> PathBuf {
+    noble_core::paths::platform_data_dir()
+}
+
+fn default_key_path() -> PathBuf {
+    noble_core::paths::platform_data_dir()
+        .join("keystore")
+        .join("validator.key")
+}
+
+// ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
 
@@ -34,7 +52,7 @@ enum Commands {
     /// Generate and serialize a genesis block to a CBOR file.
     Genesis {
         /// Output file path for the serialized genesis block.
-        #[arg(long, default_value = "genesis.cbor")]
+        #[arg(long, default_value_os_t = default_genesis_output())]
         output: PathBuf,
 
         /// Network variant to generate the genesis block for.
@@ -56,7 +74,7 @@ enum Commands {
     /// Validate an on-disk chain stored in RocksDB.
     ValidateChain {
         /// Path to the RocksDB data directory.
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_data_dir())]
         data_dir: PathBuf,
     },
 
@@ -66,7 +84,7 @@ enum Commands {
     /// The public key hex is printed to stdout for use in validators.txt.
     GenerateKey {
         /// Output file path for the 33-byte validator key.
-        #[arg(long, default_value = "validator.key")]
+        #[arg(long, default_value_os_t = default_key_path())]
         output: PathBuf,
         /// Key scheme: ed25519 (default) or secp256k1.
         #[arg(long, default_value = "ed25519")]
@@ -76,7 +94,7 @@ enum Commands {
     /// Read a validator key file and print the derived public key hex.
     ShowKey {
         /// Path to the 33-byte validator key file.
-        #[arg(long, default_value = "validator.key")]
+        #[arg(long, default_value_os_t = default_key_path())]
         key_file: PathBuf,
     },
 }

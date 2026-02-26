@@ -39,7 +39,7 @@ enum Commands {
     /// Start the node daemon
     Run {
         /// Path to TOML configuration file
-        #[arg(default_value = "noble.toml")]
+        #[arg(default_value_t = default_config())]
         config: String,
         /// Use in-memory storage instead of RocksDB
         #[arg(long)]
@@ -60,7 +60,7 @@ enum Commands {
     /// Stop then start the node
     Restart {
         /// Path to TOML configuration file
-        #[arg(default_value = "noble.toml")]
+        #[arg(default_value_t = default_config())]
         config: String,
         /// PID file path
         #[arg(long, default_value = "noble.pid")]
@@ -84,7 +84,7 @@ enum Commands {
     /// Interactive setup wizard — create or edit noble.toml
     Setup {
         /// Output configuration file path
-        #[arg(short, long, default_value = "noble.toml")]
+        #[arg(short, long, default_value_t = default_config())]
         config: String,
     },
     /// Show connected peers
@@ -127,6 +127,16 @@ enum ConfigAction {
         #[arg(default_value = "noble.toml")]
         config: String,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Platform-aware config path helper
+// ---------------------------------------------------------------------------
+
+fn default_config() -> String {
+    noble_core::paths::platform_config_path()
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +193,7 @@ async fn main() {
     let cli = Cli::parse_from(rewrite_legacy_args());
 
     let command = cli.command.unwrap_or(Commands::Run {
-        config: "noble.toml".into(),
+        config: default_config(),
         memory: false,
         pid_file: "noble.pid".into(),
         daemon: false,

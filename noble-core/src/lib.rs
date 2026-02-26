@@ -5,6 +5,7 @@
 
 pub mod block;
 pub mod constants;
+pub mod paths;
 pub mod encrypted_locator;
 pub mod error;
 pub mod evidence;
