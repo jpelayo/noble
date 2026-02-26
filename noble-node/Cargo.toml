@@ -21,6 +21,7 @@ noble-network.workspace = true
 noble-api.workspace = true
 noble-wallet.workspace = true
 hex.workspace = true
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -33,10 +34,13 @@ tower-http.workspace = true
 axum.workspace = true
 http.workspace = true
 clap = { workspace = true }
+clap_complete = { workspace = true }
 dialoguer = { workspace = true }
 sysinfo = { workspace = true }
 dirs = { workspace = true }
 rand = { workspace = true }
+parking_lot = { workspace = true }
+prometheus = { workspace = true }
 
 [dev-dependencies]
 noble-test-utils.workspace = true

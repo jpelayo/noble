@@ -87,7 +87,7 @@ use crate::types::*;
 /// Helper to persist the validator list to disk (C-003).
 fn persist_validator_list<S: StorageEngine + Send + Sync + 'static>(
     state: &ApiState<S>,
-    consensus: &std::sync::RwLockWriteGuard<'_, noble_consensus::CycleEngine>,
+    consensus: &parking_lot::RwLockWriteGuard<'_, noble_consensus::CycleEngine>,
 ) -> Result<(), ErrorObjectOwned> {
     if let Some(ref path) = state.validator_list_path {
         let bytes = consensus
@@ -168,11 +168,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .as_secs();
 
         // Cross-reference validators with peer memory for last_seen
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let peer_records = storage.list_peer_records().unwrap_or_default();
         drop(storage);
 
-        let mut consensus = self.consensus.write().unwrap();
+        let mut consensus = self.consensus.write();
         // Update last_seen from peer records
         for rec in &peer_records {
             if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
@@ -189,21 +189,67 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .list_validators_with_liveness(now);
         let count = validators.len();
 
+        let reputation = consensus.reputation();
         let entries: Vec<ValidatorEntry> = validators
             .into_iter()
-            .map(
-                |(pk, weight, liveness, added_at, friendly_name)| ValidatorEntry {
-                    public_key: hex::encode(pk.to_wire_bytes()),
+            .map(|(pk, weight, liveness, added_at, friendly_name)| {
+                let wire = pk.to_wire_bytes();
+                let rep_data = reputation.get(&wire);
+                let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
+
+                let (
+                    blocks_accepted,
+                    blocks_rejected,
+                    votes_cast,
+                    votes_missed,
+                    uptime_cycles,
+                    total_cycles,
+                ) = rep_data
+                    .map(|d| {
+                        (
+                            d.blocks_accepted,
+                            d.blocks_rejected,
+                            d.votes_cast,
+                            d.votes_missed,
+                            d.uptime_cycles,
+                            d.total_cycles,
+                        )
+                    })
+                    .unwrap_or_default();
+
+                let blocks_produced = blocks_accepted + blocks_rejected;
+
+                let block_acceptance_rate = if blocks_produced > 0 {
+                    blocks_accepted as f64 / blocks_produced as f64
+                } else {
+                    0.5
+                };
+                let uptime_ratio = if total_cycles > 0 {
+                    uptime_cycles as f64 / total_cycles as f64
+                } else {
+                    0.0
+                };
+
+                ValidatorEntry {
+                    public_key: hex::encode(&wire),
                     name: friendly_name,
                     status: liveness.as_str().to_string(),
                     weight,
-                    reputation_score: -1.0, // -1 = not yet implemented
-                    blocks_produced: 0,     // not yet tracked
-                    cycles_active: 0,       // not yet tracked
-                    last_active: None,      // populated from peer records when available
+                    reputation_score: score,
+                    reputation_breakdown: ReputationBreakdown {
+                        block_acceptance_rate,
+                        uptime: uptime_ratio,
+                        trust_score: 0.0, // Trust score requires peer-listing data (future)
+                    },
+                    blocks_produced,
+                    blocks_accepted,
+                    cycles_active: votes_cast + votes_missed, // cycles where validator was in set
+                    cycles_reachable: uptime_cycles,
+                    total_cycles,
+                    last_active: None, // populated from peer records when available
                     joined_cycle: added_at,
-                },
-            )
+                }
+            })
             .collect();
 
         Ok(ValidatorListResponse {
@@ -222,17 +268,64 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
 
-        let consensus = self.consensus.read().unwrap();
+        let consensus = self.consensus.read();
         if !consensus.validator_list().is_validator(&pk) {
             return Err(ApiError::ValidatorNotFound(pubkey).into());
         }
 
-        // Reputation scoring is not yet implemented — return 0 as sentinel.
-        Ok(ReputationScoreResponse { pubkey, score: 0 })
+        let rep_data = consensus.reputation().get(&wire_bytes);
+        let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
+        let (
+            blocks_accepted,
+            blocks_rejected,
+            votes_cast,
+            votes_missed,
+            uptime_cycles,
+            total_cycles,
+        ) = rep_data
+            .map(|d| {
+                (
+                    d.blocks_accepted,
+                    d.blocks_rejected,
+                    d.votes_cast,
+                    d.votes_missed,
+                    d.uptime_cycles,
+                    d.total_cycles,
+                )
+            })
+            .unwrap_or_default();
+
+        let blocks_produced = blocks_accepted + blocks_rejected;
+        let block_acceptance_rate = if blocks_produced > 0 {
+            blocks_accepted as f64 / blocks_produced as f64
+        } else {
+            0.5
+        };
+        let uptime_ratio = if total_cycles > 0 {
+            uptime_cycles as f64 / total_cycles as f64
+        } else {
+            0.0
+        };
+
+        Ok(ReputationScoreResponse {
+            pubkey,
+            score,
+            breakdown: ReputationBreakdown {
+                block_acceptance_rate,
+                uptime: uptime_ratio,
+                trust_score: 0.0,
+            },
+            blocks_accepted,
+            blocks_rejected,
+            votes_cast,
+            votes_missed,
+            uptime_cycles,
+            total_cycles,
+        })
     }
 
     async fn get_cycle_status(&self) -> Result<CycleStatusResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read().unwrap();
+        let consensus = self.consensus.read();
         let cycle = consensus.current_cycle();
         let (_engine_phase_idx, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
         let engine_phase = consensus.current_phase();
@@ -288,7 +381,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut consensus = self.consensus.write().unwrap();
+        let mut consensus = self.consensus.write();
         consensus
             .validator_list_mut()
             .add_validator(pk.clone(), effective_weight, now);
@@ -308,7 +401,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
 
-        let mut consensus = self.consensus.write().unwrap();
+        let mut consensus = self.consensus.write();
         let removed = consensus.validator_list_mut().remove_validator(&pk);
         if !removed {
             return Err(ApiError::ValidatorNotFound(public_key).into());
@@ -321,7 +414,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn get_voting_strategy(&self) -> Result<VotingStrategyResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read().unwrap();
+        let consensus = self.consensus.read();
         let (r1_name, r1_params) = strategy_to_response(consensus.voting_strategy());
         let (r2_name, r2_params) = strategy_to_response(consensus.confirmation_strategy());
         Ok(VotingStrategyResponse {
@@ -343,7 +436,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         }
         let parsed = parse_strategy(&strategy, params.as_ref()).map_err(ErrorObjectOwned::from)?;
 
-        let mut consensus = self.consensus.write().unwrap();
+        let mut consensus = self.consensus.write();
         if round == 1 {
             consensus.set_voting_strategy(parsed);
         } else {
@@ -361,7 +454,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read().unwrap();
+        let consensus = self.consensus.read();
         let cycle = consensus.current_cycle();
         let phase = consensus.current_phase();
         let tallies = consensus.vote_tallies();
@@ -385,7 +478,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     async fn cast_vote(&self, block_hash: String) -> Result<bool, ErrorObjectOwned> {
         let hash = parse_hash(&block_hash)?;
 
-        let mut consensus = self.consensus.write().unwrap();
+        let mut consensus = self.consensus.write();
         let strategy = consensus.voting_strategy().clone();
         if !matches!(strategy, VotingStrategy::Manual) {
             return Err(ApiError::InvalidParam(
@@ -403,7 +496,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         count: Option<usize>,
     ) -> Result<CycleHistoryResponse, ErrorObjectOwned> {
         let limit = count.unwrap_or(10).min(100);
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let raw_entries = storage
             .get_recent_cycle_history(limit)
             .map_err(|e| ApiError::Internal(format!("read cycle history: {e}")))?;

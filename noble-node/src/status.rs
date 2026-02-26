@@ -45,12 +45,6 @@ pub fn show_status(rpc: &str, pid_file: &str, totp: Option<&str>) {
             if let Some(consensus) = info.consensus {
                 println!("  Consensus:     {consensus}");
             }
-            if let Some(totp_status) = info.totp_enabled {
-                println!(
-                    "  TOTP:          {}",
-                    if totp_status { "Enabled" } else { "Disabled" }
-                );
-            }
         }
         Err(e) => {
             println!("  RPC:           Unreachable ({e})");
@@ -65,7 +59,6 @@ struct StatusInfo {
     peers: Option<String>,
     mempool: Option<String>,
     consensus: Option<String>,
-    totp_enabled: Option<bool>,
 }
 
 /// Query the JSON-RPC endpoint for node status.
@@ -76,42 +69,43 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
         peers: None,
         mempool: None,
         consensus: None,
-        totp_enabled: None,
     };
 
     // Parse host:port from RPC URL
     let (host, port) = parse_rpc_url(rpc)?;
 
-    // getBlockCount
+    // getBlockCount — returns {height, block_hash}
     if let Ok(resp) = rpc_call(&host, port, "noble_getBlockCount", &[], totp) {
-        if let Some(height) = resp.get("result").and_then(|r| r.as_u64()) {
-            info.chain_height = Some(height);
+        if let Some(result) = resp.get("result") {
+            info.chain_height = result.get("height").and_then(|v| v.as_u64());
         }
     }
 
-    // getNodeInfo — returns network, totp_enabled, etc.
+    // getNodeInfo — returns version, protocol_version, chain_id, uptime_secs, ports.
+    // Derive network label from chain_id.
     if let Ok(resp) = rpc_call(&host, port, "noble_getNodeInfo", &[], totp) {
         if let Some(result) = resp.get("result") {
-            info.network = result
-                .get("network")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            info.totp_enabled = result.get("totp_enabled").and_then(|v| v.as_bool());
+            if let Some(chain_id) = result.get("chain_id").and_then(|v| v.as_u64()) {
+                let label = match chain_id as u32 {
+                    0x4E4F424C => "mainnet",
+                    0x4E4F4254 => "testnet",
+                    0x4E4F4252 => "regtest",
+                    _ => "unknown",
+                };
+                info.network = Some(label.to_string());
+            }
         }
     }
 
-    // getNetworkInfo — peer counts
+    // getNetworkInfo — returns {peer_count, inbound, outbound}
     if let Ok(resp) = rpc_call(&host, port, "noble_getNetworkInfo", &[], totp) {
         if let Some(result) = resp.get("result") {
             let total = result
                 .get("peer_count")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let inbound = result
-                .get("inbound_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let outbound = total.saturating_sub(inbound);
+            let inbound = result.get("inbound").and_then(|v| v.as_u64()).unwrap_or(0);
+            let outbound = result.get("outbound").and_then(|v| v.as_u64()).unwrap_or(0);
             info.peers = Some(format!("{total} ({outbound} out / {inbound} in)"));
         }
     }
@@ -125,7 +119,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
         }
     }
 
-    // getCycleStatus — consensus phase
+    // getCycleStatus — returns {cycle_number, phase, phase_index, phase_remaining_secs, cycle_remaining_secs}
     if let Ok(resp) = rpc_call(&host, port, "noble_getCycleStatus", &[], totp) {
         if let Some(result) = resp.get("result") {
             let phase = result
@@ -133,7 +127,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             let remaining = result
-                .get("remaining_secs")
+                .get("phase_remaining_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let mins = remaining / 60;
@@ -189,7 +183,11 @@ fn rpc_call(
     );
 
     if let Some(code) = totp {
-        headers.push_str(&format!("X-TOTP: {code}\r\n"));
+        // NOBLE API expects Authorization: Bearer <sha256(code)>
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(code.as_bytes());
+        let hash_hex = hex::encode(hash);
+        headers.push_str(&format!("Authorization: Bearer {hash_hex}\r\n"));
     }
     headers.push_str("\r\n");
 
@@ -228,6 +226,148 @@ fn rpc_call(
     let json_body = &response_str[json_start..];
 
     serde_json::from_str(json_body).map_err(|e| format!("JSON parse failed: {e}"))
+}
+
+/// Display connected peers by querying the RPC endpoint.
+pub fn show_peers(rpc: &str, totp: Option<&str>) {
+    let (host, port) = match parse_rpc_url(rpc) {
+        Ok(hp) => hp,
+        Err(e) => {
+            eprintln!("Invalid RPC URL: {e}");
+            return;
+        }
+    };
+
+    println!("NOBLE Connected Peers");
+    println!("{}", "\u{2550}".repeat(70));
+
+    match rpc_call(&host, port, "noble_getPeerInfo", &[], totp) {
+        Ok(resp) => {
+            if let Some(peers) = resp.get("result").and_then(|r| r.as_array()) {
+                if peers.is_empty() {
+                    println!("  No peers connected.");
+                    return;
+                }
+                println!("  {:<6} {:<50} {:<8}", "Index", "Peer ID", "Latency");
+                println!("  {}", "-".repeat(66));
+                for (i, peer) in peers.iter().enumerate() {
+                    let peer_id = peer
+                        .get("peer_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let display_id = if peer_id.len() > 48 {
+                        format!("{}...", &peer_id[..45])
+                    } else {
+                        peer_id.to_string()
+                    };
+                    let latency = peer
+                        .get("latency_ms")
+                        .and_then(|v| v.as_u64())
+                        .map(|ms| format!("{ms}ms"))
+                        .unwrap_or_else(|| "N/A".to_string());
+                    println!("  {:<6} {:<50} {:<8}", i + 1, display_id, latency);
+                }
+                println!();
+                println!("  Total: {} peers", peers.len());
+            } else {
+                println!("  No peer data available.");
+            }
+        }
+        Err(e) => {
+            eprintln!("  RPC error: {e}");
+        }
+    }
+}
+
+/// Display consensus cycle status and validator list.
+pub fn show_consensus(rpc: &str, totp: Option<&str>) {
+    let (host, port) = match parse_rpc_url(rpc) {
+        Ok(hp) => hp,
+        Err(e) => {
+            eprintln!("Invalid RPC URL: {e}");
+            return;
+        }
+    };
+
+    println!("NOBLE Consensus Status");
+    println!("{}", "\u{2550}".repeat(60));
+
+    // Cycle status — {cycle_number, phase, phase_index, phase_remaining_secs, cycle_remaining_secs}
+    match rpc_call(&host, port, "noble_getCycleStatus", &[], totp) {
+        Ok(resp) => {
+            if let Some(result) = resp.get("result") {
+                let cycle = result
+                    .get("cycle_number")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let phase = result
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let remaining = result
+                    .get("phase_remaining_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mins = remaining / 60;
+                let secs = remaining % 60;
+                println!("  Cycle:         {}", format_number(cycle));
+                println!("  Phase:         {phase}");
+                println!("  Remaining:     {mins}:{secs:02}");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Cycle status: unavailable ({e})");
+        }
+    }
+
+    println!();
+
+    // Validator list — returns {selection_policy, validators, count}
+    match rpc_call(&host, port, "noble_getValidatorList", &[], totp) {
+        Ok(resp) => {
+            if let Some(validators) = resp
+                .get("result")
+                .and_then(|r| r.get("validators"))
+                .and_then(|v| v.as_array())
+            {
+                println!("  Validators ({}):", validators.len());
+                println!(
+                    "  {:<6} {:<40} {:<8} {:<10}",
+                    "Index", "Public Key", "Weight", "Reputation"
+                );
+                println!("  {}", "-".repeat(66));
+                for (i, v) in validators.iter().enumerate() {
+                    let pubkey = v
+                        .get("public_key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let display_key = if pubkey.len() > 38 {
+                        format!("{}...", &pubkey[..35])
+                    } else {
+                        pubkey.to_string()
+                    };
+                    let weight = v.get("weight").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let reputation = v
+                        .get("reputation_score")
+                        .and_then(|v| v.as_f64())
+                        .map(|s| format!("{s:.2}"))
+                        .unwrap_or_else(|| "N/A".to_string());
+                    println!(
+                        "  {:<6} {:<40} {:<8} {:<10}",
+                        i + 1,
+                        display_key,
+                        weight,
+                        reputation
+                    );
+                }
+            } else {
+                println!("  No validator data available.");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Validator list: unavailable ({e})");
+        }
+    }
 }
 
 /// Format a number with comma separators (e.g. 1247 → "1,247").

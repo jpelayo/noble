@@ -97,20 +97,23 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
         // Admit to mempool with storage-backed lookups
         let tx_id = {
-            let storage = self.storage.read().unwrap();
+            let storage = self.storage.read();
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
 
-            let mut mempool = self.mempool.lock().unwrap();
+            let mut mempool = self.mempool.lock();
             mempool
                 .admit(&tx, now, &chain_lookup, &balance_lookup)
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 
-        // Broadcast to network (best-effort)
-        let _ = self
+        // Broadcast to network (best-effort, log if channel is full).
+        if let Err(e) = self
             .network_cmd
-            .try_send(NetworkCommand::PublishTransaction(tx));
+            .try_send(NetworkCommand::PublishTransaction(tx))
+        {
+            tracing::warn!(task = "tx_broadcast", %tx_id, "network broadcast dropped (channel full): {e}");
+        }
 
         Ok(SubmitTxResponse {
             tx_id: hash_to_hex(&tx_id),
@@ -126,14 +129,14 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
         // Check mempool first
         {
-            let mempool = self.mempool.lock().unwrap();
+            let mempool = self.mempool.lock();
             if let Some(entry) = mempool.get(&tx_id_hash) {
                 return Ok(tx_to_response(&entry.tx, &tx_id));
             }
         }
 
         // Check on-chain storage
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx = storage
             .get_transaction(&tx_id_hash)
             .map_err(ApiError::from)?;
@@ -149,7 +152,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
         // Check mempool
         {
-            let mempool = self.mempool.lock().unwrap();
+            let mempool = self.mempool.lock();
             if mempool.contains(&tx_id_hash) {
                 return Ok(TransactionStatusResponse {
                     tx_id,
@@ -159,7 +162,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         }
 
         // Check storage
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         if storage.has_transaction(&tx_id_hash).unwrap_or(false) {
             return Ok(TransactionStatusResponse {
                 tx_id,
@@ -181,7 +184,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
         // Check mempool first — pending transactions have no block info
         {
-            let mempool = self.mempool.lock().unwrap();
+            let mempool = self.mempool.lock();
             if let Some(entry) = mempool.get(&tx_id_hash) {
                 return Ok(TransactionReceiptResponse {
                     transaction: tx_to_response(&entry.tx, &tx_id),
@@ -195,7 +198,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         }
 
         // Look up on-chain location
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let (height, offset) = storage
             .get_transaction_location(&tx_id_hash)
             .map_err(ApiError::from)?;

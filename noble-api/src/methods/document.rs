@@ -235,7 +235,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         checksum: String,
     ) -> Result<ChecksumLookupResponse, ErrorObjectOwned> {
         let checksum_hash = parse_hash(&checksum)?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx_ids = storage
             .lookup_checksum(&checksum_hash)
             .map_err(ApiError::from)?;
@@ -259,7 +259,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         checksum: String,
     ) -> Result<VerifyDocumentResponse, ErrorObjectOwned> {
         let checksum_hash = parse_hash(&checksum)?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx_ids = storage
             .lookup_checksum(&checksum_hash)
             .map_err(ApiError::from)?;
@@ -287,7 +287,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         checksum: String,
     ) -> Result<DocumentHistoryResponse, ErrorObjectOwned> {
         let checksum_hash = parse_hash(&checksum)?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx_ids = storage
             .lookup_checksum(&checksum_hash)
             .map_err(ApiError::from)?;
@@ -305,7 +305,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         checksum: String,
     ) -> Result<DocumentVersionsResponse, ErrorObjectOwned> {
         let root_hash = parse_hash(&checksum)?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
 
         // Verify root checksum exists
         let root_tx_ids = storage
@@ -332,7 +332,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         use noble_core::constants::META_KEY_VERSION;
 
         let wire = parse_publisher_wire(&public_key)?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx_ids = storage.lookup_by_publisher(&wire).map_err(ApiError::from)?;
 
         let mut documents = Vec::with_capacity(tx_ids.len());

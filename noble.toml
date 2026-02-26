@@ -69,9 +69,14 @@ max_connections = 100
 # Rate limit: maximum requests per second per client IP.
 rate_limit = 30
 
-# Enable TOTP-based authentication for all RPC methods.
+# Enable TOTP-based authentication for RPC methods.
 # When enabled, clients must include `Authorization: Bearer <SHA-256 hex of TOTP code>`.
 totp_enabled = false
+
+# TOTP enforcement scope: "all" (every request), "write_only" (only mutations),
+# or "none" (disabled). In "write_only" mode, read-only methods (get*, estimate*,
+# lookup*, verify*, validate*) work without authentication.
+totp_scope = "all"
 
 # Path to the TOTP shared secret file (base32-encoded).
 # If empty and totp_enabled is true, a secret is auto-generated on first startup.
@@ -116,6 +121,16 @@ initial_filter = "info"
 
 # Output traces to stderr in addition to the ring buffer (development only).
 stderr_enabled = false
+
+[gateway]
+# Enable gateway fee split. When enabled, outgoing transactions include the
+# gateway address so this node earns 50% of the transaction fee.
+enabled = true
+
+# Path to a file containing the gateway public key (hex-encoded wire bytes).
+# If empty, the first wallet key is used automatically.
+# Set this to use a dedicated key for gateway operations.
+key_path = ""
 
 [identity]
 # Human-readable name for this node (max 64 chars).

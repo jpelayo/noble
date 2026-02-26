@@ -148,8 +148,41 @@ pub const META_KEY_PREV_CHECKSUM: &str = "doc:prev_checksum";
 pub const META_KEY_VERSION: &str = "doc:version";
 
 /// Known-good block hashes at specific heights for fast initial sync.
-/// Populated after mainnet launch; empty during pre-launch development.
+///
+/// Height 0 is the genesis block hash, computed from the deterministic seed.
+/// Additional checkpoints will be added after mainnet launch.
+///
+/// Since the genesis hash depends on the keypair derivation at runtime,
+/// use [`is_valid_checkpoint`] which compares against `genesis_hash()`.
 pub const CHECKPOINTS: &[(u64, &str)] = &[];
+
+/// Validate a block hash against known checkpoints.
+///
+/// Returns:
+/// - `Some(true)` if the height is a checkpoint and the hash matches.
+/// - `Some(false)` if the height is a checkpoint but the hash does NOT match.
+/// - `None` if the height is not a checkpoint (no opinion).
+///
+/// Height 0 is always checked against the genesis block hash.
+pub fn is_valid_checkpoint(height: u64, hash: &noble_crypto::Hash256) -> Option<bool> {
+    use crate::genesis;
+
+    // Height 0: always validate against the computed genesis hash.
+    if height == 0 {
+        let genesis = genesis::genesis_hash();
+        return Some(*hash == genesis);
+    }
+
+    // Check static checkpoints table.
+    for &(cp_height, cp_hex) in CHECKPOINTS {
+        if cp_height == height {
+            let hex_str = hex::encode(hash.as_bytes());
+            return Some(hex_str == cp_hex);
+        }
+    }
+
+    None
+}
 
 /// Maximum mempool size in bytes (default 300 MB).
 pub const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;
@@ -267,6 +300,28 @@ mod tests {
         assert_eq!(dynamic_min_fee(90), MIN_TX_FEE * 10);
         assert_eq!(dynamic_min_fee(95), MIN_TX_FEE * 10);
         assert_eq!(dynamic_min_fee(100), MIN_TX_FEE * 10);
+    }
+
+    // --- Checkpoint tests ---
+
+    #[test]
+    fn checkpoint_genesis_hash_matches() {
+        let genesis = crate::genesis::genesis_hash();
+        assert_eq!(is_valid_checkpoint(0, &genesis), Some(true));
+    }
+
+    #[test]
+    fn checkpoint_genesis_wrong_hash_rejected() {
+        assert_eq!(
+            is_valid_checkpoint(0, &noble_crypto::Hash256::ZERO),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn checkpoint_unknown_height_returns_none() {
+        let hash = noble_crypto::Hash256::from_bytes([0xAA; 32]);
+        assert_eq!(is_valid_checkpoint(999_999, &hash), None);
     }
 
     #[test]

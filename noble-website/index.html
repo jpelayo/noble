@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOBLE Protocol — Neutral Open Blockchain Environment</title>
+  <meta name="description" content="NOBLE (Neutral Open Blockchain Environment) is a blockchain protocol for tamper-proof document registration, verification, and notarization.">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="site-header">
+  <div class="site-logo">NOBLE</div>
+  <nav class="site-nav" id="site-nav">
+    <a href="#features">Features</a>
+    <a href="#get-started">Get Started</a>
+    <a href="#faucet">Faucet</a>
+    <a href="#downloads">Downloads</a>
+    <a href="#docs">Docs</a>
+    <a href="#about">About</a>
+    <button class="theme-toggle" id="theme-toggle">Dark</button>
+  </nav>
+  <button class="mobile-menu-btn" id="mobile-menu" aria-label="Menu">&#9776;</button>
+</header>
+
+<!-- ── Hero ── -->
+<section class="hero" id="home">
+  <h1>Register. Verify. <span>Trust.</span></h1>
+  <p>NOBLE is a purpose-built blockchain for tamper-proof document registration, verification, and notarization — powered by Proof of Reputation consensus.</p>
+  <div class="hero-actions">
+    <a href="#get-started" class="btn btn-primary">Get Started</a>
+    <a href="#docs" class="btn btn-secondary">Read the Docs</a>
+  </div>
+</section>
+
+<!-- ── Features ── -->
+<section id="features">
+  <div class="section">
+    <h2>Why NOBLE?</h2>
+    <p class="subtitle">A blockchain designed for document integrity, not financial speculation.</p>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="icon">&#128196;</div>
+        <h3>Document Registration</h3>
+        <p>Register SHA-256 checksums of any file — PDFs, contracts, code, media — with cryptographic proof of existence and timestamp.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">&#10003;</div>
+        <h3>Instant Verification</h3>
+        <p>Verify any document against the blockchain. Drag and drop a file to confirm its authenticity and registration date.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">&#128274;</div>
+        <h3>Multi-Scheme Cryptography</h3>
+        <p>Ed25519 and secp256k1 digital signatures. Bitcoin-compatible BIP-39/BIP-137 wallet support. ECIES encrypted locators.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">&#9733;</div>
+        <h3>Proof of Reputation</h3>
+        <p>Validators earn reputation through honest participation. No energy-intensive mining — just reliable service rewarded with block subsidies.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">&#128176;</div>
+        <h3>NOBLE Transfers</h3>
+        <p>Native token transfers with fee-based economics. 1 NOBLE = 1,000,000 atomic units. Transparent fee structure.</p>
+      </div>
+      <div class="feature-card">
+        <div class="icon">&#128101;</div>
+        <h3>PKI Identity Attestation</h3>
+        <p>Bind organizational X.509 certificates to NOBLE keys via PKCS#7/CMS signatures. Enterprise-grade identity without abandoning public-key cryptography.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Get Started ── -->
+<div class="section-alt">
+  <section id="get-started">
+    <div class="section">
+      <h2>Get Started</h2>
+      <p class="subtitle">Set up your NOBLE node in minutes.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Download</h3>
+            <p>Download the latest NOBLE node binary for your platform from the <a href="#downloads">Downloads</a> section.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Run Setup</h3>
+            <p>Launch the interactive setup wizard: <code>noble-node setup</code>. Choose your role (validator/gateway/archive), configure ports, and create your wallet.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Start Your Node</h3>
+            <p>Start the node daemon: <code>noble-node run</code>. The embedded dashboard is available at <code>http://127.0.0.1:8785</code>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h3>Register Documents</h3>
+            <p>Use the dashboard GUI or JSON-RPC API to register document checksums. Each registration creates an immutable on-chain record.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">5</div>
+          <div class="step-content">
+            <h3>Verify Anytime</h3>
+            <p>Anyone can verify a document by computing its SHA-256 checksum and querying the network — no account required.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ── Faucet ── -->
+<section id="faucet">
+  <div class="section">
+    <h2>NOBLE Faucet</h2>
+    <p class="subtitle">Get free NOBLE tokens to register documents and get started.</p>
+    <div style="max-width:500px;margin:0 auto;text-align:center">
+      <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:2rem;box-shadow:var(--card-shadow)">
+        <p style="margin-bottom:1rem;color:var(--text-secondary)">Enter your NOBLE address to receive 10 NOBLE.</p>
+        <input type="text" id="faucet-address" placeholder="Paste your NOBLE address (hex)"
+          style="width:100%;padding:0.7rem;border:1px solid var(--border);border-radius:6px;font-size:0.95rem;background:var(--bg);color:var(--text);margin-bottom:1rem;box-sizing:border-box">
+        <button id="faucet-submit" class="btn btn-primary" style="width:100%;justify-content:center">
+          Request Tokens
+        </button>
+        <p id="faucet-result" style="margin-top:1rem;font-size:0.9rem;display:none"></p>
+        <p style="margin-top:1rem;font-size:0.8rem;color:var(--text-secondary)">
+          Limits: 1 request per IP every 24h &middot; 1 request per address every 7 days
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Downloads ── -->
+<div class="section-alt">
+  <section id="downloads">
+    <div class="section">
+      <h2>Downloads</h2>
+      <p class="subtitle">Pre-built binaries for major platforms.</p>
+      <div class="download-grid">
+        <div class="download-card">
+          <div class="platform-icon">&#63743;</div>
+          <h3>macOS</h3>
+          <p>Apple Silicon (arm64) &amp; Intel (x86_64)<br>macOS 13+</p>
+          <a href="#" class="btn btn-primary">Download for macOS</a>
+        </div>
+        <div class="download-card">
+          <div class="platform-icon">&#128039;</div>
+          <h3>Linux</h3>
+          <p>x86_64 &amp; aarch64<br>Ubuntu 22.04+ / Debian 12+</p>
+          <a href="#" class="btn btn-primary">Download for Linux</a>
+        </div>
+        <div class="download-card">
+          <div class="platform-icon">&#128187;</div>
+          <h3>Windows</h3>
+          <p>x86_64<br>Windows 10+</p>
+          <a href="#" class="btn btn-primary">Download for Windows</a>
+        </div>
+        <div class="download-card">
+          <div class="platform-icon">&#128230;</div>
+          <h3>Source Code</h3>
+          <p>Build from source<br>Rust 1.80+</p>
+          <a href="#" class="btn btn-primary">View on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ── Documentation ── -->
+<section id="docs">
+  <div class="section">
+    <h2>Documentation</h2>
+    <p class="subtitle">Everything you need to build on NOBLE.</p>
+    <div class="docs-grid">
+      <a href="#" class="doc-link">
+        <h3>Protocol Specification</h3>
+        <p>Complete technical specification: block structure, transaction types, consensus rules, CBOR encoding.</p>
+      </a>
+      <a href="#" class="doc-link">
+        <h3>JSON-RPC API Reference</h3>
+        <p>39 RPC methods + 4 WebSocket subscriptions. Full request/response examples for every endpoint.</p>
+      </a>
+      <a href="#" class="doc-link">
+        <h3>Node Operator Guide</h3>
+        <p>Setup, configuration, monitoring, backup, and troubleshooting for validators, gateways, and archive nodes.</p>
+      </a>
+      <a href="#" class="doc-link">
+        <h3>Wallet &amp; Cryptography</h3>
+        <p>Key management, BIP-39 mnemonics, Ed25519/secp256k1, ECIES encryption, PKI identity binding.</p>
+      </a>
+      <a href="#" class="doc-link">
+        <h3>Developer SDK</h3>
+        <p>Client libraries, code examples, and integration guides for building on the NOBLE protocol.</p>
+      </a>
+      <a href="#" class="doc-link">
+        <h3>Security Model</h3>
+        <p>Threat model, audit results, ban system, reputation scoring, and incident response procedures.</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ── About ── -->
+<div class="section-alt">
+  <section id="about">
+    <div class="section">
+      <h2>About NOBLE</h2>
+      <p class="subtitle">A blockchain for trust, not speculation.</p>
+      <div class="about-content">
+        <p>
+          NOBLE (Neutral Open Blockchain Environment) is a purpose-built blockchain protocol
+          designed by <strong>InfiniteContext</strong> for document registration, verification, and
+          notarization. Unlike general-purpose blockchains, NOBLE focuses on a single mission: providing
+          tamper-proof, timestamped proof of document existence.
+        </p>
+        <p>
+          The protocol uses <strong>Proof of Reputation</strong> consensus, where validators earn
+          reputation through honest participation rather than energy-intensive mining. This provides
+          fast 30-minute cycle finality while maintaining decentralization and security.
+        </p>
+        <p>
+          NOBLE supports multiple cryptographic schemes (Ed25519, secp256k1), Bitcoin-compatible
+          wallet import (BIP-39/BIP-137), organizational PKI identity binding (X.509/CMS), and
+          encrypted document locators for privacy-preserving verification.
+        </p>
+
+        <div class="roadmap">
+          <h3>Roadmap</h3>
+          <div class="roadmap-item">
+            <div class="roadmap-dot done"></div>
+            <div><strong>Alpha — Core Protocol</strong><span>Block/tx structures, consensus engine, P2P networking, wallet, API, dashboard</span></div>
+          </div>
+          <div class="roadmap-item">
+            <div class="roadmap-dot done"></div>
+            <div><strong>Beta — Hardening</strong><span>Security audits, ban system, reputation scoring, fuzz testing, CI/CD</span></div>
+          </div>
+          <div class="roadmap-item">
+            <div class="roadmap-dot current"></div>
+            <div><strong>Testnet Launch</strong><span>Public testnet, faucet, documentation, community onboarding</span></div>
+          </div>
+          <div class="roadmap-item">
+            <div class="roadmap-dot future"></div>
+            <div><strong>Mainnet</strong><span>Production launch, validator program, SDK release, enterprise integrations</span></div>
+          </div>
+          <div class="roadmap-item">
+            <div class="roadmap-dot future"></div>
+            <div><strong>Ecosystem</strong><span>Native macOS/iOS clients, third-party integrations, governance framework</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ── Footer ── -->
+<footer class="site-footer">
+  <p>&copy; 2026 <a href="https://infinitecontext.com">InfiniteContext.com</a> &middot; License: Apache 2.0</p>
+  <p style="margin-top:0.5rem">NOBLE Protocol &middot; Built with purpose, not hype.</p>
+</footer>
+
+<script>
+// ── Faucet interaction ──
+const faucetBtn = document.getElementById('faucet-submit');
+const faucetInput = document.getElementById('faucet-address');
+const faucetResult = document.getElementById('faucet-result');
+
+// Faucet API base URL — defaults to same origin, override with data-faucet-url on <body>.
+const faucetBase = document.body.dataset.faucetUrl || '';
+
+faucetBtn.addEventListener('click', async () => {
+  const address = faucetInput.value.trim();
+  if (!address || address.length < 64) {
+    faucetResult.textContent = 'Please enter a valid NOBLE address.';
+    faucetResult.style.color = 'var(--error)';
+    faucetResult.style.display = 'block';
+    return;
+  }
+  faucetBtn.disabled = true;
+  faucetBtn.textContent = 'Sending...';
+  faucetResult.style.display = 'none';
+
+  try {
+    const resp = await fetch(`${faucetBase}/api/faucet`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      faucetResult.textContent = `${data.message}. TX: ${data.tx_id}`;
+      faucetResult.style.color = 'var(--success)';
+    } else {
+      faucetResult.textContent = data.message || 'Request failed.';
+      faucetResult.style.color = 'var(--error)';
+    }
+  } catch (e) {
+    faucetResult.textContent = 'Network error — is the faucet server running?';
+    faucetResult.style.color = 'var(--error)';
+  }
+  faucetResult.style.display = 'block';
+  faucetBtn.disabled = false;
+  faucetBtn.textContent = 'Request Tokens';
+});
+</script>
+<script src="js/main.js"></script>
+</body>
+</html>

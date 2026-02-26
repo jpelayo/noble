@@ -1429,6 +1429,26 @@ export class MockRpcClient {
         };
       }
 
+      case 'noble_getStorageInfo': {
+        const tip = this.#blocks[this.#blocks.length - 1];
+        return {
+          chain_height: tip ? tip.header.height : 0,
+          pruning_mode: 'archive',
+          keep_blocks: 10000,
+          pruned_up_to: 0,
+          lowest_full_height: 0,
+        };
+      }
+
+      case 'noble_getPruningStatus':
+        return {
+          mode: 'archive',
+          blocks_pruned: 0,
+          transactions_removed: 0,
+          lowest_full_height: 0,
+          more_remaining: false,
+        };
+
       case 'noble_rotateTotpSecret': {
         if (!params.current_code_hash || params.current_code_hash.length !== 64) {
           throw { code: -32012, message: 'authentication required' };

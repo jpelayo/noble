@@ -6,7 +6,9 @@
 //! These tests start a real jsonrpsee server, connect a WebSocket client,
 //! and issue RPC calls against a MemoryStorage backend with genesis committed.
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 use std::time::Instant;
 
 use jsonrpsee::core::client::ClientT;
@@ -50,7 +52,6 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         .collect();
     storage
         .read()
-        .unwrap()
         .commit_block(&genesis, &block_hash, &tx_ids)
         .expect("commit genesis");
 
@@ -89,6 +90,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
         rate_limiter: None,   // disabled in tests
         totp_validator: None, // auth disabled in tests
+        totp_scope: noble_api::middleware::TotpScope::All,
         totp_secret_path: None,
         rpc_port: 8783,
         ws_port: 8784,
@@ -97,9 +99,10 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         new_tx_tx,
         cycle_phase_tx,
         peer_update_tx,
-        trace_handle: None, // trace disabled in tests
-        gateway_key: None,  // no gateway in tests
-        ip_filter: None,    // no IP filter in tests
+        trace_handle: None,             // trace disabled in tests
+        gateway_key: RwLock::new(None), // no gateway in tests
+        gateway_key_path: None,
+        ip_filter: None, // no IP filter in tests
         validator_list_path: None,
         peer_info: Arc::new(RwLock::new(std::collections::HashMap::new())),
     });
@@ -618,7 +621,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
     let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
 
     // Get genesis hash for prev_block_hash
-    let storage = state.storage.read().unwrap();
+    let storage = state.storage.read();
     let tip = storage.get_chain_tip().unwrap().unwrap();
     let prev_hash = tip.block_hash;
 

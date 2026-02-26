@@ -3,38 +3,108 @@
 
 //! Tower HTTP middleware for TOTP-based authentication.
 //!
-//! When a [`TotpValidator`] is configured, every incoming HTTP request must
+//! When a [`TotpValidator`] is configured, incoming HTTP requests must
 //! include an `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
 //! Invalid or missing credentials receive a JSON-RPC error response with
 //! code `-32012 AUTH_REQUIRED`.
+//!
+//! Supports three scopes via [`TotpScope`]:
+//! - `All`: every request requires authentication (default).
+//! - `WriteOnly`: only write/mutation methods require authentication;
+//!   read methods (get*, estimate*, lookup*, verify*, validate*) pass through.
+//! - `None`: authentication is disabled (equivalent to no validator).
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use tower::{Layer, Service};
+use tracing::Instrument;
 
 use crate::auth::TotpValidator;
 use crate::error::AUTH_REQUIRED;
 
+/// Try to extract the JSON-RPC "method" field from a body slice.
+/// Returns `None` if parsing fails or the field is absent.
+fn extract_rpc_method(body: &[u8]) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_slice(body).ok()?;
+    val.get("method")?.as_str().map(|s| s.to_string())
+}
+
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// TOTP enforcement scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotpScope {
+    /// Every request requires authentication.
+    All,
+    /// Only write/mutation RPC methods require authentication.
+    /// Read methods (get*, estimate*, lookup*, verify*, validate*) pass through.
+    WriteOnly,
+    /// Authentication is disabled.
+    None,
+}
+
+impl TotpScope {
+    /// Parse from config string ("all", "write_only", "none").
+    pub fn from_config(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "write_only" | "writeonly" | "write" => Self::WriteOnly,
+            "none" | "disabled" | "off" => Self::None,
+            _ => Self::All, // default
+        }
+    }
+}
+
+/// Returns `true` if the given JSON-RPC method name is a read-only method
+/// that does not require authentication in `WriteOnly` scope.
+///
+/// Exposed for use by dashboard/client code that needs to determine
+/// whether to include auth headers.
+pub fn is_read_method(method: &str) -> bool {
+    // Strip the "noble_" namespace prefix if present.
+    let name = method.strip_prefix("noble_").unwrap_or(method);
+    // Trace methods expose sensitive operational data and always require auth,
+    // even in WriteOnly scope (AUD4-F1).
+    if name.starts_with("getTrace")
+        || name.starts_with("setTrace")
+        || name.starts_with("clearTrace")
+    {
+        return false;
+    }
+    name.starts_with("get")
+        || name.starts_with("estimate")
+        || name.starts_with("lookup")
+        || name.starts_with("verify")
+        || name.starts_with("validate")
+}
 
 /// Tower [`Layer`] that produces [`AuthService`] instances.
 #[derive(Clone)]
 pub struct AuthLayer {
     validator: Option<Arc<RwLock<TotpValidator>>>,
+    scope: TotpScope,
+    /// AUD4-F3: Monotonic counter for per-request correlation IDs.
+    next_request_id: Arc<AtomicU64>,
 }
 
 impl AuthLayer {
     /// Create a new auth layer.
     ///
     /// Pass `None` to disable authentication (all requests pass through).
-    pub fn new(validator: Option<Arc<RwLock<TotpValidator>>>) -> Self {
-        Self { validator }
+    pub fn new(validator: Option<Arc<RwLock<TotpValidator>>>, scope: TotpScope) -> Self {
+        Self {
+            validator,
+            scope,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+        }
     }
 }
 
@@ -45,6 +115,8 @@ impl<S> Layer<S> for AuthLayer {
         AuthService {
             inner,
             validator: self.validator.clone(),
+            scope: self.scope,
+            next_request_id: self.next_request_id.clone(),
         }
     }
 }
@@ -55,14 +127,23 @@ impl<S> Layer<S> for AuthLayer {
 pub struct AuthService<S> {
     inner: S,
     validator: Option<Arc<RwLock<TotpValidator>>>,
+    scope: TotpScope,
+    /// AUD4-F3: Monotonic counter for per-request correlation IDs.
+    next_request_id: Arc<AtomicU64>,
 }
 
+/// In `WriteOnly` scope, the middleware must inspect the JSON-RPC method name
+/// to distinguish read vs write methods. This requires buffering the request body.
+/// The inner service therefore receives `Request<Full<Bytes>>` instead of the
+/// original body type. jsonrpsee's server handler is generic over body types
+/// that implement `http_body::Body<Data = Bytes>`, so this is transparent.
 impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for AuthService<S>
 where
-    S: Service<Request<ReqBody>, Response = Response<ResBody>> + Clone + Send + 'static,
+    S: Service<Request<Full<Bytes>>, Response = Response<ResBody>> + Clone + Send + 'static,
     S::Future: Send,
     S::Error: Send,
-    ReqBody: Send + 'static,
+    ReqBody: http_body::Body<Data = Bytes> + Send + 'static,
+    ReqBody::Error: Into<BoxError>,
     ResBody: http_body::Body<Data = Bytes> + Send + 'static,
     ResBody::Error: Into<BoxError>,
 {
@@ -75,56 +156,108 @@ where
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
-        // Pass through OPTIONS requests (CORS preflight) without auth.
-        if req.method() == http::Method::OPTIONS {
-            let fut = self.inner.call(req);
-            return Box::pin(async move {
-                let resp = fut.await?;
-                Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
-            });
-        }
+        // Clone the inner service so the future owns it (standard tower pattern).
+        let mut inner = self.inner.clone();
+        std::mem::swap(&mut self.inner, &mut inner);
 
-        // If no validator is configured, pass through.
-        let Some(validator) = &self.validator else {
-            let fut = self.inner.call(req);
-            return Box::pin(async move {
-                let resp = fut.await?;
-                Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
-            });
-        };
+        let validator = self.validator.clone();
+        let scope = self.scope;
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
-        // Extract and validate the Bearer token.
-        tracing::debug!(task = "rpc_auth", "authentication attempt");
-        let valid = req
-            .headers()
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|hash_hex| {
-                validator
-                    .read()
-                    .map(|v| v.validate_hash(hash_hex))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
+        Box::pin(async move {
+            // Collect the request body upfront. JSON-RPC payloads are small (< 2 MB
+            // by our server limit), so buffering is inexpensive and allows method
+            // name inspection for WriteOnly scope enforcement.
+            let (parts, body) = req.into_parts();
+            let body_bytes = BodyExt::collect(body)
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
 
-        if valid {
-            tracing::info!(task = "rpc_auth", "authentication successful");
-            let fut = self.inner.call(req);
-            Box::pin(async move {
-                let resp = fut.await?;
+            // AUD4-F3: Extract method name and create a correlation span that
+            // propagates request_id + rpc_method through all child log events.
+            let rpc_method =
+                extract_rpc_method(&body_bytes).unwrap_or_else(|| "unknown".to_string());
+            let rpc_span = tracing::info_span!(
+                "rpc_request",
+                request_id,
+                rpc_method = %rpc_method,
+            );
+
+            // --- OPTIONS preflight: pass through without auth. ---
+            if parts.method == http::Method::OPTIONS {
+                let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                let resp = inner.call(new_req).instrument(rpc_span).await?;
+                return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+            }
+
+            // --- No validator or scope None: pass through. ---
+            let Some(validator) = &validator else {
+                let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                let resp = inner.call(new_req).instrument(rpc_span).await?;
+                return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+            };
+            if scope == TotpScope::None {
+                let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                let resp = inner.call(new_req).instrument(rpc_span).await?;
+                return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+            }
+
+            // --- WriteOnly scope: inspect method name for headerless requests. ---
+            if scope == TotpScope::WriteOnly {
+                let has_auth = parts.headers.get(http::header::AUTHORIZATION).is_some();
+                if !has_auth {
+                    // Use the method name already extracted for the correlation span.
+                    let is_read = is_read_method(&rpc_method);
+
+                    if is_read {
+                        // Read method without auth header: allow through.
+                        let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                        let resp = inner.call(new_req).instrument(rpc_span).await?;
+                        return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+                    } else {
+                        // Write method (or unparseable) without auth: reject.
+                        tracing::warn!(
+                            task = "rpc_auth",
+                            method = %rpc_method,
+                            "write method rejected: missing auth in WriteOnly mode"
+                        );
+                        let resp = auth_error_response();
+                        return Ok(resp.map(|b| {
+                            b.map_err(|never: std::convert::Infallible| -> BoxError {
+                                match never {}
+                            })
+                            .boxed_unsync()
+                        }));
+                    }
+                }
+                // Auth header present in WriteOnly mode — fall through to validation.
+            }
+
+            // --- All scope (or WriteOnly with header): validate Bearer token. ---
+            tracing::debug!(task = "rpc_auth", "authentication attempt");
+            let valid = parts
+                .headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .map(|hash_hex| validator.read().validate_hash(hash_hex))
+                .unwrap_or(false);
+
+            if valid {
+                tracing::info!(task = "rpc_auth", "authentication successful");
+                let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                let resp = inner.call(new_req).instrument(rpc_span).await?;
                 Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()))
-            })
-        } else {
-            tracing::warn!(task = "rpc_auth", "authentication failed");
-            Box::pin(async move {
+            } else {
+                tracing::warn!(task = "rpc_auth", "authentication failed");
                 let resp = auth_error_response();
                 Ok(resp.map(|b| {
                     b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
                         .boxed_unsync()
                 }))
-            })
-        }
+            }
+        })
     }
 }
 
@@ -172,15 +305,72 @@ mod tests {
 
     #[test]
     fn auth_layer_none_creates_passthrough() {
-        let layer = AuthLayer::new(None);
+        let layer = AuthLayer::new(None, TotpScope::All);
         let _service = layer.layer(DummyService);
     }
 
     #[test]
     fn auth_layer_some_creates_checking_service() {
         let (validator, _) = TotpValidator::generate().unwrap();
-        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))));
+        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::All);
         let _service = layer.layer(DummyService);
+    }
+
+    #[test]
+    fn totp_scope_from_config_parses_variants() {
+        assert_eq!(TotpScope::from_config("all"), TotpScope::All);
+        assert_eq!(TotpScope::from_config("write_only"), TotpScope::WriteOnly);
+        assert_eq!(TotpScope::from_config("writeonly"), TotpScope::WriteOnly);
+        assert_eq!(TotpScope::from_config("write"), TotpScope::WriteOnly);
+        assert_eq!(TotpScope::from_config("none"), TotpScope::None);
+        assert_eq!(TotpScope::from_config("disabled"), TotpScope::None);
+        assert_eq!(TotpScope::from_config("off"), TotpScope::None);
+        assert_eq!(TotpScope::from_config("unknown"), TotpScope::All);
+        assert_eq!(TotpScope::from_config("ALL"), TotpScope::All);
+    }
+
+    #[test]
+    fn is_read_method_classification() {
+        // Read methods
+        assert!(is_read_method("noble_getBlockCount"));
+        assert!(is_read_method("noble_getTransaction"));
+        assert!(is_read_method("noble_estimateFee"));
+        assert!(is_read_method("noble_lookupChecksum"));
+        assert!(is_read_method("noble_verifyDocument"));
+        assert!(is_read_method("noble_validateAddress"));
+        assert!(is_read_method("noble_getGatewayInfo"));
+        assert!(is_read_method("noble_getNodeInfo"));
+        assert!(is_read_method("noble_getMempoolInfo"));
+        assert!(is_read_method("noble_getAllowedIps"));
+
+        // Write methods
+        assert!(!is_read_method("noble_submitTransaction"));
+        assert!(!is_read_method("noble_walletUnlock"));
+        assert!(!is_read_method("noble_walletLock"));
+        assert!(!is_read_method("noble_walletSendTransfer"));
+        assert!(!is_read_method("noble_createAddress"));
+        assert!(!is_read_method("noble_addValidator"));
+        assert!(!is_read_method("noble_removeValidator"));
+        assert!(!is_read_method("noble_setAllowedIps"));
+        assert!(!is_read_method("noble_rotateTotpSecret"));
+        assert!(!is_read_method("noble_rotateGatewayKey"));
+        assert!(!is_read_method("noble_castVote"));
+        assert!(!is_read_method("noble_submitDocumentBatch"));
+        assert!(!is_read_method("noble_importMnemonic"));
+
+        // AUD4-F1: Trace methods always require auth (sensitive operational data).
+        assert!(!is_read_method("noble_getTraceBuffer"));
+        assert!(!is_read_method("noble_getTraceStatus"));
+        assert!(!is_read_method("noble_setTraceFilter"));
+        assert!(!is_read_method("noble_clearTraceBuffer"));
+    }
+
+    #[test]
+    fn auth_layer_write_only_scope_propagates() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::WriteOnly);
+        let service = layer.layer(DummyService);
+        assert_eq!(service.scope, TotpScope::WriteOnly);
     }
 
     /// Minimal no-op service for layer construction tests.

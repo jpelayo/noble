@@ -26,6 +26,7 @@ import * as walletPage from './pages/wallet.js';
 import * as healthPage from './pages/health.js';
 import * as identityPage from './pages/identity.js';
 import * as tracePage from './pages/trace.js';
+import * as storagePage from './pages/storage.js';
 import * as settingsPage from './pages/settings.js';
 import * as setupPage from './pages/setup.js';
 
@@ -142,6 +143,7 @@ router
   .add('/consensus', consensusPage)
   .add('/wallet', walletPage)
   .add('/health', healthPage)
+  .add('/storage', storagePage)
   .add('/identity', identityPage)
   .add('/trace', tracePage)
   .add('/settings', settingsPage)

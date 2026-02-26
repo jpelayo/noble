@@ -14,6 +14,8 @@ members = [
     "noble-wallet",
     "noble-node",
     "noble-test-utils",
+    "noble-tool",
+    "noble-faucet",
 ]
 resolver = "2"
 
@@ -80,6 +82,10 @@ ipnet = "2"
 bip39 = { version = "2", features = ["rand"] }
 bip32 = "0.5"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dialoguer = { version = "0.11", features = ["password"] }
 sysinfo = "0.32"
 dirs = "6"
+parking_lot = "0.12"
+prometheus = { version = "0.13", features = ["process"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

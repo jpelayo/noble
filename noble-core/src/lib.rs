@@ -13,6 +13,7 @@ pub mod merkle;
 pub mod metadata;
 pub mod node_announce;
 pub mod peer_record;
+pub mod pst;
 pub mod transaction;
 pub mod validation;
 
@@ -29,6 +30,7 @@ pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};
 pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeRole, OrgType};
 pub use peer_record::PeerRecord;
+pub use pst::{PartiallySignedTransaction, PstError, SignerEntry, SignerRole, PST_VERSION};
 pub use transaction::Transaction;
 pub use validation::{
     median_timestamp, validate_block, validate_block_timestamp, validate_transaction,

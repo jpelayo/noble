@@ -15,6 +15,7 @@ use crate::config::ConsensusConfig;
 use crate::cycle::{CycleManager, CyclePhase};
 use crate::event::{CycleEvent, CycleIo};
 use crate::history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
+use crate::reputation::ReputationEngine;
 use crate::validator::ValidatorList;
 use crate::vote::{MigrationResult, PorVote, VoteManager};
 
@@ -66,6 +67,8 @@ pub struct CycleEngine {
     manual_vote: Option<Hash256>,
     /// P1.2: Whether an R2 confirmation vote has been cast this cycle.
     r2_vote_cast: bool,
+    /// S15-A: Per-validator reputation scoring engine.
+    reputation: ReputationEngine,
 }
 
 impl CycleEngine {
@@ -105,6 +108,7 @@ impl CycleEngine {
             last_cycle_history: None,
             manual_vote: None,
             r2_vote_cast: false,
+            reputation: ReputationEngine::new(),
         }
     }
 
@@ -437,6 +441,59 @@ impl CycleEngine {
             finalized_at: now_ts,
         });
 
+        // S15-A: Update reputation scores at cycle boundary.
+        {
+            let all_validators: Vec<Vec<u8>> = self
+                .validator_list
+                .list_validators()
+                .iter()
+                .map(|(pk, _)| pk.to_wire_bytes())
+                .collect();
+
+            // Determine the winning proposer and losing proposers.
+            let winner_wire: Option<Vec<u8>> = match &result {
+                MigrationResult::Adopt { candidate_hash, .. } => self
+                    .candidate_tracker
+                    .get(candidate_hash)
+                    .map(|e| e.block.header.validator_id.to_wire_bytes()),
+                MigrationResult::Indeterminate => None,
+            };
+            let loser_wires: Vec<Vec<u8>> = self
+                .candidate_tracker
+                .all_candidates()
+                .iter()
+                .filter_map(|entry| {
+                    let wire = entry.block.header.validator_id.to_wire_bytes();
+                    if winner_wire.as_deref() == Some(&wire) {
+                        None
+                    } else {
+                        Some(wire)
+                    }
+                })
+                .collect();
+
+            // Collect wire bytes of validators who cast at least one vote.
+            let voters: Vec<Vec<u8>> = self.vote_mgr.voter_wire_keys();
+
+            // Active validators = those who proposed or voted (observed online).
+            let mut active: Vec<Vec<u8>> = voters.clone();
+            for entry in self.candidate_tracker.all_candidates() {
+                let wire = entry.block.header.validator_id.to_wire_bytes();
+                if !active.contains(&wire) {
+                    active.push(wire);
+                }
+            }
+
+            self.reputation.process_cycle_boundary(
+                completed_cycle,
+                winner_wire.as_deref(),
+                &loser_wires,
+                &voters,
+                &all_validators,
+                &active,
+            );
+        }
+
         // Clear state for next cycle
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
@@ -721,6 +778,21 @@ impl CycleEngine {
     /// Set a manual vote target for the Manual voting strategy (P1.3).
     pub fn set_manual_vote(&mut self, hash: Hash256) {
         self.manual_vote = Some(hash);
+    }
+
+    /// Get a reference to the reputation engine (S15-A).
+    pub fn reputation(&self) -> &ReputationEngine {
+        &self.reputation
+    }
+
+    /// Get a mutable reference to the reputation engine (S15-A).
+    pub fn reputation_mut(&mut self) -> &mut ReputationEngine {
+        &mut self.reputation
+    }
+
+    /// Replace the reputation engine (used at startup to restore persisted data).
+    pub fn set_reputation(&mut self, engine: ReputationEngine) {
+        self.reputation = engine;
     }
 }
 

@@ -11,8 +11,10 @@
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
+
+use parking_lot::RwLock;
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
@@ -54,7 +56,7 @@ impl IpFilter {
             return true;
         }
 
-        let nets = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let nets = self.inner.read();
 
         // Empty list = localhost-only.
         if nets.is_empty() {
@@ -67,17 +69,14 @@ impl IpFilter {
     /// Hot-reload the allow-list at runtime.
     pub fn update(&self, new_list: &[String]) -> Result<(), String> {
         let nets = parse_allow_list(new_list)?;
-        let mut guard = self
-            .inner
-            .write()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
+        let mut guard = self.inner.write();
         *guard = nets;
         Ok(())
     }
 
     /// Return the current allow-list as strings.
     pub fn list(&self) -> Vec<String> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.read();
         guard.iter().map(|n| n.to_string()).collect()
     }
 
@@ -97,7 +96,7 @@ impl IpFilter {
 
     /// Whether the allow-list is non-empty (remote access enabled).
     pub fn has_remote_access(&self) -> bool {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.read();
         !guard.is_empty()
     }
 }

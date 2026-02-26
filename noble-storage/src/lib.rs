@@ -6,12 +6,14 @@
 pub mod error;
 pub mod integrity;
 pub mod memory;
+pub mod pruning;
 pub mod rocks;
 pub mod traits;
 
 pub use error::StorageError;
 pub use integrity::{verify_chain_integrity, FindingKind, IntegrityFinding, IntegrityReport};
 pub use memory::MemoryStorage;
+pub use pruning::{PruningConfig, PruningEngine, PruningMode, PruningResult};
 pub use rocks::RocksDbStorage;
 pub use traits::{ChainTip, KeyRotationRecord, StorageEngine};
 

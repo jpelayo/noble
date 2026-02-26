@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use dialoguer::{Confirm, Input, Password, Select};
 
 use crate::config::{
-    ApiConfig, ConsensusConfig, IdentityConfig, LoggingConfig, MetricsConfig, NetworkConfig,
-    NetworkId, NodeConfig, NodeSectionConfig, OperationalRole, StorageConfig, TraceConfig,
-    WalletConfig,
+    ApiConfig, ConsensusConfig, GatewayConfig, IdentityConfig, LoggingConfig, MetricsConfig,
+    NetworkConfig, NetworkId, NodeConfig, NodeSectionConfig, OperationalRole, StorageConfig,
+    TraceConfig, WalletConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -491,6 +491,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             max_connections: defaults.api.max_connections,
             rate_limit: defaults.api.rate_limit,
             totp_enabled,
+            totp_scope: defaults.api.totp_scope.clone(),
             totp_secret_file,
             gui_addr: defaults.api.gui_addr.clone(),
             gui_dir: defaults.api.gui_dir.clone(),
@@ -527,6 +528,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             initial_filter: defaults.trace.initial_filter.clone(),
             stderr_enabled: defaults.trace.stderr_enabled,
         },
+        gateway: GatewayConfig::default(),
     };
 
     // Display summary table.

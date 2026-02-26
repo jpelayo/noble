@@ -21,3 +21,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true
+proptest.workspace = true

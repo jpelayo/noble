@@ -277,6 +277,19 @@ impl SyncManager {
             }
         }
 
+        // S15-C: Validate headers at checkpoint heights.
+        for header in headers {
+            let hash = header
+                .compute_block_hash()
+                .map_err(|e| NetworkError::InvalidHeaderChain(e.to_string()))?;
+            if let Some(false) = noble_core::is_valid_checkpoint(header.height, &hash) {
+                return Err(NetworkError::InvalidHeaderChain(format!(
+                    "header at height {} fails checkpoint validation (hash {})",
+                    header.height, hash,
+                )));
+            }
+        }
+
         Ok(())
     }
 

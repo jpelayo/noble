@@ -118,7 +118,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         scheme_id: u8,
         passphrase: String,
     ) -> Result<CreateAddressResponse, ErrorObjectOwned> {
-        let mut keystore = self.wallet_keystore.lock().unwrap();
+        let mut keystore = self.wallet_keystore.lock();
         let pubkey = keystore
             .create_key(scheme_id, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -135,14 +135,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         timeout_secs: u64,
     ) -> Result<WalletUnlockResponse, ErrorObjectOwned> {
         {
-            let mut keystore = self.wallet_keystore.lock().unwrap();
+            let mut keystore = self.wallet_keystore.lock();
             keystore.unlock(&passphrase).map_err(|e| match e {
                 noble_wallet::WalletError::InvalidPassphrase => ApiError::InvalidPassphrase,
                 other => ApiError::Internal(other.to_string()),
             })?;
         }
 
-        let mut state = self.wallet_state.lock().unwrap();
+        let mut state = self.wallet_state.lock();
         let expires_at = state.unlock(timeout_secs);
 
         Ok(WalletUnlockResponse {
@@ -153,26 +153,26 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
     async fn wallet_lock(&self) -> Result<bool, ErrorObjectOwned> {
         {
-            let mut keystore = self.wallet_keystore.lock().unwrap();
+            let mut keystore = self.wallet_keystore.lock();
             keystore.lock();
         }
         {
-            let mut state = self.wallet_state.lock().unwrap();
+            let mut state = self.wallet_state.lock();
             state.lock();
         }
         Ok(true)
     }
 
     async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned> {
-        let keystore = self.wallet_keystore.lock().unwrap();
-        let state = self.wallet_state.lock().unwrap();
+        let keystore = self.wallet_keystore.lock();
+        let state = self.wallet_state.lock();
 
         let keys = keystore.list_keys().unwrap_or_default();
         let key_count = keys.len();
 
         // Sum balances across all wallet keys
-        let storage = self.storage.read().unwrap();
-        let mempool = self.mempool.lock().unwrap();
+        let storage = self.storage.read();
+        let mempool = self.mempool.lock();
         let mut total_balance = 0u64;
         let mut total_pending = 0u64;
         for pk in &keys {
@@ -202,7 +202,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
         // Ensure wallet is unlocked
         {
-            let state = self.wallet_state.lock().unwrap();
+            let state = self.wallet_state.lock();
             if !state.is_unlocked() {
                 return Err(ApiError::WalletLocked.into());
             }
@@ -221,7 +221,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Build and sign the transaction (inject gateway address if configured)
         let tx = {
-            let keystore = self.wallet_keystore.lock().unwrap();
+            let keystore = self.wallet_keystore.lock();
             let mut tx = TransactionBuilder::build_transfer(
                 &keystore, &sender, recipient, amount, fee, memo,
             )
@@ -232,9 +232,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 }
                 other => ApiError::Internal(other.to_string()),
             })?;
-            if let Some(ref gw) = self.gateway_key {
-                TransactionBuilder::set_gateway_and_resign(&mut tx, &keystore, &sender, gw.clone())
+            {
+                let gw_guard = self.gateway_key.read();
+                if let Some(ref gw) = *gw_guard {
+                    TransactionBuilder::set_gateway_and_resign(
+                        &mut tx,
+                        &keystore,
+                        &sender,
+                        gw.clone(),
+                    )
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
+                }
             }
             tx
         };
@@ -246,19 +254,22 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .as_secs();
 
         let tx_id = {
-            let storage = self.storage.read().unwrap();
+            let storage = self.storage.read();
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
-            let mut mempool = self.mempool.lock().unwrap();
+            let mut mempool = self.mempool.lock();
             mempool
                 .admit(&tx, now, &chain_lookup, &balance_lookup)
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 
-        // Broadcast
-        let _ = self
+        // Broadcast (log if channel full).
+        if let Err(e) = self
             .network_cmd
-            .try_send(NetworkCommand::PublishTransaction(tx));
+            .try_send(NetworkCommand::PublishTransaction(tx))
+        {
+            tracing::warn!(task = "tx_broadcast", %tx_id, "network broadcast dropped (channel full): {e}");
+        }
 
         Ok(SubmitTxResponse {
             tx_id: hash_to_hex(&tx_id),
@@ -276,7 +287,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             return Err(ApiError::InvalidParam("word_count must be 12 or 24".into()).into());
         }
 
-        let mut keystore = self.wallet_keystore.lock().unwrap();
+        let mut keystore = self.wallet_keystore.lock();
         let (mnemonic, pubkey) = keystore
             .create_key_from_mnemonic(wc, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -294,7 +305,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         mnemonic: String,
         passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned> {
-        let mut keystore = self.wallet_keystore.lock().unwrap();
+        let mut keystore = self.wallet_keystore.lock();
 
         // Check if key already exists by trying to recover
         let existing_keys: Vec<_> = keystore.list_keys().unwrap_or_default();
@@ -326,7 +337,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Ensure wallet is unlocked
         {
-            let state = self.wallet_state.lock().unwrap();
+            let state = self.wallet_state.lock();
             if !state.is_unlocked() {
                 return Err(ApiError::WalletLocked.into());
             }
@@ -395,7 +406,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
 
         // Build transaction (inject gateway address if configured)
         let tx = {
-            let keystore = self.wallet_keystore.lock().unwrap();
+            let keystore = self.wallet_keystore.lock();
             let mut tx = TransactionBuilder::build_notarization(
                 &keystore,
                 signer,
@@ -404,9 +415,17 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
                 vec![], // no metadata in batch mode
             )
             .map_err(|e| e.to_string())?;
-            if let Some(ref gw) = self.gateway_key {
-                TransactionBuilder::set_gateway_and_resign(&mut tx, &keystore, signer, gw.clone())
+            {
+                let gw_guard = self.gateway_key.read();
+                if let Some(ref gw) = *gw_guard {
+                    TransactionBuilder::set_gateway_and_resign(
+                        &mut tx,
+                        &keystore,
+                        signer,
+                        gw.clone(),
+                    )
                     .map_err(|e| e.to_string())?;
+                }
             }
             tx
         };
@@ -418,19 +437,22 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
             .as_secs();
 
         let tx_id = {
-            let storage = self.storage.read().unwrap();
+            let storage = self.storage.read();
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
-            let mut mempool = self.mempool.lock().unwrap();
+            let mut mempool = self.mempool.lock();
             mempool
                 .admit(&tx, now, &chain_lookup, &balance_lookup)
                 .map_err(|e| e.to_string())?
         };
 
-        // Broadcast (best-effort)
-        let _ = self
+        // Broadcast (log if channel full).
+        if let Err(e) = self
             .network_cmd
-            .try_send(NetworkCommand::PublishTransaction(tx));
+            .try_send(NetworkCommand::PublishTransaction(tx))
+        {
+            tracing::warn!(task = "tx_broadcast", %tx_id, "network broadcast dropped (channel full): {e}");
+        }
 
         Ok((hash_to_hex(&tx_id), hash_to_hex(&checksum)))
     }

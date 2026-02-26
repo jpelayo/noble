@@ -10,6 +10,7 @@ pub mod document;
 pub mod mempool;
 pub mod network;
 pub mod node;
+pub mod storage;
 pub mod subscriptions;
 pub mod trace;
 pub mod transaction;

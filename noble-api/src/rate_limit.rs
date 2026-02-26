@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 /// State of a single caller's token bucket.
 struct Bucket {
@@ -56,7 +57,7 @@ impl RpcRateLimiter {
     ///
     /// Returns `true` if the request is allowed, `false` if rate-limited.
     pub fn try_acquire(&self, ip: IpAddr) -> bool {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         let now = Instant::now();
         let capacity = inner.capacity;
         let rate = inner.rate;
@@ -81,7 +82,7 @@ impl RpcRateLimiter {
 
     /// Remove stale entries (idle > 5 min) and evict oldest if over max_tracked.
     pub fn cleanup(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         let stale_after = inner.stale_after;
         inner
             .buckets
@@ -105,11 +106,7 @@ impl RpcRateLimiter {
 
     /// Number of tracked IPs.
     pub fn tracked_ips(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .buckets
-            .len()
+        self.inner.lock().buckets.len()
     }
 }
 
@@ -293,7 +290,7 @@ mod tests {
 
         // Override stale_after to a very short duration for testing
         {
-            let mut inner = rl.inner.lock().unwrap();
+            let mut inner = rl.inner.lock();
             inner.stale_after = Duration::from_millis(10);
         }
         thread::sleep(Duration::from_millis(20));
@@ -320,7 +317,7 @@ mod tests {
         let rl = RpcRateLimiter::new(10, 2);
         // Set a small max_tracked
         {
-            let mut inner = rl.inner.lock().unwrap();
+            let mut inner = rl.inner.lock();
             inner.max_tracked = 3;
         }
         // Add 5 IPs

@@ -1,0 +1,56 @@
+[package]
+name = "noble-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata.cargo-fuzz]
+# Keep fuzz binaries separate from workspace
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+noble-codec = { path = "../noble-codec" }
+noble-core = { path = "../noble-core" }
+noble-crypto = { path = "../noble-crypto" }
+noble-consensus = { path = "../noble-consensus" }
+noble-network = { path = "../noble-network" }
+arbitrary = { version = "1", features = ["derive"] }
+
+# Prevent this from being discovered by the workspace
+[workspace]
+
+[[bin]]
+name = "fuzz_cbor_decode"
+path = "fuzz_targets/fuzz_cbor_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_block_validation"
+path = "fuzz_targets/fuzz_block_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tx_validation"
+path = "fuzz_targets/fuzz_tx_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_p2p_messages"
+path = "fuzz_targets/fuzz_p2p_messages.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_rpc_requests"
+path = "fuzz_targets/fuzz_rpc_requests.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_consensus_fsm"
+path = "fuzz_targets/fuzz_consensus_fsm.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_signature_verify"
+path = "fuzz_targets/fuzz_signature_verify.rs"
+doc = false

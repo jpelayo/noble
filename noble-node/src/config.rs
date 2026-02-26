@@ -25,6 +25,9 @@ pub struct NodeConfig {
     /// Runtime tracing configuration.
     #[serde(default)]
     pub trace: TraceConfig,
+    /// Gateway fee-split configuration.
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 /// Operational role of the node binary.
@@ -155,6 +158,11 @@ pub struct ApiConfig {
     /// Enable TOTP-based authentication for all RPC methods.
     #[serde(default)]
     pub totp_enabled: bool,
+    /// TOTP enforcement scope: "all" (every request), "write_only" (only mutations),
+    /// or "none" (disabled, same as totp_enabled=false).
+    /// Defaults to "all" when totp_enabled=true.
+    #[serde(default = "default_totp_scope")]
+    pub totp_scope: String,
     /// Path to the file storing the TOTP shared secret (base32).
     /// If empty and totp_enabled is true, a secret is auto-generated and written here.
     #[serde(default)]
@@ -171,6 +179,10 @@ pub struct ApiConfig {
     /// Example: ["192.168.1.0/24", "10.0.0.5"]
     #[serde(default)]
     pub allowed_ips: Vec<String>,
+}
+
+fn default_totp_scope() -> String {
+    "all".to_string()
 }
 
 fn default_gui_addr() -> String {
@@ -286,12 +298,85 @@ impl std::fmt::Debug for IdentityConfig {
     }
 }
 
+/// `[gateway]` section — fee-split gateway key configuration.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GatewayConfig {
+    /// Path to a file containing the gateway public key (hex-encoded wire bytes).
+    /// If set, the key is loaded from this file instead of being auto-derived
+    /// from the first wallet key.
+    #[serde(default)]
+    pub key_path: String,
+    /// Enable gateway fee split. When true and a key is available (from key_path
+    /// or auto-derived from the first wallet key), outgoing transactions include
+    /// the gateway address for 50/50 fee splitting.
+    #[serde(default = "default_gateway_enabled")]
+    pub enabled: bool,
+}
+
+fn default_gateway_enabled() -> bool {
+    true
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            key_path: String::new(),
+            enabled: default_gateway_enabled(),
+        }
+    }
+}
+
 impl NodeConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config: NodeConfig = toml::from_str(&contents)?;
         Ok(config)
+    }
+}
+
+/// Validate a configuration file and print the result.
+///
+/// Returns exit code 0 on success, 1 on error.
+pub fn validate_config_file(path: &str) {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        eprintln!("Error: configuration file not found: {path}");
+        std::process::exit(1);
+    }
+    match NodeConfig::from_file(p) {
+        Ok(config) => {
+            println!("Configuration file is valid: {path}");
+            println!();
+            println!("  Network:       {:?}", config.node.network);
+            println!("  Role:          {:?}", config.node.role);
+            println!("  P2P listen:    {}", config.network.listen_addr);
+            println!("  RPC addr:      {}", config.api.rpc_addr);
+            println!("  WS addr:       {}", config.api.ws_addr);
+            println!("  GUI addr:      {}", config.api.gui_addr);
+            println!("  Data dir:      {}", config.storage.data_dir.display());
+            println!(
+                "  Metrics:       {}",
+                if config.metrics.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "  TOTP auth:     {}",
+                if config.api.totp_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+        }
+        Err(e) => {
+            eprintln!("Error: invalid configuration file: {path}");
+            eprintln!("  {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -337,6 +422,7 @@ impl Default for ApiConfig {
             max_connections: 100,
             rate_limit: 30,
             totp_enabled: false,
+            totp_scope: default_totp_scope(),
             totp_secret_file: String::new(),
             gui_addr: default_gui_addr(),
             gui_dir: String::new(),

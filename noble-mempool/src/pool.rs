@@ -373,7 +373,11 @@ impl Mempool {
         };
 
         self.insert_entry(entry);
-        tracing::debug!("transaction admitted to mempool, pool size: {}", self.len());
+        tracing::debug!(
+            task = "mempool",
+            "transaction admitted to mempool, pool size: {}",
+            self.len()
+        );
         Ok(tx_id)
     }
 

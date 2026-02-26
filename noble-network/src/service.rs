@@ -73,7 +73,7 @@ pub async fn start_network(
 ) -> Result<NetworkHandle, NetworkError> {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let local_peer_id = keypair.public().to_peer_id();
-    tracing::info!(%local_peer_id, "starting network service");
+    tracing::info!(task = "network_startup", %local_peer_id, "starting network service");
 
     let mut swarm = build_swarm(keypair, &config)?;
 
@@ -86,16 +86,20 @@ pub async fn start_network(
             match addr_str.parse::<Multiaddr>() {
                 Ok(maddr) => match swarm.listen_on(maddr) {
                     Ok(_) => {
-                        tracing::info!(port, "P2P listening on {addr_str}");
+                        tracing::info!(
+                            task = "network_startup",
+                            port,
+                            "P2P listening on {addr_str}"
+                        );
                         bound = Some(port);
                         break;
                     }
                     Err(e) => {
-                        tracing::warn!(port, err = %e, "failed to bind P2P port, trying next");
+                        tracing::warn!(task = "network_startup", port, err = %e, "failed to bind P2P port, trying next");
                     }
                 },
                 Err(e) => {
-                    tracing::warn!(port, err = %e, "invalid multiaddr");
+                    tracing::warn!(task = "network_startup", port, err = %e, "invalid multiaddr");
                 }
             }
         }
@@ -116,7 +120,7 @@ pub async fn start_network(
                 }
             });
             if let Err(e) = swarm.dial(addr.clone()) {
-                tracing::warn!(%addr, err = %e, "failed to dial bootstrap peer");
+                tracing::warn!(task = "network_startup", %addr, err = %e, "failed to dial bootstrap peer");
             }
             // Add to Kademlia routing table for discovery.
             if config.enable_kademlia {
@@ -134,7 +138,7 @@ pub async fn start_network(
     // Bootstrap Kademlia if enabled and we have bootstrap peers.
     if config.enable_kademlia && !config.bootstrap_peers.is_empty() {
         if let Err(e) = swarm.behaviour_mut().kad.bootstrap() {
-            tracing::debug!(err = %e, "kademlia bootstrap (will retry on walk timer)");
+            tracing::debug!(task = "network_startup", err = %e, "kademlia bootstrap (will retry on walk timer)");
         }
     }
 
@@ -215,7 +219,7 @@ async fn run_event_loop(
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
                 if handle_command(cmd, &mut swarm, &mut peer_manager, &config).await {
-                    tracing::info!("network service shutting down");
+                    tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
             }
@@ -224,7 +228,7 @@ async fn run_event_loop(
             _ = maintenance_interval.tick() => {
                 let cleaned = peer_manager.cleanup_expired_bans();
                 if cleaned > 0 {
-                    tracing::debug!(cleaned, "expired bans removed");
+                    tracing::debug!(task = "network_maintenance", cleaned, "expired bans removed");
                 }
                 // Evict expired cache entries.
                 seen_blocks.evict_expired();
@@ -239,7 +243,7 @@ async fn run_event_loop(
                 if config.enable_kademlia {
                     let random_peer = PeerId::random();
                     swarm.behaviour_mut().kad.get_closest_peers(random_peer);
-                    tracing::debug!("kademlia random walk triggered");
+                    tracing::debug!(task = "peer_discovery", "kademlia random walk triggered");
                 }
             }
 
@@ -252,7 +256,7 @@ async fn run_event_loop(
                     if let Ok(data) = codec::encode_gossip(&msg) {
                         let topic = IdentTopic::new(topics::TOPIC_PEER_EXCHANGE);
                         if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                            tracing::debug!(err = %e, "failed to publish peer exchange");
+                            tracing::debug!(task = "peer_discovery", err = %e, "failed to publish peer exchange");
                         }
                     }
                 }
@@ -282,7 +286,7 @@ async fn run_event_loop(
                         .iter()
                         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
                     {
-                        tracing::debug!(%worst_pid, "rotating worst outbound peer");
+                        tracing::debug!(task = "peer_discovery", %worst_pid, "rotating worst outbound peer");
                         let _ = swarm.disconnect_peer_id(*worst_pid);
                         // Trigger Kademlia walk to find a replacement.
                         if config.enable_kademlia {
@@ -332,7 +336,7 @@ async fn handle_swarm_event(
                     &remote_addr,
                     config.max_outbound_per_subnet,
                 ) {
-                    tracing::debug!(%peer_id, %remote_addr, "rejecting outbound: subnet diversity");
+                    tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting outbound: subnet diversity");
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -346,7 +350,7 @@ async fn handle_swarm_event(
                     &remote_addr,
                     diversity::MAX_INBOUND_PER_SUBNET,
                 ) {
-                    tracing::debug!(%peer_id, %remote_addr, "rejecting inbound: subnet diversity (>4 from same /16)");
+                    tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting inbound: subnet diversity (>4 from same /16)");
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -354,16 +358,22 @@ async fn handle_swarm_event(
 
             if peer_manager.on_connected(peer_id, direction) {
                 peer_manager.update_addr(&peer_id, remote_addr.clone());
-                tracing::debug!(%peer_id, ?direction, "peer connected");
-                let _ = event_tx
-                    .send(NetworkEvent::PeerConnected {
+                tracing::debug!(task = "peer_management", %peer_id, ?direction, "peer connected");
+                if event_tx
+                    .try_send(NetworkEvent::PeerConnected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr,
                         chain_tip: None,
                     })
-                    .await;
+                    .is_err()
+                {
+                    tracing::warn!(
+                        task = "event_channel",
+                        "event channel full: PeerConnected dropped"
+                    );
+                }
             } else {
-                tracing::debug!(%peer_id, "peer rejected (limit or banned)");
+                tracing::debug!(task = "peer_management", %peer_id, "peer rejected (limit or banned)");
                 let _ = swarm.disconnect_peer_id(peer_id);
             }
         }
@@ -371,11 +381,17 @@ async fn handle_swarm_event(
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             peer_manager.on_disconnected(&peer_id);
             tx_rate_limiter.remove_peer(&peer_id);
-            let _ = event_tx
-                .send(NetworkEvent::PeerDisconnected {
+            if event_tx
+                .try_send(NetworkEvent::PeerDisconnected {
                     peer_id: peer_id.to_bytes().to_vec(),
                 })
-                .await;
+                .is_err()
+            {
+                tracing::warn!(
+                    task = "event_channel",
+                    "event channel full: PeerDisconnected dropped"
+                );
+            }
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Gossip(gossipsub::Event::Message {
@@ -485,7 +501,12 @@ async fn handle_swarm_event(
                         }
                     };
                     if let Some(evt) = net_event {
-                        let _ = event_tx.send(evt).await;
+                        if event_tx.try_send(evt).is_err() {
+                            tracing::warn!(
+                                task = "event_channel",
+                                "event channel full: gossip event dropped"
+                            );
+                        }
                     }
                     // Accept valid message for propagation.
                     let _ = swarm
@@ -498,7 +519,7 @@ async fn handle_swarm_event(
                         );
                 }
                 Err(e) => {
-                    tracing::warn!(%propagation_source, err = %e, "invalid gossip message");
+                    tracing::warn!(task = "gossip_receive", %propagation_source, err = %e, "invalid gossip message");
                     peer_manager.record_misbehavior(
                         &propagation_source,
                         BanReason::new(
@@ -543,21 +564,31 @@ async fn handle_swarm_event(
                 SyncResponse::Blocks(blocks) => {
                     let peer_bytes = peer.to_bytes().to_vec();
                     for block in blocks {
-                        let _ = event_tx
-                            .send(NetworkEvent::BlockReceived {
+                        if event_tx
+                            .try_send(NetworkEvent::BlockReceived {
                                 peer_id: peer_bytes.clone(),
                                 block,
                             })
-                            .await;
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                task = "sync",
+                                "event channel full: BlockReceived dropped"
+                            );
+                            break; // stop sending remaining blocks if channel is full
+                        }
                     }
                 }
                 SyncResponse::Block(Some(block)) => {
-                    let _ = event_tx
-                        .send(NetworkEvent::BlockReceived {
+                    if event_tx
+                        .try_send(NetworkEvent::BlockReceived {
                             peer_id: peer.to_bytes().to_vec(),
                             block,
                         })
-                        .await;
+                        .is_err()
+                    {
+                        tracing::warn!(task = "sync", "event channel full: BlockReceived dropped");
+                    }
                 }
                 SyncResponse::Status {
                     height,
@@ -568,6 +599,7 @@ async fn handle_swarm_event(
                     // GAP-H4: Verify chain_id and protocol_version.
                     if chain_id != config.chain_id || protocol_version != config.protocol_version {
                         tracing::warn!(
+                            task = "sync",
                             %peer,
                             remote_chain_id = chain_id,
                             local_chain_id = config.chain_id,
@@ -584,12 +616,18 @@ async fn handle_swarm_event(
                             ),
                         ) {
                             let _ = swarm.disconnect_peer_id(peer);
-                            let _ = event_tx
-                                .send(NetworkEvent::PeerBanned {
+                            if event_tx
+                                .try_send(NetworkEvent::PeerBanned {
                                     peer_id: peer.to_bytes().to_vec(),
                                     reason: "chain/protocol mismatch".into(),
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    task = "event_channel",
+                                    "event channel full: PeerBanned dropped"
+                                );
+                            }
                         }
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
@@ -623,6 +661,7 @@ async fn handle_swarm_event(
             ..
         })) => {
             tracing::debug!(
+                task = "peer_discovery",
                 %peer_id,
                 protocol = %info.protocol_version,
                 agent = %info.agent_version,
@@ -652,6 +691,7 @@ async fn handle_swarm_event(
             if let (Some(ours), Some(theirs)) = (our_major, peer_major) {
                 if ours != theirs {
                     tracing::warn!(
+                        task = "peer_discovery",
                         %peer_id,
                         our_version = %our_identify,
                         peer_version = %info.protocol_version,
@@ -802,7 +842,7 @@ fn handle_gossip_node_announce(
             })
         }
         Err(reason) => {
-            tracing::warn!(%source, %reason, "invalid node announce");
+            tracing::warn!(task = "gossip_receive", %source, %reason, "invalid node announce");
             peer_manager.record_misbehavior(
                 source,
                 BanReason::new(
@@ -820,19 +860,22 @@ fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<
     match ciborium::from_reader::<noble_core::DoubleProposalEvidence, _>(evidence_bytes) {
         Ok(evidence) => match evidence.verify() {
             Ok(()) => {
-                tracing::warn!("valid double-proposal evidence received");
+                tracing::warn!(
+                    task = "gossip_receive",
+                    "valid double-proposal evidence received"
+                );
                 Some(NetworkEvent::EvidenceReceived {
                     peer_id: peer_bytes,
                     evidence: Box::new(evidence),
                 })
             }
             Err(e) => {
-                tracing::debug!(%e, "invalid evidence rejected");
+                tracing::debug!(task = "gossip_receive", %e, "invalid evidence rejected");
                 None
             }
         },
         Err(e) => {
-            tracing::debug!(%e, "failed to decode evidence CBOR");
+            tracing::debug!(task = "gossip_receive", %e, "failed to decode evidence CBOR");
             None
         }
     }
@@ -864,10 +907,14 @@ fn handle_kad_event(event: &kad::Event) {
             result: kad::QueryResult::GetClosestPeers(Ok(ok)),
             ..
         } => {
-            tracing::debug!(peers_found = ok.peers.len(), "kademlia walk found peers");
+            tracing::debug!(
+                task = "peer_discovery",
+                peers_found = ok.peers.len(),
+                "kademlia walk found peers"
+            );
         }
         kad::Event::RoutingUpdated { peer, .. } => {
-            tracing::debug!(%peer, "kademlia routing table updated");
+            tracing::debug!(task = "peer_discovery", %peer, "kademlia routing table updated");
         }
         _ => {}
     }
@@ -954,7 +1001,7 @@ async fn handle_command(
                     topics::TOPIC_BLOCK_ANNOUNCE
                 );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                    tracing::warn!(err = %e, "failed to publish block announce");
+                    tracing::warn!(task = "gossip_publish", err = %e, "failed to publish block announce");
                 }
             }
         }
@@ -973,7 +1020,7 @@ async fn handle_command(
                     topics::TOPIC_TX_ANNOUNCE
                 );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                    tracing::warn!(err = %e, "failed to publish tx announce");
+                    tracing::warn!(task = "gossip_publish", err = %e, "failed to publish tx announce");
                 }
             }
         }
@@ -1000,7 +1047,7 @@ async fn handle_command(
                     topics::TOPIC_POR_VOTE
                 );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                    tracing::warn!(err = %e, "failed to publish vote");
+                    tracing::warn!(task = "gossip_publish", err = %e, "failed to publish vote");
                 }
             }
         }
@@ -1065,7 +1112,7 @@ async fn handle_command(
                     topics::TOPIC_NODE_ANNOUNCE
                 );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                    tracing::warn!(err = %e, "failed to publish node announce");
+                    tracing::warn!(task = "gossip_publish", err = %e, "failed to publish node announce");
                 }
             }
         }
@@ -1082,7 +1129,7 @@ async fn handle_command(
                         topics::TOPIC_EVIDENCE
                     );
                     if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                        tracing::warn!(err = %e, "failed to publish evidence");
+                        tracing::warn!(task = "gossip_publish", err = %e, "failed to publish evidence");
                     }
                 }
             }

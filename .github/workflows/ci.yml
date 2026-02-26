@@ -1,0 +1,85 @@
+# Copyright 2026 InfiniteContext.com
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  fuzz-smoke:
+    name: Fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz
+      - name: Smoke test all fuzz targets (1000 iterations each)
+        working-directory: fuzz
+        run: |
+          for target in $(cargo fuzz list 2>/dev/null || echo "fuzz_cbor_decode fuzz_block_validation fuzz_tx_validation fuzz_p2p_messages fuzz_rpc_requests fuzz_consensus_fsm fuzz_signature_verify"); do
+            echo "--- Fuzz target: $target ---"
+            cargo fuzz run "$target" -- -max_total_time=30 -runs=1000 || true
+          done
+
+  build:
+    name: Build binaries (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p noble-node -p noble-tool
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noble-binaries-${{ matrix.os }}
+          path: |
+            target/release/noble-node
+            target/release/noble-tool
+          if-no-files-found: error

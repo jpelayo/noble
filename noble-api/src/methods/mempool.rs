@@ -37,7 +37,7 @@ impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState
     }
 
     async fn get_mempool_info(&self) -> Result<MempoolInfoResponse, ErrorObjectOwned> {
-        let mempool = self.mempool.lock().unwrap();
+        let mempool = self.mempool.lock();
         let (min_fee, max_fee, avg_fee) = mempool.fee_stats();
         Ok(MempoolInfoResponse {
             count: mempool.len(),

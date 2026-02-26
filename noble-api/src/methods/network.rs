@@ -51,7 +51,7 @@ pub trait NetworkApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState<S>> {
     async fn get_peer_info(&self) -> Result<Vec<PeerInfoResponse>, ErrorObjectOwned> {
-        let info = self.peer_info.read().unwrap();
+        let info = self.peer_info.read();
         let peers: Vec<PeerInfoResponse> = info
             .values()
             .map(|entry| PeerInfoResponse {
@@ -66,7 +66,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn get_network_info(&self) -> Result<NetworkInfoResponse, ErrorObjectOwned> {
-        let stats = self.network_stats.read().unwrap();
+        let stats = self.network_stats.read();
         Ok(NetworkInfoResponse {
             peer_count: stats.peer_count,
             inbound: stats.inbound_count,
@@ -75,7 +75,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn get_sync_status(&self) -> Result<SyncStatusResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read().unwrap();
+        let consensus = self.consensus.read();
         let (height, _hash) = consensus.chain_tip();
         // Until sync manager tracks highest known, report current as highest
         let highest_known = height;
@@ -97,7 +97,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn get_peer_memory(&self) -> Result<Vec<PeerRecordResponse>, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let records = storage
             .list_peer_records()
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -129,7 +129,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key_bytes = hex::decode(&identity_key)
             .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         storage
             .remove_peer_record(&key_bytes)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -144,7 +144,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let pruned = storage
             .prune_peer_records(now, max_age_secs)
             .map_err(|e| ApiError::Internal(e.to_string()))?;

@@ -278,7 +278,10 @@ impl RocksDbStorage {
         match Self::open(path.clone()) {
             Ok(db) => Ok(db),
             Err(first_err) => {
-                tracing::warn!("DB open failed, attempting repair: {first_err}");
+                tracing::warn!(
+                    task = "storage",
+                    "DB open failed, attempting repair: {first_err}"
+                );
                 Self::repair(path.clone())?;
                 Self::open(path).map_err(|second_err| {
                     StorageError::Database(format!(
@@ -443,7 +446,12 @@ impl StorageEngine for RocksDbStorage {
 
         // Phase 2: read current balances, apply deltas, write final
         for (key, delta) in &deltas {
-            tracing::debug!("balance delta: {} for key len={}", delta, key.len());
+            tracing::debug!(
+                task = "storage",
+                "balance delta: {} for key len={}",
+                delta,
+                key.len()
+            );
             let current = self.read_balance_raw(key)?;
             let new_balance = current as i128 + delta;
             if new_balance < 0 {
@@ -488,7 +496,11 @@ impl StorageEngine for RocksDbStorage {
             .write(batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        tracing::debug!("committed block at height {}", block.header.height);
+        tracing::debug!(
+            task = "storage",
+            "committed block at height {}",
+            block.header.height
+        );
 
         Ok(())
     }

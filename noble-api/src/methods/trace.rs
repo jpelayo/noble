@@ -22,7 +22,7 @@ const VALID_DURATIONS: &[u64] = &[1, 5, 15, 30, 60, 120, 360, 720, 1440];
 pub struct SetTraceParams {
     /// Filter directive string (e.g. "trace", "noble_core=debug,info").
     pub filter: String,
-    /// Optional duration in minutes. Session auto-reverts when expired.
+    /// Optional duration in minutes. Filter auto-reverts to default on expiry.
     pub duration_minutes: Option<u64>,
 }
 
@@ -147,7 +147,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TraceApiServer for Arc<ApiState<S
             entries,
             total_in_buffer: handle.buffer.len(),
             capacity: handle.buffer.capacity(),
-            current_filter: handle.default_filter().to_string(),
+            current_filter: handle.current_filter(),
             session_active: handle.is_session_active(),
             remaining_seconds: handle.remaining_seconds(),
         })

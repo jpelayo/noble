@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Node-related RPC methods: getNodeInfo, rotateTotpSecret.
+//! Node-related RPC methods: getNodeInfo, rotateTotpSecret, gateway info/rotation.
 
 use std::sync::Arc;
 
@@ -21,6 +21,10 @@ pub trait NodeApi {
     /// Get general node information.
     #[method(name = "getNodeInfo")]
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned>;
+
+    /// Get the API version and method count.
+    #[method(name = "getApiVersion")]
+    async fn get_api_version(&self) -> Result<ApiVersionResponse, ErrorObjectOwned>;
 
     /// Rotate the TOTP shared secret.
     ///
@@ -47,6 +51,20 @@ pub trait NodeApi {
         &self,
         allowed_ips: Vec<String>,
     ) -> Result<SetAllowedIpsResponse, ErrorObjectOwned>;
+
+    /// Get current gateway fee-split configuration.
+    #[method(name = "getGatewayInfo")]
+    async fn get_gateway_info(&self) -> Result<GatewayInfoResponse, ErrorObjectOwned>;
+
+    /// Rotate the gateway key to a different wallet key.
+    ///
+    /// The `public_key` parameter is the hex-encoded wire bytes of the new
+    /// gateway key. The key must exist in the wallet keystore.
+    #[method(name = "rotateGatewayKey")]
+    async fn rotate_gateway_key(
+        &self,
+        public_key: String,
+    ) -> Result<RotateGatewayKeyResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -64,6 +82,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         })
     }
 
+    async fn get_api_version(&self) -> Result<ApiVersionResponse, ErrorObjectOwned> {
+        Ok(ApiVersionResponse {
+            version: crate::API_VERSION.to_string(),
+            methods: crate::API_METHOD_COUNT,
+        })
+    }
+
     async fn rotate_totp_secret(
         &self,
         current_code_hash: String,
@@ -76,9 +101,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Verify the current code.
         {
-            let v = validator_arc
-                .read()
-                .map_err(|e| ApiError::Internal(format!("totp lock: {e}")))?;
+            let v = validator_arc.read();
             if !v.validate_hash(&current_code_hash) {
                 return Err(ApiError::AuthRequired.into());
             }
@@ -98,9 +121,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Swap the in-memory validator.
         {
-            let mut v = validator_arc
-                .write()
-                .map_err(|e| ApiError::Internal(format!("totp lock: {e}")))?;
+            let mut v = validator_arc.write();
             *v = new_validator;
         }
 
@@ -120,6 +141,82 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(AllowedIpsResponse {
             allowed_ips,
             remote_access_enabled,
+        })
+    }
+
+    async fn get_gateway_info(&self) -> Result<GatewayInfoResponse, ErrorObjectOwned> {
+        let gw = self.gateway_key.read();
+        let (enabled, gateway_hex, source) = match &*gw {
+            Some(key) => {
+                let hex = ::hex::encode(key);
+                let source = if self.gateway_key_path.is_some() {
+                    "config_file"
+                } else {
+                    "wallet_auto"
+                };
+                (true, Some(hex), source.to_string())
+            }
+            None => (false, None, "none".to_string()),
+        };
+        Ok(GatewayInfoResponse {
+            enabled,
+            gateway_key: gateway_hex,
+            key_source: source,
+        })
+    }
+
+    async fn rotate_gateway_key(
+        &self,
+        public_key: String,
+    ) -> Result<RotateGatewayKeyResponse, ErrorObjectOwned> {
+        // Parse and validate the new key.
+        let new_key_bytes = ::hex::decode(&public_key)
+            .map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
+
+        // Verify the key exists in the wallet keystore.
+        let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&new_key_bytes)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        {
+            let ks = self.wallet_keystore.lock();
+            let keys = ks
+                .list_keys()
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            if !keys.iter().any(|k| k == &pk) {
+                return Err(ApiError::InvalidParam(
+                    "public key not found in wallet keystore".into(),
+                )
+                .into());
+            }
+        }
+
+        // Update the in-memory gateway key.
+        {
+            let mut gw = self.gateway_key.write();
+            *gw = Some(new_key_bytes.clone());
+        }
+
+        // Persist to disk if a key_path is configured.
+        let persisted = if let Some(path) = &self.gateway_key_path {
+            let tmp = path.with_extension("tmp");
+            if let Err(e) = std::fs::write(&tmp, public_key.as_bytes()) {
+                tracing::warn!("Failed to write gateway key tmp: {e}");
+                false
+            } else if let Err(e) = std::fs::rename(&tmp, path) {
+                tracing::warn!("Failed to rename gateway key file: {e}");
+                false
+            } else {
+                tracing::info!("Gateway key rotated and persisted to {}", path.display());
+                true
+            }
+        } else {
+            tracing::info!("Gateway key rotated (in-memory only, no key_path configured)");
+            false
+        };
+
+        Ok(RotateGatewayKeyResponse {
+            success: true,
+            new_gateway_key: public_key,
+            persisted,
         })
     }
 

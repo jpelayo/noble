@@ -164,6 +164,35 @@ pub trait StorageEngine {
     /// Retrieve the most recent `count` cycle history entries (newest first).
     fn get_recent_cycle_history(&self, count: usize) -> Result<Vec<Vec<u8>>, StorageError>;
 
+    // ── Pruning Support ──
+
+    /// Remove the block body (transactions) for a given block hash,
+    /// but keep the header in place. Used by moderate pruning.
+    fn prune_block_body(&self, _block_hash: &noble_crypto::Hash256) -> Result<(), StorageError> {
+        Ok(()) // default no-op for backends that don't support pruning
+    }
+
+    /// Delete all data for a block at the given height: block body, header,
+    /// and height→hash index. Used by aggressive pruning.
+    fn delete_block_data(
+        &self,
+        _block_hash: &noble_crypto::Hash256,
+        _height: u64,
+    ) -> Result<(), StorageError> {
+        Ok(()) // default no-op
+    }
+
+    /// Get the "pruned up to" marker — the highest height that has been pruned.
+    /// Returns 0 if no pruning has occurred.
+    fn get_pruning_marker(&self) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    /// Set the "pruned up to" marker after a pruning pass.
+    fn set_pruning_marker(&self, _height: u64) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
     fn close(&mut self) -> Result<(), StorageError>;

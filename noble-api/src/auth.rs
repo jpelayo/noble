@@ -8,8 +8,9 @@
 //! setup and can be rotated via the `noble_rotateTotpSecret` RPC method.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::time::Instant;
+
+use parking_lot::Mutex;
 
 use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -106,7 +107,7 @@ impl TotpValidator {
         // AUD2-H1: Reject codes already used within the window (replay prevention)
         if matched != 0 {
             if let Some(code) = matched_code {
-                let mut used = self.used_codes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut used = self.used_codes.lock();
                 // Drain expired entries (older than 180 seconds).
                 // Window covers the full ±1 TOTP time-step acceptance range (90s)
                 // plus a safety margin to close the microsecond boundary edge case.

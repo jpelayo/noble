@@ -5,9 +5,11 @@
 
 mod bridge;
 pub mod ca_store;
-#[allow(dead_code)]
 mod config;
 mod gui_server;
+#[allow(unused)]
+mod lock_order;
+pub mod metrics;
 mod node;
 mod pidfile;
 pub mod pkcs12;
@@ -18,7 +20,7 @@ pub mod trace;
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use noble_api::trace_types::TraceHandle;
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,46 @@ enum Commands {
         #[arg(short, long, default_value = "noble.toml")]
         config: String,
     },
+    /// Show connected peers
+    Peers {
+        /// RPC endpoint to query
+        #[arg(long, default_value = "http://127.0.0.1:8783")]
+        rpc: String,
+        /// TOTP code (if auth enabled)
+        #[arg(long)]
+        totp: Option<String>,
+    },
+    /// Show consensus cycle status and validator list
+    Consensus {
+        /// RPC endpoint to query
+        #[arg(long, default_value = "http://127.0.0.1:8783")]
+        rpc: String,
+        /// TOTP code (if auth enabled)
+        #[arg(long)]
+        totp: Option<String>,
+    },
+    /// Validate a configuration file without starting the node
+    #[command(name = "config")]
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Generate shell completions for bash, zsh, fish, or PowerShell
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ConfigAction {
+    /// Validate a TOML configuration file
+    Validate {
+        /// Path to configuration file
+        #[arg(default_value = "noble.toml")]
+        config: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +144,18 @@ fn rewrite_legacy_args() -> Vec<String> {
         return args;
     }
 
-    let known = ["run", "stop", "restart", "status", "setup", "help"];
+    let known = [
+        "run",
+        "stop",
+        "restart",
+        "status",
+        "setup",
+        "peers",
+        "consensus",
+        "config",
+        "completions",
+        "help",
+    ];
     let first = args[1].to_lowercase();
 
     // Already using new CLI format or built-in flags
@@ -169,6 +222,21 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Peers { rpc, totp } => {
+            status::show_peers(&rpc, totp.as_deref());
+        }
+        Commands::Consensus { rpc, totp } => {
+            status::show_consensus(&rpc, totp.as_deref());
+        }
+        Commands::Config { action } => match action {
+            ConfigAction::Validate { config } => {
+                config::validate_config_file(&config);
+            }
+        },
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "noble-node", &mut std::io::stdout());
+        }
     }
 }
 
@@ -222,11 +290,22 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
     }
 }
 
+/// Create Prometheus metrics if enabled in the configuration.
+fn init_metrics(config: &config::NodeConfig) -> Option<metrics::NobleMetrics> {
+    if config.metrics.enabled {
+        Some(metrics::NobleMetrics::new())
+    } else {
+        tracing::info!("Prometheus metrics disabled by config");
+        None
+    }
+}
+
 async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>) -> i32 {
     match node::Node::init_memory(config) {
         Ok(n) => {
             tracing::info!("Node initialized — chain height: {}", n.chain_height());
-            if let Err(e) = n.run(config, Some(trace_handle)).await {
+            let metrics = init_metrics(config);
+            if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
                 tracing::error!("Node exited with error: {e}");
                 return 1;
             }
@@ -260,7 +339,8 @@ async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHa
                     );
                 }
 
-                if let Err(e) = n.run(config, Some(trace_handle)).await {
+                let metrics = init_metrics(config);
+                if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
                     tracing::error!("Node exited with error: {e}");
                     return 1;
                 }

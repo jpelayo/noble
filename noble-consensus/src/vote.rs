@@ -5,7 +5,7 @@
 //!
 //! - **GAP-C6**: `compute_majority()` requires `total_peers >= min_peers_for_consensus`.
 //! - **GAP-C7**: `record_vote()` verifies vote signature before recording.
-//! - **GAP-C8**: Vote counting uses `peer_id` (transport-layer identity), not pubkey.
+//! - **GAP-C8**: Vote counting uses validator public key (not transport-layer peer_id).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -379,6 +379,16 @@ impl VoteManager {
     /// Total number of unique validator+round vote entries.
     pub fn total_votes(&self) -> usize {
         self.voted_validators.len()
+    }
+
+    /// Return deduplicated wire-format public key bytes of all validators who cast
+    /// at least one vote (R1 or R2) in the current cycle. Used by reputation scoring.
+    pub fn voter_wire_keys(&self) -> Vec<Vec<u8>> {
+        let mut keys: HashSet<Vec<u8>> = HashSet::new();
+        for (wire, _round) in &self.voted_validators {
+            keys.insert(wire.clone());
+        }
+        keys.into_iter().collect()
     }
 
     /// Clear all votes for a new cycle.

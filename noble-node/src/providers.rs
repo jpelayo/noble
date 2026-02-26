@@ -7,7 +7,9 @@
 //! `noble-network::BlockProvider` / `TxProvider` traits, allowing the network
 //! service to serve data from the shared storage backend.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::Hash256;
@@ -29,27 +31,28 @@ impl<S: StorageEngine> StorageBlockProvider<S> {
 impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
     fn get_block(&self, hash: &[u8; 32]) -> Option<Block> {
         let h = Hash256(*hash);
-        let storage = self.storage.read().ok()?;
+        let storage = self.storage.read();
         storage.get_block(&h).ok()
     }
 
     fn get_block_by_height(&self, height: u64) -> Option<Block> {
-        let storage = self.storage.read().ok()?;
+        let storage = self.storage.read();
         let hash = storage.get_block_hash_by_height(height).ok()?;
         storage.get_block(&hash).ok()
     }
 
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<BlockHeader> {
         let h = Hash256(*hash);
-        let storage = self.storage.read().ok()?;
+        let storage = self.storage.read();
         storage.get_block_header(&h).ok()
     }
 
     fn chain_tip(&self) -> (u64, [u8; 32]) {
-        self.storage
-            .read()
+        let storage = self.storage.read();
+        storage
+            .get_chain_tip()
             .ok()
-            .and_then(|s| s.get_chain_tip().ok().flatten())
+            .flatten()
             .map(|tip| (tip.height, *tip.block_hash.as_bytes()))
             .unwrap_or((0, [0; 32]))
     }
@@ -70,17 +73,14 @@ impl<S: StorageEngine> StorageTxProvider<S> {
 impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
     fn get_transaction(&self, tx_id: &[u8; 32]) -> Option<Transaction> {
         let h = Hash256(*tx_id);
-        let storage = self.storage.read().ok()?;
+        let storage = self.storage.read();
         storage.get_transaction(&h).ok()
     }
 
     fn has_transaction(&self, tx_id: &[u8; 32]) -> bool {
         let h = Hash256(*tx_id);
-        self.storage
-            .read()
-            .ok()
-            .and_then(|s| s.has_transaction(&h).ok())
-            .unwrap_or(false)
+        let storage = self.storage.read();
+        storage.has_transaction(&h).unwrap_or(false)
     }
 }
 
@@ -146,7 +146,7 @@ mod tests {
             .filter_map(|tx| tx.compute_tx_id(noble_core::MAINNET_CHAIN_ID).ok())
             .collect();
         {
-            let s = storage.read().unwrap();
+            let s = storage.read();
             s.commit_block(&genesis, &block_hash, &tx_ids).unwrap();
         }
 

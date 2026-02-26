@@ -283,6 +283,14 @@ pub struct PeerRecordResponse {
     pub wants_to_vote: bool,
 }
 
+/// Reputation score breakdown for a validator (S15-A).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReputationBreakdown {
+    pub block_acceptance_rate: f64,
+    pub uptime: f64,
+    pub trust_score: f64,
+}
+
 /// A single validator entry in the response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatorEntry {
@@ -291,8 +299,12 @@ pub struct ValidatorEntry {
     pub status: String,
     pub weight: u64,
     pub reputation_score: f64,
+    pub reputation_breakdown: ReputationBreakdown,
     pub blocks_produced: u64,
+    pub blocks_accepted: u64,
     pub cycles_active: u64,
+    pub cycles_reachable: u64,
+    pub total_cycles: u64,
     pub last_active: Option<u64>,
     pub joined_cycle: Option<u64>,
 }
@@ -356,6 +368,13 @@ pub struct NodeInfoResponse {
     pub rpc_port: u16,
     pub ws_port: u16,
     pub p2p_port: u16,
+}
+
+/// Response for `noble_getApiVersion`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiVersionResponse {
+    pub version: String,
+    pub methods: u32,
 }
 
 /// Response for `noble_createAddress`.
@@ -472,7 +491,14 @@ pub struct DocumentsByPublisherResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReputationScoreResponse {
     pub pubkey: String,
-    pub score: u64,
+    pub score: f64,
+    pub breakdown: ReputationBreakdown,
+    pub blocks_accepted: u64,
+    pub blocks_rejected: u64,
+    pub votes_cast: u64,
+    pub votes_missed: u64,
+    pub uptime_cycles: u64,
+    pub total_cycles: u64,
 }
 
 /// Response for `noble_rotateTotpSecret`.
@@ -589,6 +615,57 @@ pub struct AllowedIpsResponse {
 pub struct SetAllowedIpsResponse {
     pub success: bool,
     pub message: String,
+}
+
+/// Response for `noble_getGatewayInfo`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayInfoResponse {
+    /// Whether gateway fee split is active.
+    pub enabled: bool,
+    /// Hex-encoded wire public key of the gateway (if set).
+    pub gateway_key: Option<String>,
+    /// Source of the key: "config_file", "wallet_auto", or "none".
+    pub key_source: String,
+}
+
+/// Response for `noble_rotateGatewayKey`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RotateGatewayKeyResponse {
+    /// Success indicator.
+    pub success: bool,
+    /// Hex-encoded wire bytes of the new gateway key.
+    pub new_gateway_key: String,
+    /// Whether the key was persisted to disk.
+    pub persisted: bool,
+}
+
+/// Response for `noble_getStorageInfo`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageInfoResponse {
+    pub chain_height: u64,
+    pub pruning_mode: String,
+    pub keep_blocks: u64,
+    pub pruned_up_to: u64,
+    pub lowest_full_height: u64,
+}
+
+/// Response for `noble_setStorageMode`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetStorageModeResponse {
+    pub success: bool,
+    pub previous_mode: String,
+    pub new_mode: String,
+    pub message: String,
+}
+
+/// Response for `noble_getPruningStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PruningStatusResponse {
+    pub mode: String,
+    pub blocks_pruned: u64,
+    pub transactions_removed: u64,
+    pub lowest_full_height: u64,
+    pub more_remaining: bool,
 }
 
 #[cfg(test)]

@@ -59,7 +59,7 @@ pub trait BlockApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S>> {
     async fn get_latest_block(&self) -> Result<BlockResponse, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tip = storage
             .get_chain_tip()
             .map_err(ApiError::from)?
@@ -70,7 +70,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
     }
 
     async fn get_block_count(&self) -> Result<BlockCountResponse, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tip = storage
             .get_chain_tip()
             .map_err(ApiError::from)?
@@ -86,7 +86,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         &self,
         block_ref: serde_json::Value,
     ) -> Result<BlockResponse, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
 
         let (block, block_hash) = if let Some(height) = block_ref.as_u64() {
             // Lookup by height
@@ -114,7 +114,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         &self,
         block_ref: serde_json::Value,
     ) -> Result<BlockHeaderResponse, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
 
         let (header, block_hash) = if let Some(height) = block_ref.as_u64() {
             let bh = storage
@@ -150,7 +150,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         count: u64,
     ) -> Result<Vec<BlockHeaderResponse>, ErrorObjectOwned> {
         let count = count.min(MAX_BLOCK_RANGE);
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let mut headers = Vec::with_capacity(count as usize);
 
         for h in start_height..start_height.saturating_add(count) {
@@ -177,7 +177,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
     }
 
     async fn get_chain_stats(&self) -> Result<ChainStatsResponse, ErrorObjectOwned> {
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tip = storage.get_chain_tip().map_err(ApiError::from)?;
 
         let height = tip.as_ref().map(|t| t.height).unwrap_or(0);

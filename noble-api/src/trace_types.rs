@@ -7,7 +7,9 @@
 //! This module defines the interface that the API layer uses.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,12 +48,11 @@ impl TraceBuffer {
 
     /// Push a trace record, evicting the oldest if at capacity.
     pub fn push(&self, record: TraceRecord) {
-        if let Ok(mut inner) = self.inner.write() {
-            if inner.records.len() >= inner.capacity {
-                inner.records.pop_front();
-            }
-            inner.records.push_back(record);
+        let mut inner = self.inner.write();
+        if inner.records.len() >= inner.capacity {
+            inner.records.pop_front();
         }
+        inner.records.push_back(record);
     }
 
     /// Query the buffer.
@@ -61,10 +62,7 @@ impl TraceBuffer {
         task_filter: Option<&str>,
         level_filter: Option<&str>,
     ) -> Vec<TraceRecord> {
-        let inner = match self.inner.read() {
-            Ok(i) => i,
-            Err(_) => return Vec::new(),
-        };
+        let inner = self.inner.read();
 
         let filtered: Vec<_> = inner
             .records
@@ -93,9 +91,7 @@ impl TraceBuffer {
 
     /// Clear all records.
     pub fn clear(&self) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.records.clear();
-        }
+        self.inner.write().records.clear();
     }
 
     /// Whether the buffer is empty.
@@ -105,41 +101,53 @@ impl TraceBuffer {
 
     /// Number of records currently in the buffer.
     pub fn len(&self) -> usize {
-        self.inner.read().map(|i| i.records.len()).unwrap_or(0)
+        self.inner.read().records.len()
     }
 
     /// Maximum capacity.
     pub fn capacity(&self) -> usize {
-        self.inner.read().map(|i| i.capacity).unwrap_or(0)
+        self.inner.read().capacity
     }
 }
 
 /// Type alias for the filter-swap callback.
 type SetFilterFn = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
+/// Shared mutable state for trace session management (AUD4-F2).
+struct TraceSessionState {
+    /// Epoch seconds when the current trace session expires (0 = no session).
+    expiry: std::sync::atomic::AtomicU64,
+    /// Currently active filter string.
+    current_filter: parking_lot::RwLock<String>,
+}
+
 /// Handle for runtime trace control — filter swapping and buffer access.
 pub struct TraceHandle {
     /// The shared ring buffer.
     pub buffer: TraceBuffer,
     /// Callback to set a new filter at runtime.
-    set_filter_fn: SetFilterFn,
-    /// Epoch seconds when the current trace session expires (0 = no session).
-    expiry: std::sync::atomic::AtomicU64,
+    set_filter_fn: Arc<SetFilterFn>,
     /// Cancel token for the timer task.
-    cancel_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    cancel_tx: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Default filter to revert to on expiry.
     default_filter: String,
+    /// Shared session state (expiry + current filter) accessible from timer tasks.
+    session: Arc<TraceSessionState>,
 }
 
 impl TraceHandle {
     /// Create a new trace handle with a filter-reload callback.
     pub fn new(buffer: TraceBuffer, default_filter: String, set_filter_fn: SetFilterFn) -> Self {
+        let current = default_filter.clone();
         Self {
             buffer,
-            set_filter_fn,
-            expiry: std::sync::atomic::AtomicU64::new(0),
-            cancel_tx: std::sync::Mutex::new(None),
+            set_filter_fn: Arc::new(set_filter_fn),
+            cancel_tx: parking_lot::Mutex::new(None),
             default_filter,
+            session: Arc::new(TraceSessionState {
+                expiry: std::sync::atomic::AtomicU64::new(0),
+                current_filter: parking_lot::RwLock::new(current),
+            }),
         }
     }
 
@@ -151,8 +159,12 @@ impl TraceHandle {
     ) -> Result<(), String> {
         (self.set_filter_fn)(filter_str)?;
 
+        // Track the currently active filter (AUD4-F2).
+        *self.session.current_filter.write() = filter_str.to_string();
+
         // Cancel any existing timer
-        if let Ok(mut cancel) = self.cancel_tx.lock() {
+        {
+            let mut cancel = self.cancel_tx.lock();
             if let Some(tx) = cancel.take() {
                 let _ = tx.send(());
             }
@@ -164,25 +176,44 @@ impl TraceHandle {
                 .unwrap_or_default()
                 .as_secs()
                 + dur.as_secs();
-            self.expiry
+            self.session
+                .expiry
                 .store(expiry_secs, std::sync::atomic::Ordering::Relaxed);
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            if let Ok(mut cancel) = self.cancel_tx.lock() {
+            {
+                let mut cancel = self.cancel_tx.lock();
                 *cancel = Some(tx);
             }
 
-            // Spawn a timer that zeros the expiry on completion.
-            // The filter is not automatically reverted — callers should check
-            // is_session_active() and call set_filter() to revert if needed.
+            // AUD4-F2: Auto-revert filter to default when session expires.
+            let revert_fn = self.set_filter_fn.clone();
+            let revert_filter = self.default_filter.clone();
+            let session = self.session.clone();
             tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(dur) => {}
-                    _ = rx => {}
+                let cancelled = tokio::select! {
+                    _ = tokio::time::sleep(dur) => false,
+                    _ = rx => true,
+                };
+                if !cancelled {
+                    // Timer expired naturally — revert to default filter.
+                    session
+                        .expiry
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(e) = (revert_fn)(&revert_filter) {
+                        tracing::warn!(task = "trace_session", "failed to revert filter: {e}");
+                    }
+                    *session.current_filter.write() = revert_filter;
+                    tracing::info!(
+                        task = "trace_session",
+                        "timed session expired — filter reverted to default"
+                    );
                 }
             });
         } else {
-            self.expiry.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.session
+                .expiry
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(())
@@ -190,7 +221,10 @@ impl TraceHandle {
 
     /// Remaining seconds until expiry, or None if no session.
     pub fn remaining_seconds(&self) -> Option<u64> {
-        let expiry = self.expiry.load(std::sync::atomic::Ordering::Relaxed);
+        let expiry = self
+            .session
+            .expiry
+            .load(std::sync::atomic::Ordering::Relaxed);
         if expiry == 0 {
             return None;
         }
@@ -209,5 +243,10 @@ impl TraceHandle {
     /// Current default filter string.
     pub fn default_filter(&self) -> &str {
         &self.default_filter
+    }
+
+    /// Currently active filter string (AUD4-F2).
+    pub fn current_filter(&self) -> String {
+        self.session.current_filter.read().clone()
     }
 }

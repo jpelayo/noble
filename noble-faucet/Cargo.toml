@@ -1,0 +1,33 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-faucet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Testnet faucet server for the NOBLE protocol"
+
+[[bin]]
+name = "noble-faucet"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

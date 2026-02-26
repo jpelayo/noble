@@ -49,12 +49,12 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
     ) -> Result<AddressBalanceResponse, ErrorObjectOwned> {
         let pubkey = parse_pubkey(&address)?;
 
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let balance = storage.get_balance(&pubkey).map_err(ApiError::from)?;
 
         // pending = mempool debits for this address (not yet committed)
         let pending = {
-            let mempool = self.mempool.lock().unwrap();
+            let mempool = self.mempool.lock();
             mempool.pending_debit(&pubkey)
         };
         let available = balance.saturating_sub(pending);
@@ -83,7 +83,7 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         let pubkey = parse_pubkey(&address)?;
 
         let clamped_limit = limit.min(100);
-        let storage = self.storage.read().unwrap();
+        let storage = self.storage.read();
         let tx_ids = storage
             .get_address_history(&pubkey, page, clamped_limit)
             .map_err(ApiError::from)?;

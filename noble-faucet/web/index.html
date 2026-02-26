@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOBLE Faucet</title>
+  <style>
+    :root {
+      --navy: #1A2B5F; --navy-dark: #0F1A3A; --gold: #D4A843; --gold-light: #E8C76A;
+      --bg: #ffffff; --bg-alt: #f7f8fc; --text: #1a1a2e; --text-secondary: #555;
+      --border: #e0e0e0; --card-bg: #ffffff; --card-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      --success: #10b981; --error: #ef4444; --code-bg: #f4f4f8;
+    }
+    [data-theme="dark"] {
+      --bg: #0d1117; --bg-alt: #161b22; --text: #e6edf3; --text-secondary: #8b949e;
+      --border: #30363d; --card-bg: #161b22; --card-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      --code-bg: #1c2128;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.6;
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+    a { color: var(--gold); text-decoration: none; }
+
+    .header {
+      background: var(--navy); padding: 1rem 2rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .header .logo { color: var(--gold); font-size: 1.3rem; font-weight: 700; }
+    .header .subtitle { color: #ccc; font-size: 0.85rem; }
+    .theme-btn {
+      background: none; border: 1px solid #555; color: #ccc;
+      padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
+    }
+
+    .main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+
+    .faucet-card {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 16px; padding: 2.5rem; max-width: 480px; width: 100%;
+      box-shadow: var(--card-shadow); text-align: center;
+    }
+    .faucet-card h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .faucet-card .desc { color: var(--text-secondary); margin-bottom: 1.5rem; }
+
+    .input-group { text-align: left; margin-bottom: 1rem; }
+    .input-group label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; }
+    .input-group input {
+      width: 100%; padding: 0.7rem; border: 1px solid var(--border);
+      border-radius: 8px; font-size: 0.95rem; background: var(--bg); color: var(--text);
+      font-family: monospace;
+    }
+    .input-group input:focus { outline: none; border-color: var(--gold); }
+
+    .submit-btn {
+      width: 100%; padding: 0.8rem; border: none; border-radius: 8px;
+      background: var(--gold); color: var(--navy); font-size: 1rem; font-weight: 700;
+      cursor: pointer; transition: transform 0.2s;
+    }
+    .submit-btn:hover { transform: translateY(-1px); }
+    .submit-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+    .result { margin-top: 1rem; padding: 0.8rem; border-radius: 8px; font-size: 0.9rem; display: none; }
+    .result.ok { background: rgba(16,185,129,0.1); border: 1px solid var(--success); color: var(--success); }
+    .result.err { background: rgba(239,68,68,0.1); border: 1px solid var(--error); color: var(--error); }
+
+    .stats {
+      margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border);
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; text-align: left;
+    }
+    .stat-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; }
+    .stat-value { font-size: 1.1rem; font-weight: 600; }
+
+    .limits {
+      margin-top: 1.5rem; font-size: 0.8rem; color: var(--text-secondary);
+    }
+
+    .footer {
+      background: var(--navy-dark); color: #777; padding: 1rem; text-align: center; font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div>
+      <span class="logo">NOBLE Faucet</span>
+      <span class="subtitle" id="header-subtitle"> &mdash; Token Dispenser</span>
+    </div>
+    <button class="theme-btn" id="theme-toggle">Dark</button>
+  </header>
+
+  <main class="main">
+    <div class="faucet-card">
+      <h1 id="card-title">Get NOBLE</h1>
+      <p class="desc" id="card-desc">Enter your NOBLE address to receive tokens for document registration and transfers.</p>
+
+      <div class="input-group">
+        <label for="address">NOBLE Address</label>
+        <input type="text" id="address" placeholder="Hex-encoded public key (66 or 68 chars)" spellcheck="false" autocomplete="off">
+      </div>
+
+      <button class="submit-btn" id="submit">Send me NOBLE</button>
+
+      <div class="result" id="result"></div>
+
+      <div class="stats" id="stats">
+        <div><div class="stat-label">Network</div><div class="stat-value" id="s-network">--</div></div>
+        <div><div class="stat-label">Faucet Balance</div><div class="stat-value" id="s-balance">--</div></div>
+        <div><div class="stat-label">Drip Amount</div><div class="stat-value" id="s-drip">--</div></div>
+        <div><div class="stat-label">Total Distributed</div><div class="stat-value" id="s-total">--</div></div>
+        <div><div class="stat-label">Distributions Today</div><div class="stat-value" id="s-today">--</div></div>
+      </div>
+
+      <div class="limits">
+        <strong>Limits:</strong> 1 request per IP per 24h &middot; 1 per address per 7 days &middot; Daily cap applies
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    &copy; 2026 InfiniteContext.com &middot; Apache 2.0 &middot; <a href="https://noble.infinitecontext.com">noble.infinitecontext.com</a>
+  </footer>
+
+  <script>
+    const ATOMIC_PER_NOBLE = 1_000_000;
+    function fmt(atomic) {
+      return (atomic / ATOMIC_PER_NOBLE).toFixed(2) + ' NOBLE';
+    }
+
+    // Theme
+    const html = document.documentElement;
+    const themeBtn = document.getElementById('theme-toggle');
+    function applyTheme(t) {
+      html.setAttribute('data-theme', t);
+      localStorage.setItem('noble-faucet-theme', t);
+      themeBtn.textContent = t === 'dark' ? 'Light' : 'Dark';
+    }
+    const saved = localStorage.getItem('noble-faucet-theme');
+    applyTheme(saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+    themeBtn.addEventListener('click', () => applyTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+
+    // API base — empty string means same origin
+    const API = '';
+
+    // Stats
+    async function loadStats() {
+      try {
+        const resp = await fetch(`${API}/api/faucet/status`);
+        const data = await resp.json();
+        const net = data.network || 'unknown';
+        const netLabel = net.charAt(0).toUpperCase() + net.slice(1);
+        document.getElementById('s-network').textContent = netLabel;
+        document.getElementById('s-balance').textContent = fmt(data.faucet_balance);
+        document.getElementById('s-drip').textContent = fmt(data.drip_amount);
+        document.getElementById('s-total').textContent = fmt(data.total_distributed);
+        document.getElementById('s-today').textContent = fmt(data.today_distributed);
+        // Update header/title with network name
+        document.getElementById('header-subtitle').innerHTML = ` &mdash; ${netLabel} Token Dispenser`;
+        document.getElementById('card-title').textContent = `Get ${netLabel} NOBLE`;
+        document.title = `NOBLE Faucet — ${netLabel}`;
+      } catch { /* offline */ }
+    }
+    loadStats();
+
+    // Submit
+    const submitBtn = document.getElementById('submit');
+    const addressInput = document.getElementById('address');
+    const resultEl = document.getElementById('result');
+
+    submitBtn.addEventListener('click', async () => {
+      const address = addressInput.value.trim();
+      if (!address || address.length < 64 || !/^[0-9a-fA-F]+$/.test(address)) {
+        showResult('err', 'Please enter a valid hex NOBLE address (64-68 characters).');
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending...';
+      resultEl.style.display = 'none';
+
+      try {
+        const resp = await fetch(`${API}/api/faucet`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showResult('ok', `${data.message} (TX: ${data.tx_id})`);
+          loadStats();
+        } else {
+          showResult('err', data.message);
+        }
+      } catch (e) {
+        showResult('err', 'Network error — is the faucet server running?');
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send me NOBLE';
+    });
+
+    function showResult(type, msg) {
+      resultEl.className = `result ${type}`;
+      resultEl.textContent = msg;
+      resultEl.style.display = 'block';
+    }
+  </script>
+</body>
+</html>

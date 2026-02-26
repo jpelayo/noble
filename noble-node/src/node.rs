@@ -8,7 +8,9 @@
 //! provides the async event loop that wires network, consensus, and API.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -29,50 +31,68 @@ use noble_wallet::{KeyStore, WalletState};
 use crate::bridge;
 use crate::ca_store::CaStore;
 use crate::config::NodeConfig;
+use crate::metrics::NobleMetrics;
 use crate::providers::{StorageBlockProvider, StorageTxProvider};
 
 /// Typed errors for node operations.
 #[derive(Debug, Error)]
-#[allow(dead_code)]
 pub enum NodeError {
+    /// Storage backend failure (disk full, corruption, etc.).
     #[error("storage error: {0}")]
+    #[allow(dead_code)]
     Storage(String),
+    /// Network subsystem failure.
     #[error("network error: {0}")]
     Network(String),
+    /// API/RPC server failure.
     #[error("api error: {0}")]
     Api(String),
+    /// Configuration error.
     #[error("config error: {0}")]
     Config(String),
+    /// Consensus engine failure.
     #[error("consensus error: {0}")]
+    #[allow(dead_code)]
     Consensus(String),
+    /// Clean shutdown (Ctrl-C or SIGTERM).
     #[error("shutdown signal received")]
+    #[allow(dead_code)]
     Shutdown,
 }
 
 /// The running NOBLE node, generic over the storage backend.
+///
+/// # Lock ordering
+///
+/// All shared locks follow the hierarchy in [`crate::lock_order::LockOrder`].
+/// When acquiring multiple locks, always acquire lower-ordered locks first:
+///
+/// `WalletKeystore < WalletState < Storage < Consensus < Mempool < NetworkStats < PeerInfo`
 pub struct Node<S: StorageEngine + Send + Sync + 'static> {
-    /// Shared block/transaction storage.
+    /// Shared block/transaction storage. **Lock order: 2 (Storage).**
     pub storage: Arc<RwLock<S>>,
-    /// Transaction mempool.
+    /// Transaction mempool. **Lock order: 4 (Mempool).**
     pub mempool: Arc<Mutex<Mempool>>,
-    /// PoR consensus engine.
+    /// PoR consensus engine. **Lock order: 3 (Consensus).**
     pub consensus: Arc<RwLock<CycleEngine>>,
-    /// Encrypted keystore for signing.
+    /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
     pub wallet_keystore: Arc<Mutex<KeyStore>>,
-    /// Wallet lock/unlock state with auto-expire.
+    /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
     pub wallet_state: Arc<Mutex<WalletState>>,
-    /// Network statistics (peer counts).
+    /// Network statistics (peer counts). **Lock order: 5 (NetworkStats).**
     pub network_stats: Arc<RwLock<NetworkStats>>,
-    /// Live connected peer info (H-004).
+    /// Live connected peer info (H-004). **Lock order: 6 (PeerInfo).**
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID.
     pub chain_id: u32,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
     /// PKI identity attestation (CMS/PKCS#7 binding), loaded or created at startup.
+    /// TODO: Wire into peer protocol for broadcasting attestation (PKI peer verification).
     #[allow(dead_code)]
     pub pki_attestation: Option<noble_core::ExternalAttestation>,
     /// CA trust store for verifying peer PKI attestations.
+    /// TODO: Wire into peer message validation (PKI peer verification).
     #[allow(dead_code)]
     pub ca_store: Option<CaStore>,
 }
@@ -101,7 +121,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Ensure genesis block is committed if the chain is empty.
         {
-            let s = storage.read().map_err(|e| format!("storage lock: {e}"))?;
+            let s = storage.read();
             if s.get_chain_tip()?.is_none() {
                 let genesis = config.node.network.genesis_block();
                 let block_hash = genesis
@@ -124,7 +144,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Determine chain tip for the consensus engine.
         let tip = storage
             .read()
-            .map_err(|e| format!("storage lock: {e}"))?
             .get_chain_tip()?
             .unwrap_or(noble_storage::ChainTip {
                 block_hash: Hash256::ZERO,
@@ -133,7 +152,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
         let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
-            let s = storage.read().map_err(|e| format!("storage lock: {e}"))?;
+            let s = storage.read();
             s.get_block_header(&tip.block_hash).ok()
         } else {
             None
@@ -152,12 +171,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 Ok(bytes) => {
                     use noble_codec::NobleCbor;
                     ValidatorList::from_cbor(&bytes).unwrap_or_else(|e| {
-                        tracing::warn!("Failed to load validator list: {e}, starting empty");
+                        tracing::warn!(
+                            task = "config_load",
+                            "Failed to load validator list: {e}, starting empty"
+                        );
                         ValidatorList::new()
                     })
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read validator list file: {e}, starting empty");
+                    tracing::warn!(
+                        task = "config_load",
+                        "Failed to read validator list file: {e}, starting empty"
+                    );
                     ValidatorList::new()
                 }
             }
@@ -210,10 +235,39 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     pub fn chain_height(&self) -> u64 {
         self.storage
             .read()
+            .get_chain_tip()
             .ok()
-            .and_then(|s| s.get_chain_tip().ok().flatten())
+            .flatten()
             .map(|tip| tip.height)
             .unwrap_or(0)
+    }
+
+    /// Refresh all Prometheus gauge metrics from current node state.
+    fn refresh_metrics(&self, m: &NobleMetrics) {
+        // Chain height
+        let height = self.chain_height();
+        m.chain_height.set(height as f64);
+
+        // Connected peers
+        let peer_count = self.network_stats.read().peer_count;
+        m.connected_peers.set(peer_count as f64);
+
+        // Mempool
+        {
+            let mempool = self.mempool.lock();
+            m.mempool_size.set(mempool.len() as f64);
+        }
+
+        // Consensus phase and cycle elapsed time
+        {
+            let engine = self.consensus.read();
+            // phase_timing() returns (phase_index, phase_remaining_secs, cycle_remaining_secs)
+            let (phase_idx, _phase_remaining, cycle_remaining) = engine.phase_timing();
+            m.cycle_phase.set(phase_idx as f64);
+            // Cycle duration is 1800s (30 min); elapsed = total - remaining
+            m.cycle_elapsed_secs
+                .set((1800u64.saturating_sub(cycle_remaining)) as f64);
+        }
     }
 
     /// Run an integrity check on the most recent `count` blocks.
@@ -221,24 +275,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     pub fn verify_recent_blocks(&self, count: u64) -> IntegrityReport {
         let height = self.chain_height();
         let start = height.saturating_sub(count.saturating_sub(1));
-        let storage = self.storage.read().unwrap_or_else(|e| e.into_inner());
-        noble_storage::verify_chain_integrity(&*storage, self.chain_id, start, height)
+        let guard = self.storage.read();
+        noble_storage::verify_chain_integrity(&*guard, self.chain_id, start, height)
     }
 
     /// Rollback the chain to the given height, recalculating balances.
-    /// Used when corruption is detected.
+    /// Used when corruption is detected or from the CLI `chain rollback` command (S17-C).
     #[allow(dead_code)]
     pub fn rollback_to_height(
         &self,
         target_height: u64,
     ) -> Result<noble_storage::ChainTip, Box<dyn std::error::Error>> {
-        let storage = self
-            .storage
-            .read()
-            .map_err(|e| format!("storage lock: {e}"))?;
+        let storage = self.storage.read();
         let tip = storage.rollback_to_height(target_height, self.chain_id)?;
         // Update consensus engine tip
-        if let Ok(mut engine) = self.consensus.write() {
+        {
+            let mut engine = self.consensus.write();
             engine.update_tip(tip.height, tip.block_hash);
         }
         Ok(tip)
@@ -253,6 +305,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         self,
         config: &NodeConfig,
         trace_handle: Option<Arc<noble_api::trace_types::TraceHandle>>,
+        metrics: Option<NobleMetrics>,
     ) -> Result<(), NodeError> {
         // --- Parse port numbers from config addresses ---
         let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
@@ -277,7 +330,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         let p2p_port = network.bound_port;
         let network_cmd = network.command_sender();
-        tracing::info!("P2P network started on port {p2p_port}");
+        tracing::info!(
+            task = "node_startup",
+            "P2P network started on port {p2p_port}"
+        );
 
         // --- Initialize TOTP auth ---
         let (totp_validator, totp_secret_path) =
@@ -296,6 +352,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             match noble_api::ip_filter::IpFilter::new(&config.api.allowed_ips) {
                 Ok(f) => {
                     tracing::info!(
+                        task = "node_startup",
                         "IP access control enabled: {} entries",
                         config.api.allowed_ips.len()
                     );
@@ -303,6 +360,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 Err(e) => {
                     tracing::error!(
+                        task = "node_startup",
                         "Invalid allowed_ips config: {e} — falling back to localhost-only"
                     );
                     None
@@ -310,22 +368,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         };
 
-        // --- Derive gateway key (first wallet key, if any) ---
-        let gateway_key = {
-            let ks = self
-                .wallet_keystore
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            ks.list_keys()
-                .ok()
-                .and_then(|keys| keys.into_iter().next())
-                .map(|pk| pk.to_wire_bytes())
-        };
-        if gateway_key.is_some() {
-            tracing::info!("Gateway fee split enabled (wallet key found)");
-        } else {
-            tracing::info!("Gateway fee split disabled (no wallet key yet)");
-        }
+        // --- Resolve gateway key ---
+        let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
 
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
@@ -344,6 +388,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 3, // burst multiplier
             ))),
             totp_validator,
+            totp_scope: noble_api::middleware::TotpScope::from_config(&config.api.totp_scope),
             totp_secret_path,
             rpc_port,
             ws_port,
@@ -353,7 +398,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cycle_phase_tx: cycle_phase_tx.clone(),
             peer_update_tx: peer_update_tx.clone(),
             trace_handle,
-            gateway_key,
+            gateway_key: RwLock::new(gateway_key),
+            gateway_key_path: if config.gateway.key_path.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(&config.gateway.key_path))
+            },
             ip_filter: ip_filter.clone(),
             validator_list_path: Some(config.consensus.validator_list_path.clone()),
             peer_info: self.peer_info.clone(),
@@ -367,12 +417,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             config.api.rpc_addr.clone()
         };
 
+        // Clone rate limiter reference before api_state is consumed.
+        let rate_limiter_ref = api_state.rate_limiter.clone();
+
         // --- Start RPC server ---
-        let rpc_handle = noble_api::server::start_server(api_state, &rpc_bind_addr)
+        let rpc_histogram = metrics
+            .as_ref()
+            .map(|m| std::sync::Arc::new(m.rpc_request_duration.clone()));
+        let rpc_handle = noble_api::server::start_server(api_state, &rpc_bind_addr, rpc_histogram)
             .await
             .map_err(|e| NodeError::Api(e.to_string()))?;
 
-        tracing::info!("JSON-RPC server listening on {}", rpc_bind_addr);
+        tracing::info!(
+            task = "node_startup",
+            "JSON-RPC server listening on {}",
+            rpc_bind_addr
+        );
 
         // --- Start embedded GUI server ---
         let gui_dir = if config.api.gui_dir.is_empty() {
@@ -382,7 +442,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             if p.join("index.html").exists() {
                 Some(p)
             } else {
-                tracing::warn!("Configured gui_dir {} not found", config.api.gui_dir);
+                tracing::warn!(
+                    task = "node_startup",
+                    "gui_dir not found: {}",
+                    config.api.gui_dir
+                );
                 None
             }
         };
@@ -401,11 +465,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if let Err(e) =
                     crate::gui_server::start_gui_server(gui_addr, gui_path, gui_filter).await
                 {
-                    tracing::error!("GUI server error: {e}");
+                    tracing::error!(task = "node_startup", "GUI server error: {e}");
                 }
             });
         } else {
-            tracing::info!("GUI directory not found — dashboard server not started");
+            tracing::info!(
+                task = "node_startup",
+                "GUI directory not found — dashboard server not started"
+            );
+        }
+
+        // --- Start Prometheus metrics server ---
+        if let Some(ref m) = metrics {
+            let metrics_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
+                config
+                    .metrics
+                    .prometheus_addr
+                    .replace("127.0.0.1", "0.0.0.0")
+            } else {
+                config.metrics.prometheus_addr.clone()
+            };
+            match crate::metrics::start_metrics_server(&metrics_addr, m.clone()).await {
+                Ok(_handle) => {
+                    tracing::info!(
+                        task = "node_startup",
+                        "Prometheus metrics server listening on {metrics_addr}"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(task = "node_startup", "Failed to start metrics server: {e}");
+                }
+            }
         }
 
         // --- Consensus tick interval ---
@@ -416,7 +506,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mut expiry_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         expiry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // --- Metrics refresh interval (every 10s alongside consensus tick) ---
+        let mut metrics_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // --- Rate limiter cleanup interval (every 60s, removes stale per-IP buckets) ---
+        let mut rate_limit_cleanup_interval =
+            tokio::time::interval(std::time::Duration::from_secs(60));
+        rate_limit_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         tracing::info!(
+            task = "node_startup",
             "Node event loop started — chain height: {}",
             self.chain_height()
         );
@@ -435,10 +535,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 &new_tx_tx,
                                 &peer_update_tx,
                                 &cycle_phase_tx,
+                                &metrics,
                             );
                         }
                         None => {
-                            tracing::warn!("Network event channel closed — shutting down");
+                            tracing::warn!(task = "node_shutdown", "Network event channel closed — shutting down");
                             break;
                         }
                     }
@@ -452,19 +553,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
 
                     let actions = {
-                        let mut engine = self.consensus.write().unwrap_or_else(|e| e.into_inner());
+                        let mut engine = self.consensus.write();
                         engine.step(CycleEvent::Tick { now })
                     };
-                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx);
+                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &metrics);
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
-                    if let Ok(mut engine) = self.consensus.write() {
+                    {
+                        let mut engine = self.consensus.write();
                         if let Some(history) = engine.take_cycle_history() {
                             if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
-                                if let Ok(storage) = self.storage.read() {
-                                    if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
-                                        tracing::warn!("Failed to persist cycle history: {e}");
-                                    }
+                                let storage = self.storage.read();
+                                if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
+                                    tracing::warn!(task = "consensus", "Failed to persist cycle history: {e}");
                                 }
                             }
                         }
@@ -478,33 +579,48 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .unwrap_or_default()
                         .as_secs();
                     let expired = {
-                        let mut mempool = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut mempool = self.mempool.lock();
                         mempool.expire(now)
                     };
                     if expired > 0 {
-                        tracing::debug!("Swept {expired} expired mempool transactions");
+                        tracing::debug!(task = "mempool", "Swept {expired} expired mempool transactions");
+                    }
+                }
+
+                // Prometheus metrics refresh
+                _ = metrics_interval.tick() => {
+                    if let Some(ref m) = metrics {
+                        self.refresh_metrics(m);
+                    }
+                }
+
+                // Rate limiter cleanup (evict stale per-IP buckets)
+                _ = rate_limit_cleanup_interval.tick() => {
+                    if let Some(ref rl) = rate_limiter_ref {
+                        rl.cleanup();
                     }
                 }
 
                 // Graceful shutdown on CTRL+C
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Received shutdown signal");
+                    tracing::info!(task = "node_shutdown", "Received shutdown signal");
                     break;
                 }
             }
         }
 
         // --- Graceful shutdown ---
-        tracing::info!("Shutting down...");
+        tracing::info!(task = "node_shutdown", "Shutting down...");
         let _ = network_cmd.try_send(NetworkCommand::Shutdown);
         rpc_handle
             .stop()
             .map_err(|e| NodeError::Api(format!("RPC stop: {e}")))?;
-        tracing::info!("Node shutdown complete");
+        tracing::info!(task = "node_shutdown", "Node shutdown complete");
         Ok(())
     }
 
     /// Handle a single network event: route to consensus, update stats, etc.
+    #[allow(clippy::too_many_arguments)]
     fn handle_network_event(
         &self,
         event: &NetworkEvent,
@@ -513,18 +629,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         new_tx_tx: &broadcast::Sender<serde_json::Value>,
         peer_update_tx: &broadcast::Sender<serde_json::Value>,
         cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
+        metrics: &Option<NobleMetrics>,
     ) {
         match event {
             NetworkEvent::PeerConnected { peer_id, addr, .. } => {
-                let new_count = if let Ok(mut stats) = self.network_stats.write() {
+                let new_count = {
+                    let mut stats = self.network_stats.write();
                     stats.peer_count += 1;
                     stats.inbound_count += 1; // simplified; real impl tracks direction
                     stats.peer_count
-                } else {
-                    0
                 };
                 // AUD2-C1: Wire peer count to consensus engine so compute_majority works
-                if let Ok(mut engine) = self.consensus.write() {
+                {
+                    let mut engine = self.consensus.write();
                     engine.set_peer_count(new_count);
                 }
                 // H-004: Track peer info for getPeerInfo RPC.
@@ -533,7 +650,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                if let Ok(mut info) = self.peer_info.write() {
+                {
+                    let mut info = self.peer_info.write();
                     info.insert(
                         hex_pid.clone(),
                         noble_api::state::PeerInfoEntry {
@@ -550,22 +668,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                 }));
-                tracing::debug!("Peer connected: {addr}");
+                tracing::debug!(task = "peer_tracking", "Peer connected: {addr}");
             }
             NetworkEvent::PeerDisconnected { peer_id } => {
-                let new_count = if let Ok(mut stats) = self.network_stats.write() {
+                let new_count = {
+                    let mut stats = self.network_stats.write();
                     stats.peer_count = stats.peer_count.saturating_sub(1);
                     stats.peer_count
-                } else {
-                    0
                 };
                 // AUD2-C1: Update consensus engine peer count on disconnect too
-                if let Ok(mut engine) = self.consensus.write() {
+                {
+                    let mut engine = self.consensus.write();
                     engine.set_peer_count(new_count);
                 }
                 // H-004: Remove from live peer info.
                 let hex_pid = hex::encode(peer_id);
-                if let Ok(mut info) = self.peer_info.write() {
+                {
+                    let mut info = self.peer_info.write();
                     info.remove(&hex_pid);
                 }
                 let _ = peer_update_tx.send(serde_json::json!({
@@ -574,7 +693,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }));
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
-                tracing::warn!("Peer banned: {} — {reason}", hex::encode(peer_id));
+                tracing::warn!(
+                    task = "peer_tracking",
+                    "Peer banned: {} — {reason}",
+                    hex::encode(peer_id)
+                );
             }
             NetworkEvent::TransactionAnnounced { tx_id, .. } => {
                 let _ = new_tx_tx.send(serde_json::json!({
@@ -585,10 +708,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Route to consensus engine
                 if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {
                     let actions = {
-                        let mut engine = self.consensus.write().unwrap_or_else(|e| e.into_inner());
+                        let mut engine = self.consensus.write();
                         engine.step(cycle_event)
                     };
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
                 }
             }
         }
@@ -602,14 +725,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         actions: Vec<CycleIo>,
         network_cmd: &mpsc::Sender<NetworkCommand>,
         new_block_tx: &broadcast::Sender<serde_json::Value>,
+        metrics: &Option<NobleMetrics>,
     ) {
         for action in actions {
             match action {
                 CycleIo::CommitBlock(block) => {
+                    let commit_start = std::time::Instant::now();
                     let block_hash = match block.header.compute_block_hash() {
                         Ok(h) => h,
                         Err(e) => {
-                            tracing::error!("Failed to compute block hash: {e}");
+                            tracing::error!(
+                                task = "block_commit",
+                                "Failed to compute block hash: {e}"
+                            );
                             continue;
                         }
                     };
@@ -619,27 +747,40 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .filter_map(|tx| tx.compute_tx_id(self.chain_id).ok())
                         .collect();
 
-                    if let Ok(storage) = self.storage.read() {
+                    {
+                        let storage = self.storage.read();
                         if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
-                            tracing::error!("Failed to commit block {}: {e}", block.header.height);
+                            tracing::error!(
+                                task = "block_commit",
+                                "Failed to commit block {}: {e}",
+                                block.header.height
+                            );
                             continue;
                         }
                     }
 
+                    // Record block commit duration in Prometheus.
+                    if let Some(ref m) = metrics {
+                        m.block_validation_duration
+                            .observe(commit_start.elapsed().as_secs_f64());
+                    }
+
                     // AUD3-D5/D6: Update consensus tip with full header for B2/B3/B5/B6 validation.
-                    if let Ok(mut engine) = self.consensus.write() {
+                    {
+                        let mut engine = self.consensus.write();
                         engine.update_tip_with_header(block.header.clone());
                     }
 
                     // Remove committed txs from mempool
                     {
-                        let mut mempool = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut mempool = self.mempool.lock();
                         for tx_id in &tx_ids {
                             mempool.remove(tx_id);
                         }
                     }
 
                     tracing::info!(
+                        task = "block_commit",
                         "Block {} committed (hash: {}, txs: {})",
                         block.header.height,
                         hex::encode(block_hash.as_bytes()),
@@ -658,30 +799,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .unwrap_or_default()
                         .as_secs();
 
-                    let storage = match self.storage.read() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
+                    let storage = self.storage.read();
                     let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
                     let balance_lookup = StorageBalanceLookupAdapter { storage: &*storage };
-                    let mut mempool = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut mempool = self.mempool.lock();
                     for tx in txs {
                         let _ = mempool.admit(&tx, now, &chain_lookup, &balance_lookup);
                     }
                 }
                 CycleIo::Log(msg) => {
-                    tracing::info!("[consensus] {msg}");
+                    tracing::info!(task = "consensus", "[consensus] {msg}");
                 }
                 CycleIo::EmitMetric { name, value } => {
-                    tracing::debug!("metric: {name} = {value}");
+                    tracing::debug!(task = "consensus", "metric: {name} = {value}");
                 }
                 CycleIo::SetTimer { duration_secs } => {
-                    tracing::debug!("consensus timer: {duration_secs}s (handled by tick interval)");
+                    tracing::debug!(
+                        task = "consensus",
+                        "consensus timer: {duration_secs}s (handled by tick interval)"
+                    );
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
                     let txs: Vec<noble_core::Transaction> = {
-                        let mempool = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+                        let mempool = self.mempool.lock();
                         mempool
                             .iter_by_fee_desc()
                             .take(max_count)
@@ -689,17 +830,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             .collect()
                     };
                     let actions = {
-                        let mut engine = self.consensus.write().unwrap_or_else(|e| e.into_inner());
+                        let mut engine = self.consensus.write();
                         engine.step(CycleEvent::MempoolTransactions(txs))
                     };
                     // Recursively process any actions from the proposal
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
                 }
                 other => {
                     // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network
                     let cmds = bridge::cycle_io_to_network_commands(other);
                     for cmd in cmds {
-                        let _ = network_cmd.try_send(cmd);
+                        if let Err(e) = network_cmd.try_send(cmd) {
+                            tracing::warn!(
+                                task = "consensus_broadcast",
+                                "network command dropped (channel full): {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -737,13 +883,17 @@ fn load_validator_key(
     path: &str,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
     if path.is_empty() {
-        tracing::info!("Observer mode: no validator key configured");
+        tracing::info!(
+            task = "config_load",
+            "Observer mode: no validator key configured"
+        );
         return None;
     }
 
     let key_path = std::path::Path::new(path);
     if !key_path.exists() {
         tracing::warn!(
+            task = "config_load",
             "Validator key file not found: {} — running in observer mode",
             path
         );
@@ -753,13 +903,17 @@ fn load_validator_key(
     let raw = match std::fs::read(key_path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::error!("Failed to read validator key file: {e}");
+            tracing::error!(
+                task = "config_load",
+                "Failed to read validator key file: {e}"
+            );
             return None;
         }
     };
 
     if raw.len() != 33 {
         tracing::error!(
+            task = "config_load",
             "Invalid validator key file: expected 33 bytes (1 scheme_id + 32 key), got {}",
             raw.len()
         );
@@ -774,13 +928,17 @@ fn load_validator_key(
             noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec())
         }
         _ => {
-            tracing::error!("Unknown key scheme_id in validator key file: {scheme_id:#04x}");
+            tracing::error!(
+                task = "config_load",
+                "Unknown key scheme_id in validator key file: {scheme_id:#04x}"
+            );
             return None;
         }
     };
 
     let public_key = private_key.public_key();
     tracing::info!(
+        task = "config_load",
         "Validator mode enabled: {}",
         hex::encode(public_key.to_wire_bytes())
     );
@@ -828,28 +986,101 @@ fn parse_voting_strategy(
             validators: subset.to_vec(),
         },
         other => {
-            tracing::warn!("Unknown voting strategy '{other}', falling back to first_valid");
+            tracing::warn!(
+                task = "config_load",
+                "Unknown voting strategy '{other}', falling back to first_valid"
+            );
             VotingStrategy::FirstValid
         }
     }
 }
 
+/// Resolve the gateway key from config or wallet auto-derivation.
+///
+/// Priority:
+/// 1. If `[gateway] key_path` is set and file exists, load from file.
+/// 2. Else auto-derive from the first wallet key (with deprecation warning if key_path is empty).
+/// 3. If `[gateway] enabled = false`, returns None.
+fn resolve_gateway_key(
+    config: &NodeConfig,
+    wallet_keystore: &Arc<Mutex<noble_wallet::KeyStore>>,
+) -> Option<Vec<u8>> {
+    if !config.gateway.enabled {
+        tracing::info!(task = "config_load", "Gateway fee split disabled by config");
+        return None;
+    }
+
+    // Try loading from explicit key_path first.
+    if !config.gateway.key_path.is_empty() {
+        let path = std::path::Path::new(&config.gateway.key_path);
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let hex_str = contents.trim();
+                match hex::decode(hex_str) {
+                    Ok(bytes) => {
+                        tracing::info!(
+                            task = "config_load",
+                            "gateway key loaded from {}",
+                            config.gateway.key_path
+                        );
+                        return Some(bytes);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task = "config_load",
+                            "Invalid hex in gateway key file {}: {e}",
+                            config.gateway.key_path
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = "config_load",
+                    "Could not read gateway key file {}: {e}",
+                    config.gateway.key_path
+                );
+            }
+        }
+    }
+
+    // Auto-derive from first wallet key.
+    let key = {
+        let ks = wallet_keystore.lock();
+        ks.list_keys()
+            .ok()
+            .and_then(|keys| keys.into_iter().next())
+            .map(|pk| pk.to_wire_bytes())
+    };
+
+    match &key {
+        Some(_) => {
+            if config.gateway.key_path.is_empty() {
+                tracing::info!(
+                    task = "config_load",
+                    "Gateway fee split enabled (auto-derived from first wallet key). \
+                     Set [gateway] key_path for explicit configuration."
+                );
+            } else {
+                tracing::info!(
+                    task = "config_load",
+                    "Gateway fee split enabled (wallet key fallback)"
+                );
+            }
+        }
+        None => {
+            tracing::info!(
+                task = "config_load",
+                "Gateway fee split disabled (no wallet key available)"
+            );
+        }
+    }
+    key
+}
+
 /// Parse port number from a "host:port" address string.
 fn parse_port(addr: &str) -> Option<u16> {
     addr.rsplit(':').next()?.parse().ok()
-}
-
-/// Parse port number from a multiaddr string like "/ip4/0.0.0.0/tcp/8780".
-#[allow(dead_code)]
-fn parse_p2p_port(multiaddr: &str) -> Option<u16> {
-    let parts: Vec<&str> = multiaddr.split('/').collect();
-    // Find the segment after "tcp"
-    for (i, part) in parts.iter().enumerate() {
-        if *part == "tcp" {
-            return parts.get(i + 1)?.parse().ok();
-        }
-    }
-    None
 }
 
 /// Result of TOTP validator initialization.
@@ -882,7 +1113,11 @@ pub fn init_totp_validator(
     let (validator, base32) = if secret_path.exists() {
         let base32 = std::fs::read_to_string(&secret_path)?.trim().to_string();
         let v = TotpValidator::from_base32(&base32)?;
-        tracing::info!("TOTP auth loaded from {}", secret_path.display());
+        tracing::info!(
+            task = "config_load",
+            "TOTP auth loaded from {}",
+            secret_path.display()
+        );
         (v, base32)
     } else {
         let (v, base32) = TotpValidator::generate()?;
@@ -894,6 +1129,7 @@ pub fn init_totp_validator(
             std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
         }
         tracing::info!(
+            task = "config_load",
             "TOTP auth: new secret generated at {}",
             secret_path.display()
         );
@@ -918,6 +1154,7 @@ fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttes
         match crate::pkcs12::load_attestation(&attestation_path) {
             Ok(att) => {
                 tracing::info!(
+                    task = "config_load",
                     "PKI attestation loaded from {} (scheme: {}, scope: {})",
                     attestation_path.display(),
                     att.scheme,
@@ -926,7 +1163,10 @@ fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttes
                 return Some(att);
             }
             Err(e) => {
-                tracing::warn!("Failed to load saved PKI attestation: {e}");
+                tracing::warn!(
+                    task = "config_load",
+                    "Failed to load saved PKI attestation: {e}"
+                );
             }
         }
     }
@@ -939,6 +1179,7 @@ fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttes
     let p12_path = std::path::Path::new(&config.identity.pkcs12_path);
     if !p12_path.exists() {
         tracing::warn!(
+            task = "config_load",
             "PKCS#12 file not found: {} — skipping PKI binding",
             p12_path.display()
         );
@@ -952,20 +1193,26 @@ fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttes
     ) {
         Ok(id) => id,
         Err(e) => {
-            tracing::error!("Failed to load PKCS#12 file: {e}");
+            tracing::error!(task = "config_load", "Failed to load PKCS#12 file: {e}");
             return None;
         }
     };
 
     if let Some(cn) = identity.subject_cn() {
-        tracing::info!("PKCS#12 identity loaded: CN={cn}");
+        tracing::info!(task = "config_load", "PKCS#12 identity loaded: CN={cn}");
     }
 
     // We need the node's identity key to create the binding.
     // For now, use a placeholder — the real key comes from the validator key or wallet.
     // In practice, the user would configure which key to bind.
-    tracing::info!("PKCS#12 loaded but no identity key configured for binding yet");
-    tracing::info!("To complete PKI binding, set validator_key_path in [consensus] section");
+    tracing::info!(
+        task = "config_load",
+        "PKCS#12 loaded but no identity key configured for binding yet"
+    );
+    tracing::info!(
+        task = "config_load",
+        "To complete PKI binding, set validator_key_path in [consensus] section"
+    );
 
     None
 }
@@ -980,6 +1227,7 @@ fn init_ca_store(config: &NodeConfig) -> Option<CaStore> {
     match CaStore::from_directory(ca_dir) {
         Ok(store) => {
             tracing::info!(
+                task = "config_load",
                 "CA trust store loaded: {} certificates from {}",
                 store.cert_count(),
                 ca_dir.display()
@@ -987,7 +1235,7 @@ fn init_ca_store(config: &NodeConfig) -> Option<CaStore> {
             Some(store)
         }
         Err(e) => {
-            tracing::warn!("Failed to load CA trust store: {e}");
+            tracing::warn!(task = "config_load", "Failed to load CA trust store: {e}");
             None
         }
     }
@@ -1022,18 +1270,18 @@ mod tests {
         assert_eq!(node.chain_id, noble_core::MAINNET_CHAIN_ID);
 
         // Mempool should be empty.
-        assert_eq!(node.mempool.lock().unwrap().len(), 0);
+        assert_eq!(node.mempool.lock().len(), 0);
 
         // Consensus engine should track genesis tip.
-        let (tip_height, tip_hash) = node.consensus.read().unwrap().chain_tip();
+        let (tip_height, tip_hash) = node.consensus.read().chain_tip();
         assert_eq!(tip_height, 0);
         assert_ne!(tip_hash, Hash256::ZERO);
 
         // Wallet keystore should be created (locked).
-        assert!(!node.wallet_keystore.lock().unwrap().is_unlocked());
+        assert!(!node.wallet_keystore.lock().is_unlocked());
 
         // Network stats should be zeroed.
-        let stats = node.network_stats.read().unwrap();
+        let stats = node.network_stats.read();
         assert_eq!(stats.peer_count, 0);
     }
 
@@ -1050,8 +1298,7 @@ mod tests {
         // Init again with the same storage — should not duplicate genesis.
         let storage = Arc::try_unwrap(node1.storage)
             .unwrap_or_else(|_| panic!("storage has multiple owners"))
-            .into_inner()
-            .unwrap();
+            .into_inner();
         let node2 = Node::init_with_storage(&config, storage).unwrap();
         let height2 = node2.chain_height();
 
@@ -1107,7 +1354,7 @@ mod tests {
         assert_eq!(node.chain_height(), 0);
 
         // Consensus engine tip should still match
-        let (engine_height, engine_hash) = node.consensus.read().unwrap().chain_tip();
+        let (engine_height, engine_hash) = node.consensus.read().chain_tip();
         assert_eq!(engine_height, tip.height);
         assert_eq!(engine_hash, tip.block_hash);
     }
@@ -1163,9 +1410,9 @@ mod tests {
 
         // Both should accept the same code.
         let v1 = validator.unwrap();
-        let v1_locked = v1.read().unwrap();
+        let v1_locked = v1.read();
         let v2_locked = v2.unwrap();
-        let v2_locked = v2_locked.read().unwrap();
+        let v2_locked = v2_locked.read();
         assert_eq!(v1_locked.secret_base32(), v2_locked.secret_base32());
     }
 
@@ -1177,6 +1424,17 @@ mod tests {
         assert_eq!(parse_port("0.0.0.0:8784"), Some(8784));
         assert_eq!(parse_port("127.0.0.1:0"), Some(0));
         assert_eq!(parse_port("no_colon"), None);
+    }
+
+    /// Parse port number from a multiaddr string like "/ip4/0.0.0.0/tcp/8780".
+    fn parse_p2p_port(multiaddr: &str) -> Option<u16> {
+        let parts: Vec<&str> = multiaddr.split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if *part == "tcp" {
+                return parts.get(i + 1)?.parse().ok();
+            }
+        }
+        None
     }
 
     #[test]
@@ -1227,8 +1485,16 @@ mod tests {
             addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
             chain_tip: None,
         };
-        node.handle_network_event(&connect_event, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx);
-        assert_eq!(node.network_stats.read().unwrap().peer_count, 1);
+        node.handle_network_event(
+            &connect_event,
+            &tx,
+            &block_tx,
+            &tx_tx,
+            &peer_tx,
+            &cycle_tx,
+            &None,
+        );
+        assert_eq!(node.network_stats.read().peer_count, 1);
 
         // Peer disconnect should decrement
         let disconnect_event = NetworkEvent::PeerDisconnected {
@@ -1241,8 +1507,9 @@ mod tests {
             &tx_tx,
             &peer_tx,
             &cycle_tx,
+            &None,
         );
-        assert_eq!(node.network_stats.read().unwrap().peer_count, 0);
+        assert_eq!(node.network_stats.read().peer_count, 0);
     }
 
     #[test]
@@ -1307,14 +1574,22 @@ mod tests {
             addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
             chain_tip: None,
         };
-        node.handle_network_event(&connect_event, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx);
+        node.handle_network_event(
+            &connect_event,
+            &tx,
+            &block_tx,
+            &tx_tx,
+            &peer_tx,
+            &cycle_tx,
+            &None,
+        );
 
         // Consensus engine should now have peer_count > 0
-        let engine = node.consensus.read().unwrap();
+        let engine = node.consensus.read();
         // The engine doesn't expose total_peers directly, but set_peer_count was called
         // We can verify indirectly: peer_count in stats matches
         drop(engine);
-        assert_eq!(node.network_stats.read().unwrap().peer_count, 1);
+        assert_eq!(node.network_stats.read().peer_count, 1);
     }
 
     // AUD2-H2: Verify rate limiter is wired (not None)
@@ -1351,7 +1626,7 @@ mod tests {
             },
             CycleIo::SetTimer { duration_secs: 10 },
         ];
-        node.process_cycle_actions(actions, &tx, &block_tx);
+        node.process_cycle_actions(actions, &tx, &block_tx, &None);
         // No assertion needed — just verifying no panics
     }
 }
