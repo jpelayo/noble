@@ -104,15 +104,17 @@ class Noble < Formula
 
   def caveats
     <<~EOS
-      Get started:
+      CLI setup:
 
         noble-node setup               # configure identity, wallet, TOTP
         brew services start noble       # start as background service
 
-      Or on a headless server (GUI-first):
+      GUI setup (headless):
 
         brew services start noble       # starts in setup mode
         open http://<server-ip>:8785    # complete wizard in browser
+
+      Open this port to internet: 8780 (or at least one of these 8780, 8781, 8782)
 
       Paths:
         Config:    #{etc}/noble/noble.toml
@@ -120,8 +122,6 @@ class Noble < Formula
         Keystore:  #{var}/noble/keystore
         Logs:      #{var}/log/noble-node.log
         GUI:       #{prefix}/noble-gui/
-
-      Ports:  8780 P2P · 8783 RPC · 8784 WS · 8785 GUI
     EOS
   end
 

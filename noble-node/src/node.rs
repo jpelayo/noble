@@ -311,12 +311,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
         let ws_port = parse_port(&config.api.ws_addr).unwrap_or(8784);
 
+        // --- Load node identity (before network so we can use its preferred port) ---
+        let node_identity = load_identity(config);
+        let identity_path = config.storage.data_dir.join("identity.json");
+
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone()));
 
         let mut net_config = noble_network::NetworkConfig::default();
-        net_config.listen_addr = config.network.listen_addr.clone();
+        // Use identity's preferred port when identity.json exists; otherwise use config default.
+        net_config.listen_addr = if identity_path.exists() {
+            format!("/ip4/0.0.0.0/tcp/{}", node_identity.p2p_port)
+        } else {
+            config.network.listen_addr.clone()
+        };
         net_config.bootstrap_peers = config.network.seeds.clone();
         net_config.max_outbound = (config.network.max_peers as usize / 5).max(4);
         net_config.max_inbound =
@@ -382,10 +391,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
-
-        // --- Load node identity ---
-        let node_identity = load_identity(config);
-        let identity_path = config.storage.data_dir.join("identity.json");
 
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
@@ -1003,6 +1008,7 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
         host_address: config.identity.host_address.clone(),
         wants_to_validate: config.identity.wants_to_validate,
         wants_to_vote: config.identity.wants_to_vote,
+        p2p_port: 8780,
     }
 }
 

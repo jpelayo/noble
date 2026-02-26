@@ -135,12 +135,12 @@ export function init(root, ctx) {
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.innerHTML = `
-          <td>${formatNumber(b.header.height)}</td>
+          <td>${formatNumber(b.height)}</td>
           <td class="mono">${truncateHash(b.hash)}</td>
-          <td>${b.header.tx_count}</td>
-          <td>${timeAgo(b.header.timestamp)}</td>
+          <td>${b.tx_count}</td>
+          <td>${timeAgo(b.timestamp)}</td>
         `;
-        tr.addEventListener('click', () => { location.hash = `#/block/${b.header.height}`; });
+        tr.addEventListener('click', () => { location.hash = `#/block/${b.height}`; });
         ovBlocks.appendChild(tr);
       }
 
@@ -185,7 +185,7 @@ export function init(root, ctx) {
       grid: { left: 40, right: 16, top: 16, bottom: 30 },
       xAxis: {
         type: 'category',
-        data: blocks.map(b => `#${b.header.height}`),
+        data: blocks.map(b => `#${b.height}`),
         axisLabel: { color: 'var(--chart-text)' },
         axisLine: { lineStyle: { color: 'var(--chart-grid)' } },
       },
@@ -199,7 +199,7 @@ export function init(root, ctx) {
         smooth: true,
         areaStyle: { opacity: 0.15 },
         symbolSize: 4,
-        data: blocks.map(b => b.header.tx_count),
+        data: blocks.map(b => b.tx_count),
         itemStyle: { color: '#3b82f6' },
         areaStyle: { color: 'rgba(59,130,246,0.15)' },
       }],

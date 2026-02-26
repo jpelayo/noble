@@ -4,8 +4,8 @@
 //! Embedded HTTP server for the NOBLE dashboard GUI.
 //!
 //! Serves static files from the `noble-gui/` directory on a dedicated port
-//! (default 8785). Uses `tower_http::services::ServeDir` with SPA fallback
-//! so that unknown paths resolve to `index.html`.
+//! (default 8785). Uses `tower_http::services::ServeDir` without an SPA
+//! fallback — NOBLE uses hash-based routing so all navigation stays on `/`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use axum::extract::ConnectInfo;
 use axum::middleware;
 use axum::response::IntoResponse;
 use axum::Router;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use noble_api::ip_filter::IpFilter;
@@ -30,9 +30,7 @@ pub async fn start_gui_server(
     gui_dir: PathBuf,
     ip_filter: Option<IpFilter>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let index_path = gui_dir.join("index.html");
-
-    let serve_dir = ServeDir::new(&gui_dir).fallback(ServeFile::new(index_path));
+    let serve_dir = ServeDir::new(&gui_dir);
 
     let remote_access = ip_filter.as_ref().is_some_and(|f| f.has_remote_access());
 

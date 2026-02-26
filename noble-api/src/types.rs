@@ -680,6 +680,7 @@ pub struct NodeIdentityResponse {
     pub host_address: String,
     pub wants_to_validate: bool,
     pub wants_to_vote: bool,
+    pub p2p_port: u16,
 }
 
 /// Response for `noble_setNodeIdentity`.

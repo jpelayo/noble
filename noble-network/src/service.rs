@@ -77,11 +77,18 @@ pub async fn start_network(
 
     let mut swarm = build_swarm(keypair, &config)?;
 
-    // Auto-bind fallback: try P2P_PORTS in order if the configured port fails.
+    // Auto-bind: try the configured port first, then fall back to the other P2P ports.
     let base_addr = extract_base_addr(&config.listen_addr);
+    let configured_port = extract_port(&config.listen_addr).unwrap_or(crate::config::P2P_PORT_PRIMARY);
+    let mut ports_to_try: Vec<u16> = vec![configured_port];
+    for &port in &crate::config::P2P_PORTS {
+        if port != configured_port {
+            ports_to_try.push(port);
+        }
+    }
     let bound_port = {
         let mut bound = None;
-        for &port in &crate::config::P2P_PORTS {
+        for port in ports_to_try {
             let addr_str = format!("{base_addr}/tcp/{port}");
             match addr_str.parse::<Multiaddr>() {
                 Ok(maddr) => match swarm.listen_on(maddr) {
@@ -1163,6 +1170,20 @@ async fn handle_command(
     }
 
     false
+}
+
+/// Extract the TCP port from a multiaddr string.
+///
+/// E.g. "/ip4/0.0.0.0/tcp/8781" → Some(8781).
+/// Returns None if no `/tcp/` segment is found or the port is not a valid u16.
+fn extract_port(multiaddr_str: &str) -> Option<u16> {
+    multiaddr_str
+        .rsplit("/tcp/")
+        .next()?
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Extract the base multiaddr (everything before `/tcp/PORT`).

@@ -73,6 +73,7 @@ export function init(root, ctx) {
   const state = {
     network: 'mainnet',
     nodeName: '',
+    p2pPort: 8780,
     roleValue: 'FullNode',
     govClass: 'individual',
     orgType: 'Individual',
@@ -160,6 +161,7 @@ export function init(root, ctx) {
       case 'welcome':
         state.network = body.querySelector('input[name="network"]:checked')?.value || state.network;
         state.nodeName = body.querySelector('#setup-node-name')?.value || '';
+        state.p2pPort = parseInt(body.querySelector('input[name="p2pPort"]:checked')?.value || '8780', 10);
         break;
       case 'role':
         state.roleValue = body.querySelector('input[name="role"]:checked')?.value || state.roleValue;
@@ -197,6 +199,12 @@ export function init(root, ctx) {
         <label for="setup-node-name">Node Name (optional)</label>
         <input type="text" id="setup-node-name" maxlength="64" placeholder="e.g. my-noble-node" value="${esc(state.nodeName)}" autocomplete="off" spellcheck="false">
       </div>
+      <div style="margin-top:var(--gap-lg)">
+        <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm);color:var(--text-secondary)">
+          P2P Port <span style="font-weight:400;color:var(--text-muted)">(open this port to the internet)</span>
+        </label>
+        <div id="setup-p2p-port" style="display:flex;gap:var(--gap);flex-wrap:wrap"></div>
+      </div>
     `;
     const networkContainer = body.querySelector('#setup-networks');
     NETWORKS.forEach(n => {
@@ -216,6 +224,24 @@ export function init(root, ctx) {
       });
       if (checked) card.style.borderColor = 'var(--accent)';
       networkContainer.appendChild(card);
+    });
+
+    const portContainer = body.querySelector('#setup-p2p-port');
+    [8780, 8781, 8782].forEach(p => {
+      const checked = state.p2pPort === p ? 'checked' : '';
+      const card = document.createElement('label');
+      card.style.cssText = 'flex:1;min-width:100px;padding:var(--gap);background:var(--bg-tertiary);border:2px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:border-color 0.15s';
+      card.innerHTML = `
+        <input type="radio" name="p2pPort" value="${p}" ${checked} style="margin-right:var(--gap-sm)">
+        <strong>${p}</strong>${p === 8780 ? ' <span style="color:var(--text-muted);font-size:var(--font-size-xs)">(default)</span>' : ''}
+      `;
+      const radio = card.querySelector('input');
+      radio.addEventListener('change', () => {
+        portContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
+        if (radio.checked) card.style.borderColor = 'var(--accent)';
+      });
+      if (checked) card.style.borderColor = 'var(--accent)';
+      portContainer.appendChild(card);
     });
   }
 
@@ -529,6 +555,7 @@ export function init(root, ctx) {
       <dl class="detail-grid">
         <dt>Network</dt><dd>${esc(NETWORKS.find(n => n.id === state.network)?.name || state.network)}</dd>
         <dt>Node Name</dt><dd>${esc(state.nodeName || '(not set)')}</dd>
+        <dt>P2P Port</dt><dd>${state.p2pPort}</dd>
         <dt>Role</dt><dd>${esc(roleObj.label)}</dd>
         <dt>Org Type</dt><dd>${esc(state.orgType)}</dd>
         <dt>Org Name</dt><dd>${esc(state.orgName || '(not set)')}</dd>
@@ -576,6 +603,7 @@ export function init(root, ctx) {
         host_address: '',
         wants_to_validate: roleObj.validate,
         wants_to_vote: roleObj.vote,
+        p2p_port: state.p2pPort,
       });
 
       body.innerHTML = `

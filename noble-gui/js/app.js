@@ -241,30 +241,50 @@ async function bootstrap() {
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
     state.cyclePhase = cycleStatus.phase;
-
-    // First-run detection: redirect to setup wizard if no wallet key exists
-    try {
-      const walletInfo = await rpc.call('noble_getWalletInfo');
-      if (walletInfo.key_count === 0 && location.hash !== '#/setup') {
-        location.hash = '#/setup';
-      }
-    } catch { /* wallet RPC not available — skip first-run check */ }
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();
       return;
     }
     console.error('[app] bootstrap error:', e);
+    // Continue — still attempt first-run detection even if bootstrap RPCs fail.
   }
+
+  // First-run detection: always runs, independent of bootstrap success.
+  // Uses noble_getNodeIdentity (node_name empty = setup mode) as the primary
+  // signal; wallet key_count === 0 is a secondary confirmation.
+  await checkFirstRun();
+}
+
+async function checkFirstRun() {
+  if (location.hash === '#/setup') return;
+  try {
+    const identity = await rpc.call('noble_getNodeIdentity');
+    // Setup mode: node_name is empty (not yet configured via wizard or CLI).
+    if (!identity.node_name) {
+      location.hash = '#/setup';
+      return;
+    }
+    // Secondary check: wallet has no keys (CLI setup done but wallet skipped).
+    try {
+      const w = await rpc.call('noble_getWalletInfo');
+      if (w.key_count === 0) location.hash = '#/setup';
+    } catch { /* wallet RPC unavailable — skip secondary check */ }
+  } catch { /* RPC unavailable (TOTP locked, not connected, etc.) — skip */ }
 }
 
 // ── WebSocket subscriptions for global state ──
+// Block notifications from backend: { height, hash, tx_count }
 ws.subscribe('newBlocks', (block) => {
-  state.blockHeight = block.header.height;
+  state.blockHeight = block.height;
 });
 
-ws.subscribe('mempoolStats', (info) => {
-  state.mempoolSize = info.count;
+// New-transaction notifications: { tx_id }
+// Use as a trigger to refresh the mempool count via HTTP.
+ws.subscribe('newTransactions', () => {
+  rpc.call('noble_getMempoolInfo').then(info => {
+    state.mempoolSize = info.count;
+  }).catch(() => {});
 });
 
 ws.subscribe('cyclePhaseChange', (status) => {

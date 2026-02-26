@@ -519,10 +519,24 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .interact()?;
 
     let (listen_addr, seeds, max_peers) = if configure_network {
-        let addr: String = Input::new()
-            .with_prompt("P2P listen address")
-            .default(defaults.network.listen_addr.clone())
-            .interact_text()?;
+        let port_options = ["8780 (default)", "8781", "8782"];
+        let current_port = extract_port_from_listen_addr(&defaults.network.listen_addr);
+        let default_idx = match current_port {
+            8781 => 1,
+            8782 => 2,
+            _ => 0,
+        };
+        let port_idx = Select::new()
+            .with_prompt("P2P port (open this port to the internet)")
+            .items(&port_options)
+            .default(default_idx)
+            .interact()?;
+        let port: u16 = match port_idx {
+            1 => 8781,
+            2 => 8782,
+            _ => 8780,
+        };
+        let addr = format!("/ip4/0.0.0.0/tcp/{port}");
 
         let seeds_str: String = Input::new()
             .with_prompt("Seed nodes (comma-separated multiaddrs, or empty)")
@@ -670,6 +684,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         host_address: config.identity.host_address.clone(),
         wants_to_validate: config.identity.wants_to_validate,
         wants_to_vote: config.identity.wants_to_vote,
+        p2p_port: extract_port_from_listen_addr(&config.network.listen_addr),
     }) {
         fs::create_dir_all(&data_dir_path)?;
         let identity_path = data_dir_path.join("identity.json");
@@ -999,6 +1014,17 @@ fn print_summary(config: &NodeConfig, config_path: &str) {
 /// Print a single summary line.
 fn summary_line(label: &str, value: &str) {
     println!("  {:<18} {value}", format!("{label}:"));
+}
+
+/// Extract the TCP port number from a `/ip4/.../tcp/PORT` multiaddr string.
+///
+/// Returns 8780 if the port cannot be parsed.
+fn extract_port_from_listen_addr(addr: &str) -> u16 {
+    addr.rsplit("/tcp/")
+        .next()
+        .and_then(|s| s.split('/').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8780)
 }
 
 // ---------------------------------------------------------------------------

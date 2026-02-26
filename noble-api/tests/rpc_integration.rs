@@ -115,6 +115,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
             host_address: String::new(),
             wants_to_validate: false,
             wants_to_vote: false,
+            p2p_port: 8780,
         })),
         identity_path: None,
     });

@@ -504,8 +504,13 @@ export class MockRpcClient {
         const start = params.start ?? 0;
         const end = Math.min(params.end ?? start + 49, this.chainHeight);
         return this.#chain.blocks.slice(start, end + 1).map(b => ({
-          header: b.header,
+          height: b.header.height,
           hash: b._hash,
+          prev_hash: b.header.prev_hash,
+          merkle_root: b.header.merkle_root,
+          timestamp: b.header.timestamp,
+          tx_count: b.header.tx_count,
+          validator_id: b.header.validator_id,
         }));
       }
 
@@ -1130,6 +1135,7 @@ export class MockRpcClient {
           governance_class: 'individual',
           wants_to_validate: false,
           wants_to_vote: false,
+          p2p_port: 8780,
           pki_attestation: null,
           pkcs12_configured: false,
         };

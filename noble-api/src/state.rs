@@ -36,6 +36,13 @@ pub struct NodeIdentityData {
     pub wants_to_validate: bool,
     #[serde(default)]
     pub wants_to_vote: bool,
+    /// Preferred P2P port (8780, 8781, or 8782). Applied on node restart.
+    #[serde(default = "default_p2p_port")]
+    pub p2p_port: u16,
+}
+
+fn default_p2p_port() -> u16 {
+    8780
 }
 
 /// Network statistics maintained by the node event loop.

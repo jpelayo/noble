@@ -83,6 +83,7 @@ pub trait NodeApi {
         host_address: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
+        p2p_port: Option<u16>,
     ) -> Result<SetNodeIdentityResponse, ErrorObjectOwned>;
 }
 
@@ -289,6 +290,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             host_address: id.host_address.clone(),
             wants_to_validate: id.wants_to_validate,
             wants_to_vote: id.wants_to_vote,
+            p2p_port: id.p2p_port,
         })
     }
 
@@ -303,9 +305,17 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         host_address: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
+        p2p_port: Option<u16>,
     ) -> Result<SetNodeIdentityResponse, ErrorObjectOwned> {
         if node_name.trim().is_empty() {
             return Err(ApiError::InvalidParam("node_name must not be empty".into()).into());
+        }
+
+        let port = p2p_port.unwrap_or(8780);
+        if ![8780u16, 8781, 8782].contains(&port) {
+            return Err(
+                ApiError::InvalidParam("p2p_port must be 8780, 8781, or 8782".into()).into(),
+            );
         }
 
         let new_identity = NodeIdentityData {
@@ -318,6 +328,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             host_address: host_address.unwrap_or_default(),
             wants_to_validate,
             wants_to_vote,
+            p2p_port: port,
         };
 
         // Persist to identity.json atomically.
