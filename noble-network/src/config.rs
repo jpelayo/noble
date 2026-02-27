@@ -20,13 +20,6 @@ pub const P2P_PORTS: [u16; 3] = [P2P_PORT_PRIMARY, P2P_PORT_ALT1, P2P_PORT_ALT2]
 /// JSON-RPC HTTP server port.
 pub const RPC_HTTP_PORT: u16 = 8783;
 
-/// JSON-RPC WebSocket server port.
-///
-/// Deprecated: WebSocket is served on the same port as JSON-RPC (RPC_HTTP_PORT = 8783).
-/// Port 8784 is now allocated to Prometheus metrics (METRICS_PORT).
-#[deprecated(note = "WebSocket shares RPC_HTTP_PORT (8783); use METRICS_PORT for 8784")]
-pub const WS_PORT: u16 = 8784;
-
 /// Prometheus metrics HTTP server port (disabled by default).
 pub const METRICS_PORT: u16 = 8784;
 

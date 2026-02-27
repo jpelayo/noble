@@ -114,13 +114,10 @@ class Noble < Formula
         brew services start noble       # starts in setup mode
         open https://<server-ip>:8785   # complete wizard in browser
 
-      Port allocation:
+      Ports that should be reachable:
 
         8780  P2P (open to internet for full connectivity)
         8783  JSON-RPC + WebSocket (HTTPS/WSS) — open for client/wallet access
-        8784  Prometheus /metrics (disabled by default)
-        8785  Dashboard GUI (HTTPS) — open for browser access
-        8786  Faucet (testnet only)
 
       Paths:
         Config:    #{etc}/noble/noble.toml
