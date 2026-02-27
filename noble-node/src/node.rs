@@ -159,7 +159,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         };
 
         // --- Load validator key (if configured) ---
-        let validator_key = load_validator_key(&config.consensus.validator_key_path);
+        let validator_key = load_validator_key(
+            &config.consensus.validator_key_path,
+            &config.storage.data_dir,
+        );
 
         // --- Build consensus config from TOML ---
         let consensus_config = build_consensus_config(config);
@@ -333,17 +336,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             (config.network.max_peers as usize).saturating_sub(net_config.max_outbound);
         net_config.ban_threshold = config.network.ban_threshold;
         net_config.chain_id = self.chain_id;
+        // Persist the P2P identity keypair so PeerId stays stable across restarts.
+        net_config.data_dir = Some(config.storage.data_dir.clone());
 
         let mut network = noble_network::start_network(net_config, block_provider, tx_provider)
             .await
             .map_err(|e| NodeError::Network(e.to_string()))?;
 
         let p2p_port = network.bound_port;
+        let peer_id_str = network.local_peer_id.to_string();
         let network_cmd = network.command_sender();
         tracing::info!(
             task = "node_startup",
-            "P2P network started on port {p2p_port}"
+            "P2P network started on port {p2p_port} (peer_id: {peer_id_str})"
         );
+
+        // --- Derive validator key info for ApiState ---
+        let (validator_pubkey_str, validator_scheme_str, validator_key_path_str) =
+            compute_validator_key_info(
+                &config.consensus.validator_key_path,
+                &config.storage.data_dir,
+            );
 
         // --- Initialize TOTP auth ---
         let (totp_validator, totp_secret_path) =
@@ -692,6 +705,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cors_scheme: rpc_scheme.to_string(),
             gui_port,
             tls_plaintext_mode,
+            peer_id: peer_id_str,
+            validator_pubkey: validator_pubkey_str,
+            validator_scheme: validator_scheme_str,
+            validator_key_path: validator_key_path_str,
         });
 
         // --- Determine RPC bind address ---
@@ -1183,16 +1200,30 @@ impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
 /// empty or the file cannot be loaded.
 fn load_validator_key(
     path: &str,
+    data_dir: &std::path::Path,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
-    if path.is_empty() {
+    // When validator_key_path is empty, check the data_dir fallback location.
+    // This covers nodes whose validator.key was auto-generated during setup.
+    let key_path_buf;
+    let key_path = if path.is_empty() {
+        let fallback = data_dir.join("validator.key");
+        if !fallback.exists() {
+            tracing::info!(
+                task = "config_load",
+                "Observer mode: no validator key configured"
+            );
+            return None;
+        }
         tracing::info!(
             task = "config_load",
-            "Observer mode: no validator key configured"
+            "validator_key_path not set — using data_dir fallback: {}",
+            fallback.display()
         );
-        return None;
-    }
-
-    let key_path = std::path::Path::new(path);
+        key_path_buf = fallback;
+        key_path_buf.as_path()
+    } else {
+        std::path::Path::new(path)
+    };
     if !key_path.exists() {
         tracing::warn!(
             task = "config_load",
@@ -1245,6 +1276,54 @@ fn load_validator_key(
         hex::encode(public_key.to_wire_bytes())
     );
     Some((private_key, public_key))
+}
+
+/// Return `(pubkey_hex, scheme, key_path_str)` for the validator key without
+/// loading the full key into memory.  Used only to populate `ApiState` fields
+/// for the `noble_getValidatorKeyInfo` RPC.
+fn compute_validator_key_info(
+    path: &str,
+    data_dir: &std::path::Path,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let key_path_owned;
+    let key_path = if path.is_empty() {
+        let fallback = data_dir.join("validator.key");
+        if !fallback.exists() {
+            return (None, None, None);
+        }
+        key_path_owned = fallback;
+        key_path_owned.as_path()
+    } else {
+        let p = std::path::Path::new(path);
+        if !p.exists() {
+            return (None, None, None);
+        }
+        p
+    };
+
+    let raw = match std::fs::read(key_path) {
+        Ok(b) => b,
+        Err(_) => return (None, None, None),
+    };
+    if raw.len() != 33 {
+        return (None, None, None);
+    }
+    let scheme_id = raw[0];
+    let key_bytes = &raw[1..33];
+    let (private_key, scheme_str) = match scheme_id {
+        noble_crypto::SCHEME_ED25519 => (
+            noble_crypto::NoblePrivateKey::Ed25519(key_bytes.to_vec()),
+            "ed25519",
+        ),
+        noble_crypto::SCHEME_SECP256K1 => (
+            noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec()),
+            "secp256k1",
+        ),
+        _ => return (None, None, None),
+    };
+    let pubkey_hex = hex::encode(private_key.public_key().to_wire_bytes());
+    let path_str = key_path.to_string_lossy().into_owned();
+    (Some(pubkey_hex), Some(scheme_str.to_string()), Some(path_str))
 }
 
 /// Load node identity from `data_dir/identity.json`, falling back to `noble.toml` defaults.

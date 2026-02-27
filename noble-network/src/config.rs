@@ -50,6 +50,10 @@ pub struct NetworkConfig {
     /// Multiaddr string to listen on (e.g. "/ip4/0.0.0.0/tcp/8780").
     pub listen_addr: String,
 
+    /// Data directory for persisting the P2P identity keypair (`p2p_identity.key`).
+    /// `None` means ephemeral keypair (new PeerId on every restart — for tests).
+    pub data_dir: Option<std::path::PathBuf>,
+
     /// Bootstrap peer multiaddr strings to connect on startup.
     pub bootstrap_peers: Vec<String>,
 
@@ -103,6 +107,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             listen_addr: format!("/ip4/0.0.0.0/tcp/{DEFAULT_LISTEN_PORT}"),
+            data_dir: None,
             bootstrap_peers: Vec::new(),
             max_outbound: DEFAULT_MAX_OUTBOUND,
             max_inbound: DEFAULT_MAX_INBOUND,

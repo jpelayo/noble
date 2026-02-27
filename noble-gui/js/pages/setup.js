@@ -231,10 +231,8 @@ export function init(root, ctx) {
     body.innerHTML = `
       <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm);color:var(--text-secondary)">Node Role</label>
       <div id="setup-roles" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:var(--gap-sm)"></div>
-      <div id="setup-role-info" style="margin-top:var(--gap);display:none;padding:var(--gap-sm);background:color-mix(in srgb, var(--warning) 10%, transparent);border-radius:var(--radius-sm);font-size:var(--font-size-sm);color:var(--warning)"></div>
     `;
     const rolesContainer = body.querySelector('#setup-roles');
-    const roleInfo = body.querySelector('#setup-role-info');
 
     NODE_ROLES.forEach(r => {
       const checked = state.roleValue === r.value ? 'checked' : '';
@@ -251,17 +249,9 @@ export function init(root, ctx) {
       radio.addEventListener('change', () => {
         rolesContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
         if (radio.checked) card.style.borderColor = 'var(--accent)';
-        const sel = NODE_ROLES.find(x => x.value === radio.value);
-        if (sel && sel.validate) {
-          roleInfo.style.display = 'block';
-          roleInfo.textContent = 'Validator key must be configured in noble.toml before starting the node.';
-        } else {
-          roleInfo.style.display = 'none';
-        }
       });
       if (checked) {
         card.style.borderColor = 'var(--accent)';
-        if (r.validate) { roleInfo.style.display = 'block'; roleInfo.textContent = 'Validator key must be configured in noble.toml before starting the node.'; }
       }
       rolesContainer.appendChild(card);
     });
@@ -471,6 +461,9 @@ export function init(root, ctx) {
   // ── Step 5: Review ──
   function renderReview() {
     const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
+    const validatorRow = roleObj.validate
+      ? `<dt>Validator Key</dt><dd style="color:var(--text-muted);font-style:italic">Will be auto-generated on completion</dd>`
+      : '';
     body.innerHTML = `
       <h3 style="margin-bottom:var(--gap)">Configuration Summary</h3>
       <dl class="detail-grid">
@@ -481,6 +474,7 @@ export function init(root, ctx) {
         <dt>Contact Email</dt><dd>${esc(state.contactEmail || '(not set)')}</dd>
         <dt>Website</dt><dd>${esc(state.website || '(not set)')}</dd>
         <dt>Wallet</dt><dd>${state.walletAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${state.walletAddress.slice(0, 16)}...</span>` : '(skipped)'}</dd>
+        ${validatorRow}
       </dl>
       <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
@@ -514,7 +508,7 @@ export function init(root, ctx) {
 
     try {
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
-      await rpc.call('noble_setNodeIdentity', {
+      const result = await rpc.call('noble_setNodeIdentity', {
         node_name: state.nodeName,
         org_type: state.orgType,
         org_name: state.orgName,
@@ -527,11 +521,26 @@ export function init(root, ctx) {
         p2p_port: 8780,
       });
 
+      // Show validator pubkey if one was auto-generated.
+      const validatorPubkey = result && result.validator_pubkey;
+      const validatorSection = validatorPubkey ? `
+        <div style="margin-top:var(--gap);padding:var(--gap-sm);background:color-mix(in srgb, var(--success) 10%, transparent);border:1px solid var(--success);border-radius:var(--radius-sm)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-xs)">Validator Key Generated</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-secondary);margin:0 0 var(--gap-xs)">
+            Add this public key to <code>validators.txt</code> on every node in your network.
+          </p>
+          <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+            <code id="setup-vkey" style="font-size:var(--font-size-xs);word-break:break-all;flex:1">${esc(validatorPubkey)}</code>
+            <button id="setup-copy-vkey" class="btn-sm" style="white-space:nowrap;padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>
+          </div>
+        </div>` : '';
+
       body.innerHTML = `
         <div style="text-align:center;padding:var(--gap-xl)">
           <div style="font-size:3rem;color:var(--success);margin-bottom:var(--gap)">&#10004;</div>
           <h2 style="color:var(--success);margin-bottom:var(--gap-sm)">Setup Complete!</h2>
           <p style="color:var(--text-secondary)">Your node identity has been saved.</p>
+          ${validatorSection}
           <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-top:var(--gap);text-align:left;font-size:var(--font-size-sm)">
             <p style="margin-bottom:var(--gap-sm)"><strong>Next steps:</strong></p>
             <ol style="margin:0;padding-left:1.5em;color:var(--text-secondary)">
@@ -543,6 +552,16 @@ export function init(root, ctx) {
           <a href="#/" class="btn" style="margin-top:var(--gap-lg);display:inline-block">Go to Dashboard</a>
         </div>
       `;
+
+      // Wire copy button for validator pubkey.
+      const copyVkeyBtn = body.querySelector('#setup-copy-vkey');
+      if (copyVkeyBtn && validatorPubkey) {
+        copyVkeyBtn.addEventListener('click', () => {
+          navigator.clipboard?.writeText(validatorPubkey).catch(() => {});
+          copyVkeyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyVkeyBtn.textContent = 'Copy'; }, 2000);
+        });
+      }
       backBtn.style.display = 'none';
       nextBtn.style.display = 'none';
 

@@ -137,6 +137,10 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         cors_scheme: "http".to_string(),
         gui_port: 8785,
         tls_plaintext_mode: false,
+        peer_id: "12D3KooWTestPeerIdPlaceholder".to_string(),
+        validator_pubkey: None,
+        validator_scheme: None,
+        validator_key_path: None,
     });
 
     (state, dir)

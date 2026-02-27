@@ -16,6 +16,9 @@ use crate::error::ApiError;
 use crate::state::{ApiState, NodeIdentityData};
 use crate::types::*;
 
+// Bring noble_crypto into scope for validator key generation.
+use noble_crypto::{SCHEME_ED25519, SCHEME_SECP256K1};
+
 #[rpc(server, namespace = "noble")]
 pub trait NodeApi {
     /// Get general node information.
@@ -129,6 +132,12 @@ pub trait NodeApi {
         key_pem: String,
         chain_pem: Option<String>,
     ) -> Result<UploadTlsCertResponse, ErrorObjectOwned>;
+
+    /// Get validator key information: pubkey, scheme, and file path.
+    ///
+    /// Returns `enabled: false` when the node is running in observer mode.
+    #[method(name = "getValidatorKeyInfo")]
+    async fn get_validator_key_info(&self) -> Result<ValidatorKeyInfoResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -143,6 +152,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             rpc_port: self.rpc_port,
             ws_port: self.ws_port,
             p2p_port: self.p2p_port,
+            peer_id: self.peer_id.clone(),
         })
     }
 
@@ -437,7 +447,41 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             *id = new_identity;
         }
 
-        Ok(SetNodeIdentityResponse { success: true })
+        // A1: When the node is configured for validation, ensure a validator key exists.
+        let validator_pubkey = if wants_to_validate {
+            if let Some(ref identity_path) = self.identity_path {
+                if let Some(data_dir) = identity_path.parent() {
+                    let vkey_path = data_dir.join("validator.key");
+                    if vkey_path.exists() {
+                        // Already exists — just read the pubkey.
+                        read_validator_pubkey(&vkey_path)
+                    } else {
+                        // Auto-generate.
+                        match generate_validator_key(&vkey_path) {
+                            Ok(pubkey) => {
+                                tracing::info!(
+                                    task = "setup",
+                                    "Auto-generated validator key: {pubkey}"
+                                );
+                                Some(pubkey)
+                            }
+                            Err(e) => {
+                                tracing::warn!(task = "setup", "Failed to generate validator key: {e}");
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(SetNodeIdentityResponse { success: true, validator_pubkey })
     }
 
     async fn get_tls_fingerprint(&self) -> Result<TlsFingerprintResponse, ErrorObjectOwned> {
@@ -541,4 +585,54 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             restart_required: true,
         })
     }
+
+    async fn get_validator_key_info(&self) -> Result<ValidatorKeyInfoResponse, ErrorObjectOwned> {
+        Ok(ValidatorKeyInfoResponse {
+            enabled: self.validator_pubkey.is_some(),
+            pubkey_hex: self.validator_pubkey.clone(),
+            scheme: self.validator_scheme.clone(),
+            key_path: self.validator_key_path.clone(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers for validator key management
+// ---------------------------------------------------------------------------
+
+/// Generate a new Ed25519 validator key, write it to `path` (33 bytes: scheme_id + 32-byte secret),
+/// set permissions to 0o600 on Unix, and return the hex-encoded wire pubkey.
+fn generate_validator_key(path: &std::path::Path) -> Result<String, ErrorObjectOwned> {
+    let (secret_bytes, _) = noble_crypto::ed25519::generate_keypair();
+    let mut file_bytes = vec![SCHEME_ED25519];
+    file_bytes.extend_from_slice(&secret_bytes);
+    std::fs::write(path, &file_bytes)
+        .map_err(|e| ApiError::Internal(format!("write validator.key: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+    let private_key = noble_crypto::NoblePrivateKey::Ed25519(secret_bytes);
+    Ok(hex::encode(private_key.public_key().to_wire_bytes()))
+}
+
+/// Read an existing validator key file (33 bytes) and return the hex-encoded wire pubkey.
+/// Returns `None` on any read or parse error.
+fn read_validator_pubkey(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read(path).ok()?;
+    if raw.len() != 33 {
+        return None;
+    }
+    let scheme_id = raw[0];
+    let key_bytes = &raw[1..33];
+    let private_key = match scheme_id {
+        SCHEME_ED25519 => noble_crypto::NoblePrivateKey::Ed25519(key_bytes.to_vec()),
+        SCHEME_SECP256K1 => noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec()),
+        _ => return None,
+    };
+    Some(hex::encode(private_key.public_key().to_wire_bytes()))
 }

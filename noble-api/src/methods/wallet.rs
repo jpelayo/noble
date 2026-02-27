@@ -10,7 +10,7 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use noble_core::MIN_TX_FEE;
-use noble_crypto::{sha256, Hash256, NoblePublicKey};
+use noble_crypto::{sha256, Hash256, NoblePublicKey, SCHEME_ED25519 as SCHEME_ED, SCHEME_SECP256K1 as SCHEME_SEC};
 use noble_mempool::{BalanceLookup, ChainLookup};
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
@@ -109,6 +109,12 @@ pub trait WalletApi {
         mnemonic: String,
         passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned>;
+
+    /// List all public keys in the wallet keystore.
+    ///
+    /// Does not require the wallet to be unlocked — reads key filenames only.
+    #[method(name = "listAddresses")]
+    async fn list_addresses(&self) -> Result<ListAddressesResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -298,6 +304,28 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             scheme_id: pubkey.scheme_id(),
             word_count: wc,
         })
+    }
+
+    async fn list_addresses(&self) -> Result<ListAddressesResponse, ErrorObjectOwned> {
+        let keystore = self.wallet_keystore.lock();
+        let keys = keystore
+            .list_keys()
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let entries = keys
+            .into_iter()
+            .map(|pk| {
+                let scheme = match pk.scheme_id() {
+                    SCHEME_ED => "ed25519",
+                    SCHEME_SEC => "secp256k1",
+                    _ => "unknown",
+                };
+                WalletKeyEntry {
+                    pubkey_hex: hex::encode(pk.to_wire_bytes()),
+                    scheme: scheme.to_string(),
+                }
+            })
+            .collect();
+        Ok(ListAddressesResponse { keys: entries })
     }
 
     async fn import_mnemonic(

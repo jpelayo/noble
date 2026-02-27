@@ -368,6 +368,8 @@ pub struct NodeInfoResponse {
     pub rpc_port: u16,
     pub ws_port: u16,
     pub p2p_port: u16,
+    /// Base58btc-encoded libp2p PeerId of this node.
+    pub peer_id: String,
 }
 
 /// Response for `noble_getApiVersion`.
@@ -739,6 +741,41 @@ pub struct NodeIdentityResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetNodeIdentityResponse {
     pub success: bool,
+    /// Hex-encoded wire pubkey of the auto-generated (or existing) validator key.
+    /// Only present when `wants_to_validate = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_pubkey: Option<String>,
+}
+
+/// A single wallet key entry returned by `noble_listAddresses`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WalletKeyEntry {
+    /// Wire-format hex-encoded public key.
+    pub pubkey_hex: String,
+    /// Signature scheme: `"ed25519"` or `"secp256k1"`.
+    pub scheme: String,
+}
+
+/// Response for `noble_listAddresses`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListAddressesResponse {
+    pub keys: Vec<WalletKeyEntry>,
+}
+
+/// Response for `noble_getValidatorKeyInfo`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidatorKeyInfoResponse {
+    /// Whether this node is running in validator mode.
+    pub enabled: bool,
+    /// Hex-encoded wire pubkey (scheme_id + 32 bytes), if enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey_hex: Option<String>,
+    /// Signature scheme string, if enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// File path of the validator key, if enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
 }
 
 #[cfg(test)]

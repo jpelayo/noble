@@ -57,9 +57,57 @@ export function init(root, ctx) {
           <dt>Auth Mode</dt>
           <dd id="s-auth-mode">--</dd>
         </dl>
-        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:var(--gap-sm) 0 0">
-          TOTP rotation is available via the <code>noble_rotateTotpSecret</code> RPC method.
-        </p>
+        <!-- TOTP Rotation (shown only when TOTP is active) -->
+        <div id="s-totp-rotate-section" style="display:none;margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Rotate TOTP Secret</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Enter your current 6-digit TOTP code to rotate the shared secret.
+            The new secret will be displayed once — store it immediately.
+          </p>
+          <div style="display:flex;gap:var(--gap-sm);align-items:center;margin-bottom:var(--gap-sm)">
+            <input id="s-totp-code" type="text" maxlength="6" placeholder="6-digit code"
+              style="width:120px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm);text-align:center">
+            <button id="s-totp-rotate-btn" class="btn-sm" style="padding:6px 14px;background:var(--warning,#f0a500);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Rotate Secret</button>
+          </div>
+          <div id="s-totp-rotate-result" style="display:none;padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)"></div>
+          <div id="s-totp-rotate-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Validator Key -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Validator Key</span>
+        <span id="s-vkey-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-vkey-details">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
+      </div>
+    </div>
+
+    <!-- P2P Identity -->
+    <div class="panel">
+      <div class="panel-header">P2P Identity</div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-p2p-details">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
+      </div>
+    </div>
+
+    <!-- Gateway Key -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Gateway Key</span>
+        <span id="s-gw-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-gw-details">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
       </div>
     </div>
 
@@ -134,6 +182,20 @@ export function init(root, ctx) {
   const totpStatus = root.querySelector('#s-totp-status');
   const authMode = root.querySelector('#s-auth-mode');
   const portsEl = root.querySelector('#s-ports');
+  // TOTP rotation refs
+  const totpRotateSection = root.querySelector('#s-totp-rotate-section');
+  const totpCodeInput = root.querySelector('#s-totp-code');
+  const totpRotateBtn = root.querySelector('#s-totp-rotate-btn');
+  const totpRotateResult = root.querySelector('#s-totp-rotate-result');
+  const totpRotateError = root.querySelector('#s-totp-rotate-error');
+  // Validator key refs
+  const vkeyBadge = root.querySelector('#s-vkey-badge');
+  const vkeyDetails = root.querySelector('#s-vkey-details');
+  // P2P identity refs
+  const p2pDetails = root.querySelector('#s-p2p-details');
+  // Gateway key refs
+  const gwBadge = root.querySelector('#s-gw-badge');
+  const gwDetails = root.querySelector('#s-gw-details');
   // TLS cert refs
   const tlsBadge = root.querySelector('#s-tls-badge');
   const tlsDetails = root.querySelector('#s-tls-details');
@@ -365,15 +427,156 @@ export function init(root, ctx) {
     }
   }
 
+  // --- TOTP Rotation ---
+  totpRotateBtn.addEventListener('click', async () => {
+    totpRotateError.style.display = 'none';
+    totpRotateResult.style.display = 'none';
+    const code = totpCodeInput.value.trim();
+    if (code.length !== 6 || !/^\d{6}$/.test(code)) {
+      totpRotateError.textContent = 'Enter a valid 6-digit TOTP code.';
+      totpRotateError.style.display = 'block';
+      return;
+    }
+    totpRotateBtn.disabled = true;
+    try {
+      // Hash the 6-digit code with SHA-256 (matching the middleware expectation).
+      const encoder = new TextEncoder();
+      const codeBytes = encoder.encode(code);
+      const hashBuf = await crypto.subtle.digest('SHA-256', codeBytes);
+      const hashHex = Array.from(new Uint8Array(hashBuf))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+      const result = await rpc.call('noble_rotateTotpSecret', { current_code_hash: hashHex });
+
+      // Show new secret with auto-clear timer.
+      let countdown = 60;
+      let timerHandle;
+      function showSecret() {
+        totpRotateResult.style.display = 'block';
+        totpRotateResult.style.color = 'var(--success)';
+        totpRotateResult.innerHTML = `
+          <p style="margin:0 0 var(--gap-xs);font-weight:600">New TOTP Secret (clears in <span id="s-totp-countdown">${countdown}s</span>)</p>
+          <p style="margin:0 0 var(--gap-xs)"><strong>Base32:</strong> <code>${result.secret_base32}</code></p>
+          <p style="margin:0;word-break:break-all"><strong>otpauth:</strong> <code style="font-size:10px">${result.otpauth_uri}</code></p>
+        `;
+        timerHandle = setInterval(() => {
+          countdown--;
+          const countEl = totpRotateResult.querySelector('#s-totp-countdown');
+          if (countEl) countEl.textContent = countdown + 's';
+          if (countdown <= 0) {
+            clearInterval(timerHandle);
+            totpRotateResult.style.display = 'none';
+            totpRotateResult.innerHTML = '';
+          }
+        }, 1000);
+      }
+      showSecret();
+      totpCodeInput.value = '';
+    } catch (e) {
+      totpRotateError.textContent = e.message || 'Rotation failed';
+      totpRotateError.style.display = 'block';
+    } finally {
+      totpRotateBtn.disabled = false;
+    }
+  });
+
+  // --- Validator Key card ---
+  function renderValidatorKey(info) {
+    if (!info || !info.enabled) {
+      vkeyBadge.textContent = 'Observer Mode';
+      vkeyBadge.className = 'badge';
+      vkeyBadge.style.background = 'var(--text-muted)';
+      vkeyDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Node is running in observer mode — no validator key configured.</dt>';
+      return;
+    }
+    vkeyBadge.textContent = 'Active';
+    vkeyBadge.className = 'badge inbound';
+    vkeyBadge.style.background = '';
+
+    const pk = info.pubkey_hex || '';
+    const pkDisplay = pk.length > 16 ? pk.slice(0, 8) + '…' + pk.slice(-8) : pk;
+
+    vkeyDetails.innerHTML = `
+      <dt>Public Key</dt>
+      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${pkDisplay}</code>
+        ${pk ? `<button class="btn-copy-vkey btn-sm" data-pk="${pk}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
+      </dd>
+      <dt>Scheme</dt><dd>${info.scheme || '--'}</dd>
+      <dt>Key Path</dt><dd style="font-size:var(--font-size-xs);word-break:break-all">${info.key_path || '--'}</dd>
+    `;
+    vkeyDetails.querySelector('.btn-copy-vkey')?.addEventListener('click', (e) => {
+      const full = e.currentTarget.dataset.pk;
+      navigator.clipboard?.writeText(full).catch(() => {});
+      e.currentTarget.textContent = 'Copied!';
+      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+    });
+  }
+
+  // --- P2P Identity card ---
+  function renderP2pIdentity(nodeInfo) {
+    const peerId = (nodeInfo && nodeInfo.peer_id) || '';
+    if (!peerId) {
+      p2pDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Peer ID not available.</dt>';
+      return;
+    }
+    const peerIdDisplay = peerId.length > 20 ? peerId.slice(0, 12) + '…' + peerId.slice(-8) : peerId;
+    p2pDetails.innerHTML = `
+      <dt>Peer ID</dt>
+      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${peerIdDisplay}</code>
+        <button class="btn-copy-peerid btn-sm" data-pid="${peerId}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>
+      </dd>
+    `;
+    p2pDetails.querySelector('.btn-copy-peerid')?.addEventListener('click', (e) => {
+      navigator.clipboard?.writeText(e.currentTarget.dataset.pid).catch(() => {});
+      e.currentTarget.textContent = 'Copied!';
+      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+    });
+  }
+
+  // --- Gateway Key card ---
+  function renderGatewayKey(info) {
+    if (!info || !info.enabled) {
+      gwBadge.textContent = 'Disabled';
+      gwBadge.className = 'badge';
+      gwBadge.style.background = 'var(--text-muted)';
+      gwDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Gateway fee split is not configured.</dt>';
+      return;
+    }
+    gwBadge.textContent = 'Enabled';
+    gwBadge.className = 'badge inbound';
+    gwBadge.style.background = '';
+
+    const gk = info.gateway_key || '';
+    const gkDisplay = gk.length > 16 ? gk.slice(0, 8) + '…' + gk.slice(-8) : gk;
+    const sourceLabel = info.key_source === 'config_file' ? 'key file' : 'wallet-derived';
+
+    gwDetails.innerHTML = `
+      <dt>Gateway Key</dt>
+      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${gkDisplay}</code>
+        ${gk ? `<button class="btn-copy-gk btn-sm" data-gk="${gk}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
+      </dd>
+      <dt>Source</dt><dd>${sourceLabel}</dd>
+    `;
+    gwDetails.querySelector('.btn-copy-gk')?.addEventListener('click', (e) => {
+      navigator.clipboard?.writeText(e.currentTarget.dataset.gk).catch(() => {});
+      e.currentTarget.textContent = 'Copied!';
+      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+    });
+  }
+
   // Load data
   async function loadSettings() {
     // Load TLS cert info in parallel (independent from other calls).
     loadTlsCert();
 
     try {
-      const [ipResult, nodeInfo] = await Promise.all([
+      const [ipResult, nodeInfo, vkeyInfo, gwInfo] = await Promise.all([
         rpc.call('noble_getAllowedIps'),
         rpc.call('noble_getNodeInfo'),
+        rpc.call('noble_getValidatorKeyInfo').catch(() => null),
+        rpc.call('noble_getGatewayInfo').catch(() => null),
       ]);
 
       // IP Access Control
@@ -381,10 +584,13 @@ export function init(root, ctx) {
       renderIpList();
       updateBadge();
 
-      // Auth status
+      // Auth status + TOTP rotation button
       const hasAuth = rpc.hasAuthToken ? rpc.hasAuthToken() : false;
       totpStatus.textContent = hasAuth ? 'Active (authenticated)' : 'Not configured';
       authMode.textContent = hasAuth ? 'TOTP (SHA-256 hashed bearer token)' : 'None';
+      if (hasAuth) {
+        totpRotateSection.style.display = 'block';
+      }
 
       // Ports
       portsEl.innerHTML = `
@@ -393,6 +599,11 @@ export function init(root, ctx) {
         <dt>P2P</dt><dd>${nodeInfo.p2p_port}</dd>
         <dt>Dashboard (GUI)</dt><dd>8785</dd>
       `;
+
+      // New key/identity cards
+      renderValidatorKey(vkeyInfo);
+      renderP2pIdentity(nodeInfo);
+      renderGatewayKey(gwInfo);
     } catch (e) {
       console.error('[settings] load:', e);
     }

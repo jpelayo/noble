@@ -44,6 +44,8 @@ pub struct NetworkHandle {
     event_rx: mpsc::Receiver<NetworkEvent>,
     /// The P2P port that was actually bound (may differ from config if fallback was used).
     pub bound_port: u16,
+    /// The stable PeerId of this node (loaded from or saved to `p2p_identity.key`).
+    pub local_peer_id: PeerId,
 }
 
 impl NetworkHandle {
@@ -71,7 +73,83 @@ pub async fn start_network(
     block_provider: Arc<dyn BlockProvider>,
     tx_provider: Arc<dyn TxProvider>,
 ) -> Result<NetworkHandle, NetworkError> {
-    let keypair = libp2p::identity::Keypair::generate_ed25519();
+    // Load or generate the P2P identity keypair.
+    // When data_dir is set, the keypair is persisted to `p2p_identity.key` so
+    // the node retains the same PeerId across restarts.
+    let keypair = if let Some(ref data_dir) = config.data_dir {
+        let key_path = data_dir.join("p2p_identity.key");
+        if key_path.exists() {
+            match std::fs::read(&key_path) {
+                Ok(bytes) => {
+                    match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                        Ok(kp) => {
+                            tracing::info!(
+                                task = "network_startup",
+                                "Loaded persistent P2P keypair from {}",
+                                key_path.display()
+                            );
+                            kp
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task = "network_startup",
+                                "Failed to decode P2P keypair ({}), generating new one",
+                                e
+                            );
+                            libp2p::identity::Keypair::generate_ed25519()
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "network_startup",
+                        "Failed to read P2P keypair file ({}), generating new one",
+                        e
+                    );
+                    libp2p::identity::Keypair::generate_ed25519()
+                }
+            }
+        } else {
+            let kp = libp2p::identity::Keypair::generate_ed25519();
+            match kp.to_protobuf_encoding() {
+                Ok(encoded) => {
+                    if let Err(e) = std::fs::write(&key_path, &encoded) {
+                        tracing::warn!(
+                            task = "network_startup",
+                            "Failed to save P2P keypair ({}), continuing with ephemeral identity",
+                            e
+                        );
+                    } else {
+                        // Restrict file permissions on Unix.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &key_path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                        tracing::info!(
+                            task = "network_startup",
+                            "Generated and saved P2P keypair to {}",
+                            key_path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "network_startup",
+                        "Failed to encode P2P keypair for persistence ({}), continuing",
+                        e
+                    );
+                }
+            }
+            kp
+        }
+    } else {
+        libp2p::identity::Keypair::generate_ed25519()
+    };
+
     let local_peer_id = keypair.public().to_peer_id();
     tracing::info!(task = "network_startup", %local_peer_id, "starting network service");
 
@@ -168,6 +246,7 @@ pub async fn start_network(
         command_tx,
         event_rx,
         bound_port,
+        local_peer_id,
     })
 }
 

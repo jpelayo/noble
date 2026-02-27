@@ -215,4 +215,16 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// True when TLS was requested but cert failed and tls_allow_plaintext_fallback=true.
     /// Exposed so the GUI can show a plaintext-mode warning banner.
     pub tls_plaintext_mode: bool,
+
+    /// Base58btc-encoded libp2p PeerId of this node (from the persistent P2P keypair).
+    pub peer_id: String,
+
+    /// Hex-encoded wire pubkey of the validator key (if the node is in validator mode).
+    pub validator_pubkey: Option<String>,
+
+    /// Signature scheme of the validator key: `"ed25519"` or `"secp256k1"` (if enabled).
+    pub validator_scheme: Option<String>,
+
+    /// File path used to load the validator key (if enabled).
+    pub validator_key_path: Option<String>,
 }
