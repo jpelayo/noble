@@ -71,9 +71,12 @@ pub fn load_or_generate(
         (vec![cert], key)
     };
 
-    let config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_ders, key_der)?;
+    // ALPN negotiation: advertise h2 + http/1.1 so browsers (especially Firefox)
+    // negotiate the protocol cleanly during TLS handshake instead of guessing.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))
 }

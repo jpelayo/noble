@@ -70,19 +70,31 @@ class Noble < Formula
 
       # Interactive CIDR prompt (skipped in non-TTY environments like CI).
       if $stdin.tty?
+        require "ipaddr"
         puts
         puts "  Remote access — allow connections to the Dashboard GUI and JSON-RPC API."
         puts "  Enter IP addresses or CIDR blocks (comma-separated)."
         puts "  Press Enter for localhost-only access."
         puts
-        print "  Allowed IPs (e.g. 10.0.0.0/8): "
-        input = $stdin.gets.chomp.strip
-        unless input.empty?
-          cidrs = input.split(",").map { |s| "\"#{s.strip}\"" }.join(", ")
+        loop do
+          print "  Allowed IPs (e.g. 10.0.0.0/8): "
+          input = $stdin.gets.chomp.strip
+          break if input.empty?
+
+          entries = input.split(",").map(&:strip).reject(&:empty?)
+          bad = entries.reject { |e| IPAddr.new(e) rescue false }
+          unless bad.empty?
+            puts "  Invalid entries: #{bad.join(", ")}"
+            puts "  Expected: IP address (e.g. 192.168.5.20) or CIDR (e.g. 192.168.5.0/24)"
+            next
+          end
+
+          cidrs = entries.map { |s| "\"#{s}\"" }.join(", ")
           config.gsub!('allowed_ips = []', "allowed_ips = [#{cidrs}]")
           puts
-          puts "  Remote access enabled. After starting, the dashboard will be at:"
-          puts "  https://<this-host>:8785"
+          puts "  Remote access enabled for: #{entries.join(", ")}"
+          puts "  After starting, the dashboard will be at: https://<this-host>:8785"
+          break
         end
       end
 
