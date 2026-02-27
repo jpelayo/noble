@@ -51,6 +51,20 @@ export class RpcClient {
     return this.#authToken !== null;
   }
 
+  /** Return the current SHA-256 hash token (or null if not set). */
+  getAuthToken() {
+    return this.#authToken;
+  }
+
+  /**
+   * Set a raw Bearer token without SHA-256 hashing.
+   * Used in setup mode where the server compares the raw token directly.
+   * Pass null to clear.
+   */
+  setRawAuthToken(rawToken) {
+    this.#authToken = rawToken;
+  }
+
   #buildHeaders() {
     const h = { 'Content-Type': 'application/json' };
     if (this.#authToken) h['Authorization'] = `Bearer ${this.#authToken}`;

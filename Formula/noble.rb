@@ -82,7 +82,7 @@ class Noble < Formula
           config.gsub!('allowed_ips = []', "allowed_ips = [#{cidrs}]")
           puts
           puts "  Remote access enabled. After starting, the dashboard will be at:"
-          puts "  http://<this-host>:8785"
+          puts "  https://<this-host>:8785"
         end
       end
 
@@ -112,9 +112,15 @@ class Noble < Formula
       GUI setup (headless):
 
         brew services start noble       # starts in setup mode
-        open http://<server-ip>:8785    # complete wizard in browser
+        open https://<server-ip>:8785   # complete wizard in browser
 
-      Open this port to internet: 8780 (or at least one of these 8780, 8781, 8782)
+      Port allocation:
+
+        8780  P2P (open to internet for full connectivity)
+        8783  JSON-RPC + WebSocket (HTTPS/WSS) — open for client/wallet access
+        8784  Prometheus /metrics (disabled by default)
+        8785  Dashboard GUI (HTTPS) — open for browser access
+        8786  Faucet (testnet only)
 
       Paths:
         Config:    #{etc}/noble/noble.toml

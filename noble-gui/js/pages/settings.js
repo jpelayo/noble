@@ -71,6 +71,56 @@ export function init(root, ctx) {
         </dl>
       </div>
     </div>
+
+    <!-- TLS Certificate -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>TLS Certificate</span>
+        <span id="s-tls-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-tls-details"></dl>
+
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Regenerate Self-Signed Certificate</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Writes new certificate files to disk. <strong>Restart the node</strong> for the new cert to load.
+          </p>
+          <button id="s-tls-regen-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Regenerate Certificate</button>
+          <span id="s-tls-regen-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+        </div>
+
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Upload CA-Signed Certificate</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Replace the self-signed cert with a certificate from a trusted CA. Key must match the certificate.
+            <strong>Restart the node</strong> after upload.
+          </p>
+          <div style="display:grid;gap:var(--gap-sm)">
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Certificate PEM (required)</label>
+              <textarea id="s-tls-cert-pem" rows="4" placeholder="-----BEGIN CERTIFICATE-----&#10;..."
+                style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-xs);resize:vertical"></textarea>
+            </div>
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Private Key PEM (required)</label>
+              <textarea id="s-tls-key-pem" rows="4" placeholder="-----BEGIN PRIVATE KEY-----&#10;..."
+                style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-xs);resize:vertical"></textarea>
+            </div>
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Intermediate Chain PEM (optional)</label>
+              <textarea id="s-tls-chain-pem" rows="3" placeholder="-----BEGIN CERTIFICATE-----&#10;... (optional intermediate/chain)"
+                style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-xs);resize:vertical"></textarea>
+            </div>
+            <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+              <button id="s-tls-upload-btn" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Upload &amp; Replace</button>
+              <span id="s-tls-upload-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+            </div>
+          </div>
+          <div id="s-tls-upload-error" style="color:var(--error);font-size:var(--font-size-xs);margin-top:var(--gap-sm);display:none"></div>
+        </div>
+      </div>
+    </div>
   `;
 
   // DOM refs
@@ -84,6 +134,17 @@ export function init(root, ctx) {
   const totpStatus = root.querySelector('#s-totp-status');
   const authMode = root.querySelector('#s-auth-mode');
   const portsEl = root.querySelector('#s-ports');
+  // TLS cert refs
+  const tlsBadge = root.querySelector('#s-tls-badge');
+  const tlsDetails = root.querySelector('#s-tls-details');
+  const tlsRegenBtn = root.querySelector('#s-tls-regen-btn');
+  const tlsRegenMsg = root.querySelector('#s-tls-regen-msg');
+  const tlsCertPem = root.querySelector('#s-tls-cert-pem');
+  const tlsKeyPem = root.querySelector('#s-tls-key-pem');
+  const tlsChainPem = root.querySelector('#s-tls-chain-pem');
+  const tlsUploadBtn = root.querySelector('#s-tls-upload-btn');
+  const tlsUploadMsg = root.querySelector('#s-tls-upload-msg');
+  const tlsUploadError = root.querySelector('#s-tls-upload-error');
 
   let allowedIps = [];
 
@@ -179,8 +240,136 @@ export function init(root, ctx) {
     }
   }
 
+  // --- TLS cert helpers ---
+  function renderTlsCert(info) {
+    if (!info || !info.enabled) {
+      tlsBadge.textContent = 'TLS Disabled';
+      tlsBadge.className = 'badge';
+      tlsBadge.style.background = 'var(--text-muted)';
+      tlsDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">TLS is not enabled on this node.</dt>';
+      tlsRegenBtn.disabled = true;
+      tlsUploadBtn.disabled = true;
+      return;
+    }
+    tlsRegenBtn.disabled = false;
+    tlsUploadBtn.disabled = false;
+
+    if (info.plaintext_mode) {
+      tlsBadge.textContent = 'Plaintext Fallback';
+      tlsBadge.className = 'badge';
+      tlsBadge.style.background = 'var(--error)';
+    } else if (info.auto_generated) {
+      tlsBadge.textContent = 'Self-Signed';
+      tlsBadge.className = 'badge outbound';
+      tlsBadge.style.background = '';
+    } else {
+      tlsBadge.textContent = 'CA-Signed';
+      tlsBadge.className = 'badge inbound';
+      tlsBadge.style.background = '';
+    }
+
+    // Expiry badge color
+    let expiryHtml = '--';
+    if (info.expires_at) {
+      const days = info.days_remaining;
+      let color = 'var(--success)';
+      if (days !== null && days !== undefined) {
+        if (days <= 0) color = 'var(--error)';
+        else if (days <= 30) color = 'var(--error)';
+        else if (days <= 90) color = 'var(--warning, #f0a500)';
+        const label = days <= 0 ? 'EXPIRED' : `${days} days`;
+        const dateStr = info.expires_at.replace('T', ' ').replace('Z', ' UTC').slice(0, 20);
+        expiryHtml = `${dateStr} <span style="color:${color};font-weight:600">(${label})</span>`;
+      } else {
+        expiryHtml = info.expires_at;
+      }
+    }
+
+    const fp = info.fingerprint || '';
+    const fpDisplay = fp.length > 16 ? fp.slice(0, 8) + '…' + fp.slice(-8) : fp;
+    const sanList = (info.sans || []).join(', ') || '--';
+
+    tlsDetails.innerHTML = `
+      <dt>Fingerprint (SHA-256)</dt>
+      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${fpDisplay}</code>
+        ${fp ? `<button class="btn-copy-fp btn-sm" data-fp="${fp}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
+      </dd>
+      <dt>Expires</dt><dd>${expiryHtml}</dd>
+      <dt>SANs</dt><dd style="font-size:var(--font-size-xs);word-break:break-all">${sanList}</dd>
+    `;
+
+    tlsDetails.querySelector('.btn-copy-fp')?.addEventListener('click', (e) => {
+      const full = e.currentTarget.dataset.fp;
+      navigator.clipboard?.writeText(full).catch(() => {});
+      e.currentTarget.textContent = 'Copied!';
+      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+    });
+  }
+
+  tlsRegenBtn.addEventListener('click', async () => {
+    tlsRegenBtn.disabled = true;
+    tlsRegenMsg.style.color = 'var(--text-muted)';
+    tlsRegenMsg.textContent = 'Regenerating...';
+    try {
+      const result = await rpc.call('noble_regenerateTlsCert', { extra_sans: [] });
+      tlsRegenMsg.style.color = 'var(--success)';
+      tlsRegenMsg.textContent = `Done — new fingerprint: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
+      // Refresh the cert panel to show updated info.
+      loadTlsCert();
+    } catch (e) {
+      tlsRegenMsg.style.color = 'var(--error)';
+      tlsRegenMsg.textContent = e.message || 'Regeneration failed';
+    } finally {
+      tlsRegenBtn.disabled = false;
+    }
+  });
+
+  tlsUploadBtn.addEventListener('click', async () => {
+    tlsUploadError.style.display = 'none';
+    tlsUploadMsg.textContent = '';
+    const certPem = tlsCertPem.value.trim();
+    const keyPem = tlsKeyPem.value.trim();
+    const chainPem = tlsChainPem.value.trim() || null;
+    if (!certPem || !keyPem) {
+      tlsUploadError.textContent = 'Certificate PEM and Private Key PEM are required.';
+      tlsUploadError.style.display = 'block';
+      return;
+    }
+    tlsUploadBtn.disabled = true;
+    tlsUploadMsg.style.color = 'var(--text-muted)';
+    tlsUploadMsg.textContent = 'Uploading...';
+    try {
+      const result = await rpc.call('noble_uploadTlsCert', { cert_pem: certPem, key_pem: keyPem, chain_pem: chainPem });
+      tlsUploadMsg.style.color = 'var(--success)';
+      tlsUploadMsg.textContent = `Uploaded — SHA-256: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
+      tlsCertPem.value = '';
+      tlsKeyPem.value = '';
+      tlsChainPem.value = '';
+      loadTlsCert();
+    } catch (e) {
+      tlsUploadError.textContent = e.message || 'Upload failed';
+      tlsUploadError.style.display = 'block';
+      tlsUploadMsg.textContent = '';
+    } finally {
+      tlsUploadBtn.disabled = false;
+    }
+  });
+
+  async function loadTlsCert() {
+    try {
+      const info = await rpc.call('noble_getTlsCertInfo');
+      renderTlsCert(info);
+    } catch {
+      tlsDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Unable to load TLS certificate info.</dt>';
+    }
+  }
+
   // Load data
   async function loadSettings() {
+    // Load TLS cert info in parallel (independent from other calls).
+    loadTlsCert();
+
     try {
       const [ipResult, nodeInfo] = await Promise.all([
         rpc.call('noble_getAllowedIps'),

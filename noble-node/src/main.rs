@@ -7,6 +7,7 @@ mod bridge;
 pub mod ca_store;
 mod config;
 mod gui_server;
+mod tls_cert;
 #[allow(unused)]
 mod lock_order;
 pub mod metrics;
@@ -72,7 +73,7 @@ enum Commands {
     /// Show node status (running/stopped, chain height, peers, etc.)
     Status {
         /// RPC endpoint to query
-        #[arg(long, default_value = "http://127.0.0.1:8783")]
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc: String,
         /// PID file to check process state
         #[arg(long, default_value = "noble.pid")]
@@ -90,7 +91,7 @@ enum Commands {
     /// Show connected peers
     Peers {
         /// RPC endpoint to query
-        #[arg(long, default_value = "http://127.0.0.1:8783")]
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc: String,
         /// TOTP code (if auth enabled)
         #[arg(long)]
@@ -99,7 +100,7 @@ enum Commands {
     /// Show consensus cycle status and validator list
     Consensus {
         /// RPC endpoint to query
-        #[arg(long, default_value = "http://127.0.0.1:8783")]
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc: String,
         /// TOTP code (if auth enabled)
         #[arg(long)]
@@ -116,6 +117,12 @@ enum Commands {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+    /// Print the SHA-256 fingerprint of the TLS certificate
+    TlsFingerprint {
+        /// Path to TOML configuration file (to locate the data directory)
+        #[arg(default_value_t = default_config())]
+        config: String,
     },
 }
 
@@ -164,6 +171,7 @@ fn rewrite_legacy_args() -> Vec<String> {
         "consensus",
         "config",
         "completions",
+        "tls-fingerprint",
         "help",
     ];
     let first = args[1].to_lowercase();
@@ -246,6 +254,25 @@ async fn main() {
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "noble-node", &mut std::io::stdout());
+        }
+        Commands::TlsFingerprint { config } => {
+            let cfg = match config::NodeConfig::from_file(std::path::Path::new(&config)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to load config from {config}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match tls_cert::certificate_fingerprint(&cfg.storage.data_dir) {
+                Some(fp) => println!("SHA-256: {fp}"),
+                None => {
+                    eprintln!(
+                        "No TLS certificate found in {} (run the node once with tls_enabled = true to generate it)",
+                        cfg.storage.data_dir.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }

@@ -82,7 +82,7 @@ pub struct PeerInfoEntry {
 ///
 /// All locks follow the hierarchy defined in `noble-node::lock_order::LockOrder`:
 ///
-/// `WalletKeystore(0) < WalletState(1) < Storage(2) < Consensus(3) < Mempool(4) < NetworkStats(5) < PeerInfo(6) < TotpValidator(7)`
+/// `WalletKeystore(0) < WalletState(1) < Storage(2) < Consensus(3) < Mempool(4) < NetworkStats(5) < PeerInfo(6) < TotpValidator(7) < MaxNetworkVersion(8) < TlsCertInfo(9)`
 ///
 /// When acquiring multiple locks, always acquire lower-ordered locks first.
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
@@ -155,4 +155,64 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub node_identity: Arc<RwLock<NodeIdentityData>>,
     /// Path to identity.json for persistence. None = no persistence.
     pub identity_path: Option<std::path::PathBuf>,
+
+    /// SHA-256 fingerprint of the active TLS certificate (hex). None when TLS is disabled.
+    /// Wrapped in RwLock so `regenerateTlsCert` / `uploadTlsCert` can update it at runtime.
+    /// **Lock order: 9 (TlsCertInfo).**
+    pub tls_fingerprint: RwLock<Option<String>>,
+
+    /// ISO 8601 `not_after` of the active TLS certificate. None when TLS is disabled.
+    /// **Lock order: 9 (TlsCertInfo).**
+    pub tls_expires_at: RwLock<Option<String>>,
+
+    /// Unix timestamp (seconds) of `not_after` for `days_remaining` computation.
+    /// **Lock order: 9 (TlsCertInfo).**
+    pub tls_expiry_secs: RwLock<Option<i64>>,
+
+    /// Subject Alternative Names of the active TLS certificate.
+    /// **Lock order: 9 (TlsCertInfo).**
+    pub tls_sans: RwLock<Vec<String>>,
+
+    /// Callback to regenerate the self-signed TLS certificate.
+    /// Captures `data_dir` and the node's extra SANs list at startup.
+    /// Parameters: `extra_sans: Vec<String>` — SANs for the new cert.
+    /// Returns: `Ok((fingerprint, expires_at_iso, expiry_unix_secs, sans))` or `Err(message)`.
+    /// `None` when TLS is disabled or in tests that don't wire up TLS.
+    pub tls_regenerate: Option<Arc<dyn Fn(Vec<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>>,
+
+    /// Callback to validate and write an external (CA-signed) TLS certificate.
+    /// Parameters: `(cert_pem, key_pem, chain_pem: Option<String>)`.
+    /// Returns: `Ok((fingerprint, expires_at_iso, expiry_unix_secs, sans))` or `Err(message)`.
+    /// `None` when TLS is disabled or in tests that don't wire up TLS.
+    pub tls_upload: Option<Arc<dyn Fn(String, String, Option<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>>,
+
+    /// True when the node is running in first-boot setup mode (no identity.json yet).
+    /// Affects CORS policy: origins are narrowed to the GUI allow-list even when IP filter
+    /// is allow-all.
+    pub setup_mode: bool,
+
+    /// Setup authorization token for first-boot write operations.
+    /// `Some(token)` when `setup_mode` is true and no TOTP validator is configured.
+    /// Write-method RPC calls must include `Authorization: Bearer <token>` in this mode.
+    /// `None` after `identity.json` exists or when TOTP is enabled.
+    pub setup_token: Option<String>,
+
+    /// Allowed CORS origins for the RPC server (e.g. "https://127.0.0.1:8785").
+    /// Built at startup from localhost defaults plus any LAN IPs in TLS SANs or allowed_ips.
+    /// Wrapped in Arc<RwLock> so `setAllowedIps` can update origins at runtime.
+    pub allowed_cors_origins: std::sync::Arc<parking_lot::RwLock<Vec<String>>>,
+
+    /// Allowed RPC origins for the GUI server CSP connect-src directive.
+    /// Wrapped in Arc<RwLock> so `setAllowedIps` can update origins at runtime.
+    pub rpc_origins: std::sync::Arc<parking_lot::RwLock<Vec<String>>>,
+
+    /// HTTP/HTTPS scheme string ("http" or "https") used for CORS origin rebuilding.
+    pub cors_scheme: String,
+
+    /// Dashboard GUI port (for rebuilding CORS/CSP origins in `setAllowedIps`).
+    pub gui_port: u16,
+
+    /// True when TLS was requested but cert failed and tls_allow_plaintext_fallback=true.
+    /// Exposed so the GUI can show a plaintext-mode warning banner.
+    pub tls_plaintext_mode: bool,
 }

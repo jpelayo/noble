@@ -2,12 +2,14 @@
  * NOBLE Dashboard — Application Entry Point
  *
  * RPC endpoint is configurable via URL parameter:
- *   ?rpc=http://localhost:8783&ws=ws://localhost:8784
+ *   ?rpc=https://localhost:8783&ws=wss://localhost:8783
  *
- * If no ?rpc parameter is provided, the mock layer is used.
+ * If no ?rpc parameter is provided and served over file://, the mock layer is
+ * used. mock-rpc.js is never loaded on deployed nodes — it is imported
+ * dynamically only in the mock branch, keeping zero interference and zero
+ * parse weight on production.
  */
 
-import { MockRpcClient, MockWsManager } from './mock-rpc.js';
 import { createStore } from './state.js';
 import { Router } from './router.js';
 import { formatNumber } from './utils.js';
@@ -38,22 +40,34 @@ function onStatusChange(status) {
 // ── Initialize RPC layer (real or mock) ──
 const params = new URLSearchParams(window.location.search);
 let rpcUrl = params.get('rpc');
-const wsUrl = params.get('ws');
+let wsUrl = params.get('ws');
 
-// Auto-detect RPC endpoint when served over HTTP (not file://).
+// Auto-detect RPC endpoint when served over HTTP(S) (not file://).
+// Use the same protocol as the page so no mixed-content blocking occurs.
+// jsonrpsee handles both JSON-RPC (HTTP POST) and WS subscriptions on port 8783.
+// F4: use NOBLE_RPC_PORT injected by the GUI server so non-default ports work correctly.
 if (!rpcUrl && window.location.protocol.startsWith('http')) {
-  rpcUrl = `http://${window.location.hostname}:8783`;
+  const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+  const rpcPort = window.NOBLE_RPC_PORT || 8783;
+  rpcUrl = `${proto}://${window.location.hostname}:${rpcPort}`;
 }
 
 let rpc, ws;
 if (rpcUrl) {
-  // Dynamic import for real RPC client (only loaded when needed)
+  // PRODUCTION PATH — rpc-client.js and ws-manager.js only.
+  // mock-rpc.js is never fetched, parsed, or held in memory.
   const { RpcClient } = await import('./rpc-client.js');
   const { WsManager } = await import('./ws-manager.js');
   rpc = new RpcClient(rpcUrl);
-  ws = new WsManager(wsUrl || rpcUrl.replace(/^http/, 'ws').replace(/:\d+/, ':8784'), { onStatusChange });
-  console.info(`[app] Using real RPC: ${rpcUrl}`);
+  // WS uses the same host:port as RPC — jsonrpsee handles both on one port.
+  // http:// → ws://, https:// → wss://
+  wsUrl = wsUrl || rpcUrl.replace(/^http/, 'ws');
+  ws = new WsManager(wsUrl, { onStatusChange });
+  console.info(`[app] Using real RPC: ${rpcUrl}, WS: ${wsUrl}`);
 } else {
+  // MOCK PATH (file:// dev mode only) — mock-rpc.js loaded lazily here.
+  // Bugs or parse errors in mock code cannot affect the production branch.
+  const { MockRpcClient, MockWsManager } = await import('./mock-rpc.js');
   rpc = new MockRpcClient();
   ws = new MockWsManager(rpc, { onStatusChange });
   console.info('[app] Using mock RPC layer');
@@ -203,6 +217,9 @@ function showAuthPrompt() {
     errEl.style.display = 'none';
 
     await rpc.setAuthToken(code);
+    // F3: propagate the same pre-computed hash to WsManager so WebSocket
+    // upgrades can include ?token=<hash> for TOTP-protected nodes.
+    ws.setAuthToken(rpc.getAuthToken());
     try {
       await rpc.call('noble_getBlockCount');
       overlay.style.display = 'none';
@@ -212,6 +229,7 @@ function showAuthPrompt() {
         errEl.textContent = 'Invalid code. Please try again.';
         errEl.style.display = 'block';
         await rpc.setAuthToken(null);
+        ws.setAuthToken(null);
       } else {
         errEl.textContent = e.message;
         errEl.style.display = 'block';

@@ -69,8 +69,9 @@ confirmation_strategy = "follow_majority"
 # JSON-RPC HTTP server bind address.
 rpc_addr = "127.0.0.1:8783"
 
-# WebSocket server bind address for subscriptions.
-ws_addr = "127.0.0.1:8784"
+# WebSocket server bind address (DEPRECATED — WebSocket is served on rpc_addr port 8783 by jsonrpsee).
+# Kept for backward-compatible config parsing; field is ignored at runtime.
+# ws_addr = "127.0.0.1:8784"
 
 # Maximum concurrent RPC connections.
 max_connections = 100
@@ -100,6 +101,33 @@ gui_addr = "127.0.0.1:8785"
 # Examples: ["192.168.1.0/24"] or ["10.0.0.5", "172.16.0.0/12"]
 allowed_ips = []
 
+# Enable TLS (HTTPS/WSS) on the RPC (port 8783) and GUI (port 8785) servers.
+# A self-signed certificate is auto-generated on first start and saved to the
+# data directory.  Required for Tauri client apps, which run in a secure context
+# and cannot connect to plain HTTP/WS endpoints without TLS.
+# The WebSocket subscription endpoint is served on the same port as RPC (8783).
+# Note: ws_addr below is informational only — jsonrpsee handles HTTP+WS on one port.
+tls_enabled = true
+
+# Extra Subject Alternative Names for the self-signed TLS certificate.
+# Add your server's LAN/WAN IP or hostname so remote browsers trust the cert.
+# Example: ["192.168.1.100", "node.example.com"]
+tls_san = []
+
+# EMERGENCY ONLY: When true, fall back to plain HTTP if TLS cert generation fails.
+# Default false = refuse to start if TLS fails (fail-closed, recommended).
+# WARNING: Enabling this means all API traffic is UNENCRYPTED if TLS fails.
+# A loud warning banner is logged at startup when plaintext fallback is active.
+# Only enable temporarily to diagnose cert issues; disable once resolved.
+tls_allow_plaintext_fallback = false
+
+# Allow remote browser access during first-boot setup mode (when identity.json is absent).
+# Default false = localhost-only setup (secure default). The node binds to 127.0.0.1 so only
+# local browsers can reach the setup wizard, preventing unauthorized remote configuration.
+# Set to true ONLY if the node has no local display and must be configured from another machine.
+# When true, the node binds to 0.0.0.0 in setup mode (same as configured allowed_ips behavior).
+# remote_setup = false
+
 [wallet]
 # Directory where encrypted keystores are stored.
 keystore_path = "keystore"
@@ -116,7 +144,7 @@ rotation = "daily"
 
 [metrics]
 # Prometheus metrics endpoint bind address.
-prometheus_addr = "127.0.0.1:8786"
+prometheus_addr = "127.0.0.1:8784"
 
 # Enable or disable metrics collection and the /metrics HTTP endpoint.
 # Disabled by default — enable via CLI setup wizard or dashboard settings.

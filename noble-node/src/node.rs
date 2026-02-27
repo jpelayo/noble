@@ -309,7 +309,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<(), NodeError> {
         // --- Parse port numbers from config addresses ---
         let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
-        let ws_port = parse_port(&config.api.ws_addr).unwrap_or(8784);
+        // WS is served on the RPC port by jsonrpsee; ws_addr config is informational only.
+        let ws_port = rpc_port;
 
         // --- Load node identity (before network so we can use its preferred port) ---
         let node_identity = load_identity(config);
@@ -358,15 +359,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let setup_mode = !config.storage.data_dir.join("identity.json").exists();
 
         let ip_filter = if setup_mode {
-            tracing::warn!(
-                task = "node_startup",
-                "SETUP MODE: No identity.json found — GUI/RPC bound to 0.0.0.0 (all interfaces)"
-            );
-            tracing::warn!(
-                task = "node_startup",
-                "Complete the setup wizard at http://<this-host>:8785, then restart the node"
-            );
-            Some(noble_api::ip_filter::IpFilter::allow_all())
+            let gui_scheme = if config.api.tls_enabled { "https" } else { "http" };
+            if config.api.remote_setup {
+                // Operator explicitly opted-in to remote setup access.
+                tracing::warn!(
+                    task = "node_startup",
+                    "SETUP MODE (remote): No identity.json found — GUI/RPC bound to 0.0.0.0 (remote_setup = true)"
+                );
+                tracing::warn!(
+                    task = "node_startup",
+                    "Complete the setup wizard at {gui_scheme}://<this-host>:8785, then restart the node"
+                );
+                Some(noble_api::ip_filter::IpFilter::allow_all())
+            } else {
+                // Default: localhost-only setup. Safe for headless and remote nodes.
+                tracing::warn!(
+                    task = "node_startup",
+                    "SETUP MODE: No identity.json found — GUI/RPC localhost-only (set remote_setup = true for remote access)"
+                );
+                tracing::warn!(
+                    task = "node_startup",
+                    "Complete the setup wizard at {gui_scheme}://127.0.0.1:8785, then restart the node"
+                );
+                None // server stays bound to 127.0.0.1
+            }
         } else if config.api.allowed_ips.is_empty() {
             None
         } else {
@@ -388,6 +404,206 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
         };
+
+        // --- Collect extra TLS SANs (config + auto-detected LAN IPs in setup mode) ---
+        let mut extra_sans = config.api.tls_san.clone();
+        if setup_mode {
+            // Auto-add machine's LAN IPs so remote browser setup works with self-signed cert.
+            for iface in if_addrs::get_if_addrs().unwrap_or_default() {
+                if !iface.ip().is_loopback() {
+                    let s = iface.ip().to_string();
+                    if !extra_sans.contains(&s) {
+                        extra_sans.push(s);
+                    }
+                }
+            }
+        }
+
+        // --- F1: Setup mode security token ---
+        // Generate a random one-time token printed to stdout so only the operator
+        // who has console/log access can initiate setup actions.
+        let setup_token_val: Option<String> = if setup_mode {
+            let token = generate_setup_token(&config.storage.data_dir);
+            let sep = "═".repeat(60);
+            tracing::warn!(task = "node_startup", "{sep}");
+            tracing::warn!(task = "node_startup", "  SETUP MODE — FIRST-BOOT CONFIGURATION REQUIRED");
+            tracing::warn!(task = "node_startup", "  Setup token: {token}");
+            tracing::warn!(task = "node_startup", "  This token is required to authorize setup write");
+            tracing::warn!(task = "node_startup", "  operations. Keep it private.");
+            tracing::warn!(task = "node_startup", "{sep}");
+
+            // Spawn 30-minute expiry warning.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                tracing::warn!(
+                    task = "node_startup",
+                    "SETUP WINDOW EXPIRED: 30 minutes have passed in setup mode. \
+                     Restart the node if setup is incomplete to refresh the setup token."
+                );
+            });
+
+            Some(token)
+        } else {
+            None
+        };
+
+        // --- Build TLS config (shared by RPC and GUI servers) — fail-closed by default ---
+        let (tls_config, tls_plaintext_mode): (Option<std::sync::Arc<rustls::ServerConfig>>, bool) =
+            if config.api.tls_enabled {
+                match crate::tls_cert::load_or_generate(&config.storage.data_dir, &extra_sans) {
+                    Ok(cfg) => (Some(cfg), false),
+                    Err(e) => {
+                        if config.api.tls_allow_plaintext_fallback {
+                            // F6: Loud warning for plaintext fallback.
+                            let sep = "═".repeat(60);
+                            tracing::warn!(task = "node_startup", "{sep}");
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  ⚠  WARNING: NODE IS RUNNING IN PLAINTEXT MODE  ⚠"
+                            );
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  TLS certificate failed: {e}"
+                            );
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  tls_allow_plaintext_fallback = true is set in [api] config."
+                            );
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  ALL API TRAFFIC IS UNENCRYPTED (HTTP, not HTTPS)."
+                            );
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  Use plaintext fallback for emergencies only. Fix TLS or"
+                            );
+                            tracing::warn!(
+                                task = "node_startup",
+                                "  set tls_allow_plaintext_fallback = false (default) to prevent this."
+                            );
+                            tracing::warn!(task = "node_startup", "{sep}");
+                            (None, true)
+                        } else {
+                            return Err(NodeError::Config(format!(
+                                "TLS certificate failed: {e}. Fix the issue or set tls_allow_plaintext_fallback = true in [api] config."
+                            )));
+                        }
+                    }
+                }
+            } else {
+                tracing::info!(task = "node_startup", "TLS disabled by config");
+                (None, false)
+            };
+
+        // --- Compute TLS fingerprint / expiry / SANs for ApiState ---
+        let tls_fingerprint = if tls_config.is_some() {
+            crate::tls_cert::certificate_fingerprint(&config.storage.data_dir)
+        } else {
+            None
+        };
+        let tls_expires_at = if tls_config.is_some() {
+            crate::tls_cert::certificate_expiry(&config.storage.data_dir)
+        } else {
+            None
+        };
+        let tls_expiry_secs = if tls_config.is_some() {
+            crate::tls_cert::certificate_expiry_secs(&config.storage.data_dir)
+        } else {
+            None
+        };
+        let tls_sans_init = if tls_config.is_some() {
+            crate::tls_cert::certificate_sans(&config.storage.data_dir)
+        } else {
+            vec![]
+        };
+
+        // --- Build TLS lifecycle callbacks for ApiState ---
+        let tls_active = tls_config.is_some();
+        let data_dir_regen = config.storage.data_dir.clone();
+        let tls_regenerate: Option<std::sync::Arc<dyn Fn(Vec<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>> = if tls_active {
+            Some(std::sync::Arc::new(move |extra_sans: Vec<String>| {
+                crate::tls_cert::regenerate(&data_dir_regen, &extra_sans)
+                    .map(|info| (info.fingerprint, info.expires_at, info.expiry_secs, info.sans))
+                    .map_err(|e| e.to_string())
+            }))
+        } else {
+            None
+        };
+        let data_dir_upload = config.storage.data_dir.clone();
+        let tls_upload: Option<std::sync::Arc<dyn Fn(String, String, Option<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>> = if tls_active {
+            Some(std::sync::Arc::new(move |cert_pem: String, key_pem: String, chain_pem: Option<String>| {
+                crate::tls_cert::validate_and_write(&data_dir_upload, &cert_pem, &key_pem, chain_pem.as_deref())
+                    .map(|info| (info.fingerprint, info.expires_at, info.expiry_secs, info.sans))
+                    .map_err(|e| e.to_string())
+            }))
+        } else {
+            None
+        };
+
+        // --- F1/F2: Build allowed CORS origins for RPC and GUI servers ---
+        // Always include localhost GUI origins.  In setup mode (extra_sans contains LAN IPs)
+        // or when allowed_ips are configured, also include those IPs so remote browsers
+        // can reach the RPC through the GUI without CORS errors.
+        // This replaces CorsLayer::permissive() with an explicit allow-list.
+        // F4: use actual configured ports rather than hardcoded constants.
+        let gui_port = parse_port(&config.api.gui_addr).unwrap_or(8785);
+        let rpc_scheme = if tls_config.is_some() { "https" } else { "http" };
+        let gui_scheme_cors = rpc_scheme; // GUI and RPC share the same TLS mode.
+        let mut cors_origins_vec: Vec<String> = vec![
+            format!("{gui_scheme_cors}://127.0.0.1:{gui_port}"),
+            format!("{gui_scheme_cors}://localhost:{gui_port}"),
+            format!("{gui_scheme_cors}://[::1]:{gui_port}"),
+        ];
+        // Build RPC origins list for CSP (http(s):// + ws(s)://).
+        let ws_scheme = if tls_config.is_some() { "wss" } else { "ws" };
+        let mut rpc_origins_vec: Vec<String> = vec![
+            format!("{rpc_scheme}://127.0.0.1:{rpc_port}"),
+            format!("{rpc_scheme}://localhost:{rpc_port}"),
+            format!("{rpc_scheme}://[::1]:{rpc_port}"),
+            format!("{ws_scheme}://127.0.0.1:{rpc_port}"),
+            format!("{ws_scheme}://localhost:{rpc_port}"),
+            format!("{ws_scheme}://[::1]:{rpc_port}"),
+        ];
+        // Add LAN IPs (from setup-mode detection or tls_san config).
+        for san in &extra_sans {
+            if san != "localhost" {
+                let gui_origin = format!("{gui_scheme_cors}://{san}:{gui_port}");
+                if !cors_origins_vec.contains(&gui_origin) {
+                    cors_origins_vec.push(gui_origin);
+                }
+                let rpc_http = format!("{rpc_scheme}://{san}:{rpc_port}");
+                let rpc_ws = format!("{ws_scheme}://{san}:{rpc_port}");
+                if !rpc_origins_vec.contains(&rpc_http) {
+                    rpc_origins_vec.push(rpc_http);
+                }
+                if !rpc_origins_vec.contains(&rpc_ws) {
+                    rpc_origins_vec.push(rpc_ws);
+                }
+            }
+        }
+        // Also add origins for explicitly configured allowed_ips.
+        // Skip CIDR blocks — a /24 block is not a valid browser origin.
+        for ip in &config.api.allowed_ips {
+            if ip.contains('/') {
+                continue; // CIDR block — not a valid HTTP origin
+            }
+            let gui_origin = format!("{gui_scheme_cors}://{ip}:{gui_port}");
+            if !cors_origins_vec.contains(&gui_origin) {
+                cors_origins_vec.push(gui_origin);
+            }
+            let rpc_http = format!("{rpc_scheme}://{ip}:{rpc_port}");
+            let rpc_ws = format!("{ws_scheme}://{ip}:{rpc_port}");
+            if !rpc_origins_vec.contains(&rpc_http) {
+                rpc_origins_vec.push(rpc_http);
+            }
+            if !rpc_origins_vec.contains(&rpc_ws) {
+                rpc_origins_vec.push(rpc_ws);
+            }
+        }
+
+        // Wrap in Arc<RwLock> so setAllowedIps can update them at runtime.
+        let allowed_cors_origins = std::sync::Arc::new(parking_lot::RwLock::new(cors_origins_vec));
+        let rpc_origins = std::sync::Arc::new(parking_lot::RwLock::new(rpc_origins_vec));
 
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
@@ -430,6 +646,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             peer_info: self.peer_info.clone(),
             node_identity: Arc::new(RwLock::new(node_identity)),
             identity_path: Some(identity_path),
+            tls_fingerprint: parking_lot::RwLock::new(tls_fingerprint),
+            tls_expires_at: parking_lot::RwLock::new(tls_expires_at),
+            tls_expiry_secs: parking_lot::RwLock::new(tls_expiry_secs),
+            tls_sans: parking_lot::RwLock::new(tls_sans_init),
+            tls_regenerate,
+            tls_upload,
+            setup_mode,
+            setup_token: setup_token_val,
+            allowed_cors_origins: allowed_cors_origins.clone(),
+            rpc_origins: rpc_origins.clone(),
+            cors_scheme: rpc_scheme.to_string(),
+            gui_port,
+            tls_plaintext_mode,
         });
 
         // --- Determine RPC bind address ---
@@ -447,9 +676,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let rpc_histogram = metrics
             .as_ref()
             .map(|m| std::sync::Arc::new(m.rpc_request_duration.clone()));
-        let rpc_handle = noble_api::server::start_server(api_state, &rpc_bind_addr, rpc_histogram)
-            .await
-            .map_err(|e| NodeError::Api(e.to_string()))?;
+        let rpc_handle = noble_api::server::start_server(
+            api_state,
+            &rpc_bind_addr,
+            rpc_histogram,
+            tls_config.clone(),
+            config.api.max_connections,
+        )
+        .await
+        .map_err(|e| NodeError::Api(e.to_string()))?;
 
         tracing::info!(
             task = "node_startup",
@@ -484,9 +719,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 .parse()
                 .unwrap_or_else(|_| "127.0.0.1:8785".parse().unwrap());
             let gui_filter = ip_filter.clone();
+            let gui_tls = tls_config.clone();
+            let gui_rpc_origins = rpc_origins.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    crate::gui_server::start_gui_server(gui_addr, gui_path, gui_filter).await
+                if let Err(e) = crate::gui_server::start_gui_server(
+                    gui_addr,
+                    gui_path,
+                    gui_filter,
+                    gui_tls,
+                    gui_rpc_origins,
+                    rpc_port,
+                )
+                .await
                 {
                     tracing::error!(task = "node_startup", "GUI server error: {e}");
                 }
@@ -1087,6 +1331,47 @@ fn parse_voting_strategy(
 /// 1. If `[gateway] key_path` is set and file exists, load from file.
 /// 2. Else auto-derive from the first wallet key (with deprecation warning if key_path is empty).
 /// 3. If `[gateway] enabled = false`, returns None.
+/// Generate (or load) a one-time setup token for setup-mode authentication.
+///
+/// On first call, a 32-byte random hex token is written to
+/// `<data_dir>/setup-token.txt` with 0o600 permissions. On subsequent calls
+/// the same file is returned so a node restart prints the same token until
+/// setup completes.  The file is NOT automatically deleted — the operator
+/// should delete it after completing setup, or it is overwritten on the next
+/// setup-mode boot (i.e. when identity.json is absent again).
+fn generate_setup_token(data_dir: &std::path::Path) -> String {
+    use rand::RngCore as _;
+    let token_path = data_dir.join("setup-token.txt");
+
+    // Re-use existing token if present (stable across restarts during the same setup session).
+    if let Ok(existing) = std::fs::read_to_string(&token_path) {
+        let t = existing.trim().to_string();
+        if t.len() == 64 {
+            return t;
+        }
+    }
+
+    // Generate a fresh 32-byte (64 hex char) token.
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = hex::encode(bytes);
+
+    if let Some(parent) = token_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&token_path, &token) {
+        tracing::warn!(task = "node_startup", "Could not write setup-token.txt: {e}");
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    token
+}
+
 fn resolve_gateway_key(
     config: &NodeConfig,
     wallet_keystore: &Arc<Mutex<noble_wallet::KeyStore>>,

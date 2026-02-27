@@ -28,6 +28,9 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

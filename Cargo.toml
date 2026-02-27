@@ -89,3 +89,11 @@ dirs = "6"
 parking_lot = "0.12"
 prometheus = { version = "0.13", features = ["process"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+rcgen = "0.11"
+rustls = "0.23"
+rustls-pki-types = "1"
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2", "service"] }
+time = { version = "0.3", features = ["formatting"] }
+pem = "3"
+if-addrs = "0.10"

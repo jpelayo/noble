@@ -166,10 +166,17 @@ impl std::fmt::Debug for ConsensusConfig {
     }
 }
 
+fn default_ws_addr() -> String {
+    "127.0.0.1:8784".to_string()
+}
+
 /// JSON-RPC and WebSocket API configuration.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ApiConfig {
     pub rpc_addr: String,
+    /// Deprecated: WebSocket is served on the same port as JSON-RPC (rpc_addr).
+    /// Kept for backward-compatible config parsing; field is ignored at runtime.
+    #[serde(default = "default_ws_addr")]
     pub ws_addr: String,
     pub max_connections: u32,
     pub rate_limit: u32,
@@ -197,6 +204,30 @@ pub struct ApiConfig {
     /// Example: ["192.168.1.0/24", "10.0.0.5"]
     #[serde(default)]
     pub allowed_ips: Vec<String>,
+    /// Enable TLS (HTTPS/WSS) on the RPC and GUI servers.
+    /// A self-signed certificate is generated on first start and stored in the
+    /// data directory alongside RocksDB files.  Required for Tauri client apps,
+    /// which run in a secure context and block plain HTTP/WS endpoints.
+    #[serde(default = "default_tls_enabled")]
+    pub tls_enabled: bool,
+    /// Additional Subject Alternative Names to include in the generated self-signed certificate.
+    /// Use this to add your server's LAN/WAN IP or hostname so remote browsers trust the cert.
+    /// Example: ["192.168.1.100", "node.example.com"]
+    #[serde(default)]
+    pub tls_san: Vec<String>,
+    /// When true, the node falls back to plain HTTP if TLS certificate generation fails.
+    /// By default (false) the node refuses to start if TLS is enabled but cert fails — fail-closed.
+    #[serde(default)]
+    pub tls_allow_plaintext_fallback: bool,
+    /// Allow remote browser access during setup mode (when identity.json is absent).
+    /// Default false = localhost-only setup, which is the safe default.
+    /// Set to true only when the node has no local display and must be configured remotely.
+    #[serde(default)]
+    pub remote_setup: bool,
+}
+
+fn default_tls_enabled() -> bool {
+    true
 }
 
 fn default_totp_scope() -> String {
@@ -447,6 +478,10 @@ impl Default for ApiConfig {
             gui_addr: default_gui_addr(),
             gui_dir: String::new(),
             allowed_ips: Vec::new(),
+            tls_enabled: true,
+            tls_san: Vec::new(),
+            tls_allow_plaintext_fallback: false,
+            remote_setup: false,
         }
     }
 }
@@ -472,7 +507,7 @@ impl Default for LoggingConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            prometheus_addr: "127.0.0.1:8786".to_string(),
+            prometheus_addr: "127.0.0.1:8784".to_string(),
             enabled: false,
         }
     }
@@ -587,7 +622,7 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:8786"
+            prometheus_addr = "127.0.0.1:8784"
             enabled = false
 
             [identity]
@@ -612,7 +647,7 @@ mod tests {
         assert_eq!(config.gui_addr, "127.0.0.1:8785");
 
         let metrics = MetricsConfig::default();
-        assert_eq!(metrics.prometheus_addr, "127.0.0.1:8786");
+        assert_eq!(metrics.prometheus_addr, "127.0.0.1:8784");
         assert!(!metrics.enabled, "metrics should be disabled by default");
 
         let net = NetworkConfig::default();
@@ -662,7 +697,7 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:8786"
+            prometheus_addr = "127.0.0.1:8784"
             enabled = false
 
             [identity]

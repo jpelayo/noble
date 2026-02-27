@@ -27,6 +27,8 @@
 //!   TotpValidator (7)
 //!     ↓
 //!   MaxNetworkVersion (8)
+//!     ↓
+//!   TlsCertInfo (9)
 //! ```
 //!
 //! # Rules
@@ -83,6 +85,8 @@ pub enum LockOrder {
     TotpValidator = 7,
     /// `Arc<RwLock<String>>` — highest observed peer software version.
     MaxNetworkVersion = 8,
+    /// `RwLock<Option<String>>` in `ApiState` — TLS certificate metadata (fingerprint, expiry, SANs).
+    TlsCertInfo = 9,
 }
 
 impl std::fmt::Display for LockOrder {
@@ -182,6 +186,7 @@ mod tests {
             LockOrder::PeerInfo,
             LockOrder::TotpValidator,
             LockOrder::MaxNetworkVersion,
+            LockOrder::TlsCertInfo,
         ];
         for pair in orders.windows(2) {
             assert!(

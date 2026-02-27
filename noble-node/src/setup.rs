@@ -188,7 +188,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!();
             println!("  Remote access enabled. After setup, the dashboard GUI will");
-            println!("  be available at http://<this-host>:8785");
+            let scheme = if defaults.api.tls_enabled { "https" } else { "http" };
+            println!("  be available at {scheme}://<this-host>:8785");
         }
     }
 
@@ -605,6 +606,10 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             gui_addr: defaults.api.gui_addr.clone(),
             gui_dir: defaults.api.gui_dir.clone(),
             allowed_ips: allowed_ips.clone(),
+            tls_enabled: defaults.api.tls_enabled,
+            tls_san: defaults.api.tls_san.clone(),
+            tls_allow_plaintext_fallback: defaults.api.tls_allow_plaintext_fallback,
+            remote_setup: defaults.api.remote_setup,
         },
         wallet: WalletConfig {
             keystore_path: PathBuf::from("keystore"),

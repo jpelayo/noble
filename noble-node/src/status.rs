@@ -5,9 +5,76 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::pidfile;
+
+// ---------------------------------------------------------------------------
+// TLS client support (no-cert verifier for self-signed certs)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme;
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
+fn make_tls_client_config() -> rustls::ClientConfig {
+    rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+        .with_no_client_auth()
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
 
 /// Display node status by checking the PID file and querying the RPC endpoint.
 pub fn show_status(rpc: &str, pid_file: &str, totp: Option<&str>) {
@@ -71,11 +138,11 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
         consensus: None,
     };
 
-    // Parse host:port from RPC URL
-    let (host, port) = parse_rpc_url(rpc)?;
+    // Parse host:port and TLS flag from RPC URL
+    let (host, port, use_tls) = parse_rpc_url(rpc)?;
 
     // getBlockCount — returns {height, block_hash}
-    if let Ok(resp) = rpc_call(&host, port, "noble_getBlockCount", &[], totp) {
+    if let Ok(resp) = rpc_call(&host, port, "noble_getBlockCount", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             info.chain_height = result.get("height").and_then(|v| v.as_u64());
         }
@@ -83,7 +150,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
 
     // getNodeInfo — returns version, protocol_version, chain_id, uptime_secs, ports.
     // Derive network label from chain_id.
-    if let Ok(resp) = rpc_call(&host, port, "noble_getNodeInfo", &[], totp) {
+    if let Ok(resp) = rpc_call(&host, port, "noble_getNodeInfo", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             if let Some(chain_id) = result.get("chain_id").and_then(|v| v.as_u64()) {
                 let label = match chain_id as u32 {
@@ -98,7 +165,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
     }
 
     // getNetworkInfo — returns {peer_count, inbound, outbound}
-    if let Ok(resp) = rpc_call(&host, port, "noble_getNetworkInfo", &[], totp) {
+    if let Ok(resp) = rpc_call(&host, port, "noble_getNetworkInfo", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             let total = result
                 .get("peer_count")
@@ -111,7 +178,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
     }
 
     // getMempoolInfo — tx count
-    if let Ok(resp) = rpc_call(&host, port, "noble_getMempoolInfo", &[], totp) {
+    if let Ok(resp) = rpc_call(&host, port, "noble_getMempoolInfo", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             if let Some(count) = result.get("size").and_then(|v| v.as_u64()) {
                 info.mempool = Some(format!("{} transactions", format_number(count)));
@@ -120,7 +187,7 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
     }
 
     // getCycleStatus — returns {cycle_number, phase, phase_index, phase_remaining_secs, cycle_remaining_secs}
-    if let Ok(resp) = rpc_call(&host, port, "noble_getCycleStatus", &[], totp) {
+    if let Ok(resp) = rpc_call(&host, port, "noble_getCycleStatus", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             let phase = result
                 .get("phase")
@@ -139,12 +206,16 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
     Ok(info)
 }
 
-/// Parse an RPC URL like `http://127.0.0.1:8783` into (host, port).
-fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
-    let stripped = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
+/// Parse an RPC URL like `https://127.0.0.1:8783` or `http://127.0.0.1:8783`
+/// into (host, port, use_tls).
+fn parse_rpc_url(url: &str) -> Result<(String, u16, bool), String> {
+    let (stripped, use_tls) = if let Some(s) = url.strip_prefix("https://") {
+        (s, true)
+    } else if let Some(s) = url.strip_prefix("http://") {
+        (s, false)
+    } else {
+        (url, false)
+    };
 
     let (host, port_str) = stripped
         .rsplit_once(':')
@@ -155,16 +226,17 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
         .parse()
         .map_err(|_| format!("invalid port in URL: {url}"))?;
 
-    Ok((host.to_string(), port))
+    Ok((host.to_string(), port, use_tls))
 }
 
-/// Make a JSON-RPC 2.0 call over raw TCP (avoids pulling in reqwest).
+/// Make a JSON-RPC 2.0 call over raw TCP or TLS (avoids pulling in reqwest).
 fn rpc_call(
     host: &str,
     port: u16,
     method: &str,
     params: &[serde_json::Value],
     totp: Option<&str>,
+    use_tls: bool,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -192,32 +264,19 @@ fn rpc_call(
     headers.push_str("\r\n");
 
     let addr = format!("{host}:{port}");
-    let mut stream = TcpStream::connect_timeout(
+    let tcp = TcpStream::connect_timeout(
         &addr.parse().map_err(|e| format!("invalid address: {e}"))?,
         Duration::from_secs(5),
     )
     .map_err(|e| format!("connect failed: {e}"))?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
-    stream
-        .write_all(headers.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
-    stream
-        .write_all(body_str.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
-
-    let mut response = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(e) => return Err(format!("read failed: {e}")),
-        }
-    }
+    let response = if use_tls {
+        read_tls_response(tcp, host, headers.as_bytes(), body_str.as_bytes())?
+    } else {
+        read_plain_response(tcp, headers.as_bytes(), body_str.as_bytes())?
+    };
 
     let response_str = String::from_utf8_lossy(&response);
 
@@ -228,9 +287,65 @@ fn rpc_call(
     serde_json::from_str(json_body).map_err(|e| format!("JSON parse failed: {e}"))
 }
 
+fn read_plain_response(
+    mut stream: TcpStream,
+    headers: &[u8],
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    stream
+        .write_all(headers)
+        .map_err(|e| format!("write failed: {e}"))?;
+    stream
+        .write_all(body)
+        .map_err(|e| format!("write failed: {e}"))?;
+    read_all(&mut stream)
+}
+
+fn read_tls_response(
+    tcp: TcpStream,
+    host: &str,
+    headers: &[u8],
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    let server_name: rustls_pki_types::ServerName<'_> = host
+        .try_into()
+        .map_err(|e| format!("invalid server name '{host}': {e}"))?;
+    let config = Arc::new(make_tls_client_config());
+    let conn = rustls::ClientConnection::new(config, server_name.to_owned())
+        .map_err(|e| format!("TLS init failed: {e}"))?;
+    let mut stream = rustls::StreamOwned::new(conn, tcp);
+
+    stream
+        .write_all(headers)
+        .map_err(|e| format!("TLS write failed: {e}"))?;
+    stream
+        .write_all(body)
+        .map_err(|e| format!("TLS write failed: {e}"))?;
+    read_all(&mut stream)
+}
+
+fn read_all<R: Read>(reader: &mut R) -> Result<Vec<u8>, String> {
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(format!("read failed: {e}")),
+        }
+    }
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Peers / Consensus commands
+// ---------------------------------------------------------------------------
+
 /// Display connected peers by querying the RPC endpoint.
 pub fn show_peers(rpc: &str, totp: Option<&str>) {
-    let (host, port) = match parse_rpc_url(rpc) {
+    let (host, port, use_tls) = match parse_rpc_url(rpc) {
         Ok(hp) => hp,
         Err(e) => {
             eprintln!("Invalid RPC URL: {e}");
@@ -241,7 +356,7 @@ pub fn show_peers(rpc: &str, totp: Option<&str>) {
     println!("NOBLE Connected Peers");
     println!("{}", "\u{2550}".repeat(70));
 
-    match rpc_call(&host, port, "noble_getPeerInfo", &[], totp) {
+    match rpc_call(&host, port, "noble_getPeerInfo", &[], totp, use_tls) {
         Ok(resp) => {
             if let Some(peers) = resp.get("result").and_then(|r| r.as_array()) {
                 if peers.is_empty() {
@@ -281,7 +396,7 @@ pub fn show_peers(rpc: &str, totp: Option<&str>) {
 
 /// Display consensus cycle status and validator list.
 pub fn show_consensus(rpc: &str, totp: Option<&str>) {
-    let (host, port) = match parse_rpc_url(rpc) {
+    let (host, port, use_tls) = match parse_rpc_url(rpc) {
         Ok(hp) => hp,
         Err(e) => {
             eprintln!("Invalid RPC URL: {e}");
@@ -293,7 +408,7 @@ pub fn show_consensus(rpc: &str, totp: Option<&str>) {
     println!("{}", "\u{2550}".repeat(60));
 
     // Cycle status — {cycle_number, phase, phase_index, phase_remaining_secs, cycle_remaining_secs}
-    match rpc_call(&host, port, "noble_getCycleStatus", &[], totp) {
+    match rpc_call(&host, port, "noble_getCycleStatus", &[], totp, use_tls) {
         Ok(resp) => {
             if let Some(result) = resp.get("result") {
                 let cycle = result
@@ -323,7 +438,7 @@ pub fn show_consensus(rpc: &str, totp: Option<&str>) {
     println!();
 
     // Validator list — returns {selection_policy, validators, count}
-    match rpc_call(&host, port, "noble_getValidatorList", &[], totp) {
+    match rpc_call(&host, port, "noble_getValidatorList", &[], totp, use_tls) {
         Ok(resp) => {
             if let Some(validators) = resp
                 .get("result")

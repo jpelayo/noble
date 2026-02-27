@@ -93,8 +93,8 @@ pub struct FaucetState {
     about = "NOBLE faucet server (mainnet + testnet)"
 )]
 struct Cli {
-    /// Listen address (e.g. "0.0.0.0:8787").
-    #[arg(long, default_value = "127.0.0.1:8787")]
+    /// Listen address (e.g. "0.0.0.0:8786").
+    #[arg(long, default_value = "127.0.0.1:8786")]
     listen: String,
 
     /// NOBLE node JSON-RPC URL.
@@ -240,7 +240,7 @@ mod tests {
     fn cli_parse_defaults() {
         use clap::Parser;
         let cli = Cli::try_parse_from(["noble-faucet", "--faucet-address", "abcd1234"]).unwrap();
-        assert_eq!(cli.listen, "127.0.0.1:8787");
+        assert_eq!(cli.listen, "127.0.0.1:8786");
         assert_eq!(cli.rpc_url, "http://127.0.0.1:8783");
         assert_eq!(cli.faucet_address, "abcd1234");
         assert_eq!(cli.drip_amount, 10_000_000);
@@ -248,13 +248,20 @@ mod tests {
     }
 
     #[test]
-    fn rpc_client_rejects_https() {
+    fn rpc_client_accepts_https() {
+        // F7: https:// is now supported via the NoCertVerifier TLS client.
         let result = NodeRpcClient::new("https://127.0.0.1:8783", None);
+        assert!(result.is_ok(), "https:// should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn rpc_client_rejects_unknown_scheme() {
+        let result = NodeRpcClient::new("ftp://127.0.0.1:8783", None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("https://"),
-            "error should mention https: {err}"
+            err.contains("unsupported URL scheme"),
+            "error should mention unsupported scheme: {err}"
         );
     }
 

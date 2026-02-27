@@ -38,6 +38,11 @@ tower-http.workspace = true
 ipnet.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true
+hyper.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

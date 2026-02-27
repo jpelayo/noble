@@ -39,7 +39,8 @@ pub mod transport;
 // Re-export primary public API types.
 pub use config::NetworkConfig;
 pub use config::{
-    GUI_PORT, P2P_PORTS, P2P_PORT_ALT1, P2P_PORT_ALT2, P2P_PORT_PRIMARY, RPC_HTTP_PORT, WS_PORT,
+    FAUCET_PORT, GUI_PORT, METRICS_PORT, P2P_PORTS, P2P_PORT_ALT1, P2P_PORT_ALT2,
+    P2P_PORT_PRIMARY, RPC_HTTP_PORT, WS_PORT,
 };
 pub use error::NetworkError;
 pub use messages::{NetworkCommand, NetworkEvent};

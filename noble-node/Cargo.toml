@@ -41,6 +41,14 @@ dirs = { workspace = true }
 rand = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+hyper-util.workspace = true
+time.workspace = true
+pem.workspace = true
+if-addrs.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

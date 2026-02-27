@@ -85,6 +85,50 @@ pub trait NodeApi {
         wants_to_vote: bool,
         p2p_port: Option<u16>,
     ) -> Result<SetNodeIdentityResponse, ErrorObjectOwned>;
+
+    /// Get the SHA-256 fingerprint of the active TLS certificate.
+    ///
+    /// Returns null when TLS is disabled.  Use this fingerprint to verify the
+    /// self-signed certificate in browser trust dialogs or client configurations.
+    #[method(name = "getTlsFingerprint")]
+    async fn get_tls_fingerprint(&self) -> Result<TlsFingerprintResponse, ErrorObjectOwned>;
+
+    /// Get full TLS certificate metadata: fingerprint, expiry, SANs, and mode flags.
+    ///
+    /// Does not require authentication — safe for the GUI status panel.
+    #[method(name = "getTlsCertInfo")]
+    async fn get_tls_cert_info(&self) -> Result<TlsCertInfoResponse, ErrorObjectOwned>;
+
+    /// Regenerate the self-signed TLS certificate.
+    ///
+    /// Writes new `tls-cert.pem` + `tls-key.pem` to the data directory and updates
+    /// the in-memory fingerprint/expiry/SANs.  **Restart the node** for the new
+    /// certificate to be loaded by the TLS acceptor.
+    ///
+    /// `extra_sans` — additional IP addresses or DNS names for the new certificate.
+    /// If omitted the default SANs (localhost, 127.0.0.1, ::1) are used.
+    #[method(name = "regenerateTlsCert")]
+    async fn regenerate_tls_cert(
+        &self,
+        extra_sans: Option<Vec<String>>,
+    ) -> Result<RegenerateTlsCertResponse, ErrorObjectOwned>;
+
+    /// Replace the TLS certificate with a CA-signed (purchased) certificate.
+    ///
+    /// The uploaded certificate and private key are validated (key must match cert)
+    /// before any files are written, preventing an invalid cert from bricking the node.
+    /// **Restart the node** to load the new certificate.
+    ///
+    /// `cert_pem`  — PEM-encoded leaf certificate (required).
+    /// `key_pem`   — PEM-encoded private key (required).
+    /// `chain_pem` — PEM-encoded intermediate chain (optional).
+    #[method(name = "uploadTlsCert")]
+    async fn upload_tls_cert(
+        &self,
+        cert_pem: String,
+        key_pem: String,
+        chain_pem: Option<String>,
+    ) -> Result<UploadTlsCertResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -258,6 +302,50 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         let is_remote = filter.has_remote_access();
 
+        // F4: Rebuild CORS origins and RPC origins from the updated IP list
+        // so the live servers immediately reflect the new allow-list.
+        {
+            let scheme = &self.cors_scheme;
+            let ws_scheme = if scheme == "https" { "wss" } else { "ws" };
+            let rpc_port = self.rpc_port;
+            let gui_port = self.gui_port;
+
+            let mut cors: Vec<String> = vec![
+                format!("{scheme}://127.0.0.1:{gui_port}"),
+                format!("{scheme}://localhost:{gui_port}"),
+                format!("{scheme}://[::1]:{gui_port}"),
+            ];
+            let mut rpc: Vec<String> = vec![
+                format!("{scheme}://127.0.0.1:{rpc_port}"),
+                format!("{scheme}://localhost:{rpc_port}"),
+                format!("{scheme}://[::1]:{rpc_port}"),
+                format!("{ws_scheme}://127.0.0.1:{rpc_port}"),
+                format!("{ws_scheme}://localhost:{rpc_port}"),
+                format!("{ws_scheme}://[::1]:{rpc_port}"),
+            ];
+
+            for ip in &allowed_ips {
+                if ip.contains('/') {
+                    continue; // CIDR block — not a valid HTTP origin
+                }
+                let gui_origin = format!("{scheme}://{ip}:{gui_port}");
+                if !cors.contains(&gui_origin) {
+                    cors.push(gui_origin);
+                }
+                let rpc_http = format!("{scheme}://{ip}:{rpc_port}");
+                let rpc_ws = format!("{ws_scheme}://{ip}:{rpc_port}");
+                if !rpc.contains(&rpc_http) {
+                    rpc.push(rpc_http);
+                }
+                if !rpc.contains(&rpc_ws) {
+                    rpc.push(rpc_ws);
+                }
+            }
+
+            *self.allowed_cors_origins.write() = cors;
+            *self.rpc_origins.write() = rpc;
+        }
+
         // Warn if the bind address mode changed (requires restart).
         let message = if was_remote != is_remote {
             format!(
@@ -350,5 +438,107 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         }
 
         Ok(SetNodeIdentityResponse { success: true })
+    }
+
+    async fn get_tls_fingerprint(&self) -> Result<TlsFingerprintResponse, ErrorObjectOwned> {
+        Ok(TlsFingerprintResponse {
+            fingerprint: self.tls_fingerprint.read().clone(),
+        })
+    }
+
+    async fn get_tls_cert_info(&self) -> Result<TlsCertInfoResponse, ErrorObjectOwned> {
+        let fingerprint = self.tls_fingerprint.read().clone();
+        let enabled = fingerprint.is_some() || self.tls_plaintext_mode;
+        let tls_active = fingerprint.is_some();
+
+        let expires_at = self.tls_expires_at.read().clone();
+        let sans = self.tls_sans.read().clone();
+
+        // Calculate days remaining using the stored Unix timestamp (avoids ISO parsing).
+        let expiry_secs = self.tls_expiry_secs.read();
+        let days_remaining = expiry_secs.map(|exp| {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            (exp - now_secs) / 86400
+        });
+
+        Ok(TlsCertInfoResponse {
+            enabled: enabled || tls_active,
+            fingerprint,
+            expires_at,
+            days_remaining,
+            sans,
+            auto_generated: true, // self-signed unless uploaded via uploadTlsCert
+            plaintext_mode: self.tls_plaintext_mode,
+        })
+    }
+
+    async fn regenerate_tls_cert(
+        &self,
+        extra_sans: Option<Vec<String>>,
+    ) -> Result<RegenerateTlsCertResponse, ErrorObjectOwned> {
+        let regen = self.tls_regenerate.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam(
+                "TLS regeneration is not available (TLS disabled or not configured)".into(),
+            )
+        })?;
+
+        let (fingerprint, expires_at, expiry_secs, sans) = regen(extra_sans.unwrap_or_default())
+            .map_err(|e| ApiError::Internal(format!("regenerate cert: {e}")))?;
+
+        // Update in-memory state so subsequent getTlsCertInfo / getTlsFingerprint reflect
+        // the new cert (the live TLS acceptor still uses the old cert until restart).
+        { *self.tls_fingerprint.write() = Some(fingerprint.clone()); }
+        { *self.tls_expires_at.write() = Some(expires_at.clone()); }
+        { *self.tls_expiry_secs.write() = Some(expiry_secs); }
+        { *self.tls_sans.write() = sans; }
+
+        tracing::info!(
+            task = "tls_cert",
+            "TLS certificate regenerated — SHA-256: {fingerprint}. Restart node to apply."
+        );
+
+        Ok(RegenerateTlsCertResponse {
+            fingerprint,
+            expires_at,
+            restart_required: true,
+        })
+    }
+
+    async fn upload_tls_cert(
+        &self,
+        cert_pem: String,
+        key_pem: String,
+        chain_pem: Option<String>,
+    ) -> Result<UploadTlsCertResponse, ErrorObjectOwned> {
+        let upload = self.tls_upload.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam(
+                "TLS upload is not available (TLS disabled or not configured)".into(),
+            )
+        })?;
+
+        let (fingerprint, expires_at, expiry_secs, sans) = upload(cert_pem, key_pem, chain_pem)
+            .map_err(|e| ApiError::InvalidParam(format!("invalid certificate: {e}")))?;
+
+        // Update in-memory state.
+        { *self.tls_fingerprint.write() = Some(fingerprint.clone()); }
+        { *self.tls_expires_at.write() = Some(expires_at.clone()); }
+        { *self.tls_expiry_secs.write() = Some(expiry_secs); }
+        { *self.tls_sans.write() = sans.clone(); }
+
+        tracing::info!(
+            task = "tls_cert",
+            "TLS certificate uploaded (CA-signed) — SHA-256: {fingerprint}. Restart node to apply."
+        );
+
+        Ok(UploadTlsCertResponse {
+            fingerprint,
+            expires_at,
+            sans,
+            auto_generated: false,
+            restart_required: true,
+        })
     }
 }

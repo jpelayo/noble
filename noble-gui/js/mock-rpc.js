@@ -931,7 +931,7 @@ export class MockRpcClient {
           storage_bytes: 256 * 1024 * 1024,
           storage_capacity_bytes: 1024 * 1024 * 1024,
           rpc_port: 8783,
-          ws_port: 8784,
+          ws_port: 8783,
           p2p_port: 8780,
           data_dir: '/var/noble/data',
           totp_enabled: this.#authEnabled,
@@ -1436,7 +1436,7 @@ export class MockRpcClient {
       }
 
       case 'noble_getStorageInfo': {
-        const tip = this.#blocks[this.#blocks.length - 1];
+        const tip = this.#chain.blocks[this.#chain.blocks.length - 1];
         return {
           chain_height: tip ? tip.header.height : 0,
           pruning_mode: 'archive',

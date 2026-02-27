@@ -93,7 +93,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         totp_scope: noble_api::middleware::TotpScope::All,
         totp_secret_path: None,
         rpc_port: 8783,
-        ws_port: 8784,
+        ws_port: 8783,
         p2p_port: 8780,
         new_block_tx,
         new_tx_tx,
@@ -118,6 +118,25 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
             p2p_port: 8780,
         })),
         identity_path: None,
+        tls_fingerprint: parking_lot::RwLock::new(None),
+        tls_expires_at: parking_lot::RwLock::new(None),
+        tls_expiry_secs: parking_lot::RwLock::new(None),
+        tls_sans: parking_lot::RwLock::new(vec![]),
+        tls_regenerate: None,
+        tls_upload: None,
+        setup_mode: false,
+        setup_token: None,
+        allowed_cors_origins: std::sync::Arc::new(parking_lot::RwLock::new(vec![
+            "http://127.0.0.1:8785".into(),
+            "http://localhost:8785".into(),
+        ])),
+        rpc_origins: std::sync::Arc::new(parking_lot::RwLock::new(vec![
+            "http://127.0.0.1:8783".into(),
+            "ws://127.0.0.1:8783".into(),
+        ])),
+        cors_scheme: "http".to_string(),
+        gui_port: 8785,
+        tls_plaintext_mode: false,
     });
 
     (state, dir)
@@ -410,7 +429,7 @@ async fn get_node_info() {
     // uptime_secs should be a small number (just started)
     assert!(resp["uptime_secs"].as_u64().unwrap() < 60);
     assert_eq!(resp["rpc_port"], 8783);
-    assert_eq!(resp["ws_port"], 8784);
+    assert_eq!(resp["ws_port"], 8783);
     assert_eq!(resp["p2p_port"], 8780);
 }
 

@@ -33,10 +33,20 @@ export class WsManager {
   #maxDelay = 30_000;
   #shouldConnect = false;
   #onStatusChange = null;
+  #authToken = null;              // SHA-256 hash of TOTP code (set via setAuthToken)
 
   constructor(url, { onStatusChange } = {}) {
     this.#url = url;
     this.#onStatusChange = onStatusChange;
+  }
+
+  /**
+   * Set the pre-computed TOTP hash token for WS auth (F3).
+   * Pass the value from rpc.getAuthToken() after TOTP login.
+   * Pass null to clear (on logout).
+   */
+  setAuthToken(hash) {
+    this.#authToken = hash;
   }
 
   connect() {
@@ -47,8 +57,15 @@ export class WsManager {
   #doConnect() {
     if (!this.#shouldConnect) return;
 
+    // F3: append ?token=<hash> when TOTP auth is active.
+    // The browser WebSocket API cannot set custom headers, so the auth token
+    // is passed as a query parameter and validated by the auth middleware.
+    const connectUrl = this.#authToken
+      ? `${this.#url}?token=${this.#authToken}`
+      : this.#url;
+
     try {
-      this.#ws = new WebSocket(this.#url);
+      this.#ws = new WebSocket(connectUrl);
     } catch {
       this.#scheduleReconnect();
       return;

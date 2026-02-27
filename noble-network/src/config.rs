@@ -21,10 +21,20 @@ pub const P2P_PORTS: [u16; 3] = [P2P_PORT_PRIMARY, P2P_PORT_ALT1, P2P_PORT_ALT2]
 pub const RPC_HTTP_PORT: u16 = 8783;
 
 /// JSON-RPC WebSocket server port.
+///
+/// Deprecated: WebSocket is served on the same port as JSON-RPC (RPC_HTTP_PORT = 8783).
+/// Port 8784 is now allocated to Prometheus metrics (METRICS_PORT).
+#[deprecated(note = "WebSocket shares RPC_HTTP_PORT (8783); use METRICS_PORT for 8784")]
 pub const WS_PORT: u16 = 8784;
+
+/// Prometheus metrics HTTP server port (disabled by default).
+pub const METRICS_PORT: u16 = 8784;
 
 /// Dashboard GUI HTTP server port.
 pub const GUI_PORT: u16 = 8785;
+
+/// Faucet HTTP server port (testnet/mainnet onboarding).
+pub const FAUCET_PORT: u16 = 8786;
 
 /// Legacy alias kept for backward compatibility within the crate.
 pub const DEFAULT_LISTEN_PORT: u16 = P2P_PORT_PRIMARY;

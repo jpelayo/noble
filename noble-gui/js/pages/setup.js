@@ -86,6 +86,7 @@ export function init(root, ctx) {
     dataDir: 'data',
     cacheSize: 256,
     compression: true,
+    setupToken: '',  // F1: raw setup token from node console (used as Bearer auth for write RPCs)
   };
 
   // ── Shell ──
@@ -162,6 +163,7 @@ export function init(root, ctx) {
         state.network = body.querySelector('input[name="network"]:checked')?.value || state.network;
         state.nodeName = body.querySelector('#setup-node-name')?.value || '';
         state.p2pPort = parseInt(body.querySelector('input[name="p2pPort"]:checked')?.value || '8780', 10);
+        state.setupToken = body.querySelector('#setup-token')?.value?.trim() || '';
         break;
       case 'role':
         state.roleValue = body.querySelector('input[name="role"]:checked')?.value || state.roleValue;
@@ -190,6 +192,18 @@ export function init(root, ctx) {
       <div style="text-align:center;padding:var(--gap-lg) 0 var(--gap)">
         <h2 style="margin-bottom:var(--gap-sm)">Welcome to NOBLE</h2>
         <p style="color:var(--text-secondary)">This wizard will guide you through the essential configuration for your node.</p>
+      </div>
+      <div class="form-group" style="margin-bottom:var(--gap-lg)">
+        <label for="setup-token" style="display:flex;align-items:center;gap:var(--gap-sm)">
+          Setup Token
+          <span style="font-size:var(--font-size-xs);font-weight:400;color:var(--text-muted)">— required to save configuration</span>
+        </label>
+        <input type="text" id="setup-token" maxlength="128" placeholder="Paste token from node console output"
+          value="${esc(state.setupToken)}" autocomplete="off" spellcheck="false"
+          style="font-family:var(--font-mono,monospace);letter-spacing:0.03em">
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Copy the token printed in the node terminal at startup (under "SETUP MODE").
+        </div>
       </div>
       <div style="margin-bottom:var(--gap-lg)">
         <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm);color:var(--text-secondary)">Target Network</label>
@@ -591,6 +605,12 @@ export function init(root, ctx) {
     nextBtn.disabled = true;
     nextBtn.textContent = 'Completing...';
 
+    // F1: Set setup token as raw Bearer auth for the write RPC call.
+    // The node validates this token to prevent unauthorized configuration changes.
+    if (state.setupToken) {
+      rpc.setRawAuthToken(state.setupToken);
+    }
+
     try {
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
       await rpc.call('noble_setNodeIdentity', {
@@ -630,6 +650,9 @@ export function init(root, ctx) {
       body.innerHTML += `<div style="color:var(--error);margin-top:var(--gap)">Setup error: ${e.message || e}</div>`;
       nextBtn.disabled = false;
       nextBtn.textContent = 'Complete Setup';
+    } finally {
+      // Always clear the raw setup token so it doesn't persist in memory.
+      rpc.setRawAuthToken(null);
     }
   }
 
