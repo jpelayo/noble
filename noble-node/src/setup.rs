@@ -48,30 +48,34 @@ const ROLE_CHOICES: &[&str] = &[
     "Light Client          - minimal (headers only)",
 ];
 
-const GOV_CLASS_CHOICES: &[&str] = &["Individual", "Private", "Public"];
-
-const PRIVATE_ORG_TYPES: &[&str] = &[
-    "Corp",
-    "LLC",
-    "Partnership",
-    "Trust",
-    "Foundation",
-    "GmbH",
-    "Holding",
-    "Family Office",
-    "SARL",
-    "Other",
+const ORG_TYPE_LABELS: &[&str] = &[
+    "Individual",
+    "Fully privately funded non-profit institution or NGO",
+    "Fully privately funded for-profit corporation",
+    "Fully privately funded for-profit startup",
+    "Fully privately funded for-profit academic institution",
+    "Fully privately funded for-profit institution",
+    "National public administration entity",
+    "Regional or municipal public administration entity",
+    "Publicly funded supranational organization",
+    "Publicly funded corporation or startup",
+    "Publicly funded academic institution",
+    "Publicly funded institution or NGO",
 ];
 
-const PUBLIC_ORG_TYPES: &[&str] = &[
-    "PublicCorp",
-    "Government",
-    "University",
-    "Research",
-    "NGO",
-    "Central Bank",
-    "Judiciary",
-    "Other",
+const ORG_TYPE_IDS: &[&str] = &[
+    "Individual",
+    "PrivateNonProfit",
+    "PrivateCorporation",
+    "PrivateStartup",
+    "PrivateAcademic",
+    "PrivateInstitution",
+    "PublicNational",
+    "PublicRegional",
+    "PublicSupranational",
+    "PublicCorporation",
+    "PublicAcademic",
+    "PublicInstitution",
 ];
 
 const WALLET_CHOICES: &[&str] = &[
@@ -279,47 +283,16 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     section_header("3", "Identity");
 
-    let gov_default = match defaults.identity.org_type.as_str() {
-        "Individual" => 0,
-        "Corp" | "LLC" | "Partnership" | "Trust" | "Foundation" | "GmbH" | "Holding"
-        | "Family Office" | "SARL" => 1,
-        "PublicCorp" | "Government" | "University" | "Research" | "NGO" | "Central Bank"
-        | "Judiciary" => 2,
-        _ => 0,
-    };
-    let gov_sel = Select::new()
-        .with_prompt("Governance class")
-        .items(GOV_CLASS_CHOICES)
-        .default(gov_default)
+    let org_default = ORG_TYPE_IDS
+        .iter()
+        .position(|id| *id == defaults.identity.org_type)
+        .unwrap_or(0);
+    let org_sel = Select::new()
+        .with_prompt("Organization type")
+        .items(ORG_TYPE_LABELS)
+        .default(org_default)
         .interact()?;
-
-    let org_type = match gov_sel {
-        0 => "Individual".to_string(),
-        1 => {
-            let priv_default = PRIVATE_ORG_TYPES
-                .iter()
-                .position(|t| *t == defaults.identity.org_type)
-                .unwrap_or(0);
-            let sel = Select::new()
-                .with_prompt("Private organization type")
-                .items(PRIVATE_ORG_TYPES)
-                .default(priv_default)
-                .interact()?;
-            PRIVATE_ORG_TYPES[sel].to_string()
-        }
-        _ => {
-            let pub_default = PUBLIC_ORG_TYPES
-                .iter()
-                .position(|t| *t == defaults.identity.org_type)
-                .unwrap_or(0);
-            let sel = Select::new()
-                .with_prompt("Public organization type")
-                .items(PUBLIC_ORG_TYPES)
-                .default(pub_default)
-                .interact()?;
-            PUBLIC_ORG_TYPES[sel].to_string()
-        }
-    };
+    let org_type = ORG_TYPE_IDS[org_sel].to_string();
 
     let org_name: String = Input::new()
         .with_prompt("Organization name (optional)")

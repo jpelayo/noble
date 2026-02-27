@@ -32,30 +32,45 @@ const NODE_ROLES = [
   { value: 'LightClient',    label: 'Light Client',                      role: 'LightClient', validate: false, vote: false, desc: 'Minimal, headers only' },
 ];
 
-const GOV_CLASSES = [
-  { id: 'individual', label: 'Individual' },
-  { id: 'private',    label: 'Private' },
-  { id: 'public',     label: 'Public' },
-];
-
-const ORG_TYPES = {
-  individual: [{ id: 'Individual', label: 'Individual' }],
-  private: [
-    { id: 'PrivateNonProfit',    label: 'Non-Profit' },
-    { id: 'PrivateCorporation',  label: 'Corporation' },
-    { id: 'PrivateStartup',     label: 'Startup' },
-    { id: 'PrivateAcademic',    label: 'Academic Institution' },
-    { id: 'PrivateInstitution', label: 'Other Institution' },
-  ],
-  public: [
-    { id: 'PublicNational',       label: 'National Administration' },
-    { id: 'PublicRegional',       label: 'Regional/Municipal' },
-    { id: 'PublicSupranational',  label: 'Supranational Organization' },
-    { id: 'PublicCorporation',    label: 'Public Corporation' },
-    { id: 'PublicAcademic',       label: 'Academic Institution' },
-    { id: 'PublicInstitution',    label: 'Other Institution' },
-  ],
+const ORG_TYPE_GROUPS = {
+  individual: { label: 'Individual', types: ['Individual'] },
+  private: {
+    label: 'Private',
+    types: ['PrivateNonProfit', 'PrivateCorporation', 'PrivateStartup', 'PrivateAcademic', 'PrivateInstitution'],
+  },
+  public: {
+    label: 'Public',
+    types: ['PublicNational', 'PublicRegional', 'PublicSupranational', 'PublicCorporation', 'PublicAcademic', 'PublicInstitution'],
+  },
 };
+
+const ORG_TYPE_LABELS = {
+  Individual:          'Individual',
+  PrivateNonProfit:    'Fully privately funded non-profit institution or NGO',
+  PrivateCorporation:  'Fully privately funded for-profit corporation',
+  PrivateStartup:      'Fully privately funded for-profit startup',
+  PrivateAcademic:     'Fully privately funded for-profit academic institution',
+  PrivateInstitution:  'Fully privately funded for-profit institution',
+  PublicNational:      'National public administration entity',
+  PublicRegional:      'Regional or municipal public administration entity',
+  PublicSupranational: 'Publicly funded supranational organization',
+  PublicCorporation:   'Publicly funded corporation or startup',
+  PublicAcademic:      'Publicly funded academic institution',
+  PublicInstitution:   'Publicly funded institution or NGO',
+};
+
+function buildOrgTypeOptions(selected) {
+  let html = '';
+  for (const [, group] of Object.entries(ORG_TYPE_GROUPS)) {
+    html += `<optgroup label="${group.label}">`;
+    for (const id of group.types) {
+      const sel = id === selected ? ' selected' : '';
+      html += `<option value="${id}"${sel}>${ORG_TYPE_LABELS[id]}</option>`;
+    }
+    html += '</optgroup>';
+  }
+  return html;
+}
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -66,7 +81,6 @@ export function init(root, ctx) {
   const state = {
     nodeName: '',
     roleValue: 'FullNode',
-    govClass: 'individual',
     orgType: 'Individual',
     orgName: '',
     contactEmail: '',
@@ -179,9 +193,7 @@ export function init(root, ctx) {
         state.roleValue = body.querySelector('input[name="role"]:checked')?.value || state.roleValue;
         break;
       case 'identity': {
-        const govSel = body.querySelector('#setup-gov-class');
         const orgSel = body.querySelector('#setup-org-type');
-        if (govSel) state.govClass = govSel.value;
         if (orgSel) state.orgType = orgSel.value;
         state.orgName = body.querySelector('#setup-org-name')?.value || '';
         state.contactEmail = body.querySelector('#setup-email')?.value || '';
@@ -261,12 +273,8 @@ export function init(root, ctx) {
   function renderIdentity() {
     body.innerHTML = `
       <div class="form-group">
-        <label for="setup-gov-class">Governance Class</label>
-        <select id="setup-gov-class"></select>
-      </div>
-      <div class="form-group">
         <label for="setup-org-type">Organization Type</label>
-        <select id="setup-org-type"></select>
+        <select id="setup-org-type">${buildOrgTypeOptions(state.orgType)}</select>
       </div>
       <div class="form-group">
         <label for="setup-org-name">Organization Name (optional)</label>
@@ -282,31 +290,6 @@ export function init(root, ctx) {
         <input type="url" id="setup-website" value="${esc(state.website)}" placeholder="https://..." autocomplete="off">
       </div>
     `;
-    const govSelect = body.querySelector('#setup-gov-class');
-    const orgSelect = body.querySelector('#setup-org-type');
-
-    GOV_CLASSES.forEach(g => {
-      const opt = document.createElement('option');
-      opt.value = g.id;
-      opt.textContent = g.label;
-      if (g.id === state.govClass) opt.selected = true;
-      govSelect.appendChild(opt);
-    });
-
-    function updateOrgTypes() {
-      orgSelect.innerHTML = '';
-      const types = ORG_TYPES[govSelect.value] || ORG_TYPES.individual;
-      types.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t.id;
-        opt.textContent = t.label;
-        if (t.id === state.orgType) opt.selected = true;
-        orgSelect.appendChild(opt);
-      });
-    }
-
-    govSelect.addEventListener('change', updateOrgTypes);
-    updateOrgTypes();
   }
 
   // ── Step 4: Wallet ──
@@ -469,7 +452,7 @@ export function init(root, ctx) {
       <dl class="detail-grid">
         <dt>Node Name</dt><dd>${esc(state.nodeName || '(not set)')}</dd>
         <dt>Role</dt><dd>${esc(roleObj.label)}</dd>
-        <dt>Org Type</dt><dd>${esc(state.orgType)}</dd>
+        <dt>Org Type</dt><dd>${esc(ORG_TYPE_LABELS[state.orgType] || state.orgType)}</dd>
         <dt>Org Name</dt><dd>${esc(state.orgName || '(not set)')}</dd>
         <dt>Contact Email</dt><dd>${esc(state.contactEmail || '(not set)')}</dd>
         <dt>Website</dt><dd>${esc(state.website || '(not set)')}</dd>
