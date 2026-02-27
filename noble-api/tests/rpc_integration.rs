@@ -141,6 +141,13 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         validator_pubkey: None,
         validator_scheme: None,
         validator_key_path: None,
+        data_dir: None,
+        pruning_mode: "archive".to_string(),
+        keep_blocks: 0,
+        reward_address: parking_lot::RwLock::new(None),
+        enable_totp: None,
+        set_config_value: None,
+        config_path: None,
     });
 
     (state, dir)
@@ -651,6 +658,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -727,4 +735,43 @@ async fn get_transaction_receipt_not_found() {
         .await;
 
     assert!(result.is_err());
+}
+
+// --- Finding 5: Multi-address integration tests ---
+
+#[tokio::test]
+async fn validate_address_bitcoin_p2wpkh() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    // BIP-173 test vector
+    let result: serde_json::Value = client
+        .request(
+            "noble_validateAddress",
+            rpc_params!["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["valid"], true);
+    assert_eq!(result["address_type"], "bitcoin_hash160");
+}
+
+#[tokio::test]
+async fn validate_address_testnet_rejected() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    // tb1q... should be invalid (testnet not supported)
+    let result: serde_json::Value = client
+        .request(
+            "noble_validateAddress",
+            rpc_params!["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["valid"], false);
 }

@@ -66,6 +66,7 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 encrypted_locator: None,
                 external_attestations: vec![],
                 gateway_address: None,
+                source_address: None,
             },
         )
 }
@@ -218,7 +219,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     checksum: Hash256::ZERO,
                     timestamp,
                     fee,
-                    recipient: Some(NoblePublicKey::Ed25519(recipient_bytes)),
+                    recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes))),
                     amount: Some(amount),
                     publisher_sig,
                     additional_sigs,
@@ -226,6 +227,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     encrypted_locator: None,
                     external_attestations: vec![],
                     gateway_address: None,
+                    source_address: None,
                 }
             },
         )
@@ -266,7 +268,7 @@ fn signed_transaction_roundtrip_100() {
             timestamp: 1_700_000_000 + i,
             fee: 1_000 + i,
             recipient: if is_transfer {
-                Some(NoblePublicKey::Ed25519(recipient_pk.clone()))
+                Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())))
             } else {
                 None
             },
@@ -285,6 +287,7 @@ fn signed_transaction_roundtrip_100() {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
 
         let msg = tx.compute_signing_message().unwrap();
@@ -334,6 +337,7 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg0 = tx0.compute_signing_message().unwrap();
     tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
@@ -345,7 +349,7 @@ fn signing_message_includes_tx_type() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: 1_000,
-        recipient: Some(NoblePublicKey::Ed25519(recipient_pk.clone())),
+        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone()))),
         amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -357,6 +361,7 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg1 = tx1.compute_signing_message().unwrap();
     tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
@@ -378,7 +383,7 @@ fn signing_message_includes_recipient() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: 1_000,
-        recipient: Some(NoblePublicKey::Ed25519(r1_pk)),
+        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r1_pk))),
         amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -390,6 +395,7 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
 
     let tx2 = Transaction {
@@ -398,7 +404,7 @@ fn signing_message_includes_recipient() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: 1_000,
-        recipient: Some(NoblePublicKey::Ed25519(r2_pk)),
+        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r2_pk))),
         amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -410,6 +416,7 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
 
     let msg1 = tx1.compute_signing_message().unwrap();
@@ -434,7 +441,7 @@ fn signing_message_includes_amount() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: 1_000,
-        recipient: Some(recipient.clone()),
+        recipient: Some(noble_core::NobleAddress::Noble(recipient.clone())),
         amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -446,6 +453,7 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
 
     let tx2 = Transaction {
@@ -454,7 +462,7 @@ fn signing_message_includes_amount() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: 1_000,
-        recipient: Some(recipient),
+        recipient: Some(noble_core::NobleAddress::Noble(recipient)),
         amount: Some(100_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -466,6 +474,7 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
 
     let msg1 = tx1.compute_signing_message().unwrap();

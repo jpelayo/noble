@@ -317,15 +317,17 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
         tracing::warn!("Failed to write PID file: {e}");
     }
 
+    let cfg_path = Some(std::path::PathBuf::from(config_path));
+
     let exit_code = if use_memory {
         tracing::info!("Using in-memory storage (--memory flag)");
-        run_with_memory(&config, trace_handle).await
+        run_with_memory(&config, trace_handle, cfg_path).await
     } else {
         tracing::info!(
             "RocksDB mode — data_dir: {}",
             config.storage.data_dir.display()
         );
-        run_with_rocksdb(&config, trace_handle).await
+        run_with_rocksdb(&config, trace_handle, cfg_path).await
     };
 
     // Cleanup PID file on exit
@@ -346,12 +348,12 @@ fn init_metrics(config: &config::NodeConfig) -> Option<metrics::NobleMetrics> {
     }
 }
 
-async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>) -> i32 {
+async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>, config_path: Option<std::path::PathBuf>) -> i32 {
     match node::Node::init_memory(config) {
         Ok(n) => {
             tracing::info!("Node initialized — chain height: {}", n.chain_height());
             let metrics = init_metrics(config);
-            if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
+            if let Err(e) = n.run(config, Some(trace_handle), metrics, config_path).await {
                 tracing::error!("Node exited with error: {e}");
                 eprintln!("FATAL: Node exited with error: {e}");
                 return 1;
@@ -366,7 +368,7 @@ async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHan
     }
 }
 
-async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>) -> i32 {
+async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>, config_path: Option<std::path::PathBuf>) -> i32 {
     match noble_storage::RocksDbStorage::open_with_repair(&config.storage.data_dir) {
         Ok(storage) => match node::Node::init_with_storage(config, storage) {
             Ok(n) => {
@@ -388,7 +390,7 @@ async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHa
                 }
 
                 let metrics = init_metrics(config);
-                if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
+                if let Err(e) = n.run(config, Some(trace_handle), metrics, config_path).await {
                     tracing::error!("Node exited with error: {e}");
                     eprintln!("FATAL: Node exited with error: {e}");
                     return 1;

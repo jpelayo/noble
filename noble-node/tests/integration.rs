@@ -89,6 +89,7 @@ fn storage_only_indexes_notarization_checksums() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = notarization
         .compute_signing_message_for_chain(MAINNET_CHAIN_ID)
@@ -104,7 +105,7 @@ fn storage_only_indexes_notarization_checksums() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         fee: noble_core::MIN_TX_FEE,
-        recipient: Some(new_key),
+        recipient: Some(noble_core::NobleAddress::Noble(new_key)),
         amount: None,
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -116,6 +117,7 @@ fn storage_only_indexes_notarization_checksums() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = key_rotation
         .compute_signing_message_for_chain(MAINNET_CHAIN_ID)

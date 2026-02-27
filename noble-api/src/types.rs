@@ -6,7 +6,7 @@
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Serialize};
 
-use noble_core::{Block, Transaction};
+use noble_core::{Block, NobleAddress, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::ApiError;
@@ -25,6 +25,50 @@ pub fn parse_pubkey(hex_str: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
     let bytes =
         hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
     NoblePublicKey::from_wire_bytes(&bytes)
+        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
+}
+
+/// Parse an address string into a `NobleAddress`.
+///
+/// Accepts:
+/// - Hex-encoded wire-format NOBLE public keys (Ed25519: 0x01, secp256k1: 0x02)
+/// - Bitcoin addresses: P2PKH (1...), P2WPKH (bc1q...), P2TR (bc1p...)
+/// - Hex-encoded Bitcoin address wire bytes (0x80, 0x81 prefix)
+pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
+    let trimmed = input.trim();
+
+    // Try Bitcoin address formats first (bc1q..., bc1p..., 1..., tb1...)
+    if trimmed.starts_with("bc1")
+        || trimmed.starts_with("BC1")
+        || trimmed.starts_with("tb1")
+        || trimmed.starts_with("TB1")
+        || trimmed.starts_with('1')
+        || trimmed.starts_with('m')
+        || trimmed.starts_with('n')
+        || trimmed.starts_with('3')
+        || trimmed.starts_with('2')
+    {
+        use noble_crypto::bitcoin_addr::{parse_bitcoin_address, BitcoinAddressType};
+        let parsed = parse_bitcoin_address(trimmed)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        return match parsed.address_type {
+            BitcoinAddressType::P2pkh | BitcoinAddressType::P2wpkh => {
+                let mut hash = [0u8; 20];
+                hash.copy_from_slice(&parsed.data);
+                Ok(NobleAddress::BitcoinHash160(hash))
+            }
+            BitcoinAddressType::P2tr => {
+                let mut xonly = [0u8; 32];
+                xonly.copy_from_slice(&parsed.data);
+                Ok(NobleAddress::BitcoinTaproot(xonly))
+            }
+        };
+    }
+
+    // Try hex-encoded wire bytes (covers both NOBLE keys and Bitcoin address wire format)
+    let bytes = hex::decode(trimmed)
+        .map_err(|_| ApiError::InvalidAddress("invalid hex string or unrecognized address format".into()))?;
+    NobleAddress::from_wire_bytes(&bytes)
         .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
 }
 
@@ -356,12 +400,23 @@ pub struct WalletInfoResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
+    /// Balance held in Noble (Ed25519/secp256k1) address buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noble_balance: Option<u64>,
+    /// Balance held in Bitcoin Hash160 (P2PKH/P2WPKH) address buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash160_balance: Option<u64>,
+    /// Balance held in Bitcoin Taproot (P2TR) address buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taproot_balance: Option<u64>,
 }
 
 /// Response for `noble_getNodeInfo`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfoResponse {
     pub version: String,
+    /// Alias for `version` — used by the GUI.
+    pub software_version: String,
     pub protocol_version: u16,
     pub chain_id: u32,
     pub uptime_secs: u64,
@@ -370,6 +425,18 @@ pub struct NodeInfoResponse {
     pub p2p_port: u16,
     /// Base58btc-encoded libp2p PeerId of this node.
     pub peer_id: String,
+    /// Highest software version seen on the P2P network, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_network_version: Option<String>,
+    /// Total bytes used by the data directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_bytes: Option<u64>,
+    /// Total capacity of the disk containing the data directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_capacity_bytes: Option<u64>,
+    /// Path to the data directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
 }
 
 /// Response for `noble_getApiVersion`.
@@ -466,6 +533,9 @@ pub struct SubmitBatchResponse {
 pub struct ValidateAddressResponse {
     pub valid: bool,
     pub scheme_id: Option<u8>,
+    /// Address type: "ed25519", "secp256k1", "bitcoin_hash160", "bitcoin_taproot"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address_type: Option<String>,
 }
 
 /// Response for `noble_getTransactionStatus`.
@@ -776,6 +846,69 @@ pub struct ValidatorKeyInfoResponse {
     /// File path of the validator key, if enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_path: Option<String>,
+}
+
+/// Response for `noble_enableTotp`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnableTotpResponse {
+    /// The base32-encoded TOTP shared secret.
+    pub secret_base32: String,
+    /// An `otpauth://` URI for QR code generation.
+    pub otpauth_uri: String,
+}
+
+/// Response for `noble_getTotpStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TotpStatusResponse {
+    /// Whether TOTP authentication is currently enabled.
+    pub enabled: bool,
+    /// Enforcement scope: "all", "write_only", or "none".
+    pub scope: String,
+}
+
+/// Response for `noble_setRewardAddress`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetRewardAddressResponse {
+    /// The detected address type: "bitcoin_hash160", "bitcoin_taproot", "ed25519", "secp256k1".
+    pub address_type: String,
+    /// Human-readable display address.
+    pub display_address: String,
+    /// Hex-encoded wire bytes used as the balance DB key.
+    pub wire_hex: String,
+}
+
+/// Response for `noble_getRewardAddress`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GetRewardAddressResponse {
+    /// Whether a reward address is configured.
+    pub configured: bool,
+    /// The configured reward address string (as entered by the operator).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Detected address type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address_type: Option<String>,
+    /// Hex-encoded wire bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_hex: Option<String>,
+}
+
+/// Response for `noble_importSecp256k1Key`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportKeyResponse {
+    /// Hex-encoded wire bytes of the imported public key.
+    pub public_key: String,
+    /// Derived Bitcoin P2WPKH address (bc1q...) for this key.
+    pub bitcoin_address: String,
+}
+
+/// Response for `noble_setConfigValue`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetConfigValueResponse {
+    /// Whether the config was successfully updated.
+    pub success: bool,
+    /// Whether a node restart is required for the change to take effect.
+    pub restart_required: bool,
 }
 
 #[cfg(test)]

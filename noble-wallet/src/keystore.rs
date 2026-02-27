@@ -426,6 +426,55 @@ impl KeyStore {
         self.unlocked_keys.is_some()
     }
 
+    /// Import a secp256k1 private key from WIF (Wallet Import Format) or raw hex.
+    /// Returns the derived public key.
+    pub fn import_secp256k1_key(
+        &mut self,
+        key_input: &str,
+        passphrase: &str,
+    ) -> Result<NoblePublicKey, WalletError> {
+        Self::validate_passphrase(passphrase)?;
+
+        let mut secret_bytes = if key_input.len() == 64
+            && key_input.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            // Raw hex (32 bytes)
+            hex::decode(key_input).map_err(|e| WalletError::InvalidKey(e.to_string()))?
+        } else {
+            // Try WIF decode (Base58Check)
+            noble_crypto::bitcoin_addr::decode_wif(key_input)
+                .map_err(|e| WalletError::InvalidKey(e.to_string()))?
+        };
+
+        let priv_key = NoblePrivateKey::Secp256k1(secret_bytes.clone());
+        let pub_key = priv_key.public_key();
+        let file_path = self.key_file_path(&pub_key);
+
+        if file_path.exists() {
+            secret_bytes.zeroize();
+            return Err(WalletError::DuplicateKey(hex::encode(
+                pub_key.to_wire_bytes(),
+            )));
+        }
+
+        let encrypted = encrypt_key(&secret_bytes, SCHEME_SECP256K1, passphrase)?;
+        secret_bytes.zeroize();
+        let json = serde_json::to_string_pretty(&encrypted)?;
+        fs::write(&file_path, &json)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        if let Some(ref mut keys) = self.unlocked_keys {
+            keys.insert(pub_key.to_wire_bytes(), priv_key);
+        }
+
+        Ok(pub_key)
+    }
+
     /// Compute the file path for a given public key.
     fn key_file_path(&self, pubkey: &NoblePublicKey) -> PathBuf {
         self.path
@@ -729,6 +778,53 @@ mod tests {
             perms.mode() & 0o777,
             0o600,
             "key file should have 0o600 permissions"
+        );
+    }
+
+    // --- secp256k1 key import tests ---
+
+    #[test]
+    fn import_secp256k1_hex_key() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.unlock("passphrase-ok").unwrap();
+
+        // Generate a secp256k1 keypair to get a known secret key
+        let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
+        let hex_key = hex::encode(&sk);
+
+        let pk = ks
+            .import_secp256k1_key(&hex_key, "passphrase-ok")
+            .unwrap();
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
+
+        // Key should appear in list
+        let keys = ks.list_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+
+        // Sign should work
+        let msg = sha256(b"import hex test");
+        let sig = ks.sign(&pk, msg.as_bytes()).unwrap();
+        assert!(pk.verify(msg.as_bytes(), &sig).is_ok());
+    }
+
+    #[test]
+    fn import_secp256k1_duplicate_rejected() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.unlock("passphrase-ok").unwrap();
+
+        let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
+        let hex_key = hex::encode(&sk);
+
+        // First import succeeds
+        ks.import_secp256k1_key(&hex_key, "passphrase-ok").unwrap();
+
+        // Second import of same key fails
+        let result = ks.import_secp256k1_key(&hex_key, "passphrase-ok");
+        assert!(
+            matches!(result, Err(WalletError::DuplicateKey(_))),
+            "duplicate import should fail: {result:?}"
         );
     }
 

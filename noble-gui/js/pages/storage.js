@@ -113,25 +113,47 @@ export function init(root, ctx) {
     retentionChart = echarts.init(dom);
 
     const pruned = info.pruned_up_to;
-    const full = info.chain_height - info.lowest_full_height + 1;
+    const full = info.chain_height > 0 ? info.chain_height - info.lowest_full_height + 1 : 0;
     const kept = info.keep_blocks;
+    const isArchive = info.pruning_mode === 'archive' || kept === 0;
 
-    retentionChart.setOption({
-      tooltip: { trigger: 'item', formatter: '{b}: {c} blocks ({d}%)' },
-      legend: { bottom: 0, textStyle: { color: 'var(--text-secondary)' } },
-      series: [{
-        type: 'pie',
-        radius: ['40%', '70%'],
-        avoidLabelOverlap: true,
-        itemStyle: { borderRadius: 4, borderColor: 'var(--bg-primary)', borderWidth: 2 },
-        label: { show: true, formatter: '{b}\n{c}' },
-        data: [
-          ...(pruned > 0 ? [{ value: pruned, name: 'Pruned', itemStyle: { color: '#6b7280' } }] : []),
-          { value: full, name: 'Full Blocks', itemStyle: { color: '#10b981' } },
-          { value: Math.max(0, kept - full), name: 'Retention Buffer', itemStyle: { color: '#3b82f6' } },
-        ].filter(d => d.value > 0),
-      }],
-    });
+    if (isArchive) {
+      // Archive mode: show a single "All Blocks" slice or informational text
+      if (full === 0) {
+        dom.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:2rem">Archive mode — no blocks yet</div>';
+        return;
+      }
+      retentionChart.setOption({
+        tooltip: { trigger: 'item', formatter: '{b}: {c} blocks' },
+        series: [{
+          type: 'pie',
+          radius: ['40%', '70%'],
+          itemStyle: { borderRadius: 4, borderColor: 'var(--bg-primary)', borderWidth: 2 },
+          label: { show: true, formatter: '{b}\n{c}' },
+          data: [
+            { value: full, name: 'All Blocks (Archive)', itemStyle: { color: '#10b981' } },
+          ],
+        }],
+      });
+    } else {
+      retentionChart.setOption({
+        tooltip: { trigger: 'item', formatter: '{b}: {c} blocks ({d}%)' },
+        legend: { bottom: 0, textStyle: { color: 'var(--text-secondary)' } },
+        series: [{
+          type: 'pie',
+          radius: ['40%', '70%'],
+          avoidLabelOverlap: true,
+          minAngle: 5,
+          itemStyle: { borderRadius: 4, borderColor: 'var(--bg-primary)', borderWidth: 2 },
+          label: { show: true, formatter: '{b}\n{c}' },
+          data: [
+            ...(pruned > 0 ? [{ value: pruned, name: 'Pruned', itemStyle: { color: '#6b7280' } }] : []),
+            { value: full, name: 'Full Blocks', itemStyle: { color: '#10b981' } },
+            { value: Math.max(0, kept - full), name: 'Retention Buffer', itemStyle: { color: '#3b82f6' } },
+          ].filter(d => d.value > 0),
+        }],
+      });
+    }
 
     const ro = new ResizeObserver(() => retentionChart?.resize());
     ro.observe(dom);

@@ -43,6 +43,7 @@ rustls.workspace = true
 rustls-pki-types.workspace = true
 tokio-rustls.workspace = true
 time.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 noble-test-utils.workspace = true

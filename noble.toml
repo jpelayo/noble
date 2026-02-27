@@ -177,6 +177,12 @@ enabled = true
 # Set this to use a dedicated key for gateway operations.
 key_path = ""
 
+[rewards]
+# Bitcoin address (bc1q..., 1..., bc1p...) or NOBLE public key (hex).
+# Receives gateway fee splits. Block subsidy goes to the validator key.
+# Leave empty to use the gateway key as the fee-split destination.
+reward_address = ""
+
 [identity]
 # Human-readable name for this node (max 64 chars).
 node_name = ""

@@ -65,6 +65,16 @@ impl TotpScope {
     }
 }
 
+impl std::fmt::Display for TotpScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => write!(f, "all"),
+            Self::WriteOnly => write!(f, "write_only"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
 /// Returns `true` if the given JSON-RPC method name is a read-only method
 /// that does not require authentication in `WriteOnly` scope.
 ///

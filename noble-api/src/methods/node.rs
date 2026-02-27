@@ -138,14 +138,71 @@ pub trait NodeApi {
     /// Returns `enabled: false` when the node is running in observer mode.
     #[method(name = "getValidatorKeyInfo")]
     async fn get_validator_key_info(&self) -> Result<ValidatorKeyInfoResponse, ErrorObjectOwned>;
+
+    /// Enable TOTP authentication for the first time.
+    ///
+    /// Returns the generated secret and otpauth URI for QR code scanning.
+    /// Fails if TOTP is already enabled.
+    #[method(name = "enableTotp")]
+    async fn enable_totp(&self) -> Result<EnableTotpResponse, ErrorObjectOwned>;
+
+    /// Get the current TOTP authentication status.
+    #[method(name = "getTotpStatus")]
+    async fn get_totp_status(&self) -> Result<TotpStatusResponse, ErrorObjectOwned>;
+
+    /// Set the reward address for gateway fee splits.
+    ///
+    /// Accepts Bitcoin addresses (bc1q..., 1..., bc1p...) or hex-encoded NOBLE public keys.
+    #[method(name = "setRewardAddress")]
+    async fn set_reward_address(
+        &self,
+        address: String,
+    ) -> Result<SetRewardAddressResponse, ErrorObjectOwned>;
+
+    /// Get the current reward address configuration.
+    #[method(name = "getRewardAddress")]
+    async fn get_reward_address(&self) -> Result<GetRewardAddressResponse, ErrorObjectOwned>;
+
+    /// Update a configuration value in noble.toml.
+    ///
+    /// Only a whitelist of keys is allowed:
+    /// - `network.listen_port` (P2P port)
+    /// - `api.rpc_port`
+    /// - `api.gui_port`
+    #[method(name = "setConfigValue")]
+    async fn set_config_value(
+        &self,
+        section: String,
+        key: String,
+        value: String,
+    ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>> {
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned> {
         let uptime = self.start_time.elapsed().as_secs();
+        let max_ver = self.max_network_version.read().clone();
+        let latest_network_version = if max_ver.is_empty() {
+            None
+        } else {
+            Some(max_ver)
+        };
+
+        // Calculate storage bytes by walking the data directory.
+        let (storage_bytes, storage_capacity_bytes) = if let Some(ref data_dir) = self.data_dir {
+            let used = dir_size(data_dir);
+            let capacity = disk_capacity(data_dir);
+            (Some(used), Some(capacity))
+        } else {
+            (None, None)
+        };
+
+        let data_dir_str = self.data_dir.as_ref().map(|d| d.display().to_string());
+
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
+            software_version: SOFTWARE_VERSION.to_string(),
             protocol_version: PROTOCOL_VERSION,
             chain_id: self.chain_id,
             uptime_secs: uptime,
@@ -153,6 +210,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ws_port: self.ws_port,
             p2p_port: self.p2p_port,
             peer_id: self.peer_id.clone(),
+            latest_network_version,
+            storage_bytes,
+            storage_capacity_bytes,
+            data_dir: data_dir_str,
         })
     }
 
@@ -594,6 +655,141 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             key_path: self.validator_key_path.clone(),
         })
     }
+
+    async fn enable_totp(&self) -> Result<EnableTotpResponse, ErrorObjectOwned> {
+        // Reject if TOTP is already enabled.
+        if self.totp_validator.is_some() {
+            return Err(
+                ApiError::InvalidParam("TOTP is already enabled. Use rotateTotpSecret to change the secret.".into())
+                    .into(),
+            );
+        }
+
+        let enable_fn = self.enable_totp.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam("TOTP enable callback not configured".into())
+        })?;
+
+        let (secret_base32, otpauth_uri) = enable_fn()
+            .map_err(|e| ApiError::Internal(format!("enable TOTP: {e}")))?;
+
+        tracing::info!("TOTP authentication enabled via RPC");
+
+        Ok(EnableTotpResponse {
+            secret_base32,
+            otpauth_uri,
+        })
+    }
+
+    async fn get_totp_status(&self) -> Result<TotpStatusResponse, ErrorObjectOwned> {
+        let enabled = self.totp_validator.is_some();
+        let scope = format!("{}", self.totp_scope);
+        Ok(TotpStatusResponse { enabled, scope })
+    }
+
+    async fn set_reward_address(
+        &self,
+        address: String,
+    ) -> Result<SetRewardAddressResponse, ErrorObjectOwned> {
+        let trimmed = address.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ApiError::InvalidParam("address must not be empty".into()).into());
+        }
+
+        // Parse the address to validate it.
+        let noble_addr = parse_address(&trimmed)?;
+        let wire_bytes = noble_addr.to_wire_bytes();
+        let wire_hex = hex::encode(&wire_bytes);
+        let address_type = noble_addr.address_type().to_string();
+
+        // Update in-memory gateway key to use this address.
+        {
+            let mut gw = self.gateway_key.write();
+            *gw = Some(wire_bytes);
+        }
+
+        // Update in-memory reward address.
+        {
+            let mut ra = self.reward_address.write();
+            *ra = Some(trimmed.clone());
+        }
+
+        // Persist to noble.toml via set_config_value if available.
+        if let Some(ref set_fn) = self.set_config_value {
+            let _ = set_fn("rewards", "reward_address", &trimmed);
+        }
+
+        tracing::info!(task = "rewards", "Reward address set: {address_type} → {wire_hex}");
+
+        // Derive display address.
+        let display_address = derive_display_address(&noble_addr, &trimmed);
+
+        Ok(SetRewardAddressResponse {
+            address_type,
+            display_address,
+            wire_hex,
+        })
+    }
+
+    async fn get_reward_address(&self) -> Result<GetRewardAddressResponse, ErrorObjectOwned> {
+        let ra = self.reward_address.read().clone();
+        match ra {
+            Some(addr) => {
+                let noble_addr = parse_address(&addr).ok();
+                let address_type = noble_addr.as_ref().map(|a| a.address_type().to_string());
+                let wire_hex = noble_addr.map(|a| hex::encode(a.to_wire_bytes()));
+                Ok(GetRewardAddressResponse {
+                    configured: true,
+                    address: Some(addr),
+                    address_type,
+                    wire_hex,
+                })
+            }
+            None => Ok(GetRewardAddressResponse {
+                configured: false,
+                address: None,
+                address_type: None,
+                wire_hex: None,
+            }),
+        }
+    }
+
+    async fn set_config_value(
+        &self,
+        section: String,
+        key: String,
+        value: String,
+    ) -> Result<SetConfigValueResponse, ErrorObjectOwned> {
+        // Whitelist of allowed config keys.
+        let allowed = [
+            ("network", "listen_port"),
+            ("api", "rpc_port"),
+            ("api", "gui_port"),
+        ];
+
+        if !allowed.iter().any(|(s, k)| *s == section && *k == key) {
+            return Err(ApiError::InvalidParam(format!(
+                "config key '{section}.{key}' is not in the allowed whitelist"
+            ))
+            .into());
+        }
+
+        let set_fn = self.set_config_value.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam("config update callback not configured".into())
+        })?;
+
+        let restart_required = set_fn(&section, &key, &value)
+            .map_err(|e| ApiError::Internal(format!("update config: {e}")))?;
+
+        tracing::info!(
+            task = "config",
+            "Config value {section}.{key} updated. Restart required: {restart_required}"
+        );
+
+        Ok(SetConfigValueResponse {
+            success: true,
+            restart_required,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +814,67 @@ fn generate_validator_key(path: &std::path::Path) -> Result<String, ErrorObjectO
     }
     let private_key = noble_crypto::NoblePrivateKey::Ed25519(secret_bytes);
     Ok(hex::encode(private_key.public_key().to_wire_bytes()))
+}
+
+/// Calculate the total size of a directory recursively.
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let ft = entry.file_type();
+            if let Ok(ft) = ft {
+                if ft.is_file() {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                } else if ft.is_dir() {
+                    total += dir_size(&entry.path());
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Get the total capacity of the disk containing the given path.
+fn disk_capacity(path: &std::path::Path) -> u64 {
+    // Use sysinfo-like statvfs on unix, or a large default.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                return stat.f_blocks as u64 * stat.f_frsize as u64;
+            }
+        }
+    }
+    // Fallback: return 0 (GUI will show "N/A").
+    #[cfg(not(unix))]
+    { let _ = path; }
+    0
+}
+
+/// Derive a display address for a NobleAddress.
+fn derive_display_address(addr: &noble_core::NobleAddress, original: &str) -> String {
+    match addr {
+        noble_core::NobleAddress::BitcoinHash160(hash) => {
+            // If original is a valid bitcoin address, return it as-is.
+            if original.starts_with("bc1") || original.starts_with('1') || original.starts_with('3') {
+                original.to_string()
+            } else {
+                // Derive bc1q... from hash160
+                noble_crypto::bitcoin_addr::hash160_to_p2wpkh(hash, true)
+            }
+        }
+        noble_core::NobleAddress::BitcoinTaproot(xonly) => {
+            if original.starts_with("bc1p") {
+                original.to_string()
+            } else {
+                noble_crypto::bitcoin_addr::xonly_to_p2tr(xonly, true)
+            }
+        }
+        noble_core::NobleAddress::Noble(pk) => hex::encode(pk.to_wire_bytes()),
+    }
 }
 
 /// Read an existing validator key file (33 bytes) and return the hex-encoded wire pubkey.

@@ -115,6 +115,7 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
 
         let msg = tx
@@ -126,13 +127,17 @@ impl TransactionBuilder {
     }
 
     /// Build a signed transfer transaction.
+    ///
+    /// If `source_address` is `Some`, it is included in the signing payload
+    /// and commits the sender to debiting a specific balance bucket.
     pub fn build_transfer(
         keystore: &KeyStore,
         signer: &NoblePublicKey,
-        recipient: NoblePublicKey,
+        recipient: noble_core::NobleAddress,
         amount: u64,
         fee: u64,
         memo: Option<String>,
+        source_address: Option<noble_core::NobleAddress>,
     ) -> Result<Transaction, WalletError> {
         tracing::debug!(
             task = "wallet_build",
@@ -175,6 +180,7 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: source_address.map(|a| a.to_wire_bytes()),
         };
 
         let msg = tx
@@ -262,6 +268,7 @@ impl TransactionBuilder {
             encrypted_locator,
             external_attestations: attestations,
             gateway_address: None,
+            source_address: None,
         };
 
         let msg = tx
@@ -377,18 +384,20 @@ mod tests {
         let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
         let recipient = NoblePublicKey::Ed25519(recipient_bytes);
 
+        let recipient_addr = noble_core::NobleAddress::Noble(recipient.clone());
         let tx = TransactionBuilder::build_transfer(
             &ks,
             &sender,
-            recipient.clone(),
+            recipient_addr.clone(),
             500_000,
             MIN_TX_FEE,
+            None,
             None,
         )
         .unwrap();
 
         assert_eq!(tx.tx_type, TX_TYPE_TRANSFER);
-        assert_eq!(tx.recipient.as_ref().unwrap(), &recipient);
+        assert_eq!(tx.recipient.as_ref().unwrap(), &recipient_addr);
         assert_eq!(tx.amount, Some(500_000));
         assert_eq!(tx.checksum, Hash256::ZERO);
 
@@ -401,10 +410,10 @@ mod tests {
     fn build_transfer_zero_amount_rejected() {
         let (ks, sender) = setup_keystore();
         let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recipient_bytes);
+        let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes));
 
         let result =
-            TransactionBuilder::build_transfer(&ks, &sender, recipient, 0, MIN_TX_FEE, None);
+            TransactionBuilder::build_transfer(&ks, &sender, recipient, 0, MIN_TX_FEE, None, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             WalletError::InvalidRecipient(msg) => {
@@ -418,7 +427,7 @@ mod tests {
     fn build_transfer_with_memo() {
         let (ks, sender) = setup_keystore();
         let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recipient_bytes);
+        let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes));
 
         let tx = TransactionBuilder::build_transfer(
             &ks,
@@ -427,6 +436,7 @@ mod tests {
             100_000,
             MIN_TX_FEE,
             Some("payment for services".into()),
+            None,
         )
         .unwrap();
 

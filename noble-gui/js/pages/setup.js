@@ -1,20 +1,13 @@
 /**
  * NOBLE Dashboard — First-Run Setup Wizard
- * Multi-step onboarding: Welcome → Role → Identity → Wallet → Review
+ * Multi-step onboarding: Welcome → Role → Identity → Rewards → Review
  */
-
-import {
-  createMnemonicGrid,
-  startAutoClearTimer,
-  wipeInput,
-  destroySecureElements,
-} from '../wallet-security.js';
 
 const STEPS = [
   { key: 'welcome',  label: 'Welcome'  },
   { key: 'role',     label: 'Role'     },
   { key: 'identity', label: 'Identity' },
-  { key: 'wallet',   label: 'Wallet'   },
+  { key: 'rewards',  label: 'Rewards'  },
   { key: 'review',   label: 'Review'   },
 ];
 
@@ -83,10 +76,9 @@ export function init(root, ctx) {
     orgName: '',
     contactEmail: '',
     website: '',
-    walletPath: 'skip',    // 'create' | 'import' | 'skip'
-    walletPhase: 'choose', // 'choose' | 'passphrase' | 'mnemonic' | 'done'
-    walletMnemonic: null,  // string[] — words generated during create flow
-    walletAddress: '',
+    rewardAddress: '',     // Bitcoin or NOBLE address entered by user
+    rewardAddressType: '', // e.g. 'P2WPKH', 'Ed25519'
+    rewardSkipped: false,  // true when user chose to skip
     setupToken: '',  // raw setup token from node console (applied immediately for write RPCs)
   };
 
@@ -125,7 +117,6 @@ export function init(root, ctx) {
     // Cleanup previous step
     cleanupFns.forEach(fn => { try { fn(); } catch {} });
     cleanupFns = [];
-    destroySecureElements(body);
 
     currentStep = Math.max(0, Math.min(step, STEPS.length - 1));
     renderProgress();
@@ -141,30 +132,12 @@ export function init(root, ctx) {
       case 'welcome':  renderWelcome(); break;
       case 'role':     renderRole(); break;
       case 'identity': renderIdentity(); break;
-      case 'wallet':   renderWallet(); break;
+      case 'rewards':  renderRewards(); break;
       case 'review':   renderReview(); break;
     }
   }
 
   backBtn.addEventListener('click', () => {
-    if (STEPS[currentStep].key === 'wallet') {
-      if (state.walletPhase === 'passphrase') {
-        // Go back within the wallet step to the choose phase.
-        state.walletPhase = 'choose';
-        state.walletPath = 'skip';
-        destroySecureElements(body);
-        cleanupFns.forEach(fn => { try { fn(); } catch {} });
-        cleanupFns = [];
-        body.innerHTML = '';
-        renderWallet();
-        return;
-      }
-      if (state.walletPhase === 'mnemonic' || state.walletPhase === 'done') {
-        // Cannot go back once a wallet has been generated or the step is done.
-        return;
-      }
-      // 'choose' phase — fall through to step navigation below.
-    }
     goTo(currentStep - 1);
   });
 
@@ -200,112 +173,50 @@ export function init(root, ctx) {
       }
     }
 
-    if (stepKey === 'wallet') {
-      if (state.walletPhase === 'passphrase') {
-        // Validate passphrase fields and call the RPC.
-        const passInput  = body.querySelector('#setup-wallet-pass');
-        const pass2Input = body.querySelector('#setup-wallet-pass2');
-        const passphrase = passInput?.value || '';
-        const confirm    = pass2Input?.value || '';
+    if (stepKey === 'rewards') {
+      const addrInput = body.querySelector('#setup-reward-address');
+      const addr = addrInput?.value?.trim() || '';
 
-        if (passphrase.length < 12) {
-          showWalletError('Passphrase must be at least 12 characters.');
-          return false;
-        }
-        if (passphrase !== confirm) {
-          showWalletError('Passphrases do not match.');
-          return false;
-        }
-
-        // Disable the Next button while the RPC call is in flight.
-        nextBtn.disabled = true;
-        const originalLabel = nextBtn.textContent;
-        nextBtn.textContent = state.walletPath === 'create' ? 'Generating...' : 'Importing...';
-
-        try {
-          if (state.walletPath === 'create') {
-            const result = await rpc.call('noble_generateMnemonic', {
-              word_count: 24,
-              passphrase,
-            });
-            state.walletAddress = result.address;
-            state.walletMnemonic = result.mnemonic.split(/\s+/);
-            // Wipe passphrase inputs before re-render.
-            if (passInput) wipeInput(passInput);
-            if (pass2Input) wipeInput(pass2Input);
-            state.walletPhase = 'mnemonic';
-          } else {
-            const mnemonicEl = body.querySelector('#setup-wallet-mnemonic');
-            const mnemonic = mnemonicEl?.value?.trim() || '';
-            if (!mnemonic) {
-              showWalletError('Please enter your mnemonic phrase.');
-              nextBtn.disabled = false;
-              nextBtn.textContent = originalLabel;
-              return false;
-            }
-            const result = await rpc.call('noble_importMnemonic', { mnemonic, passphrase });
-            state.walletAddress = result.address;
-            if (passInput) wipeInput(passInput);
-            if (pass2Input) wipeInput(pass2Input);
-            if (mnemonicEl) wipeInput(mnemonicEl);
-            state.walletPhase = 'done';
-          }
-        } catch (e) {
-          const isNetwork = e.message &&
-            (e.message.includes('NetworkError') ||
-             e.message.includes('Failed to fetch') ||
-             e.message.includes('network') ||
-             e.message.includes('unreachable'));
-          const msg = isNetwork
-            ? 'Cannot connect to the node. Please ensure the node is running.'
-            : `Error: ${e.message || e}`;
-          showWalletError(msg);
-          nextBtn.disabled = false;
-          nextBtn.textContent = originalLabel;
-          return false;
-        }
-
-        // Re-render wallet step to show mnemonic or done phase.
-        destroySecureElements(body);
-        cleanupFns.forEach(fn => { try { fn(); } catch {} });
-        cleanupFns = [];
-        body.innerHTML = '';
-        renderWallet();
-        return false; // Stay on wallet step — let user see the new phase.
+      // If the skip checkbox is checked, allow advancing without an address.
+      const skipCheckbox = body.querySelector('#setup-reward-skip');
+      if (skipCheckbox?.checked || state.rewardSkipped) {
+        state.rewardSkipped = true;
+        state.rewardAddress = '';
+        return true;
       }
 
-      if (state.walletPhase === 'mnemonic') {
-        const checkbox = body.querySelector('#setup-wallet-backed-up');
-        if (!checkbox?.checked) return false;
-        // Wipe the mnemonic from state now that the user has backed it up.
-        state.walletMnemonic = null;
-        state.walletPhase = 'done';
-        destroySecureElements(body);
-        cleanupFns.forEach(fn => { try { fn(); } catch {} });
-        cleanupFns = [];
-        body.innerHTML = '';
-        renderWallet();
-        return false; // Show done phase, then user clicks Next to advance.
+      if (!addr) {
+        showRewardError('Please enter a Bitcoin address, or check "Skip" to configure later.');
+        return false;
       }
 
-      if (state.walletPhase === 'choose') {
-        // User clicked Next without choosing — treat as skip.
-        state.walletPath = 'skip';
-        state.walletPhase = 'done';
+      // Validate and save via RPC.
+      nextBtn.disabled = true;
+      nextBtn.textContent = 'Validating...';
+      try {
+        const result = await rpc.call('noble_setRewardAddress', { address: addr });
+        state.rewardAddress = addr;
+        state.rewardAddressType = result.address_type;
+        state.rewardSkipped = false;
+      } catch (e) {
+        showRewardError('Invalid address: ' + (e.message || e));
+        nextBtn.disabled = false;
+        nextBtn.textContent = 'Next';
+        return false;
       }
-
-      // 'done' phase (or just-set 'done'): advance to Review.
+      nextBtn.disabled = false;
+      nextBtn.textContent = 'Next';
       return true;
     }
 
     return true;
   }
 
-  function showWalletError(msg) {
-    let err = body.querySelector('#setup-wallet-error');
+  function showRewardError(msg) {
+    let err = body.querySelector('#setup-reward-error');
     if (!err) {
       err = document.createElement('div');
-      err.id = 'setup-wallet-error';
+      err.id = 'setup-reward-error';
       err.style.cssText =
         'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
       body.appendChild(err);
@@ -429,223 +340,59 @@ export function init(root, ctx) {
 
   // ── Step 4: Wallet ──
 
-  /** Dispatch to the correct wallet sub-renderer based on walletPhase. */
-  function renderWallet() {
-    switch (state.walletPhase) {
-      case 'choose':     renderWalletChoose();     break;
-      case 'passphrase': renderWalletPassphrase(); break;
-      case 'mnemonic':   renderWalletMnemonic();   break;
-      case 'done':       renderWalletDone();       break;
-      default:           renderWalletChoose();
-    }
-    updateNextButton();
-  }
-
-  /** Update Next button text and disabled state based on wallet phase. */
-  function updateNextButton() {
-    if (STEPS[currentStep].key !== 'wallet') return;
-    if (currentStep === STEPS.length - 1) return; // handled by goTo
-
-    switch (state.walletPhase) {
-      case 'choose':
-        nextBtn.textContent = 'Next';
-        nextBtn.disabled = false;
-        break;
-      case 'passphrase':
-        nextBtn.textContent = state.walletPath === 'create' ? 'Generate Wallet' : 'Import Wallet';
-        nextBtn.disabled = false;
-        break;
-      case 'mnemonic': {
-        nextBtn.textContent = 'Continue';
-        const checkbox = body.querySelector('#setup-wallet-backed-up');
-        nextBtn.disabled = !checkbox?.checked;
-        break;
-      }
-      case 'done':
-        nextBtn.textContent = 'Next';
-        nextBtn.disabled = false;
-        break;
-    }
-  }
-
-  /** Phase: choose — three buttons wired to set walletPath + walletPhase. */
-  function renderWalletChoose() {
+  // ── Step 4: Reward Address ──
+  function renderRewards() {
     body.innerHTML = `
       <div style="text-align:center;margin-bottom:var(--gap-lg)">
-        <h3 style="margin-bottom:var(--gap-xs)">Wallet Setup</h3>
+        <h3 style="margin-bottom:var(--gap-xs)">Reward Address</h3>
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary)">
-          Create a new wallet, import an existing one, or skip for now.
+          Your node earns block rewards and gateway fee splits.<br>
+          Paste your Bitcoin address from any wallet to set the reward destination.
         </p>
       </div>
-      <div style="display:flex;gap:var(--gap);flex-wrap:wrap;justify-content:center">
-        <button id="setup-wallet-create" class="btn" style="padding:var(--gap-sm) var(--gap-lg)">Create New Wallet</button>
-        <button id="setup-wallet-import" class="btn btn-secondary" style="padding:var(--gap-sm) var(--gap-lg)">Import Existing</button>
-        <button id="setup-wallet-skip"   class="btn btn-secondary" style="padding:var(--gap-sm) var(--gap-lg)">Skip for Now</button>
-      </div>
-    `;
-    body.querySelector('#setup-wallet-create').addEventListener('click', () => {
-      state.walletPath = 'create';
-      state.walletPhase = 'passphrase';
-      body.innerHTML = '';
-      renderWallet();
-    });
-    body.querySelector('#setup-wallet-import').addEventListener('click', () => {
-      state.walletPath = 'import';
-      state.walletPhase = 'passphrase';
-      body.innerHTML = '';
-      renderWallet();
-    });
-    body.querySelector('#setup-wallet-skip').addEventListener('click', () => {
-      state.walletPath = 'skip';
-      state.walletPhase = 'done';
-      state.walletAddress = '';
-      body.innerHTML = '';
-      renderWallet();
-    });
-  }
 
-  /** Phase: passphrase — inline passphrase fields; Next button drives the RPC call. */
-  function renderWalletPassphrase() {
-    const isCreate = state.walletPath === 'create';
-    const infoText = isCreate
-      ? `This passphrase <strong>encrypts your private key file on disk</strong>.
-         It is used every time you unlock the wallet to sign transactions.<br><br>
-         <strong>Minimum 12 characters.</strong> Keep it safe — if you forget it,
-         your key file cannot be decrypted. Your 24-word recovery phrase is separate
-         and can restore the key to a new node.`
-      : `This passphrase <strong>encrypts your private key file on disk</strong>.
-         It does not have to match any previous passphrase — you are choosing a new
-         one for this node's key store.<br><br>
-         <strong>Minimum 12 characters.</strong>`;
+      <div class="form-group">
+        <label for="setup-reward-address" style="font-weight:600">Bitcoin address or NOBLE public key</label>
+        <input type="text" id="setup-reward-address" autocomplete="off" spellcheck="false"
+          placeholder="bc1q..., 1..., bc1p..., or hex public key"
+          value="${esc(state.rewardAddress)}"
+          style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Accepts P2WPKH (bc1q...), P2PKH (1...), P2TR (bc1p...), or hex-encoded NOBLE public key.
+          This address will receive 50% of transaction fees processed by your node.
+        </div>
+      </div>
 
-    body.innerHTML = `
-      <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);
-                  padding:var(--gap-sm) var(--gap);margin-bottom:var(--gap);font-size:var(--font-size-sm)">
-        <strong>Key encryption passphrase</strong>
-        <p style="margin:var(--gap-xs) 0 0;color:var(--text-secondary);line-height:1.5">${infoText}</p>
-      </div>
-      ${!isCreate ? `
-      <div class="form-group">
-        <label for="setup-wallet-mnemonic">Recovery Phrase</label>
-        <textarea id="setup-wallet-mnemonic" rows="3" autocomplete="off" spellcheck="false"
-          placeholder="Enter your 12 or 24 word mnemonic phrase..."
-          style="width:100%;background:var(--bg-primary);border:1px solid var(--border);
-                 border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);
-                 font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical;
-                 box-sizing:border-box"></textarea>
-      </div>` : ''}
-      <div class="form-group">
-        <label for="setup-wallet-pass">Passphrase</label>
-        <input type="password" id="setup-wallet-pass" autocomplete="new-password"
-          placeholder="Minimum 12 characters">
-      </div>
-      <div style="height:4px;width:100%;background:var(--bg-tertiary);border-radius:var(--radius-sm);
-                  overflow:hidden;margin-bottom:var(--gap-xs)">
-        <div id="setup-wallet-strength-bar"
-             style="height:100%;width:0%;transition:width 0.2s,background 0.2s;
-                    border-radius:var(--radius-sm)"></div>
-      </div>
-      <div id="setup-wallet-strength-text"
-           style="font-size:var(--font-size-xs);color:var(--text-muted);
-                  min-height:1.2em;margin-bottom:var(--gap-sm)"></div>
-      <div class="form-group">
-        <label for="setup-wallet-pass2">Confirm Passphrase</label>
-        <input type="password" id="setup-wallet-pass2" autocomplete="new-password"
-          placeholder="Repeat passphrase">
-      </div>
-      <div id="setup-wallet-error"
-           style="color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm);display:none"></div>
+      <div id="setup-reward-result" style="display:none;margin-top:var(--gap-sm);padding:var(--gap-sm);
+           background:color-mix(in srgb, var(--success) 10%, transparent);border:1px solid var(--success);
+           border-radius:var(--radius-sm);font-size:var(--font-size-sm)"></div>
+
+      <label style="display:flex;align-items:center;gap:var(--gap-sm);margin-top:var(--gap);cursor:pointer">
+        <input type="checkbox" id="setup-reward-skip" ${state.rewardSkipped ? 'checked' : ''}>
+        <span style="font-size:var(--font-size-sm);color:var(--text-muted)">
+          Skip — configure later in Settings
+        </span>
+      </label>
+
+      <div id="setup-reward-error" style="color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm);display:none"></div>
     `;
 
-    // Strength meter
-    const passInput   = body.querySelector('#setup-wallet-pass');
-    const strengthBar = body.querySelector('#setup-wallet-strength-bar');
-    const strengthTxt = body.querySelector('#setup-wallet-strength-text');
-    passInput.addEventListener('input', () => {
-      const len = passInput.value.length;
-      if (len === 0) {
-        strengthBar.style.width = '0%';
-        strengthBar.style.background = 'transparent';
-        strengthTxt.textContent = '';
-      } else if (len < 12) {
-        strengthBar.style.width = '33%';
-        strengthBar.style.background = 'var(--error)';
-        strengthTxt.style.color = 'var(--error)';
-        strengthTxt.textContent = `Too short (${len}/12 min)`;
-      } else if (len < 20) {
-        strengthBar.style.width = '66%';
-        strengthBar.style.background = 'var(--warning)';
-        strengthTxt.style.color = 'var(--warning)';
-        strengthTxt.textContent = 'Acceptable';
+    const addrInput = body.querySelector('#setup-reward-address');
+    const skipCb = body.querySelector('#setup-reward-skip');
+
+    // Toggle address input when skip is checked.
+    skipCb.addEventListener('change', () => {
+      addrInput.disabled = skipCb.checked;
+      if (skipCb.checked) {
+        addrInput.style.opacity = '0.5';
       } else {
-        strengthBar.style.width = '100%';
-        strengthBar.style.background = 'var(--success)';
-        strengthTxt.style.color = 'var(--success)';
-        strengthTxt.textContent = 'Strong';
+        addrInput.style.opacity = '1';
+        addrInput.focus();
       }
     });
-
-    // Wipe sensitive inputs when the wizard step is torn down.
-    cleanupFns.push(() => {
-      const p  = body.querySelector('#setup-wallet-pass');
-      const p2 = body.querySelector('#setup-wallet-pass2');
-      const t  = body.querySelector('#setup-wallet-mnemonic');
-      if (p)  wipeInput(p);
-      if (p2) wipeInput(p2);
-      if (t)  wipeInput(t);
-    });
-  }
-
-  /** Phase: mnemonic — show words grid + checkbox; Next button is "Continue". */
-  function renderWalletMnemonic() {
-    body.innerHTML = `
-      <div style="font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)">
-        Write Down Your 24-Word Recovery Phrase
-      </div>
-      <div id="setup-mnemonic-host"></div>
-      <div style="font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)">
-        Write these words down. They CANNOT be recovered from the node.
-      </div>
-      <label style="display:flex;align-items:center;gap:var(--gap-sm);
-                    margin-top:var(--gap);cursor:pointer">
-        <input type="checkbox" id="setup-wallet-backed-up">
-        <span style="font-size:var(--font-size-sm)">I have written down my recovery phrase</span>
-      </label>
-    `;
-
-    if (state.walletMnemonic) {
-      const host = body.querySelector('#setup-mnemonic-host');
-      const gridEl = createMnemonicGrid(host, state.walletMnemonic);
-      const timerHandle = startAutoClearTimer(host, gridEl, 300_000);
-      cleanupFns.push(() => timerHandle.stop());
-    }
-
-    const checkbox = body.querySelector('#setup-wallet-backed-up');
-    checkbox.addEventListener('change', () => updateNextButton());
-    nextBtn.disabled = true; // disabled until checkbox checked
-  }
-
-  /** Phase: done — success card or skip message. */
-  function renderWalletDone() {
-    if (state.walletPath === 'skip') {
-      body.innerHTML = `
-        <div style="text-align:center;padding:var(--gap);color:var(--text-muted)">
-          <p style="font-size:var(--font-size-sm)">
-            Wallet setup skipped. You can set it up later from the Wallet page.
-          </p>
-        </div>
-      `;
-    } else {
-      const label = state.walletPath === 'import' ? 'Wallet Imported' : 'Wallet Created';
-      body.innerHTML = `
-        <div style="text-align:center;padding:var(--gap)">
-          <div style="font-size:2rem;color:var(--success);margin-bottom:var(--gap-sm)">&#10004;</div>
-          <h3 style="color:var(--success)">${label}</h3>
-          <p class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">
-            ${esc(state.walletAddress)}
-          </p>
-        </div>
-      `;
+    if (state.rewardSkipped) {
+      addrInput.disabled = true;
+      addrInput.style.opacity = '0.5';
     }
   }
 
@@ -664,7 +411,7 @@ export function init(root, ctx) {
         <dt>Org Name</dt><dd>${esc(state.orgName || '(not set)')}</dd>
         <dt>Contact Email</dt><dd>${esc(state.contactEmail || '(not set)')}</dd>
         <dt>Website</dt><dd>${esc(state.website || '(not set)')}</dd>
-        <dt>Wallet</dt><dd>${state.walletAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${state.walletAddress.slice(0, 16)}...</span>` : '(skipped)'}</dd>
+        <dt>Reward Address</dt><dd>${state.rewardAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.rewardAddress)}</span>` : '(skipped)'}</dd>
         ${validatorRow}
       </dl>
       <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
@@ -739,7 +486,7 @@ export function init(root, ctx) {
               <li>Restart the node: <code>brew services restart noble</code></li>
             </ol>
           </div>
-          <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap)">Redirecting to dashboard in 5 seconds...</p>
+          <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap)">Click below when you are ready to continue.</p>
           <a href="#/" class="btn" style="margin-top:var(--gap-lg);display:inline-block">Go to Dashboard</a>
         </div>
       `;
@@ -756,7 +503,6 @@ export function init(root, ctx) {
       backBtn.style.display = 'none';
       nextBtn.style.display = 'none';
 
-      setTimeout(() => { location.hash = '#/'; }, 5000);
     } catch (e) {
       body.innerHTML += `<div style="color:var(--error);margin-top:var(--gap)">Setup error: ${e.message || e}</div>`;
       nextBtn.disabled = false;
@@ -781,7 +527,6 @@ export function init(root, ctx) {
   return {
     destroy() {
       cleanupFns.forEach(fn => { try { fn(); } catch {} });
-      destroySecureElements(body);
       // Clear setup token from RPC client when navigating away from setup.
       rpc.setRawAuthToken(null);
     },

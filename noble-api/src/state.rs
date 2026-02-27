@@ -227,4 +227,30 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// File path used to load the validator key (if enabled).
     pub validator_key_path: Option<String>,
+
+    /// Path to the data directory (for storage_bytes calculation).
+    pub data_dir: Option<std::path::PathBuf>,
+
+    /// Pruning mode string: "archive", "moderate", "aggressive".
+    pub pruning_mode: String,
+
+    /// Number of blocks to keep when pruning. 0 = archive (keep all).
+    pub keep_blocks: u64,
+
+    /// Configured reward address string (as entered by the operator).
+    /// Can be a Bitcoin address (bc1q..., 1..., bc1p...) or hex NOBLE pubkey.
+    pub reward_address: RwLock<Option<String>>,
+
+    /// Callback to enable TOTP authentication.
+    /// Returns `Ok((secret_base32, otpauth_uri))`.
+    /// `None` when TOTP is already enabled.
+    pub enable_totp: Option<Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync>>,
+
+    /// Callback to update a config value in noble.toml.
+    /// Parameters: `(section, key, value)`.
+    /// Returns `Ok(restart_required)` or `Err(message)`.
+    pub set_config_value: Option<Arc<dyn Fn(&str, &str, &str) -> Result<bool, String> + Send + Sync>>,
+
+    /// Path to noble.toml for config updates.
+    pub config_path: Option<std::path::PathBuf>,
 }

@@ -5,7 +5,7 @@
 //!
 //! All storage backends (RocksDB, in-memory mock) implement this trait.
 
-use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
+use noble_core::{Block, BlockHeader, NobleAddress, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -65,18 +65,25 @@ pub trait StorageEngine {
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError>;
 
     /// Get the balance of an address in atomic units. Returns 0 for unknown addresses.
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> Result<u64, StorageError>;
+    /// Accepts both native NOBLE public keys and Bitcoin-format addresses.
+    fn get_balance(&self, address: &NobleAddress) -> Result<u64, StorageError>;
 
     /// Get paginated transaction history for an address.
     ///
     /// Returns tx_ids in chronological order (earliest first).
     /// `page` is 0-indexed, `limit` is the maximum number of entries per page.
+    /// Accepts both native NOBLE public keys and Bitcoin-format addresses.
     fn get_address_history(
         &self,
-        pubkey: &NoblePublicKey,
+        address: &NobleAddress,
         page: u32,
         limit: u32,
     ) -> Result<Vec<Hash256>, StorageError>;
+
+    /// Count total transaction history entries for an address.
+    ///
+    /// More efficient than `get_address_history` with limit=0 for counting purposes.
+    fn count_address_history(&self, address: &NobleAddress) -> Result<u64, StorageError>;
 
     /// Get the timestamps of the most recent `count` blocks (newest first).
     ///

@@ -63,6 +63,7 @@ pub fn make_signed_tx(
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
@@ -97,6 +98,7 @@ pub fn make_signed_tx_with_metadata(
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
@@ -120,7 +122,7 @@ pub fn make_signed_transfer_tx(
         checksum: Hash256::ZERO,
         timestamp,
         fee,
-        recipient: Some(recipient.clone()),
+        recipient: Some(noble_core::NobleAddress::Noble(recipient.clone())),
         amount: Some(amount),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
@@ -132,6 +134,7 @@ pub fn make_signed_transfer_tx(
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+        source_address: None,
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();

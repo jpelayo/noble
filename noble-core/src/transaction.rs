@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use noble_codec::NobleCbor;
-use noble_crypto::{double_sha256, sha256, Hash256, NoblePublicKey, SignatureEnvelope};
+use noble_crypto::{double_sha256, sha256, Hash256, SignatureEnvelope};
+
+use crate::address::NobleAddress;
 
 use crate::encrypted_locator::{EncryptedLocator, ExternalAttestation};
 use crate::metadata::MetadataEntry;
@@ -25,8 +27,9 @@ pub struct Transaction {
     pub timestamp: u64,
     /// Fee in atomic units (GAP-C2).
     pub fee: u64,
-    /// Recipient public key (present for transfers only).
-    pub recipient: Option<NoblePublicKey>,
+    /// Recipient address (present for transfers only).
+    /// Accepts both native NOBLE public keys and Bitcoin-format addresses.
+    pub recipient: Option<NobleAddress>,
     /// Transfer amount in atomic units (present for transfers only).
     pub amount: Option<u64>,
     /// Publisher's signature over the signing payload.
@@ -46,6 +49,12 @@ pub struct Transaction {
     /// Set by the node's RPC handler when it first accepts the transaction from the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_address: Option<Vec<u8>>,
+    /// Explicit source (debit) address for transfers (S34).
+    /// Wire-encoded `NobleAddress` bytes indicating which balance bucket to debit.
+    /// When absent, legacy fallback applies (Noble first, Hash160 for secp256k1).
+    /// Required for secp256k1 senders at/above SOURCE_ADDRESS_ACTIVATION_HEIGHT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_address: Option<Vec<u8>>,
 }
 
 /// Internal struct used to compute the signing message (GAP-C1).
@@ -64,7 +73,7 @@ struct SigningPayload {
     checksum: Hash256,
     timestamp: u64,
     fee: u64,
-    recipient: Option<NoblePublicKey>,
+    recipient: Option<NobleAddress>,
     amount: Option<u64>,
     metadata: Vec<MetadataEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +82,9 @@ struct SigningPayload {
     external_attestations: Vec<ExternalAttestation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gateway_address: Option<Vec<u8>>,
+    /// S34: Source address commits the debit bucket into the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_address: Option<Vec<u8>>,
     /// AUD2-H7: Chain identifier prevents cross-chain signature replay.
     /// Default 0 = legacy (pre-Sprint 9) compatibility.
     #[serde(default)]
@@ -125,6 +137,7 @@ impl Transaction {
             encrypted_locator: self.encrypted_locator.clone(),
             external_attestations: self.external_attestations.clone(),
             gateway_address: self.gateway_address.clone(),
+            source_address: self.source_address.clone(),
             chain_id,
         };
 
@@ -169,6 +182,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
 
         // Sign with the actual signing message

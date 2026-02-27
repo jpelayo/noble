@@ -13,7 +13,7 @@ use noble_core::constants::{
     subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM, TX_TYPE_NOTARIZATION,
     TX_TYPE_TRANSFER,
 };
-use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
+use noble_core::{Block, BlockHeader, NobleAddress, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -30,7 +30,8 @@ struct Inner {
     tx_locations: HashMap<Hash256, (u64, u32)>,
     chain_tip: Option<ChainTip>,
     /// Address balances in atomic units (GAP-H19).
-    balances: HashMap<NoblePublicKey, u64>,
+    /// Supports both native NOBLE keys and Bitcoin-format addresses (dual-address system).
+    balances: HashMap<NobleAddress, u64>,
     /// Address history: (wire_bytes, height, offset) → tx_id (GAP-H19).
     address_history: BTreeMap<(Vec<u8>, u64, u32), Hash256>,
     /// Persisted peer bans: peer_id_bytes → banned_until_unix.
@@ -138,52 +139,58 @@ impl StorageEngine for MemoryStorage {
 
         // --- Balance accumulator (GAP-H19) ---
         // Phase 1: accumulate deltas as i128 to detect overflows later
-        let mut deltas: HashMap<NoblePublicKey, i128> = HashMap::new();
+        let mut deltas: HashMap<NobleAddress, i128> = HashMap::new();
 
         // Validator gets subsidy + fee share (gateway gets 50% of fee when present)
         let validator = &block.header.validator_id;
+        let validator_addr = NobleAddress::Noble(validator.clone());
         let subsidy = subsidy_at_height(height) as i128;
         let mut validator_fee_total: i128 = 0;
         for tx in &block.transactions {
             let fee = tx.fee as i128;
             if let Some(ref gw) = tx.gateway_address {
-                let gw_key = NoblePublicKey::from_wire_bytes(gw)
+                let gw_addr = NobleAddress::from_wire_bytes(gw)
                     .map_err(|e| StorageError::Codec(format!("bad gateway_address: {e}")))?;
                 let gw_share = fee / 2;
                 let val_share = fee - gw_share; // validator gets rounding
-                *deltas.entry(gw_key).or_default() += gw_share;
+                *deltas.entry(gw_addr).or_default() += gw_share;
                 validator_fee_total += val_share;
             } else {
                 validator_fee_total += fee;
             }
         }
-        *deltas.entry(validator.clone()).or_default() += subsidy + validator_fee_total;
+        *deltas.entry(validator_addr).or_default() += subsidy + validator_fee_total;
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
-            let sender = tx
+            let sender_pk = tx
                 .publisher_sig
                 .to_noble_public_key()
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
+            // S34: Canonical debit address resolution
+            let need = (tx.amount.unwrap_or(0) + tx.fee) as u64;
+            let sender_addr = noble_core::resolve_debit_address(
+                &tx.source_address,
+                &sender_pk,
+                need,
+                |a| *inner.balances.get(a).unwrap_or(&0) as u64,
+            )
+            .map_err(|e| StorageError::Codec(e.to_string()))?;
 
             if tx.tx_type == TX_TYPE_TRANSFER {
                 let amount = tx.amount.unwrap_or(0) as i128;
                 let fee = tx.fee as i128;
-                *deltas.entry(sender.clone()).or_default() -= amount + fee;
+                *deltas.entry(sender_addr.clone()).or_default() -= amount + fee;
                 if let Some(ref recipient) = tx.recipient {
                     *deltas.entry(recipient.clone()).or_default() += amount;
                 }
             } else {
                 // Notarization: sender pays fee only
                 let fee = tx.fee as i128;
-                *deltas.entry(sender.clone()).or_default() -= fee;
+                *deltas.entry(sender_addr.clone()).or_default() -= fee;
             }
 
             // Record history for sender
-            let sender_wire = tx
-                .publisher_sig
-                .to_noble_public_key()
-                .map_err(|e| StorageError::Codec(e.to_string()))?
-                .to_wire_bytes();
+            let sender_wire = sender_addr.to_wire_bytes();
             inner
                 .address_history
                 .insert((sender_wire, height, offset as u32), *tx_id);
@@ -300,22 +307,22 @@ impl StorageEngine for MemoryStorage {
             .ok_or_else(|| StorageError::TransactionNotFound(tx_id.to_string()))
     }
 
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> Result<u64, StorageError> {
+    fn get_balance(&self, address: &NobleAddress) -> Result<u64, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
-        Ok(*inner.balances.get(pubkey).unwrap_or(&0))
+        Ok(*inner.balances.get(address).unwrap_or(&0))
     }
 
     fn get_address_history(
         &self,
-        pubkey: &NoblePublicKey,
+        address: &NobleAddress,
         page: u32,
         limit: u32,
     ) -> Result<Vec<Hash256>, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
 
-        let wire = pubkey.to_wire_bytes();
+        let wire = address.to_wire_bytes();
         let skip = (page as usize) * (limit as usize);
 
         // Range scan: all entries whose first element matches wire bytes
@@ -330,6 +337,20 @@ impl StorageEngine for MemoryStorage {
             .collect();
 
         Ok(results)
+    }
+
+    fn count_address_history(&self, address: &NobleAddress) -> Result<u64, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+
+        let wire = address.to_wire_bytes();
+        let start = (wire.clone(), 0u64, 0u32);
+        let count = inner
+            .address_history
+            .range(start..)
+            .take_while(|((w, _, _), _)| *w == wire)
+            .count() as u64;
+        Ok(count)
     }
 
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError> {
@@ -411,31 +432,41 @@ impl StorageEngine for MemoryStorage {
                 .clone();
 
             // Replay balance logic (same as commit_block)
-            let mut deltas: std::collections::HashMap<NoblePublicKey, i128> =
+            let mut deltas: std::collections::HashMap<NobleAddress, i128> =
                 std::collections::HashMap::new();
             let validator = &block.header.validator_id;
+            let validator_addr = NobleAddress::Noble(validator.clone());
             let subsidy = subsidy_at_height(h) as i128;
             let mut validator_fee_total: i128 = 0;
             for tx in &block.transactions {
                 let fee = tx.fee as i128;
                 if let Some(ref gw) = tx.gateway_address {
-                    let gw_key = NoblePublicKey::from_wire_bytes(gw)
+                    let gw_addr = NobleAddress::from_wire_bytes(gw)
                         .map_err(|e| StorageError::Codec(format!("bad gateway_address: {e}")))?;
                     let gw_share = fee / 2;
                     let val_share = fee - gw_share;
-                    *deltas.entry(gw_key).or_default() += gw_share;
+                    *deltas.entry(gw_addr).or_default() += gw_share;
                     validator_fee_total += val_share;
                 } else {
                     validator_fee_total += fee;
                 }
             }
-            *deltas.entry(validator.clone()).or_default() += subsidy + validator_fee_total;
+            *deltas.entry(validator_addr).or_default() += subsidy + validator_fee_total;
 
             for (offset, tx) in block.transactions.iter().enumerate() {
-                let sender = tx
+                let sender_pk = tx
                     .publisher_sig
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
+                // S34: Use canonical debit resolution (fixes P0 replay divergence)
+                let need = (tx.amount.unwrap_or(0) + tx.fee) as u64;
+                let sender_addr = noble_core::resolve_debit_address(
+                    &tx.source_address,
+                    &sender_pk,
+                    need,
+                    |a| *inner.balances.get(a).unwrap_or(&0) as u64,
+                )
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
                 let tx_id = tx
                     .compute_tx_id(chain_id)
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
@@ -443,7 +474,7 @@ impl StorageEngine for MemoryStorage {
                 if tx.tx_type == TX_TYPE_TRANSFER {
                     let amount = tx.amount.unwrap_or(0) as i128;
                     let fee = tx.fee as i128;
-                    *deltas.entry(sender.clone()).or_default() -= amount + fee;
+                    *deltas.entry(sender_addr.clone()).or_default() -= amount + fee;
                     if let Some(ref recipient) = tx.recipient {
                         *deltas.entry(recipient.clone()).or_default() += amount;
                         // History for recipient
@@ -453,10 +484,10 @@ impl StorageEngine for MemoryStorage {
                     }
                 } else {
                     let fee = tx.fee as i128;
-                    *deltas.entry(sender.clone()).or_default() -= fee;
+                    *deltas.entry(sender_addr.clone()).or_default() -= fee;
                 }
                 // History for sender
-                let sender_wire = sender.to_wire_bytes();
+                let sender_wire = sender_addr.to_wire_bytes();
                 inner
                     .address_history
                     .insert((sender_wire, h, offset as u32), tx_id);
@@ -713,6 +744,11 @@ mod tests {
         SCHEME_ED25519,
     };
 
+    /// Convenience: wrap a NoblePublicKey into a NobleAddress for balance lookups.
+    fn addr(pk: &NoblePublicKey) -> NobleAddress {
+        NobleAddress::Noble(pk.clone())
+    }
+
     fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], timestamp: u64) -> (Transaction, Hash256) {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let checksum = sha256(doc);
@@ -734,6 +770,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -744,7 +781,7 @@ mod tests {
     fn make_transfer_tx(
         sk: &[u8],
         pk: &[u8],
-        recipient: &NoblePublicKey,
+        recipient: &NoblePublicKey,  // wrapped into NobleAddress::Noble internally
         amount: u64,
         fee: u64,
         timestamp: u64,
@@ -757,7 +794,7 @@ mod tests {
             checksum,
             timestamp,
             fee,
-            recipient: Some(recipient.clone()),
+            recipient: Some(NobleAddress::Noble(recipient.clone())),
             amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
@@ -769,6 +806,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1019,7 +1057,7 @@ mod tests {
         let store = MemoryStorage::new();
         let (_, pk) = ed25519::generate_keypair();
         let pubkey = NoblePublicKey::Ed25519(pk);
-        assert_eq!(store.get_balance(&pubkey).unwrap(), 0);
+        assert_eq!(store.get_balance(&addr(&pubkey)).unwrap(), 0);
     }
 
     #[test]
@@ -1028,7 +1066,7 @@ mod tests {
         let (block, block_hash, tx_ids) = make_block(vec![], 1, Hash256::ZERO, 1_700_000_000);
         let validator = block.header.validator_id.clone();
         store.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(store.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(store.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
     }
 
     #[test]
@@ -1038,7 +1076,7 @@ mod tests {
             make_block(vec![], HALVING_INTERVAL, Hash256::ZERO, 1_700_000_000);
         let validator = block.header.validator_id.clone();
         store.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(store.get_balance(&validator).unwrap(), INITIAL_SUBSIDY / 2);
+        assert_eq!(store.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY / 2);
     }
 
     #[test]
@@ -1074,7 +1112,7 @@ mod tests {
 
         // Validator gets subsidy + 2 * 1000 fee
         assert_eq!(
-            store.get_balance(&validator).unwrap(),
+            store.get_balance(&addr(&validator)).unwrap(),
             INITIAL_SUBSIDY + 2_000
         );
     }
@@ -1096,7 +1134,7 @@ mod tests {
         store.commit_block(&block0, &hash0, &ids0).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        assert_eq!(store.get_balance(&sender_pub).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(store.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY);
 
         // Block 1: sender submits a notarization (different validator)
         let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
@@ -1105,7 +1143,7 @@ mod tests {
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         assert_eq!(
-            store.get_balance(&sender_pub).unwrap(),
+            store.get_balance(&addr(&sender_pub)).unwrap(),
             INITIAL_SUBSIDY - fee
         );
     }
@@ -1144,10 +1182,10 @@ mod tests {
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
         assert_eq!(
-            store.get_balance(&sender_pub).unwrap(),
+            store.get_balance(&addr(&sender_pub)).unwrap(),
             INITIAL_SUBSIDY - amount - fee
         );
-        assert_eq!(store.get_balance(&recipient).unwrap(), amount);
+        assert_eq!(store.get_balance(&addr(&recipient)).unwrap(), amount);
     }
 
     #[test]
@@ -1189,7 +1227,7 @@ mod tests {
         // Manually set balance to near u64::MAX
         {
             let mut inner = store.inner.write().unwrap();
-            let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+            let val_pub = NobleAddress::Noble(NoblePublicKey::Ed25519(val_pk.to_vec()));
             inner.balances.insert(val_pub, u64::MAX - 10);
         }
 
@@ -1221,7 +1259,7 @@ mod tests {
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = store.get_address_history(&sender_pub, 0, 100).unwrap();
+        let history = store.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
         assert!(history.contains(&id1));
     }
 
@@ -1256,11 +1294,11 @@ mod tests {
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
         assert!(store
-            .get_address_history(&sender_pub, 0, 100)
+            .get_address_history(&addr(&sender_pub), 0, 100)
             .unwrap()
             .contains(&tx_id));
         assert!(store
-            .get_address_history(&recipient, 0, 100)
+            .get_address_history(&addr(&recipient), 0, 100)
             .unwrap()
             .contains(&tx_id));
     }
@@ -1305,9 +1343,9 @@ mod tests {
         }
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let page0 = store.get_address_history(&sender_pub, 0, 2).unwrap();
+        let page0 = store.get_address_history(&addr(&sender_pub), 0, 2).unwrap();
         assert_eq!(page0.len(), 2);
-        let page1 = store.get_address_history(&sender_pub, 1, 2).unwrap();
+        let page1 = store.get_address_history(&addr(&sender_pub), 1, 2).unwrap();
         assert_eq!(page1.len(), 1);
         // No overlap
         assert!(!page0.contains(&page1[0]));
@@ -1318,7 +1356,7 @@ mod tests {
         let store = MemoryStorage::new();
         let (_, pk) = ed25519::generate_keypair();
         let pubkey = NoblePublicKey::Ed25519(pk);
-        let history = store.get_address_history(&pubkey, 0, 100).unwrap();
+        let history = store.get_address_history(&addr(&pubkey), 0, 100).unwrap();
         assert!(history.is_empty());
     }
 
@@ -1360,7 +1398,7 @@ mod tests {
         }
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = store.get_address_history(&sender_pub, 0, 100).unwrap();
+        let history = store.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
         assert_eq!(history, expected_order);
     }
 
@@ -1384,7 +1422,7 @@ mod tests {
         }
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
     #[test]
@@ -1421,7 +1459,7 @@ mod tests {
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + fee);
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + fee);
     }
 
     #[test]
@@ -1457,7 +1495,7 @@ mod tests {
 
         // Self-transfer: net effect is -fee only (amount cancels out)
         assert_eq!(
-            store.get_balance(&sender_pub).unwrap(),
+            store.get_balance(&addr(&sender_pub)).unwrap(),
             INITIAL_SUBSIDY - fee
         );
     }
@@ -1499,10 +1537,10 @@ mod tests {
         }
 
         // Heights 0..=3: height 0 gives 0 subsidy, heights 1-3 give INITIAL_SUBSIDY each
-        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
         store.rollback_to_height(2, MAINNET_CHAIN_ID).unwrap();
         // After rollback to height 2: heights 0,1,2 remain; 0 gives 0, 1-2 give INITIAL_SUBSIDY each
-        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 2);
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
     }
 
     #[test]
@@ -1810,6 +1848,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: gateway,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1852,10 +1891,10 @@ mod tests {
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         assert_eq!(
-            store.get_balance(&val_pub).unwrap(),
+            store.get_balance(&addr(&val_pub)).unwrap(),
             INITIAL_SUBSIDY + 1_000
         );
-        assert_eq!(store.get_balance(&gw_key).unwrap(), 1_000);
+        assert_eq!(store.get_balance(&addr(&gw_key)).unwrap(), 1_000);
     }
 
     #[test]
@@ -1890,8 +1929,8 @@ mod tests {
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(store.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 501);
-        assert_eq!(store.get_balance(&gw_key).unwrap(), 500);
+        assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 501);
+        assert_eq!(store.get_balance(&addr(&gw_key)).unwrap(), 500);
     }
 
     #[test]
@@ -1924,7 +1963,7 @@ mod tests {
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         assert_eq!(
-            store.get_balance(&val_pub).unwrap(),
+            store.get_balance(&addr(&val_pub)).unwrap(),
             INITIAL_SUBSIDY + 2_000
         );
     }
@@ -1961,7 +2000,7 @@ mod tests {
 
         // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
         assert_eq!(
-            store.get_balance(&val_pub).unwrap(),
+            store.get_balance(&addr(&val_pub)).unwrap(),
             INITIAL_SUBSIDY + 2_000
         );
     }
@@ -2012,6 +2051,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -2337,5 +2377,53 @@ mod tests {
         let results = store.lookup_by_publisher(&wire).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], tx_id1);
+    }
+
+    // --- Finding 3: count_address_history tests ---
+
+    #[test]
+    fn count_address_history_empty() {
+        let store = MemoryStorage::new();
+        let (_, pk) = ed25519::generate_keypair();
+        let address = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
+        let count = store.count_address_history(&address).unwrap();
+        assert_eq!(count, 0, "empty store should have 0 history entries");
+    }
+
+    #[test]
+    fn count_address_history_after_block() {
+        let store = MemoryStorage::new();
+        let (sk, pk) = ed25519::generate_keypair();
+
+        // Genesis block
+        let genesis = make_block(vec![], 0, Hash256::ZERO, 1_000_000);
+        store
+            .commit_block(&genesis.0, &genesis.1, &genesis.2)
+            .unwrap();
+
+        // Block 1: empty block with sender as validator (gives them subsidy)
+        let block1 = make_block_with_validator(vec![], 1, genesis.1, 1_000_010, &sk, &pk);
+        store
+            .commit_block(&block1.0, &block1.1, &block1.2)
+            .unwrap();
+
+        // Block 2: tx from this sender (they now have balance from subsidy)
+        let (tx1, tx1_id) = make_signed_tx(&sk, &pk, b"doc1", 1_000_020);
+        let (tx2, tx2_id) = make_signed_tx(&sk, &pk, b"doc2", 1_000_021);
+        let block2 = make_block_with_validator(
+            vec![(tx1, tx1_id), (tx2, tx2_id)],
+            2,
+            block1.1,
+            1_000_030,
+            &sk,
+            &pk,
+        );
+        store
+            .commit_block(&block2.0, &block2.1, &block2.2)
+            .unwrap();
+
+        let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
+        let count = store.count_address_history(&sender_addr).unwrap();
+        assert_eq!(count, 2, "sender should have 2 history entries");
     }
 }

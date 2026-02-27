@@ -50,6 +50,10 @@ pub enum WalletError {
     #[error("invalid recipient: {0}")]
     InvalidRecipient(String),
 
+    /// Invalid key input (WIF, hex, etc.).
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+
     /// Unsupported signature scheme.
     #[error("unsupported scheme: {0:#04x}")]
     UnsupportedScheme(u8),

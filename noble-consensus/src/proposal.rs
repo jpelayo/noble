@@ -119,6 +119,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(MAINNET_CHAIN_ID)

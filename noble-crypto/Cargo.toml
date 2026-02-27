@@ -26,6 +26,9 @@ zeroize.workspace = true
 tracing.workspace = true
 bip39.workspace = true
 bip32.workspace = true
+ripemd.workspace = true
+bs58.workspace = true
+bech32.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

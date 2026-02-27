@@ -11,6 +11,7 @@
 //! - **Multi-scheme keys**: Unified key types via the [`keys`] module (Step 5)
 
 pub mod bip137;
+pub mod bitcoin_addr;
 pub mod ecies;
 pub mod ed25519;
 pub mod error;

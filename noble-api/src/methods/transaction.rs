@@ -10,7 +10,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 
 use noble_codec::NobleCbor;
 use noble_core::Transaction;
-use noble_crypto::{Hash256, NoblePublicKey};
+use noble_crypto::Hash256;
 use noble_mempool::{BalanceLookup, ChainLookup};
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
@@ -40,8 +40,8 @@ struct StorageBalanceLookup<'a, S: StorageEngine> {
 }
 
 impl<S: StorageEngine> BalanceLookup for StorageBalanceLookup<'_, S> {
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> u64 {
-        self.storage.get_balance(pubkey).unwrap_or(0)
+    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
+        self.storage.get_balance(address).unwrap_or(0)
     }
 }
 

@@ -28,7 +28,7 @@ use noble_core::{
     Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
     TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
 };
-use noble_crypto::{is_recognized_scheme, Hash256, NoblePublicKey};
+use noble_crypto::{is_recognized_scheme, Hash256};
 
 use crate::error::MempoolError;
 use crate::sigcache::SigCache;
@@ -114,8 +114,8 @@ impl ChainLookup for NoChainLookup {
 /// Decoupled from `ChainLookup` (SRP) following the project pattern of
 /// one trait per concern (ChainLookup, BlockProvider, TxProvider).
 pub trait BalanceLookup {
-    /// Return the confirmed balance for the given public key (in atomic units).
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> u64;
+    /// Return the confirmed balance for the given address (in atomic units).
+    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64;
 }
 
 /// A no-op balance lookup that always returns `u64::MAX`.
@@ -123,7 +123,7 @@ pub trait BalanceLookup {
 pub struct NoBalanceLookup;
 
 impl BalanceLookup for NoBalanceLookup {
-    fn get_balance(&self, _pubkey: &NoblePublicKey) -> u64 {
+    fn get_balance(&self, _address: &noble_core::NobleAddress) -> u64 {
         u64::MAX
     }
 }
@@ -221,6 +221,31 @@ impl Mempool {
     pub fn pending_debit(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
         let wire = pubkey.to_wire_bytes();
         self.pending_debits_for_sender(&wire)
+    }
+
+    /// Sum of pending debits targeting a specific `NobleAddress` bucket.
+    ///
+    /// - For `Noble(pk)`: sums all debits from that sender (same as `pending_debit`).
+    /// - For `BitcoinHash160`/`BitcoinTaproot`: sums debits of txs with an explicit
+    ///   `source_address` pointing to this bucket. Legacy txs (no `source_address`)
+    ///   are attributed to the Noble bucket.
+    pub fn pending_debit_for_address(&self, addr: &noble_core::NobleAddress) -> u64 {
+        if let noble_core::NobleAddress::Noble(ref pk) = addr {
+            return self.pending_debit(pk);
+        }
+        let addr_wire = addr.to_wire_bytes();
+        self.by_id
+            .values()
+            .filter(|e| e.tx.tx_type == TX_TYPE_TRANSFER)
+            .filter(|e| {
+                e.tx.source_address
+                    .as_ref()
+                    .map_or(false, |sa| *sa == addr_wire)
+            })
+            .fold(0u64, |acc, e| {
+                acc.saturating_add(e.tx.amount.unwrap_or(0))
+                    .saturating_add(e.tx.fee)
+            })
     }
 
     /// Iterate transactions in descending fee order (highest fee first).
@@ -342,7 +367,17 @@ impl Mempool {
                 let amount = tx.amount.unwrap_or(0);
                 let pending = self.pending_debits_for_sender(&sender_wire);
                 let need = amount.saturating_add(tx.fee).saturating_add(pending);
-                let have = balance.get_balance(&sender);
+
+                // Resolve debit bucket via canonical shared logic (S34)
+                let debit_addr = noble_core::resolve_debit_address(
+                    &tx.source_address,
+                    &sender,
+                    need,
+                    |a| balance.get_balance(a),
+                )
+                .map_err(|e| MempoolError::ValidationFailed(e.to_string()))?;
+
+                let have = balance.get_balance(&debit_addr);
                 if have < need {
                     return Err(MempoolError::InsufficientBalance { have, need });
                 }
@@ -611,6 +646,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -766,6 +802,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -828,6 +865,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -994,7 +1032,7 @@ mod tests {
     struct FixedBalanceLookup(u64);
 
     impl BalanceLookup for FixedBalanceLookup {
-        fn get_balance(&self, _pubkey: &NoblePublicKey) -> u64 {
+        fn get_balance(&self, _address: &noble_core::NobleAddress) -> u64 {
             self.0
         }
     }
@@ -1026,7 +1064,7 @@ mod tests {
             checksum,
             timestamp: 1_700_000_000,
             fee,
-            recipient: Some(recipient),
+            recipient: Some(noble_core::NobleAddress::Noble(recipient)),
             amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
@@ -1038,6 +1076,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1233,6 +1272,23 @@ mod tests {
         assert_eq!(pool.pending_debit(&pubkey), 0);
     }
 
+    #[test]
+    fn pending_debit_for_address_noble() {
+        let pool = Mempool::new(test_config());
+        let (_sk, pk) = ed25519::generate_keypair();
+        let pubkey = noble_crypto::NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = noble_core::NobleAddress::Noble(pubkey.clone());
+        // Should delegate to pending_debit for Noble addresses
+        assert_eq!(pool.pending_debit_for_address(&addr), 0);
+    }
+
+    #[test]
+    fn pending_debit_for_address_bitcoin_zero() {
+        let pool = Mempool::new(test_config());
+        let h160_addr = noble_core::NobleAddress::BitcoinHash160([0xAA; 20]);
+        assert_eq!(pool.pending_debit_for_address(&h160_addr), 0);
+    }
+
     // --- Step 2.6: Version chain validation ---
 
     fn make_versioned_notarization(
@@ -1276,6 +1332,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1333,5 +1390,73 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"normal_doc", MIN_TX_FEE);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    // --- Finding 2B: Hash160 balance fallback test ---
+
+    #[test]
+    fn balance_check_hash160_fallback() {
+        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
+
+        // Custom balance lookup that returns 0 for Noble addresses
+        // but 100_000 for the Hash160 address of the secp256k1 key
+        struct Hash160BalanceLookup {
+            hash160_addr: noble_core::NobleAddress,
+        }
+        impl BalanceLookup for Hash160BalanceLookup {
+            fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
+                if address == &self.hash160_addr {
+                    100_000 // balance exists only in Hash160 bucket
+                } else {
+                    0 // Noble bucket is empty
+                }
+            }
+        }
+
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk_bytes) = secp256k1::generate_keypair();
+        let sender_pk = noble_crypto::NoblePublicKey::Secp256k1(pk_bytes.clone());
+
+        // Derive the Hash160 address for this secp256k1 key
+        let hash160_addr =
+            noble_core::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
+        let balance = Hash160BalanceLookup { hash160_addr };
+
+        // Build a transfer tx with secp256k1 key
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let (_, recip_pk) = ed25519::generate_keypair();
+        let recip_addr = noble_core::NobleAddress::Noble(
+            noble_crypto::NoblePublicKey::Ed25519(recip_pk),
+        );
+
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: sha256(b"transfer_test"),
+            timestamp: 1_700_000_000,
+            fee: MIN_TX_FEE,
+            recipient: Some(recip_addr),
+            amount: Some(10_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_SECP256K1,
+                public_key: pk_bytes.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            source_address: None,
+        };
+        let msg = tx.compute_signing_message().unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+
+        // Admit should succeed because Hash160 balance covers the transfer
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &balance);
+        assert!(
+            result.is_ok(),
+            "secp256k1 sender with Hash160 balance should pass: {result:?}"
+        );
     }
 }

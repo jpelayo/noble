@@ -39,8 +39,8 @@ struct StorageBalanceLookup<'a, S: StorageEngine> {
 }
 
 impl<S: StorageEngine> BalanceLookup for StorageBalanceLookup<'_, S> {
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> u64 {
-        self.storage.get_balance(pubkey).unwrap_or(0)
+    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
+        self.storage.get_balance(address).unwrap_or(0)
     }
 }
 
@@ -71,6 +71,10 @@ pub trait WalletApi {
     async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned>;
 
     /// Build, sign, and submit a transfer transaction.
+    ///
+    /// `source_address` optionally specifies which balance bucket to debit.
+    /// If omitted and `from` is secp256k1, the node auto-selects Noble first,
+    /// then Hash160 fallback.
     #[method(name = "walletSendTransfer")]
     async fn wallet_send_transfer(
         &self,
@@ -79,6 +83,7 @@ pub trait WalletApi {
         amount: u64,
         fee: Option<u64>,
         memo: Option<String>,
+        source_address: Option<String>,
     ) -> Result<SubmitTxResponse, ErrorObjectOwned>;
 
     /// Submit a batch of document checksums for notarization.
@@ -109,6 +114,15 @@ pub trait WalletApi {
         mnemonic: String,
         passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned>;
+
+    /// Import a secp256k1 private key (WIF or hex) into the wallet.
+    /// Returns the public key and derived Bitcoin address.
+    #[method(name = "importSecp256k1Key")]
+    async fn import_secp256k1_key(
+        &self,
+        key_input: String,
+        passphrase: String,
+    ) -> Result<ImportKeyResponse, ErrorObjectOwned>;
 
     /// List all public keys in the wallet keystore.
     ///
@@ -176,17 +190,43 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let keys = keystore.list_keys().unwrap_or_default();
         let key_count = keys.len();
 
-        // Sum balances across all wallet keys
+        // Sum balances across all wallet keys and all address buckets
         let storage = self.storage.read();
         let mempool = self.mempool.lock();
         let mut total_balance = 0u64;
         let mut total_pending = 0u64;
+        let mut noble_bal = 0u64;
+        let mut hash160_bal = 0u64;
+        let mut taproot_bal = 0u64;
+
         for pk in &keys {
-            total_balance += storage.get_balance(pk).unwrap_or(0);
+            // Noble bucket (all key types)
+            let nb = storage
+                .get_balance(&noble_core::NobleAddress::Noble(pk.clone()))
+                .unwrap_or(0);
+            noble_bal += nb;
+            total_balance += nb;
+
+            // Hash160 + Taproot buckets (secp256k1 keys only)
+            if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                let hb = storage.get_balance(&h160_addr).unwrap_or(0);
+                hash160_bal += hb;
+                total_balance += hb;
+            }
+            if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                let tb = storage.get_balance(&tap_addr).unwrap_or(0);
+                taproot_bal += tb;
+                total_balance += tb;
+            }
+
+            // Pending debits (by sender key — covers all buckets)
             total_pending += mempool.pending_debit(pk);
         }
         drop(mempool);
         drop(storage);
+
+        // Only include bucket breakdown if there are non-zero Bitcoin balances
+        let has_bitcoin = hash160_bal > 0 || taproot_bal > 0;
 
         Ok(WalletInfoResponse {
             unlocked: state.is_unlocked(),
@@ -195,6 +235,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             balance: total_balance,
             available: total_balance.saturating_sub(total_pending),
             pending: total_pending,
+            noble_balance: if has_bitcoin { Some(noble_bal) } else { None },
+            hash160_balance: if has_bitcoin { Some(hash160_bal) } else { None },
+            taproot_balance: if has_bitcoin { Some(taproot_bal) } else { None },
         })
     }
 
@@ -205,6 +248,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         amount: u64,
         fee: Option<u64>,
         memo: Option<String>,
+        source_address: Option<String>,
     ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
         // Ensure wallet is unlocked
         {
@@ -221,7 +265,13 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Parse addresses
         let sender = parse_pubkey(&from)?;
-        let recipient = parse_pubkey(&to)?;
+        let recipient = parse_address(&to)?;
+
+        // Parse optional source_address
+        let src_addr = match source_address {
+            Some(ref s) if !s.is_empty() => Some(parse_address(s)?),
+            _ => None,
+        };
 
         let fee = fee.unwrap_or(MIN_TX_FEE);
 
@@ -229,7 +279,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let tx = {
             let keystore = self.wallet_keystore.lock();
             let mut tx = TransactionBuilder::build_transfer(
-                &keystore, &sender, recipient, amount, fee, memo,
+                &keystore, &sender, recipient, amount, fee, memo, src_addr,
             )
             .map_err(|e| match e {
                 noble_wallet::WalletError::Locked => ApiError::WalletLocked,
@@ -303,6 +353,30 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             address: hex::encode(pubkey.to_wire_bytes()),
             scheme_id: pubkey.scheme_id(),
             word_count: wc,
+        })
+    }
+
+    async fn import_secp256k1_key(
+        &self,
+        key_input: String,
+        passphrase: String,
+    ) -> Result<ImportKeyResponse, ErrorObjectOwned> {
+        let mut keystore = self.wallet_keystore.lock();
+        let pubkey = keystore
+            .import_secp256k1_key(&key_input, &passphrase)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        // Derive the Bitcoin P2WPKH display address
+        let bitcoin_address = if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
+            let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+            noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&key, true)
+        } else {
+            String::new()
+        };
+
+        Ok(ImportKeyResponse {
+            public_key: hex::encode(pubkey.to_wire_bytes()),
+            bitcoin_address,
         })
     }
 

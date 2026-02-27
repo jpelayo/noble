@@ -97,3 +97,6 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "ht
 time = { version = "0.3", features = ["formatting"] }
 pem = "3"
 if-addrs = "0.10"
+ripemd = "0.1"
+bs58 = { version = "0.5", features = ["check"] }
+bech32 = "0.11"

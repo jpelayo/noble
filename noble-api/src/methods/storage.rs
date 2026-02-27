@@ -43,8 +43,8 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
 
         Ok(StorageInfoResponse {
             chain_height,
-            pruning_mode: "archive".to_string(),
-            keep_blocks: 10_000,
+            pruning_mode: self.pruning_mode.clone(),
+            keep_blocks: self.keep_blocks,
             pruned_up_to,
             lowest_full_height: lowest_full,
         })
@@ -60,7 +60,7 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
         };
 
         Ok(PruningStatusResponse {
-            mode: "archive".to_string(),
+            mode: self.pruning_mode.clone(),
             blocks_pruned: 0,
             transactions_removed: 0,
             lowest_full_height: lowest_full,

@@ -309,6 +309,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         config: &NodeConfig,
         trace_handle: Option<Arc<noble_api::trace_types::TraceHandle>>,
         metrics: Option<NobleMetrics>,
+        config_path: Option<std::path::PathBuf>,
     ) -> Result<(), NodeError> {
         // --- Parse port numbers from config addresses ---
         let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
@@ -582,6 +583,94 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
+        // --- Build enable_totp closure for ApiState ---
+        // When TOTP is not yet enabled, this closure generates a new secret, persists it,
+        // and returns (secret_base32, otpauth_uri). It does NOT update the live ApiState
+        // validator — the RPC handler does that directly.
+        let totp_data_dir = config.storage.data_dir.clone();
+        let totp_secret_file_cfg = config.api.totp_secret_file.clone();
+        let enable_totp_closure: Option<Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync>> =
+            if config.api.totp_enabled {
+                None // already enabled
+            } else {
+                let config_path_totp = config_path.clone();
+                Some(Arc::new(move || {
+                    let (validator, base32) = noble_api::auth::TotpValidator::generate()
+                        .map_err(|e| format!("generate TOTP: {e}"))?;
+
+                    let secret_path = if totp_secret_file_cfg.is_empty() {
+                        totp_data_dir.join("totp_secret.txt")
+                    } else {
+                        std::path::PathBuf::from(&totp_secret_file_cfg)
+                    };
+
+                    atomic_write_file(&secret_path, base32.as_bytes())
+                        .map_err(|e| format!("write TOTP secret: {e}"))?;
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &secret_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
+
+                    // Update noble.toml to enable TOTP
+                    if let Some(ref cp) = config_path_totp {
+                        if let Ok(contents) = std::fs::read_to_string(cp) {
+                            let updated = if contents.contains("totp_enabled") {
+                                contents.replace("totp_enabled = false", "totp_enabled = true")
+                            } else if contents.contains("[api]") {
+                                contents.replace("[api]", "[api]\ntotp_enabled = true")
+                            } else {
+                                contents
+                            };
+                            let _ = atomic_write_file(cp, updated.as_bytes());
+                        }
+                    }
+
+                    let uri = validator.otpauth_uri("NOBLE Node");
+                    tracing::info!(task = "totp", "TOTP secret generated and saved to {}", secret_path.display());
+                    Ok((base32, uri))
+                }))
+            };
+
+        // --- Build set_config_value closure for ApiState ---
+        // Reads noble.toml, modifies a key, writes back.
+        let set_config_value_closure: Option<Arc<dyn Fn(&str, &str, &str) -> Result<bool, String> + Send + Sync>> =
+            if let Some(ref cp) = config_path {
+                let cp = cp.clone();
+                Some(Arc::new(move |section: &str, key: &str, value: &str| {
+                    let contents = std::fs::read_to_string(&cp)
+                        .map_err(|e| format!("read config: {e}"))?;
+                    let mut doc: toml::Table = toml::from_str(&contents)
+                        .map_err(|e| format!("parse config: {e}"))?;
+
+                    // Navigate to the section and update the key.
+                    let table = doc
+                        .entry(section)
+                        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                    if let toml::Value::Table(ref mut t) = table {
+                        t.insert(key.to_string(), toml::Value::String(value.to_string()));
+                    } else {
+                        return Err(format!("config section '{section}' is not a table"));
+                    }
+
+                    let new_contents = toml::to_string_pretty(&doc)
+                        .map_err(|e| format!("serialize config: {e}"))?;
+                    atomic_write_file(&cp, new_contents.as_bytes())
+                        .map_err(|e| format!("write config: {e}"))?;
+
+                    tracing::info!(task = "config", "Updated {section}.{key} = {value} in {}", cp.display());
+
+                    // Port changes always require restart.
+                    Ok(true)
+                }))
+            } else {
+                None
+            };
+
         // --- F1/F2: Build allowed CORS origins for RPC and GUI servers ---
         // Always include localhost GUI origins.  In setup mode (extra_sans contains LAN IPs)
         // or when allowed_ips are configured, also include those IPs so remote browsers
@@ -709,6 +798,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_pubkey: validator_pubkey_str,
             validator_scheme: validator_scheme_str,
             validator_key_path: validator_key_path_str,
+            data_dir: Some(config.storage.data_dir.clone()),
+            pruning_mode: "archive".to_string(),
+            keep_blocks: 0,
+            reward_address: parking_lot::RwLock::new(
+                if config.rewards.reward_address.is_empty() {
+                    None
+                } else {
+                    Some(config.rewards.reward_address.clone())
+                },
+            ),
+            enable_totp: enable_totp_closure,
+            set_config_value: set_config_value_closure,
+            config_path,
         });
 
         // --- Determine RPC bind address ---
@@ -1188,8 +1290,8 @@ struct StorageBalanceLookupAdapter<'a, S: StorageEngine> {
 }
 
 impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
-    fn get_balance(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
-        self.storage.get_balance(pubkey).unwrap_or(0)
+    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
+        self.storage.get_balance(address).unwrap_or(0)
     }
 }
 
@@ -1495,7 +1597,31 @@ fn resolve_gateway_key(
         return None;
     }
 
-    // Try loading from explicit key_path first.
+    // Try reward_address first (new dual-address system).
+    if !config.rewards.reward_address.is_empty() {
+        use noble_api::types::parse_address;
+        match parse_address(&config.rewards.reward_address) {
+            Ok(addr) => {
+                let wire = addr.to_wire_bytes();
+                tracing::info!(
+                    task = "config_load",
+                    "Gateway key from reward_address: {} ({})",
+                    config.rewards.reward_address,
+                    addr.address_type(),
+                );
+                return Some(wire);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = "config_load",
+                    "Invalid reward_address '{}': {e}",
+                    config.rewards.reward_address,
+                );
+            }
+        }
+    }
+
+    // Try loading from explicit key_path next.
     if !config.gateway.key_path.is_empty() {
         let path = std::path::Path::new(&config.gateway.key_path);
         match std::fs::read_to_string(path) {

@@ -13,6 +13,7 @@ fuzz_target!(|data: &[u8]| {
         let ctx = TxValidationContext {
             chain_id: MAINNET_CHAIN_ID,
             current_time: 1_772_524_800 + 3600,
+            chain_height: 0,
         };
         let _ = validate_transaction(&tx, &claimed_tx_id, &ctx);
     }

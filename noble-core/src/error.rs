@@ -210,6 +210,18 @@ pub enum ValidationError {
     #[error("T30: version metadata inconsistency: {0}")]
     VersionMetadataInconsistent(String),
 
+    /// T31: source_address ownership proof failed.
+    #[error("T31: source_address validation failed: {0}")]
+    InvalidSourceAddress(String),
+
+    /// T31b: source_address only allowed on transfer transactions.
+    #[error("T31b: source_address only allowed on transfer tx")]
+    SourceAddressOnNonTransfer,
+
+    /// T32: source_address required for secp256k1 senders at/above activation height.
+    #[error("T32: source_address required for secp256k1 senders")]
+    SourceAddressRequired,
+
     // --- General ---
     /// Codec or crypto error during validation.
     #[error("internal: {0}")]

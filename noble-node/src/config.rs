@@ -30,6 +30,9 @@ pub struct NodeConfig {
     /// Gateway fee-split configuration.
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// Reward address configuration.
+    #[serde(default)]
+    pub rewards: RewardsConfig,
 }
 
 /// Operational role of the node binary.
@@ -373,6 +376,23 @@ impl Default for GatewayConfig {
         Self {
             key_path: String::new(),
             enabled: default_gateway_enabled(),
+        }
+    }
+}
+
+/// `[rewards]` section — reward address for fee splits.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RewardsConfig {
+    /// Bitcoin address (bc1q..., 1..., bc1p...) or NOBLE public key (hex).
+    /// Receives gateway fee splits. Block subsidy goes to the validator key.
+    #[serde(default)]
+    pub reward_address: String,
+}
+
+impl Default for RewardsConfig {
+    fn default() -> Self {
+        Self {
+            reward_address: String::new(),
         }
     }
 }

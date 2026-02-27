@@ -42,6 +42,30 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Reward Address -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Reward Address</span>
+        <span id="w-reward-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
+          Your node earns block rewards and gateway fee splits. Paste your Bitcoin address from any wallet to set the reward destination.
+        </p>
+        <dl class="detail-grid" id="w-reward-info">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
+        <div id="w-reward-edit" style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <div style="display:flex;gap:var(--gap-sm);align-items:center">
+            <input id="w-reward-input" type="text" placeholder="bc1q..., 1..., bc1p..., or hex public key"
+              style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            <button id="w-reward-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+          </div>
+          <span id="w-reward-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Wallet identity -->
     <div class="panel">
       <div class="panel-header">Wallet Identity</div>
@@ -131,8 +155,65 @@ export function init(root, ctx) {
   const wTxCount = root.querySelector('#w-tx-count');
   const wPagination = root.querySelector('#w-pagination');
   const wFilter = root.querySelector('#w-filter');
+  const wRewardBadge = root.querySelector('#w-reward-badge');
+  const wRewardInfo = root.querySelector('#w-reward-info');
+  const wRewardInput = root.querySelector('#w-reward-input');
+  const wRewardSave = root.querySelector('#w-reward-save');
+  const wRewardMsg = root.querySelector('#w-reward-msg');
 
   let allTransactions = [];
+
+  // ── Load reward address ──
+  async function loadRewardAddress() {
+    try {
+      const res = await rpc.call('noble_getRewardAddress');
+      if (res.configured) {
+        wRewardBadge.textContent = 'Configured';
+        wRewardBadge.className = 'badge inbound';
+        wRewardInfo.innerHTML = `
+          <dt>Address</dt><dd class="mono">${res.address}</dd>
+          <dt>Type</dt><dd>${res.address_type || 'Unknown'}</dd>
+          <dt>Wire Key</dt><dd class="mono" style="font-size:var(--font-size-xs)">${res.wire_hex || '--'}</dd>
+        `;
+        wRewardInput.value = res.address;
+      } else {
+        wRewardBadge.textContent = 'Not Configured';
+        wRewardBadge.className = 'badge outbound';
+        wRewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">No reward address set. Paste a Bitcoin address below.</dt>`;
+        wRewardInput.value = '';
+      }
+    } catch (e) {
+      console.error('[wallet] load reward address:', e);
+      wRewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">Could not load reward address.</dt>`;
+    }
+  }
+
+  // ── Save reward address ──
+  wRewardSave.addEventListener('click', async () => {
+    const addr = wRewardInput.value.trim();
+    if (!addr) {
+      wRewardMsg.style.color = 'var(--error)';
+      wRewardMsg.textContent = 'Please enter an address.';
+      return;
+    }
+    wRewardSave.disabled = true;
+    wRewardSave.textContent = 'Saving...';
+    wRewardMsg.textContent = '';
+    try {
+      const res = await rpc.call('noble_setRewardAddress', { address: addr });
+      wRewardMsg.style.color = 'var(--success)';
+      wRewardMsg.textContent = `Saved: ${res.address_type} address (${res.display_address})`;
+      await loadRewardAddress();
+    } catch (e) {
+      wRewardMsg.style.color = 'var(--error)';
+      wRewardMsg.textContent = 'Error: ' + (e.message || e);
+    } finally {
+      wRewardSave.disabled = false;
+      wRewardSave.textContent = 'Save';
+    }
+  });
+
+  loadRewardAddress();
 
   // ── Load wallet info ──
   async function loadWallet() {

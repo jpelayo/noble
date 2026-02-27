@@ -30,7 +30,7 @@ use noble_core::constants::{
     subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM, TX_TYPE_NOTARIZATION,
     TX_TYPE_TRANSFER,
 };
-use noble_core::{Block, BlockHeader, PeerRecord, Transaction};
+use noble_core::{Block, BlockHeader, NobleAddress, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -230,7 +230,13 @@ impl RocksDbStorage {
             .ok_or_else(|| StorageError::Database(format!("column family '{name}' not found")))
     }
 
-    /// Build the CF key for an address balance: pubkey wire bytes.
+    /// Build the CF key for an address balance: wire bytes.
+    /// Supports both native NOBLE keys (0x01/0x02) and Bitcoin addresses (0x80/0x81).
+    fn address_key(address: &NobleAddress) -> Vec<u8> {
+        address.to_wire_bytes()
+    }
+
+    /// Build the CF key for an address balance from a NoblePublicKey (convenience).
     fn pubkey_key(pubkey: &NoblePublicKey) -> Vec<u8> {
         pubkey.to_wire_bytes()
     }
@@ -415,18 +421,27 @@ impl StorageEngine for RocksDbStorage {
         *deltas.entry(validator_key).or_default() += subsidy + validator_fee_total;
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
-            let sender_key = tx
+            let sender_pk = tx
                 .publisher_sig
                 .to_noble_public_key()
-                .map_err(|e| StorageError::Codec(e.to_string()))?
-                .to_wire_bytes();
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
+            // S34: Canonical debit address resolution
+            let need = tx.amount.unwrap_or(0) + tx.fee;
+            let sender_addr = noble_core::resolve_debit_address(
+                &tx.source_address,
+                &sender_pk,
+                need,
+                |a| self.read_balance_raw(&a.to_wire_bytes()).unwrap_or(0),
+            )
+            .map_err(|e| StorageError::Codec(e.to_string()))?;
+            let sender_key = sender_addr.to_wire_bytes();
 
             if tx.tx_type == TX_TYPE_TRANSFER {
                 let amount = tx.amount.unwrap_or(0) as i128;
                 let fee = tx.fee as i128;
                 *deltas.entry(sender_key.clone()).or_default() -= amount + fee;
                 if let Some(ref recipient) = tx.recipient {
-                    let recip_key = Self::pubkey_key(recipient);
+                    let recip_key = recipient.to_wire_bytes();
                     *deltas.entry(recip_key.clone()).or_default() += amount;
 
                     // History for recipient
@@ -632,22 +647,22 @@ impl StorageEngine for RocksDbStorage {
         Ok(exists)
     }
 
-    fn get_balance(&self, pubkey: &NoblePublicKey) -> Result<u64, StorageError> {
+    fn get_balance(&self, address: &NobleAddress) -> Result<u64, StorageError> {
         self.check_open()?;
-        let key = Self::pubkey_key(pubkey);
+        let key = Self::address_key(address);
         self.read_balance_raw(&key)
     }
 
     fn get_address_history(
         &self,
-        pubkey: &NoblePublicKey,
+        address: &NobleAddress,
         page: u32,
         limit: u32,
     ) -> Result<Vec<Hash256>, StorageError> {
         self.check_open()?;
 
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
-        let prefix = Self::pubkey_key(pubkey);
+        let prefix = Self::address_key(address);
         let skip = (page as usize) * (limit as usize);
 
         let iter = self
@@ -684,6 +699,24 @@ impl StorageEngine for RocksDbStorage {
         }
 
         Ok(results)
+    }
+
+    fn count_address_history(&self, address: &NobleAddress) -> Result<u64, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_ADDRESS_HISTORY)?;
+        let wire = Self::address_key(address);
+        let mut count = 0u64;
+        let iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&wire, Direction::Forward));
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.len() < wire.len() || &key[..wire.len()] != wire.as_slice() {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
     }
 
     fn get_chain_tip(&self) -> Result<Option<ChainTip>, StorageError> {
@@ -871,11 +904,24 @@ impl StorageEngine for RocksDbStorage {
             *balances.entry(validator_key).or_default() += subsidy + validator_fee_total;
 
             for (offset, tx) in block.transactions.iter().enumerate() {
-                let sender_key = tx
+                let sender_pk = tx
                     .publisher_sig
                     .to_noble_public_key()
-                    .map_err(|e| StorageError::Codec(e.to_string()))?
-                    .to_wire_bytes();
+                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                // S34: Use canonical debit resolution (fixes P0 replay divergence)
+                let need = tx.amount.unwrap_or(0) + tx.fee;
+                let sender_addr = noble_core::resolve_debit_address(
+                    &tx.source_address,
+                    &sender_pk,
+                    need,
+                    |a| {
+                        let key = a.to_wire_bytes();
+                        let bal = balances.get(&key).copied().unwrap_or(0);
+                        if bal >= 0 { bal as u64 } else { 0 }
+                    },
+                )
+                .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let sender_key = sender_addr.to_wire_bytes();
 
                 let tx_id = tx
                     .compute_tx_id(chain_id)
@@ -909,7 +955,7 @@ impl StorageEngine for RocksDbStorage {
                     let fee = tx.fee as i128;
                     *balances.entry(sender_key.clone()).or_default() -= amount + fee;
                     if let Some(ref recipient) = tx.recipient {
-                        let recip_key = Self::pubkey_key(recipient);
+                        let recip_key = recipient.to_wire_bytes();
                         *balances.entry(recip_key.clone()).or_default() += amount;
                         let hkey = Self::history_key(&recip_key, h, offset as u32);
                         replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
@@ -1260,6 +1306,11 @@ mod tests {
         (db, dir)
     }
 
+    /// Convenience: wrap a NoblePublicKey into a NobleAddress for balance lookups.
+    fn addr(pk: &NoblePublicKey) -> NobleAddress {
+        NobleAddress::Noble(pk.clone())
+    }
+
     fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], timestamp: u64) -> (Transaction, Hash256) {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let checksum = sha256(doc);
@@ -1281,6 +1332,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1304,7 +1356,7 @@ mod tests {
             checksum,
             timestamp,
             fee,
-            recipient: Some(recipient.clone()),
+            recipient: Some(NobleAddress::Noble(recipient.clone())),
             amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
@@ -1316,6 +1368,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1684,7 +1737,7 @@ mod tests {
         let (db, _dir) = temp_db();
         let (_, pk) = ed25519::generate_keypair();
         let pubkey = NoblePublicKey::Ed25519(pk);
-        assert_eq!(db.get_balance(&pubkey).unwrap(), 0);
+        assert_eq!(db.get_balance(&addr(&pubkey)).unwrap(), 0);
     }
 
     #[test]
@@ -1693,7 +1746,7 @@ mod tests {
         let (block, block_hash, tx_ids) = make_block(vec![], 1, Hash256::ZERO, 1_700_000_000);
         let validator = block.header.validator_id.clone();
         db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
     }
 
     #[test]
@@ -1703,7 +1756,7 @@ mod tests {
             make_block(vec![], HALVING_INTERVAL, Hash256::ZERO, 1_700_000_000);
         let validator = block.header.validator_id.clone();
         db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY / 2);
+        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY / 2);
     }
 
     #[test]
@@ -1737,7 +1790,7 @@ mod tests {
         let validator = block1.header.validator_id.clone();
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
-        assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY + 2_000);
+        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY + 2_000);
     }
 
     #[test]
@@ -1757,7 +1810,7 @@ mod tests {
         db.commit_block(&block0, &hash0, &ids0).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        assert_eq!(db.get_balance(&sender_pub).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY);
 
         // Block 2: sender submits a notarization (different validator)
         let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
@@ -1765,7 +1818,7 @@ mod tests {
         let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 2, hash0, 1_700_000_001);
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
-        assert_eq!(db.get_balance(&sender_pub).unwrap(), INITIAL_SUBSIDY - fee);
+        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY - fee);
     }
 
     #[test]
@@ -1802,10 +1855,10 @@ mod tests {
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
         assert_eq!(
-            db.get_balance(&sender_pub).unwrap(),
+            db.get_balance(&addr(&sender_pub)).unwrap(),
             INITIAL_SUBSIDY - amount - fee
         );
-        assert_eq!(db.get_balance(&recipient).unwrap(), amount);
+        assert_eq!(db.get_balance(&addr(&recipient)).unwrap(), amount);
     }
 
     #[test]
@@ -1879,7 +1932,7 @@ mod tests {
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = db.get_address_history(&sender_pub, 0, 100).unwrap();
+        let history = db.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
         assert!(history.contains(&id1));
     }
 
@@ -1914,11 +1967,11 @@ mod tests {
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
         assert!(db
-            .get_address_history(&sender_pub, 0, 100)
+            .get_address_history(&addr(&sender_pub), 0, 100)
             .unwrap()
             .contains(&tx_id));
         assert!(db
-            .get_address_history(&recipient, 0, 100)
+            .get_address_history(&addr(&recipient), 0, 100)
             .unwrap()
             .contains(&tx_id));
     }
@@ -1960,9 +2013,9 @@ mod tests {
         }
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let page0 = db.get_address_history(&sender_pub, 0, 2).unwrap();
+        let page0 = db.get_address_history(&addr(&sender_pub), 0, 2).unwrap();
         assert_eq!(page0.len(), 2);
-        let page1 = db.get_address_history(&sender_pub, 1, 2).unwrap();
+        let page1 = db.get_address_history(&addr(&sender_pub), 1, 2).unwrap();
         assert_eq!(page1.len(), 1);
         assert!(!page0.contains(&page1[0]));
     }
@@ -1972,7 +2025,7 @@ mod tests {
         let (db, _dir) = temp_db();
         let (_, pk) = ed25519::generate_keypair();
         let pubkey = NoblePublicKey::Ed25519(pk);
-        let history = db.get_address_history(&pubkey, 0, 100).unwrap();
+        let history = db.get_address_history(&addr(&pubkey), 0, 100).unwrap();
         assert!(history.is_empty());
     }
 
@@ -2014,7 +2067,7 @@ mod tests {
         }
 
         let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = db.get_address_history(&sender_pub, 0, 100).unwrap();
+        let history = db.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
         assert_eq!(history, expected_order);
     }
 
@@ -2038,7 +2091,7 @@ mod tests {
         }
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
     #[test]
@@ -2075,7 +2128,7 @@ mod tests {
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + fee);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + fee);
     }
 
     #[test]
@@ -2109,7 +2162,7 @@ mod tests {
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
         // Self-transfer: net effect is -fee only
-        assert_eq!(db.get_balance(&sender_pub).unwrap(), INITIAL_SUBSIDY - fee);
+        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY - fee);
     }
 
     #[test]
@@ -2130,13 +2183,13 @@ mod tests {
                 &val_pk,
             );
             db.commit_block(&block, &hash, &ids).unwrap();
-            assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
+            assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
         }
 
         // Reopen and verify
         {
             let db = RocksDbStorage::open(dir.path()).unwrap();
-            assert_eq!(db.get_balance(&validator).unwrap(), INITIAL_SUBSIDY);
+            assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
         }
     }
 
@@ -2176,10 +2229,10 @@ mod tests {
         }
 
         // Heights 1,2,3 each give INITIAL_SUBSIDY; height 0 gives 0
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 3);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
         db.rollback_to_height(2, MAINNET_CHAIN_ID).unwrap();
         // After rollback: heights 0,1,2 remain → 0 + INITIAL_SUBSIDY + INITIAL_SUBSIDY
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY * 2);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
     }
 
     #[test]
@@ -2293,6 +2346,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: gateway,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -2336,9 +2390,9 @@ mod tests {
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         // Validator gets subsidy + 50% of fee (1000)
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 1_000);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 1_000);
         // Gateway gets 50% of fee (1000)
-        assert_eq!(db.get_balance(&gw_key).unwrap(), 1_000);
+        assert_eq!(db.get_balance(&addr(&gw_key)).unwrap(), 1_000);
     }
 
     #[test]
@@ -2377,8 +2431,8 @@ mod tests {
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         // fee=1001: gw_share=500, val_share=501
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 501);
-        assert_eq!(db.get_balance(&gw_key).unwrap(), 500);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 501);
+        assert_eq!(db.get_balance(&addr(&gw_key)).unwrap(), 500);
     }
 
     #[test]
@@ -2414,7 +2468,7 @@ mod tests {
 
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         // Validator gets subsidy + 100% of fee
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 2_000);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 2_000);
     }
 
     #[test]
@@ -2453,12 +2507,12 @@ mod tests {
 
         // sender pays fee=2000, gets back gw_share=1000 → net change = -1000
         assert_eq!(
-            db.get_balance(&sender_pub).unwrap(),
+            db.get_balance(&addr(&sender_pub)).unwrap(),
             INITIAL_SUBSIDY - 1_000
         );
         // validator gets subsidy + val_share=1000
         let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 1_000);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 1_000);
     }
 
     #[test]
@@ -2495,7 +2549,7 @@ mod tests {
         db.commit_block(&b1, &h1, &ids1).unwrap();
 
         // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
-        assert_eq!(db.get_balance(&val_pub).unwrap(), INITIAL_SUBSIDY + 2_000);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 2_000);
     }
 
     // --- AUD2-M2: O(1) total_supply tracking ---
@@ -2557,8 +2611,8 @@ mod tests {
         // Each validator has INITIAL_SUBSIDY individually
         let v1 = NoblePublicKey::Ed25519(pk1.to_vec());
         let v2 = NoblePublicKey::Ed25519(pk2.to_vec());
-        assert_eq!(db.get_balance(&v1).unwrap(), INITIAL_SUBSIDY);
-        assert_eq!(db.get_balance(&v2).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(db.get_balance(&addr(&v1)).unwrap(), INITIAL_SUBSIDY);
+        assert_eq!(db.get_balance(&addr(&v2)).unwrap(), INITIAL_SUBSIDY);
     }
 
     // --- Version chain tests ---
@@ -2607,6 +2661,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            source_address: None,
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();

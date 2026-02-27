@@ -3,8 +3,10 @@
 
 //! Transaction, Block, BlockHeader, Merkle tree and validation rules for the NOBLE protocol.
 
+pub mod address;
 pub mod block;
 pub mod constants;
+pub mod debit;
 pub mod paths;
 pub mod encrypted_locator;
 pub mod error;
@@ -18,8 +20,10 @@ pub mod pst;
 pub mod transaction;
 pub mod validation;
 
+pub use address::{AddressError, NobleAddress};
 pub use block::{Block, BlockHeader};
 pub use constants::*;
+pub use debit::{resolve_debit_address, resolve_debit_address_enforced, DebitError};
 pub use encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
 pub use error::ValidationError;
 pub use evidence::{DoubleProposalEvidence, EvidenceError};

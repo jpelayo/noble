@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dialoguer::{Confirm, Input, Password, Select};
+use dialoguer::{Confirm, Input, Select};
 use noble_crypto::{ed25519, secp256k1, NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1};
 
 use crate::config::{
@@ -78,11 +78,10 @@ const ORG_TYPE_IDS: &[&str] = &[
     "PublicInstitution",
 ];
 
-const WALLET_CHOICES: &[&str] = &[
-    "Create new wallet (BIP-39 mnemonic)",
-    "Import existing wallet (mnemonic phrase)",
-    "Skip wallet setup",
-];
+const REWARD_ADDR_HELP: &str = "\
+  Paste your Bitcoin address (bc1q..., 1..., bc1p...) or hex NOBLE public key.\n\
+  This address receives 50% of transaction fees processed by your node.\n\
+  Leave empty to skip (you can configure this later in Settings).";
 
 const KEY_SCHEME_CHOICES: &[&str] = &[
     "Ed25519   (recommended — fast, compact)",
@@ -334,81 +333,34 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .interact_text()?;
 
     // -----------------------------------------------------------------------
-    // Step 4: Wallet
+    // Step 4: Reward Address
     // -----------------------------------------------------------------------
-    section_header("4", "Wallet");
+    section_header("4", "Reward Address");
 
-    let wallet_sel = Select::new()
-        .with_prompt("Wallet setup")
-        .items(WALLET_CHOICES)
-        .default(2) // default: skip
-        .interact()?;
+    println!("{REWARD_ADDR_HELP}");
+    println!();
 
-    let mut wallet_public_key: Option<String> = None;
+    let reward_address: String = Input::new()
+        .with_prompt("Reward address")
+        .default(defaults.rewards.reward_address.clone())
+        .allow_empty(true)
+        .interact_text()?;
 
-    match wallet_sel {
-        0 => {
-            // --- Create new wallet ---
-            let passphrase = prompt_wallet_passphrase()?;
-
-            // Use a temporary directory for the keystore during creation.
-            let keystore_dir = platform_data_dir().join("keystore");
-            fs::create_dir_all(&keystore_dir)?;
-
-            let mut ks = noble_wallet::KeyStore::new(&keystore_dir)?;
-            let (mnemonic, pub_key) = ks.create_key_from_mnemonic(24, &passphrase)?;
-
-            println!();
-            println!("  ============================================================");
-            println!("  YOUR 24-WORD RECOVERY PHRASE (write these down NOW):");
-            println!("  ============================================================");
-            println!();
-            display_mnemonic_grid(&mnemonic);
-            println!();
-            println!("  WARNING: If you lose these words, your funds are GONE FOREVER.");
-            println!("  Write them down on paper. Do NOT store them digitally.");
-            println!("  ============================================================");
-            println!();
-
-            // Verify 3 random words
-            verify_mnemonic_words(&mnemonic)?;
-
-            wallet_public_key = Some(hex::encode(pub_key.to_wire_bytes()));
-            println!();
-            println!(
-                "  Wallet created. Public key: {}",
-                wallet_public_key.as_ref().unwrap()
-            );
-
-            // Zeroize passphrase (drop will handle String dealloc, but we clear it).
-            drop(passphrase);
+    let reward_address = reward_address.trim().to_string();
+    if !reward_address.is_empty() {
+        // Validate the address
+        match noble_crypto::bitcoin_addr::parse_bitcoin_address(&reward_address) {
+            Ok(addr) => {
+                let addr_type = &addr.address_type;
+                println!("  Valid {addr_type:?} address.");
+            }
+            Err(e) => {
+                println!("  Warning: Could not validate address: {e}");
+                println!("  Continuing anyway — you can fix this in Settings.");
+            }
         }
-        1 => {
-            // --- Import existing wallet ---
-            let mnemonic_input: String = Input::new()
-                .with_prompt("Enter your BIP-39 mnemonic phrase (12 or 24 words)")
-                .interact_text()?;
-
-            let passphrase = prompt_wallet_passphrase()?;
-
-            let keystore_dir = platform_data_dir().join("keystore");
-            fs::create_dir_all(&keystore_dir)?;
-
-            let mut ks = noble_wallet::KeyStore::new(&keystore_dir)?;
-            let pub_key = ks.recover_from_mnemonic(&mnemonic_input, &passphrase)?;
-
-            wallet_public_key = Some(hex::encode(pub_key.to_wire_bytes()));
-            println!();
-            println!(
-                "  Wallet imported. Public key: {}",
-                wallet_public_key.as_ref().unwrap()
-            );
-
-            drop(passphrase);
-        }
-        _ => {
-            println!("  Wallet setup skipped.");
-        }
+    } else {
+        println!("  Reward address skipped. Configure later in Settings.");
     }
 
     // -----------------------------------------------------------------------
@@ -623,6 +575,9 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             stderr_enabled: defaults.trace.stderr_enabled,
         },
         gateway: GatewayConfig::default(),
+        rewards: crate::config::RewardsConfig {
+            reward_address: reward_address.clone(),
+        },
     };
 
     // Display summary table.
@@ -697,8 +652,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("    {binary} status");
     println!();
 
-    if let Some(pk) = wallet_public_key {
-        println!("  Wallet public key: {pk}");
+    if !reward_address.is_empty() {
+        println!("  Reward address: {reward_address}");
         println!();
     }
 
@@ -731,69 +686,6 @@ fn platform_data_dir() -> PathBuf {
     noble_core::paths::platform_data_dir()
 }
 
-/// Prompt for wallet encryption passphrase with confirmation and min-length.
-fn prompt_wallet_passphrase() -> Result<String, Box<dyn std::error::Error>> {
-    let passphrase = Password::new()
-        .with_prompt("Wallet encryption passphrase")
-        .with_confirmation("Confirm passphrase", "Passwords don't match")
-        .validate_with(|input: &String| -> Result<(), &str> {
-            if input.len() >= 12 {
-                Ok(())
-            } else {
-                Err("Minimum 12 characters")
-            }
-        })
-        .interact()?;
-    Ok(passphrase)
-}
-
-/// Display a BIP-39 mnemonic in 4-column numbered grid format.
-fn display_mnemonic_grid(mnemonic: &str) {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    let cols = 4;
-    let rows = words.len().div_ceil(cols);
-
-    for row in 0..rows {
-        print!("  ");
-        for col in 0..cols {
-            let idx = row + col * rows;
-            if idx < words.len() {
-                print!("  {:>2}. {:<14}", idx + 1, words[idx]);
-            }
-        }
-        println!();
-    }
-}
-
-/// Verify 3 random mnemonic words by index.
-fn verify_mnemonic_words(mnemonic: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use rand::seq::SliceRandom;
-
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    let word_count = words.len();
-
-    // Pick 3 unique random indices.
-    let mut indices: Vec<usize> = (0..word_count).collect();
-    indices.shuffle(&mut rand::thread_rng());
-    let check_indices: Vec<usize> = indices.into_iter().take(3).collect();
-
-    println!("  Please verify 3 words from your recovery phrase:\n");
-
-    for &idx in &check_indices {
-        loop {
-            let answer: String = Input::new()
-                .with_prompt(format!("  Word #{}", idx + 1))
-                .interact_text()?;
-            if answer.trim().eq_ignore_ascii_case(words[idx]) {
-                break;
-            }
-            println!("    Incorrect. Please try again.");
-        }
-    }
-
-    println!("  All words verified correctly.");
-    Ok(())
-}
 
 /// If the key file exists, display its public key.
 /// If it doesn't exist, offer to generate it inline.
@@ -989,6 +881,9 @@ fn print_summary(config: &NodeConfig, config_path: &str) {
             "disabled"
         },
     );
+    if !config.rewards.reward_address.is_empty() {
+        summary_line("Reward address", &config.rewards.reward_address);
+    }
     summary_line("Metrics", &config.metrics.prometheus_addr);
     summary_line("Log level", &config.logging.level);
     println!();
@@ -1027,15 +922,6 @@ mod tests {
             !dir.as_os_str().is_empty(),
             "platform_data_dir() must return a non-empty path"
         );
-    }
-
-    #[test]
-    fn display_mnemonic_grid_does_not_panic() {
-        let mnemonic = "abandon abandon abandon abandon abandon abandon \
-                         abandon abandon abandon abandon abandon about \
-                         abandon abandon abandon abandon abandon abandon \
-                         abandon abandon abandon abandon abandon art";
-        display_mnemonic_grid(mnemonic);
     }
 
     #[test]

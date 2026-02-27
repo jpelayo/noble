@@ -357,8 +357,9 @@ export function init(root, ctx) {
         <input type="file" id="pki-file" accept=".p12,.pfx" style="padding:6px 0">
       </div>
       <div class="form-group">
-        <label for="pki-pass">Passphrase</label>
-        <input type="password" id="pki-pass" autocomplete="off" spellcheck="false" placeholder="Certificate passphrase">
+        <label for="pki-pass">PKCS#12 Password</label>
+        <input type="password" id="pki-pass" autocomplete="off" spellcheck="false" placeholder="Password that protects the .p12 file">
+        <small style="color:var(--text-muted);display:block;margin-top:4px">This is the password set when the PKCS#12 file was created. You are not creating a new password.</small>
       </div>
       <button type="button" class="btn btn-primary" id="pki-upload">Upload &amp; Inspect</button>
       <span id="pki-status" class="form-status"></span>

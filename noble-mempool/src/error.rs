@@ -54,6 +54,10 @@ pub enum MempoolError {
     #[error("step 2.6: doc:prev_checksum not found on-chain: {0}")]
     PrevChecksumNotFound(String),
 
+    /// Debit address resolution failed (S34).
+    #[error("step 6.5: debit resolution failed: {0}")]
+    ValidationFailed(String),
+
     /// Internal error (codec, crypto, etc.).
     #[error("internal: {0}")]
     Internal(String),

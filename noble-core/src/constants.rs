@@ -147,6 +147,11 @@ pub const META_KEY_PREV_CHECKSUM: &str = "doc:prev_checksum";
 /// Well-known metadata key: version ordinal (UTF-8 positive integer string).
 pub const META_KEY_VERSION: &str = "doc:version";
 
+/// S34: Block height at which `source_address` becomes mandatory for secp256k1
+/// transfer senders. Below this height, legacy implicit fallback is allowed.
+/// Set to u64::MAX (effectively disabled) until the network activates the feature.
+pub const SOURCE_ADDRESS_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
 /// Known-good block hashes at specific heights for fast initial sync.
 ///
 /// Height 0 is the genesis block hash, computed from the deterministic seed.

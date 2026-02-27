@@ -584,21 +584,102 @@ export function init(root, ctx) {
       renderIpList();
       updateBadge();
 
-      // Auth status + TOTP rotation button
-      const hasAuth = rpc.hasAuthToken ? rpc.hasAuthToken() : false;
-      totpStatus.textContent = hasAuth ? 'Active (authenticated)' : 'Not configured';
-      authMode.textContent = hasAuth ? 'TOTP (SHA-256 hashed bearer token)' : 'None';
-      if (hasAuth) {
-        totpRotateSection.style.display = 'block';
+      // Auth status using getTotpStatus RPC
+      try {
+        const totpInfo = await rpc.call('noble_getTotpStatus');
+        totpStatus.textContent = totpInfo.enabled ? 'Enabled' : 'Not configured';
+        totpStatus.style.color = totpInfo.enabled ? 'var(--success)' : 'var(--text-muted)';
+        authMode.textContent = totpInfo.enabled ? `TOTP (scope: ${totpInfo.scope})` : 'None';
+        if (totpInfo.enabled) {
+          totpRotateSection.style.display = 'block';
+        } else {
+          // Show Enable TOTP button
+          const authGrid = root.querySelector('#s-auth-info');
+          if (authGrid) {
+            const enableDiv = document.createElement('div');
+            enableDiv.style.cssText = 'grid-column:1/-1;margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)';
+            enableDiv.innerHTML = `
+              <button id="s-enable-totp-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Enable TOTP</button>
+              <span id="s-enable-totp-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+              <div id="s-enable-totp-result" style="display:none;margin-top:var(--gap-sm);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)"></div>
+            `;
+            authGrid.after(enableDiv);
+            enableDiv.querySelector('#s-enable-totp-btn').addEventListener('click', async function() {
+              this.disabled = true;
+              const msg = enableDiv.querySelector('#s-enable-totp-msg');
+              const result = enableDiv.querySelector('#s-enable-totp-result');
+              msg.textContent = 'Enabling...';
+              try {
+                const resp = await rpc.call('noble_enableTotp');
+                result.style.display = 'block';
+                result.style.color = 'var(--success)';
+                result.innerHTML = `
+                  <p style="margin:0 0 var(--gap-xs);font-weight:600">TOTP Enabled — save this secret now:</p>
+                  <p style="margin:0 0 var(--gap-xs)"><strong>Base32:</strong> <code>${resp.secret_base32}</code></p>
+                  <p style="margin:0;word-break:break-all"><strong>otpauth:</strong> <code style="font-size:10px">${resp.otpauth_uri}</code></p>
+                `;
+                msg.textContent = '';
+                this.style.display = 'none';
+                totpStatus.textContent = 'Enabled';
+                totpStatus.style.color = 'var(--success)';
+                authMode.textContent = 'TOTP (scope: all)';
+              } catch (e) {
+                msg.textContent = e.message || 'Failed';
+                msg.style.color = 'var(--error)';
+                this.disabled = false;
+              }
+            });
+          }
+        }
+      } catch {
+        const hasAuth = rpc.hasAuthToken ? rpc.hasAuthToken() : false;
+        totpStatus.textContent = hasAuth ? 'Active' : 'Not configured';
+        authMode.textContent = hasAuth ? 'TOTP' : 'None';
+        if (hasAuth) totpRotateSection.style.display = 'block';
       }
 
-      // Ports
+      // Ports with inline P2P edit
       portsEl.innerHTML = `
         <dt>RPC (JSON-RPC)</dt><dd>${nodeInfo.rpc_port}</dd>
         <dt>WebSocket</dt><dd>${nodeInfo.ws_port}</dd>
-        <dt>P2P</dt><dd>${nodeInfo.p2p_port}</dd>
+        <dt>P2P</dt>
+        <dd id="s-p2p-port-dd">
+          <span id="s-p2p-port-val">${nodeInfo.p2p_port}</span>
+          <button id="s-p2p-edit-btn" class="btn-sm" style="margin-left:var(--gap-sm);padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Edit</button>
+          <span id="s-p2p-edit-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+        </dd>
         <dt>Dashboard (GUI)</dt><dd>8785</dd>
       `;
+      const p2pEditBtn = root.querySelector('#s-p2p-edit-btn');
+      const p2pPortVal = root.querySelector('#s-p2p-port-val');
+      const p2pEditMsg = root.querySelector('#s-p2p-edit-msg');
+      const p2pPortDd = root.querySelector('#s-p2p-port-dd');
+      if (p2pEditBtn) {
+        p2pEditBtn.addEventListener('click', () => {
+          const currentPort = p2pPortVal.textContent;
+          p2pPortDd.innerHTML = `
+            <input id="s-p2p-port-input" type="number" min="1024" max="65535" value="${currentPort}"
+              style="width:80px;padding:4px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            <button id="s-p2p-save" class="btn-sm" style="margin-left:var(--gap-sm);padding:4px 10px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Save</button>
+            <button id="s-p2p-cancel" class="btn-sm" style="margin-left:var(--gap-xs);padding:4px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Cancel</button>
+            <span id="s-p2p-save-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+          `;
+          root.querySelector('#s-p2p-cancel').addEventListener('click', () => loadSettings());
+          root.querySelector('#s-p2p-save').addEventListener('click', async () => {
+            const port = root.querySelector('#s-p2p-port-input').value;
+            const msg = root.querySelector('#s-p2p-save-msg');
+            try {
+              const result = await rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_port', value: port });
+              msg.style.color = 'var(--success)';
+              msg.textContent = result.restart_required ? 'Saved — restart required' : 'Saved';
+              setTimeout(() => loadSettings(), 2000);
+            } catch (e) {
+              msg.style.color = 'var(--error)';
+              msg.textContent = e.message || 'Save failed';
+            }
+          });
+        });
+      }
 
       // New key/identity cards
       renderValidatorKey(vkeyInfo);

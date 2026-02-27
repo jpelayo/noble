@@ -67,7 +67,7 @@ export function init(root, ctx) {
         hVersion.innerHTML = `v${swVer} <span class="badge warning">Update available: v${info.latest_network_version}</span>`;
       }
       hUptime.textContent = formatDuration(info.uptime_secs);
-      hStorage.textContent = formatBytes(info.storage_bytes);
+      hStorage.textContent = info.storage_bytes != null ? formatBytes(info.storage_bytes) : 'N/A';
 
       const connected = syncStatus.synced;
       hConnection.textContent = connected ? 'Online' : 'Syncing';
@@ -81,16 +81,21 @@ export function init(root, ctx) {
         <dt>Protocol</dt><dd>${info.protocol_version || info.version}</dd>
         <dt>Chain ID</dt><dd>0x${info.chain_id.toString(16).toUpperCase()}</dd>
         <dt>Uptime</dt><dd>${formatDuration(info.uptime_secs)}</dd>
-        <dt>Storage</dt><dd>${formatBytes(info.storage_bytes)} / ${formatBytes(info.storage_capacity_bytes)}</dd>
-        <dt>Data Directory</dt><dd class="mono">${info.data_dir}</dd>
+        <dt>Storage</dt><dd>${info.storage_bytes != null ? formatBytes(info.storage_bytes) : 'N/A'} / ${info.storage_capacity_bytes != null ? formatBytes(info.storage_capacity_bytes) : 'N/A'}</dd>
+        <dt>Data Directory</dt><dd class="mono">${info.data_dir || 'N/A'}</dd>
         <dt>RPC Port</dt><dd>${info.rpc_port}</dd>
         <dt>WebSocket Port</dt><dd>${info.ws_port}</dd>
         <dt>P2P Port</dt><dd>${info.p2p_port}</dd>
       `;
 
-      // Storage gauge chart
-      if (typeof echarts !== 'undefined') {
+      // Storage gauge chart (only if both values are available)
+      if (typeof echarts !== 'undefined' && info.storage_bytes != null && info.storage_capacity_bytes != null && info.storage_capacity_bytes > 0) {
         initStorageGauge(info.storage_bytes, info.storage_capacity_bytes);
+      } else if (typeof echarts === 'undefined') {
+        // No echarts, skip
+      } else {
+        const dom = root.querySelector('#h-storage-chart');
+        if (dom) dom.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:2rem">Storage metrics not available</div>';
       }
     } catch (e) {
       console.error('[health] load:', e);
