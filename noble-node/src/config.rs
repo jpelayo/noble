@@ -221,7 +221,9 @@ pub struct ApiConfig {
     pub tls_allow_plaintext_fallback: bool,
     /// Allow remote browser access during setup mode (when identity.json is absent).
     /// Default false = localhost-only setup, which is the safe default.
-    /// Set to true only when the node has no local display and must be configured remotely.
+    /// Preferred: set `allowed_ips` — the node will respect the whitelist automatically
+    /// in setup mode without requiring this flag. Set `remote_setup = true` only when you
+    /// need to bypass the whitelist and allow all remote addresses (e.g. dynamic IP cloud node).
     #[serde(default)]
     pub remote_setup: bool,
 }

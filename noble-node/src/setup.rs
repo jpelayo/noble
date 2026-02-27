@@ -215,11 +215,18 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let node_name: String = Input::new()
-        .with_prompt("Node name (optional, max 64 chars)")
-        .default(defaults.identity.node_name.clone())
-        .allow_empty(true)
+        .with_prompt("Node name (required, max 64 chars)")
+        .default(if defaults.identity.node_name.is_empty() {
+            String::new()
+        } else {
+            defaults.identity.node_name.clone()
+        })
+        .allow_empty(false)
         .validate_with(|input: &String| -> Result<(), &str> {
-            if input.len() > 64 {
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                Err("Node name is required")
+            } else if trimmed.len() > 64 {
                 Err("Node name must be 64 characters or fewer")
             } else {
                 Ok(())

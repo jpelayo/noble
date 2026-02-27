@@ -124,8 +124,13 @@ tls_allow_plaintext_fallback = false
 # Allow remote browser access during first-boot setup mode (when identity.json is absent).
 # Default false = localhost-only setup (secure default). The node binds to 127.0.0.1 so only
 # local browsers can reach the setup wizard, preventing unauthorized remote configuration.
-# Set to true ONLY if the node has no local display and must be configured from another machine.
-# When true, the node binds to 0.0.0.0 in setup mode (same as configured allowed_ips behavior).
+#
+# Preferred approach: set allowed_ips (e.g. allowed_ips = ["192.168.1.0/24"]) — the node
+# will automatically honour the whitelist during setup mode and bind to 0.0.0.0 with the
+# same IP filter applied, without requiring remote_setup = true.
+#
+# Set remote_setup = true ONLY when you want to bypass the IP whitelist entirely and expose
+# the setup wizard to all remote addresses (e.g. cloud node with a dynamic IP).
 # remote_setup = false
 
 [wallet]

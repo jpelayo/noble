@@ -1,6 +1,6 @@
 /**
  * NOBLE Dashboard — First-Run Setup Wizard
- * Multi-step onboarding: Network → Role → Identity → Wallet → Security → Storage → Review
+ * Multi-step onboarding: Welcome → Role → Identity → Wallet → Review
  */
 
 import {
@@ -17,16 +17,9 @@ const STEPS = [
   { key: 'role',     label: 'Role'     },
   { key: 'identity', label: 'Identity' },
   { key: 'wallet',   label: 'Wallet'   },
-  { key: 'security', label: 'Security' },
-  { key: 'storage',  label: 'Storage'  },
   { key: 'review',   label: 'Review'   },
 ];
 
-const NETWORKS = [
-  { id: 'mainnet', name: 'Mainnet', chain: '0x4E4F424C', desc: 'Production network' },
-  { id: 'testnet', name: 'Testnet', chain: '0x4E4F4254', desc: 'Test network for development' },
-  { id: 'regtest', name: 'Regtest', chain: '0x4E4F4252', desc: 'Local regression testing' },
-];
 
 const NODE_ROLES = [
   { value: 'FullNode',       label: 'Full Node Observer',                role: 'FullNode',    validate: false, vote: false, desc: 'No consensus participation' },
@@ -71,9 +64,7 @@ export function init(root, ctx) {
 
   // Wizard state
   const state = {
-    network: 'mainnet',
     nodeName: '',
-    p2pPort: 8780,
     roleValue: 'FullNode',
     govClass: 'individual',
     orgType: 'Individual',
@@ -82,11 +73,7 @@ export function init(root, ctx) {
     website: '',
     walletPath: 'skip',  // 'create' | 'import' | 'skip'
     walletAddress: '',
-    totpEnabled: false,
-    dataDir: 'data',
-    cacheSize: 256,
-    compression: true,
-    setupToken: '',  // F1: raw setup token from node console (used as Bearer auth for write RPCs)
+    setupToken: '',  // raw setup token from node console (applied immediately for write RPCs)
   };
 
   // ── Shell ──
@@ -140,8 +127,6 @@ export function init(root, ctx) {
       case 'role':     renderRole(); break;
       case 'identity': renderIdentity(); break;
       case 'wallet':   renderWallet(); break;
-      case 'security': renderSecurity(); break;
-      case 'storage':  renderStorage(); break;
       case 'review':   renderReview(); break;
     }
   }
@@ -152,18 +137,43 @@ export function init(root, ctx) {
       completeSetup();
     } else {
       collectStepData();
+      if (!validateCurrentStep()) return;
       goTo(currentStep + 1);
     }
   });
+
+  function validateCurrentStep() {
+    const stepKey = STEPS[currentStep].key;
+    if (stepKey === 'welcome') {
+      if (!state.nodeName.trim()) {
+        const input = body.querySelector('#setup-node-name');
+        if (input) {
+          input.focus();
+          input.style.borderColor = 'var(--error, #e55)';
+          let err = body.querySelector('#setup-node-name-error');
+          if (!err) {
+            err = document.createElement('div');
+            err.id = 'setup-node-name-error';
+            err.style.cssText = 'font-size:var(--font-size-xs);color:var(--error,#e55);margin-top:var(--gap-xs)';
+            input.parentElement.appendChild(err);
+          }
+          err.textContent = 'Node name is required.';
+        }
+        return false;
+      }
+    }
+    return true;
+  }
 
   function collectStepData() {
     const stepKey = STEPS[currentStep].key;
     switch (stepKey) {
       case 'welcome':
-        state.network = body.querySelector('input[name="network"]:checked')?.value || state.network;
-        state.nodeName = body.querySelector('#setup-node-name')?.value || '';
-        state.p2pPort = parseInt(body.querySelector('input[name="p2pPort"]:checked')?.value || '8780', 10);
+        state.nodeName = body.querySelector('#setup-node-name')?.value.trim() || '';
         state.setupToken = body.querySelector('#setup-token')?.value?.trim() || '';
+        // Apply setup token immediately so wallet RPCs (write methods) in
+        // Step 4 are authorized by the middleware before completeSetup().
+        if (state.setupToken) rpc.setRawAuthToken(state.setupToken);
         break;
       case 'role':
         state.roleValue = body.querySelector('input[name="role"]:checked')?.value || state.roleValue;
@@ -178,11 +188,6 @@ export function init(root, ctx) {
         state.website = body.querySelector('#setup-website')?.value || '';
         break;
       }
-      case 'storage':
-        state.dataDir = body.querySelector('#setup-data-dir')?.value || 'data';
-        state.cacheSize = parseInt(body.querySelector('#setup-cache')?.value, 10) || 256;
-        state.compression = body.querySelector('#setup-compression')?.checked ?? true;
-        break;
     }
   }
 
@@ -191,7 +196,7 @@ export function init(root, ctx) {
     body.innerHTML = `
       <div style="text-align:center;padding:var(--gap-lg) 0 var(--gap)">
         <h2 style="margin-bottom:var(--gap-sm)">Welcome to NOBLE</h2>
-        <p style="color:var(--text-secondary)">This wizard will guide you through the essential configuration for your node.</p>
+        <p style="color:var(--text-secondary)">This wizard will configure your node identity and wallet.</p>
       </div>
       <div class="form-group" style="margin-bottom:var(--gap-lg)">
         <label for="setup-token" style="display:flex;align-items:center;gap:var(--gap-sm)">
@@ -205,58 +210,15 @@ export function init(root, ctx) {
           Copy the token printed in the node terminal at startup (under "SETUP MODE").
         </div>
       </div>
-      <div style="margin-bottom:var(--gap-lg)">
-        <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm);color:var(--text-secondary)">Target Network</label>
-        <div id="setup-networks" style="display:flex;gap:var(--gap);flex-wrap:wrap"></div>
-      </div>
       <div class="form-group">
-        <label for="setup-node-name">Node Name (optional)</label>
-        <input type="text" id="setup-node-name" maxlength="64" placeholder="e.g. my-noble-node" value="${esc(state.nodeName)}" autocomplete="off" spellcheck="false">
-      </div>
-      <div style="margin-top:var(--gap-lg)">
-        <label style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--gap-sm);color:var(--text-secondary)">
-          P2P Port <span style="font-weight:400;color:var(--text-muted)">(open this port to the internet)</span>
-        </label>
-        <div id="setup-p2p-port" style="display:flex;gap:var(--gap);flex-wrap:wrap"></div>
+        <label for="setup-node-name">Node Name</label>
+        <input type="text" id="setup-node-name" maxlength="64" placeholder="e.g. my-noble-node"
+          value="${esc(state.nodeName)}" autocomplete="off" spellcheck="false" required>
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Required. A human-readable name for your node (max 64 characters).
+        </div>
       </div>
     `;
-    const networkContainer = body.querySelector('#setup-networks');
-    NETWORKS.forEach(n => {
-      const checked = state.network === n.id ? 'checked' : '';
-      const card = document.createElement('label');
-      card.style.cssText = 'flex:1;min-width:140px;padding:var(--gap);background:var(--bg-tertiary);border:2px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:border-color 0.15s';
-      card.innerHTML = `
-        <input type="radio" name="network" value="${n.id}" ${checked} style="margin-right:var(--gap-sm)">
-        <strong>${n.name}</strong>
-        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${n.desc}</div>
-        <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${n.chain}</div>
-      `;
-      const radio = card.querySelector('input');
-      radio.addEventListener('change', () => {
-        networkContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
-        if (radio.checked) card.style.borderColor = 'var(--accent)';
-      });
-      if (checked) card.style.borderColor = 'var(--accent)';
-      networkContainer.appendChild(card);
-    });
-
-    const portContainer = body.querySelector('#setup-p2p-port');
-    [8780, 8781, 8782].forEach(p => {
-      const checked = state.p2pPort === p ? 'checked' : '';
-      const card = document.createElement('label');
-      card.style.cssText = 'flex:1;min-width:100px;padding:var(--gap);background:var(--bg-tertiary);border:2px solid var(--border);border-radius:var(--radius);cursor:pointer;transition:border-color 0.15s';
-      card.innerHTML = `
-        <input type="radio" name="p2pPort" value="${p}" ${checked} style="margin-right:var(--gap-sm)">
-        <strong>${p}</strong>${p === 8780 ? ' <span style="color:var(--text-muted);font-size:var(--font-size-xs)">(default)</span>' : ''}
-      `;
-      const radio = card.querySelector('input');
-      radio.addEventListener('change', () => {
-        portContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
-        if (radio.checked) card.style.borderColor = 'var(--accent)';
-      });
-      if (checked) card.style.borderColor = 'var(--accent)';
-      portContainer.appendChild(card);
-    });
   }
 
   // ── Step 2: Role ──
@@ -501,86 +463,26 @@ export function init(root, ctx) {
     }
   }
 
-  // ── Step 5: Security ──
-  function renderSecurity() {
-    body.innerHTML = `
-      <div class="form-group">
-        <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
-          <input type="checkbox" id="setup-totp" ${state.totpEnabled ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--accent)">
-          <span style="font-weight:600">Enable TOTP Authentication</span>
-        </label>
-        <div class="form-hint">All RPC and dashboard access will require a 6-digit TOTP code from your authenticator app.</div>
-      </div>
-      <div id="setup-totp-area" style="display:${state.totpEnabled ? 'block' : 'none'}"></div>
-    `;
-    const checkbox = body.querySelector('#setup-totp');
-    const totpArea = body.querySelector('#setup-totp-area');
-
-    checkbox.addEventListener('change', () => {
-      state.totpEnabled = checkbox.checked;
-      totpArea.style.display = checkbox.checked ? 'block' : 'none';
-      if (checkbox.checked && !totpArea.hasChildNodes()) {
-        totpArea.innerHTML = `
-          <div style="padding:var(--gap);background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
-            <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap-sm)">
-              TOTP will be configured when the node starts. The secret and otpauth URI will be shown in the node's terminal output.
-              Add the URI to your authenticator app (Google Authenticator, Authy, etc.).
-            </p>
-            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">
-              Note: TOTP configuration requires the CLI setup wizard (<code>noble-node setup</code>) for secret generation and verification.
-              The dashboard wizard enables the flag in configuration.
-            </p>
-          </div>
-        `;
-      }
-    });
-
-    if (state.totpEnabled) checkbox.dispatchEvent(new Event('change'));
-  }
-
-  // ── Step 6: Storage ──
-  function renderStorage() {
-    body.innerHTML = `
-      <div class="form-group">
-        <label for="setup-data-dir">Data Directory</label>
-        <input type="text" id="setup-data-dir" value="${esc(state.dataDir)}" autocomplete="off">
-        <div class="form-hint">Directory where blockchain data is stored.</div>
-      </div>
-      <div class="form-group">
-        <label for="setup-cache">Cache Size (MB)</label>
-        <input type="number" id="setup-cache" min="64" max="4096" value="${state.cacheSize}">
-        <div class="form-hint">Recommended: 256 MB for 8+ GB RAM, 128 MB for 4 GB RAM.</div>
-      </div>
-      <div class="form-group">
-        <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
-          <input type="checkbox" id="setup-compression" ${state.compression ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--accent)">
-          <span>Enable Zstd Compression</span>
-        </label>
-        <div class="form-hint">Reduces disk usage by ~40%. Recommended for most setups.</div>
-      </div>
-    `;
-  }
-
-  // ── Step 7: Review ──
+  // ── Step 5: Review ──
   function renderReview() {
     const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
     body.innerHTML = `
       <h3 style="margin-bottom:var(--gap)">Configuration Summary</h3>
       <dl class="detail-grid">
-        <dt>Network</dt><dd>${esc(NETWORKS.find(n => n.id === state.network)?.name || state.network)}</dd>
         <dt>Node Name</dt><dd>${esc(state.nodeName || '(not set)')}</dd>
-        <dt>P2P Port</dt><dd>${state.p2pPort}</dd>
         <dt>Role</dt><dd>${esc(roleObj.label)}</dd>
         <dt>Org Type</dt><dd>${esc(state.orgType)}</dd>
         <dt>Org Name</dt><dd>${esc(state.orgName || '(not set)')}</dd>
         <dt>Contact Email</dt><dd>${esc(state.contactEmail || '(not set)')}</dd>
         <dt>Website</dt><dd>${esc(state.website || '(not set)')}</dd>
         <dt>Wallet</dt><dd>${state.walletAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${state.walletAddress.slice(0, 16)}...</span>` : '(skipped)'}</dd>
-        <dt>TOTP</dt><dd>${state.totpEnabled ? 'Enabled' : 'Disabled'}</dd>
-        <dt>Data Dir</dt><dd class="mono">${esc(state.dataDir)}</dd>
-        <dt>Cache</dt><dd>${state.cacheSize} MB</dd>
-        <dt>Compression</dt><dd>${state.compression ? 'Zstd' : 'None'}</dd>
       </dl>
+      <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
+          Network, storage, TOTP, and advanced settings can be configured in
+          <code>noble.toml</code> before (re)starting the node.
+        </p>
+      </div>
       <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap)">
         Click a step in the progress bar above to go back and edit.
       </p>
@@ -605,12 +507,6 @@ export function init(root, ctx) {
     nextBtn.disabled = true;
     nextBtn.textContent = 'Completing...';
 
-    // F1: Set setup token as raw Bearer auth for the write RPC call.
-    // The node validates this token to prevent unauthorized configuration changes.
-    if (state.setupToken) {
-      rpc.setRawAuthToken(state.setupToken);
-    }
-
     try {
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
       await rpc.call('noble_setNodeIdentity', {
@@ -623,7 +519,7 @@ export function init(root, ctx) {
         host_address: '',
         wants_to_validate: roleObj.validate,
         wants_to_vote: roleObj.vote,
-        p2p_port: state.p2pPort,
+        p2p_port: 8780,
       });
 
       body.innerHTML = `
@@ -663,6 +559,8 @@ export function init(root, ctx) {
     destroy() {
       cleanupFns.forEach(fn => { try { fn(); } catch {} });
       destroySecureElements(body);
+      // Clear setup token from RPC client when navigating away from setup.
+      rpc.setRawAuthToken(null);
     },
   };
 }

@@ -283,11 +283,9 @@ async function checkFirstRun() {
       location.hash = '#/setup';
       return;
     }
-    // Secondary check: wallet has no keys (CLI setup done but wallet skipped).
-    try {
-      const w = await rpc.call('noble_getWalletInfo');
-      if (w.key_count === 0) location.hash = '#/setup';
-    } catch { /* wallet RPC unavailable — skip secondary check */ }
+    // Wallet key_count === 0 is intentional when the operator chose "skip wallet"
+    // during setup. The wallet can be created later from the Wallet page.
+    // Do not redirect back to setup — it would overwrite existing identity.
   } catch { /* RPC unavailable (TOTP locked, not connected, etc.) — skip */ }
 }
 

@@ -371,11 +371,38 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "Complete the setup wizard at {gui_scheme}://<this-host>:8785, then restart the node"
                 );
                 Some(noble_api::ip_filter::IpFilter::allow_all())
+            } else if !config.api.allowed_ips.is_empty() {
+                // allowed_ips configured — honour the whitelist during setup mode.
+                match noble_api::ip_filter::IpFilter::new(&config.api.allowed_ips) {
+                    Ok(filter) => {
+                        tracing::warn!(
+                            task = "node_startup",
+                            "SETUP MODE (whitelist): No identity.json — GUI/RPC restricted to allowed_ips ({} entries)",
+                            config.api.allowed_ips.len()
+                        );
+                        tracing::warn!(
+                            task = "node_startup",
+                            "Complete the setup wizard at {gui_scheme}://<this-host>:8785, then restart the node"
+                        );
+                        Some(filter)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task = "node_startup",
+                            "SETUP MODE: Failed to parse allowed_ips ({e}) — falling back to localhost-only"
+                        );
+                        tracing::warn!(
+                            task = "node_startup",
+                            "Complete the setup wizard at {gui_scheme}://127.0.0.1:8785, then restart the node"
+                        );
+                        None
+                    }
+                }
             } else {
                 // Default: localhost-only setup. Safe for headless and remote nodes.
                 tracing::warn!(
                     task = "node_startup",
-                    "SETUP MODE: No identity.json found — GUI/RPC localhost-only (set remote_setup = true for remote access)"
+                    "SETUP MODE: No identity.json found — GUI/RPC localhost-only (set allowed_ips or remote_setup = true for remote access)"
                 );
                 tracing::warn!(
                     task = "node_startup",
