@@ -157,8 +157,10 @@ buffer_capacity = 50000
 # Initial filter directive. Override with NOBLE_LOG env var.
 initial_filter = "info"
 
-# Output traces to stderr in addition to the ring buffer (development only).
-stderr_enabled = false
+# Output traces to stderr in addition to the ring buffer.
+# Enabled by default so startup failures are visible in systemd/journalctl.
+# Set to false only if you want completely silent operation (all logs via getTraceLog RPC only).
+stderr_enabled = true
 
 [gateway]
 # Enable gateway fee split. When enabled, outgoing transactions include the

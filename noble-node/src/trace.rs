@@ -148,7 +148,7 @@ impl Default for TraceConfig {
         Self {
             buffer_capacity: 50_000,
             initial_filter: "info".to_string(),
-            stderr_enabled: false,
+            stderr_enabled: true,
         }
     }
 }

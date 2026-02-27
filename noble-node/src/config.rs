@@ -285,7 +285,7 @@ impl Default for TraceConfig {
         Self {
             buffer_capacity: default_buffer_capacity(),
             initial_filter: default_initial_filter(),
-            stderr_enabled: false,
+            stderr_enabled: true,
         }
     }
 }

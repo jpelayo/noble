@@ -484,6 +484,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             tracing::warn!(task = "node_startup", "{sep}");
                             (None, true)
                         } else {
+                            eprintln!("FATAL: TLS certificate failed: {e}");
+                            eprintln!("Fix the issue or set tls_allow_plaintext_fallback = true in [api] config.");
                             return Err(NodeError::Config(format!(
                                 "TLS certificate failed: {e}. Fix the issue or set tls_allow_plaintext_fallback = true in [api] config."
                             )));

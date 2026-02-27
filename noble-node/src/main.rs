@@ -353,12 +353,14 @@ async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHan
             let metrics = init_metrics(config);
             if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
                 tracing::error!("Node exited with error: {e}");
+                eprintln!("FATAL: Node exited with error: {e}");
                 return 1;
             }
             0
         }
         Err(e) => {
             tracing::error!("Failed to initialize node: {e}");
+            eprintln!("FATAL: Failed to initialize node: {e}");
             1
         }
     }
@@ -388,17 +390,20 @@ async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHa
                 let metrics = init_metrics(config);
                 if let Err(e) = n.run(config, Some(trace_handle), metrics).await {
                     tracing::error!("Node exited with error: {e}");
+                    eprintln!("FATAL: Node exited with error: {e}");
                     return 1;
                 }
                 0
             }
             Err(e) => {
                 tracing::error!("Failed to initialize node: {e}");
+                eprintln!("FATAL: Failed to initialize node: {e}");
                 1
             }
         },
         Err(e) => {
             tracing::error!("Failed to open storage: {e}");
+            eprintln!("FATAL: Failed to open storage: {e}");
             1
         }
     }
