@@ -20,6 +20,11 @@ class Noble < Formula
   license "Apache-2.0"
   head "https://github.com/jpelayo/noble.git", branch: "main"
 
+  option "localonly", "Localhost-only access — skip the CIDR prompt (most secure)"
+  option "allow192",  "Allow remote access from 192.168.0.0/16 (home / office LAN)"
+  option "allow10",   "Allow remote access from 10.0.0.0/8 (corporate / VPN LAN)"
+  option "allow172",  "Allow remote access from 172.16.0.0/12 (Docker / VPN range)"
+
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
   depends_on "rust" => :build
@@ -68,8 +73,25 @@ class Noble < Formula
       config.gsub!('data_dir = "data"', "data_dir = \"#{var}/noble/data\"")
       config.gsub!('keystore_path = "keystore"', "keystore_path = \"#{var}/noble/keystore\"")
 
+      # Option flags encode well-known CIDRs; no interactive prompt needed.
+      preset_cidr = if build.with?("allow192") then "192.168.0.0/16"
+                    elsif build.with?("allow10")  then "10.0.0.0/8"
+                    elsif build.with?("allow172") then "172.16.0.0/12"
+                    end
+
+      if build.with?("localonly")
+        # allowed_ips stays [] — localhost only, no changes needed.
+        puts
+        puts "  Localhost-only mode: Dashboard and RPC are accessible on this machine only."
+
+      elsif preset_cidr
+        config.gsub!('allowed_ips = []', "allowed_ips = [\"#{preset_cidr}\"]")
+        puts
+        puts "  Remote access enabled for: #{preset_cidr}"
+        puts "  After starting, the dashboard will be at: https://<this-host>:8785"
+
       # Interactive CIDR prompt (skipped in non-TTY environments like CI).
-      if $stdin.tty?
+      elsif $stdin.tty?
         require "ipaddr"
         puts
         puts "  Remote access — allow connections to the Dashboard GUI and JSON-RPC API."
