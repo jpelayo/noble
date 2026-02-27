@@ -3114,6 +3114,8 @@ dependencies = [
  "dirs",
  "hex",
  "http 1.4.0",
+ "http-body-util",
+ "hyper 1.8.1",
  "hyper-util",
  "if-addrs",
  "noble-api",

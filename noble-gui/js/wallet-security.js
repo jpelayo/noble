@@ -51,8 +51,8 @@ export function createPassphraseForm(container, options = {}) {
   form.style.cssText = 'display:flex;flex-direction:column;gap:var(--gap-sm);';
 
   // ── Password input ──
-  const pwInput = _makeSecureInput('Enter encryption passphrase...');
-  form.appendChild(_label('Passphrase', pwInput));
+  const pwInput = _makeSecureInput('Min 12 characters — letters, numbers, symbols');
+  form.appendChild(_label('Encryption passphrase', pwInput));
 
   // ── Strength meter ──
   const meterOuter = document.createElement('div');

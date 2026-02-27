@@ -43,13 +43,12 @@ let rpcUrl = params.get('rpc');
 let wsUrl = params.get('ws');
 
 // Auto-detect RPC endpoint when served over HTTP(S) (not file://).
-// Use the same protocol as the page so no mixed-content blocking occurs.
-// jsonrpsee handles both JSON-RPC (HTTP POST) and WS subscriptions on port 8783.
-// F4: use NOBLE_RPC_PORT injected by the GUI server so non-default ports work correctly.
+// Use the same-origin /rpc proxy route (served by the GUI server on port 8785)
+// so the browser never directly connects to port 8783.  This avoids the
+// cross-port TLS cert trust issue where the user would need to manually accept
+// the self-signed cert for port 8783 separately from port 8785.
 if (!rpcUrl && window.location.protocol.startsWith('http')) {
-  const proto = window.location.protocol === 'https:' ? 'https' : 'http';
-  const rpcPort = window.NOBLE_RPC_PORT || 8783;
-  rpcUrl = `${proto}://${window.location.hostname}:${rpcPort}`;
+  rpcUrl = '/rpc';
 }
 
 let rpc, ws;
@@ -59,11 +58,16 @@ if (rpcUrl) {
   const { RpcClient } = await import('./rpc-client.js');
   const { WsManager } = await import('./ws-manager.js');
   rpc = new RpcClient(rpcUrl);
-  // WS uses the same host:port as RPC — jsonrpsee handles both on one port.
-  // http:// → ws://, https:// → wss://
-  wsUrl = wsUrl || rpcUrl.replace(/^http/, 'ws');
+  // WS connects directly to the RPC port (jsonrpsee HTTP+WS on port 8783).
+  // We can't proxy WS through /rpc (HTTP-only), so fall back to direct port.
+  // F4: use NOBLE_RPC_PORT injected by the GUI server for non-default ports.
+  if (!wsUrl) {
+    const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const rpcPort = window.NOBLE_RPC_PORT || 8783;
+    wsUrl = `${wsProto}://${window.location.hostname}:${rpcPort}`;
+  }
   ws = new WsManager(wsUrl, { onStatusChange });
-  console.info(`[app] Using real RPC: ${rpcUrl}, WS: ${wsUrl}`);
+  console.info(`[app] Using RPC proxy: ${rpcUrl}, WS: ${wsUrl}`);
 } else {
   // MOCK PATH (file:// dev mode only) — mock-rpc.js loaded lazily here.
   // Bugs or parse errors in mock code cannot affect the production branch.

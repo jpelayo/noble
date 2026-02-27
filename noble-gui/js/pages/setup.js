@@ -4,10 +4,8 @@
  */
 
 import {
-  createPassphraseForm,
   createMnemonicGrid,
   startAutoClearTimer,
-  createVerifyStep,
   wipeInput,
   destroySecureElements,
 } from '../wallet-security.js';
@@ -85,7 +83,9 @@ export function init(root, ctx) {
     orgName: '',
     contactEmail: '',
     website: '',
-    walletPath: 'skip',  // 'create' | 'import' | 'skip'
+    walletPath: 'skip',    // 'create' | 'import' | 'skip'
+    walletPhase: 'choose', // 'choose' | 'passphrase' | 'mnemonic' | 'done'
+    walletMnemonic: null,  // string[] — words generated during create flow
     walletAddress: '',
     setupToken: '',  // raw setup token from node console (applied immediately for write RPCs)
   };
@@ -133,6 +133,7 @@ export function init(root, ctx) {
 
     const isLast = currentStep === STEPS.length - 1;
     nextBtn.textContent = isLast ? 'Complete Setup' : 'Next';
+    nextBtn.disabled = false;
 
     body.innerHTML = '';
     const stepKey = STEPS[currentStep].key;
@@ -145,19 +146,41 @@ export function init(root, ctx) {
     }
   }
 
-  backBtn.addEventListener('click', () => goTo(currentStep - 1));
-  nextBtn.addEventListener('click', () => {
+  backBtn.addEventListener('click', () => {
+    if (STEPS[currentStep].key === 'wallet') {
+      if (state.walletPhase === 'passphrase') {
+        // Go back within the wallet step to the choose phase.
+        state.walletPhase = 'choose';
+        state.walletPath = 'skip';
+        destroySecureElements(body);
+        cleanupFns.forEach(fn => { try { fn(); } catch {} });
+        cleanupFns = [];
+        body.innerHTML = '';
+        renderWallet();
+        return;
+      }
+      if (state.walletPhase === 'mnemonic' || state.walletPhase === 'done') {
+        // Cannot go back once a wallet has been generated or the step is done.
+        return;
+      }
+      // 'choose' phase — fall through to step navigation below.
+    }
+    goTo(currentStep - 1);
+  });
+
+  nextBtn.addEventListener('click', async () => {
     if (currentStep === STEPS.length - 1) {
       completeSetup();
     } else {
       collectStepData();
-      if (!validateCurrentStep()) return;
+      if (!(await validateCurrentStep())) return;
       goTo(currentStep + 1);
     }
   });
 
-  function validateCurrentStep() {
+  async function validateCurrentStep() {
     const stepKey = STEPS[currentStep].key;
+
     if (stepKey === 'welcome') {
       if (!state.nodeName.trim()) {
         const input = body.querySelector('#setup-node-name');
@@ -176,7 +199,119 @@ export function init(root, ctx) {
         return false;
       }
     }
+
+    if (stepKey === 'wallet') {
+      if (state.walletPhase === 'passphrase') {
+        // Validate passphrase fields and call the RPC.
+        const passInput  = body.querySelector('#setup-wallet-pass');
+        const pass2Input = body.querySelector('#setup-wallet-pass2');
+        const passphrase = passInput?.value || '';
+        const confirm    = pass2Input?.value || '';
+
+        if (passphrase.length < 12) {
+          showWalletError('Passphrase must be at least 12 characters.');
+          return false;
+        }
+        if (passphrase !== confirm) {
+          showWalletError('Passphrases do not match.');
+          return false;
+        }
+
+        // Disable the Next button while the RPC call is in flight.
+        nextBtn.disabled = true;
+        const originalLabel = nextBtn.textContent;
+        nextBtn.textContent = state.walletPath === 'create' ? 'Generating...' : 'Importing...';
+
+        try {
+          if (state.walletPath === 'create') {
+            const result = await rpc.call('noble_generateMnemonic', {
+              word_count: 24,
+              passphrase,
+            });
+            state.walletAddress = result.address;
+            state.walletMnemonic = result.mnemonic.split(/\s+/);
+            // Wipe passphrase inputs before re-render.
+            if (passInput) wipeInput(passInput);
+            if (pass2Input) wipeInput(pass2Input);
+            state.walletPhase = 'mnemonic';
+          } else {
+            const mnemonicEl = body.querySelector('#setup-wallet-mnemonic');
+            const mnemonic = mnemonicEl?.value?.trim() || '';
+            if (!mnemonic) {
+              showWalletError('Please enter your mnemonic phrase.');
+              nextBtn.disabled = false;
+              nextBtn.textContent = originalLabel;
+              return false;
+            }
+            const result = await rpc.call('noble_importMnemonic', { mnemonic, passphrase });
+            state.walletAddress = result.address;
+            if (passInput) wipeInput(passInput);
+            if (pass2Input) wipeInput(pass2Input);
+            if (mnemonicEl) wipeInput(mnemonicEl);
+            state.walletPhase = 'done';
+          }
+        } catch (e) {
+          const isNetwork = e.message &&
+            (e.message.includes('NetworkError') ||
+             e.message.includes('Failed to fetch') ||
+             e.message.includes('network') ||
+             e.message.includes('unreachable'));
+          const msg = isNetwork
+            ? 'Cannot connect to the node. Please ensure the node is running.'
+            : `Error: ${e.message || e}`;
+          showWalletError(msg);
+          nextBtn.disabled = false;
+          nextBtn.textContent = originalLabel;
+          return false;
+        }
+
+        // Re-render wallet step to show mnemonic or done phase.
+        destroySecureElements(body);
+        cleanupFns.forEach(fn => { try { fn(); } catch {} });
+        cleanupFns = [];
+        body.innerHTML = '';
+        renderWallet();
+        return false; // Stay on wallet step — let user see the new phase.
+      }
+
+      if (state.walletPhase === 'mnemonic') {
+        const checkbox = body.querySelector('#setup-wallet-backed-up');
+        if (!checkbox?.checked) return false;
+        // Wipe the mnemonic from state now that the user has backed it up.
+        state.walletMnemonic = null;
+        state.walletPhase = 'done';
+        destroySecureElements(body);
+        cleanupFns.forEach(fn => { try { fn(); } catch {} });
+        cleanupFns = [];
+        body.innerHTML = '';
+        renderWallet();
+        return false; // Show done phase, then user clicks Next to advance.
+      }
+
+      if (state.walletPhase === 'choose') {
+        // User clicked Next without choosing — treat as skip.
+        state.walletPath = 'skip';
+        state.walletPhase = 'done';
+      }
+
+      // 'done' phase (or just-set 'done'): advance to Review.
+      return true;
+    }
+
     return true;
+  }
+
+  function showWalletError(msg) {
+    let err = body.querySelector('#setup-wallet-error');
+    if (!err) {
+      err = document.createElement('div');
+      err.id = 'setup-wallet-error';
+      err.style.cssText =
+        'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
+      body.appendChild(err);
+    }
+    err.style.display = 'block';
+    err.textContent = msg;
   }
 
   function collectStepData() {
@@ -293,149 +428,222 @@ export function init(root, ctx) {
   }
 
   // ── Step 4: Wallet ──
+
+  /** Dispatch to the correct wallet sub-renderer based on walletPhase. */
   function renderWallet() {
+    switch (state.walletPhase) {
+      case 'choose':     renderWalletChoose();     break;
+      case 'passphrase': renderWalletPassphrase(); break;
+      case 'mnemonic':   renderWalletMnemonic();   break;
+      case 'done':       renderWalletDone();       break;
+      default:           renderWalletChoose();
+    }
+    updateNextButton();
+  }
+
+  /** Update Next button text and disabled state based on wallet phase. */
+  function updateNextButton() {
+    if (STEPS[currentStep].key !== 'wallet') return;
+    if (currentStep === STEPS.length - 1) return; // handled by goTo
+
+    switch (state.walletPhase) {
+      case 'choose':
+        nextBtn.textContent = 'Next';
+        nextBtn.disabled = false;
+        break;
+      case 'passphrase':
+        nextBtn.textContent = state.walletPath === 'create' ? 'Generate Wallet' : 'Import Wallet';
+        nextBtn.disabled = false;
+        break;
+      case 'mnemonic': {
+        nextBtn.textContent = 'Continue';
+        const checkbox = body.querySelector('#setup-wallet-backed-up');
+        nextBtn.disabled = !checkbox?.checked;
+        break;
+      }
+      case 'done':
+        nextBtn.textContent = 'Next';
+        nextBtn.disabled = false;
+        break;
+    }
+  }
+
+  /** Phase: choose — three buttons wired to set walletPath + walletPhase. */
+  function renderWalletChoose() {
     body.innerHTML = `
       <div style="text-align:center;margin-bottom:var(--gap-lg)">
         <h3 style="margin-bottom:var(--gap-xs)">Wallet Setup</h3>
-        <p style="font-size:var(--font-size-sm);color:var(--text-secondary)">Create a new wallet, import an existing one, or skip for now.</p>
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary)">
+          Create a new wallet, import an existing one, or skip for now.
+        </p>
       </div>
-      <div style="display:flex;gap:var(--gap);flex-wrap:wrap;justify-content:center;margin-bottom:var(--gap-lg)">
+      <div style="display:flex;gap:var(--gap);flex-wrap:wrap;justify-content:center">
         <button id="setup-wallet-create" class="btn" style="padding:var(--gap-sm) var(--gap-lg)">Create New Wallet</button>
         <button id="setup-wallet-import" class="btn btn-secondary" style="padding:var(--gap-sm) var(--gap-lg)">Import Existing</button>
-        <button id="setup-wallet-skip" class="btn btn-secondary" style="padding:var(--gap-sm) var(--gap-lg)">Skip</button>
+        <button id="setup-wallet-skip"   class="btn btn-secondary" style="padding:var(--gap-sm) var(--gap-lg)">Skip for Now</button>
       </div>
-      <div id="setup-wallet-area"></div>
+    `;
+    body.querySelector('#setup-wallet-create').addEventListener('click', () => {
+      state.walletPath = 'create';
+      state.walletPhase = 'passphrase';
+      body.innerHTML = '';
+      renderWallet();
+    });
+    body.querySelector('#setup-wallet-import').addEventListener('click', () => {
+      state.walletPath = 'import';
+      state.walletPhase = 'passphrase';
+      body.innerHTML = '';
+      renderWallet();
+    });
+    body.querySelector('#setup-wallet-skip').addEventListener('click', () => {
+      state.walletPath = 'skip';
+      state.walletPhase = 'done';
+      state.walletAddress = '';
+      body.innerHTML = '';
+      renderWallet();
+    });
+  }
+
+  /** Phase: passphrase — inline passphrase fields; Next button drives the RPC call. */
+  function renderWalletPassphrase() {
+    const isCreate = state.walletPath === 'create';
+    const infoText = isCreate
+      ? `This passphrase <strong>encrypts your private key file on disk</strong>.
+         It is used every time you unlock the wallet to sign transactions.<br><br>
+         <strong>Minimum 12 characters.</strong> Keep it safe — if you forget it,
+         your key file cannot be decrypted. Your 24-word recovery phrase is separate
+         and can restore the key to a new node.`
+      : `This passphrase <strong>encrypts your private key file on disk</strong>.
+         It does not have to match any previous passphrase — you are choosing a new
+         one for this node's key store.<br><br>
+         <strong>Minimum 12 characters.</strong>`;
+
+    body.innerHTML = `
+      <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);
+                  padding:var(--gap-sm) var(--gap);margin-bottom:var(--gap);font-size:var(--font-size-sm)">
+        <strong>Key encryption passphrase</strong>
+        <p style="margin:var(--gap-xs) 0 0;color:var(--text-secondary);line-height:1.5">${infoText}</p>
+      </div>
+      ${!isCreate ? `
+      <div class="form-group">
+        <label for="setup-wallet-mnemonic">Recovery Phrase</label>
+        <textarea id="setup-wallet-mnemonic" rows="3" autocomplete="off" spellcheck="false"
+          placeholder="Enter your 12 or 24 word mnemonic phrase..."
+          style="width:100%;background:var(--bg-primary);border:1px solid var(--border);
+                 border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);
+                 font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical;
+                 box-sizing:border-box"></textarea>
+      </div>` : ''}
+      <div class="form-group">
+        <label for="setup-wallet-pass">Passphrase</label>
+        <input type="password" id="setup-wallet-pass" autocomplete="new-password"
+          placeholder="Minimum 12 characters">
+      </div>
+      <div style="height:4px;width:100%;background:var(--bg-tertiary);border-radius:var(--radius-sm);
+                  overflow:hidden;margin-bottom:var(--gap-xs)">
+        <div id="setup-wallet-strength-bar"
+             style="height:100%;width:0%;transition:width 0.2s,background 0.2s;
+                    border-radius:var(--radius-sm)"></div>
+      </div>
+      <div id="setup-wallet-strength-text"
+           style="font-size:var(--font-size-xs);color:var(--text-muted);
+                  min-height:1.2em;margin-bottom:var(--gap-sm)"></div>
+      <div class="form-group">
+        <label for="setup-wallet-pass2">Confirm Passphrase</label>
+        <input type="password" id="setup-wallet-pass2" autocomplete="new-password"
+          placeholder="Repeat passphrase">
+      </div>
+      <div id="setup-wallet-error"
+           style="color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm);display:none"></div>
     `;
 
-    const walletArea = body.querySelector('#setup-wallet-area');
-    const createBtn = body.querySelector('#setup-wallet-create');
-    const importBtnEl = body.querySelector('#setup-wallet-import');
-    const skipBtn = body.querySelector('#setup-wallet-skip');
-
-    skipBtn.addEventListener('click', () => {
-      state.walletPath = 'skip';
-      state.walletAddress = '';
-      walletArea.innerHTML = '<div style="text-align:center;color:var(--text-muted);font-size:var(--font-size-sm)">Wallet setup skipped. You can set it up later from the Wallet page.</div>';
+    // Strength meter
+    const passInput   = body.querySelector('#setup-wallet-pass');
+    const strengthBar = body.querySelector('#setup-wallet-strength-bar');
+    const strengthTxt = body.querySelector('#setup-wallet-strength-text');
+    passInput.addEventListener('input', () => {
+      const len = passInput.value.length;
+      if (len === 0) {
+        strengthBar.style.width = '0%';
+        strengthBar.style.background = 'transparent';
+        strengthTxt.textContent = '';
+      } else if (len < 12) {
+        strengthBar.style.width = '33%';
+        strengthBar.style.background = 'var(--error)';
+        strengthTxt.style.color = 'var(--error)';
+        strengthTxt.textContent = `Too short (${len}/12 min)`;
+      } else if (len < 20) {
+        strengthBar.style.width = '66%';
+        strengthBar.style.background = 'var(--warning)';
+        strengthTxt.style.color = 'var(--warning)';
+        strengthTxt.textContent = 'Acceptable';
+      } else {
+        strengthBar.style.width = '100%';
+        strengthBar.style.background = 'var(--success)';
+        strengthTxt.style.color = 'var(--success)';
+        strengthTxt.textContent = 'Strong';
+      }
     });
 
-    createBtn.addEventListener('click', () => {
-      destroySecureElements(walletArea);
-      walletArea.innerHTML = '';
-      state.walletPath = 'create';
-
-      const passContainer = document.createElement('div');
-      walletArea.appendChild(passContainer);
-
-      createPassphraseForm(passContainer, {
-        submitLabel: 'Generate Mnemonic',
-        onSubmit: async (passphrase) => {
-          try {
-            const result = await rpc.call('noble_generateMnemonic', {
-              word_count: 24,
-              passphrase,
-            });
-            destroySecureElements(walletArea);
-            walletArea.innerHTML = '';
-
-            state.walletAddress = result.address;
-
-            // Show mnemonic
-            const words = result.mnemonic.split(/\s+/);
-            const header = document.createElement('div');
-            header.style.cssText = 'font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)';
-            header.textContent = 'Write Down Your 24-Word Recovery Phrase';
-            walletArea.appendChild(header);
-
-            const gridEl = createMnemonicGrid(walletArea, words);
-            const timerHandle = startAutoClearTimer(walletArea, gridEl, 300_000);
-            cleanupFns.push(() => timerHandle.stop());
-
-            const warning = document.createElement('div');
-            warning.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)';
-            warning.textContent = 'Write these words down. They CANNOT be recovered from the node.';
-            walletArea.appendChild(warning);
-
-            // "I've backed it up" button → verify step
-            const continueBtn = document.createElement('button');
-            continueBtn.className = 'btn';
-            continueBtn.style.cssText = 'margin-top:var(--gap)';
-            continueBtn.textContent = "I've backed it up \u2014 Continue to Verification";
-            walletArea.appendChild(continueBtn);
-
-            continueBtn.addEventListener('click', () => {
-              walletArea.innerHTML = '';
-              createVerifyStep(walletArea, words,
-                () => {
-                  walletArea.innerHTML = `
-                    <div style="text-align:center;padding:var(--gap)">
-                      <div style="font-size:2rem;color:var(--success);margin-bottom:var(--gap-sm)">&#10004;</div>
-                      <h3 style="color:var(--success)">Wallet Created</h3>
-                      <p class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">${result.address}</p>
-                    </div>
-                  `;
-                },
-                () => { /* fail — user retries via the verify UI */ }
-              );
-            });
-          } catch (e) {
-            walletArea.innerHTML = `<div style="color:var(--error);font-size:var(--font-size-sm)">Error: ${e.message || e}</div>`;
-          }
-        },
-      });
+    // Wipe sensitive inputs when the wizard step is torn down.
+    cleanupFns.push(() => {
+      const p  = body.querySelector('#setup-wallet-pass');
+      const p2 = body.querySelector('#setup-wallet-pass2');
+      const t  = body.querySelector('#setup-wallet-mnemonic');
+      if (p)  wipeInput(p);
+      if (p2) wipeInput(p2);
+      if (t)  wipeInput(t);
     });
+  }
 
-    importBtnEl.addEventListener('click', () => {
-      destroySecureElements(walletArea);
-      walletArea.innerHTML = '';
-      state.walletPath = 'import';
+  /** Phase: mnemonic — show words grid + checkbox; Next button is "Continue". */
+  function renderWalletMnemonic() {
+    body.innerHTML = `
+      <div style="font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)">
+        Write Down Your 24-Word Recovery Phrase
+      </div>
+      <div id="setup-mnemonic-host"></div>
+      <div style="font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)">
+        Write these words down. They CANNOT be recovered from the node.
+      </div>
+      <label style="display:flex;align-items:center;gap:var(--gap-sm);
+                    margin-top:var(--gap);cursor:pointer">
+        <input type="checkbox" id="setup-wallet-backed-up">
+        <span style="font-size:var(--font-size-sm)">I have written down my recovery phrase</span>
+      </label>
+    `;
 
-      const textarea = document.createElement('textarea');
-      textarea.rows = 3;
-      textarea.autocomplete = 'off';
-      textarea.spellcheck = false;
-      textarea.placeholder = 'Enter your 12 or 24 word mnemonic phrase...';
-      textarea.style.cssText = 'width:100%;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical;margin-bottom:var(--gap-sm)';
-      walletArea.appendChild(textarea);
-      cleanupFns.push(() => wipeInput(textarea));
+    if (state.walletMnemonic) {
+      const host = body.querySelector('#setup-mnemonic-host');
+      const gridEl = createMnemonicGrid(host, state.walletMnemonic);
+      const timerHandle = startAutoClearTimer(host, gridEl, 300_000);
+      cleanupFns.push(() => timerHandle.stop());
+    }
 
-      const passContainer = document.createElement('div');
-      walletArea.appendChild(passContainer);
+    const checkbox = body.querySelector('#setup-wallet-backed-up');
+    checkbox.addEventListener('change', () => updateNextButton());
+    nextBtn.disabled = true; // disabled until checkbox checked
+  }
 
-      const resultEl = document.createElement('div');
-      resultEl.style.cssText = 'margin-top:var(--gap-sm);font-size:var(--font-size-sm)';
-      walletArea.appendChild(resultEl);
-
-      createPassphraseForm(passContainer, {
-        submitLabel: 'Import Wallet',
-        onSubmit: async (passphrase) => {
-          const words = textarea.value.trim();
-          if (!words) { resultEl.innerHTML = '<span style="color:var(--error)">Please enter your mnemonic.</span>'; return; }
-          try {
-            const result = await rpc.call('noble_importMnemonic', { mnemonic: words, passphrase });
-            wipeInput(textarea);
-            destroySecureElements(passContainer);
-            state.walletAddress = result.address;
-            walletArea.innerHTML = `
-              <div style="text-align:center;padding:var(--gap)">
-                <div style="font-size:2rem;color:var(--success);margin-bottom:var(--gap-sm)">&#10004;</div>
-                <h3 style="color:var(--success)">${result.already_exists ? 'Key Already Exists' : 'Wallet Imported'}</h3>
-                <p class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">${result.address}</p>
-              </div>
-            `;
-          } catch (e) {
-            resultEl.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
-          }
-        },
-      });
-    });
-
-    // Restore state
-    if (state.walletAddress) {
-      walletArea.innerHTML = `
-        <div style="text-align:center;padding:var(--gap);color:var(--success)">
-          <div style="font-size:2rem;margin-bottom:var(--gap-sm)">&#10004;</div>
-          <h3>Wallet Configured</h3>
-          <p class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">${state.walletAddress}</p>
+  /** Phase: done — success card or skip message. */
+  function renderWalletDone() {
+    if (state.walletPath === 'skip') {
+      body.innerHTML = `
+        <div style="text-align:center;padding:var(--gap);color:var(--text-muted)">
+          <p style="font-size:var(--font-size-sm)">
+            Wallet setup skipped. You can set it up later from the Wallet page.
+          </p>
+        </div>
+      `;
+    } else {
+      const label = state.walletPath === 'import' ? 'Wallet Imported' : 'Wallet Created';
+      body.innerHTML = `
+        <div style="text-align:center;padding:var(--gap)">
+          <div style="font-size:2rem;color:var(--success);margin-bottom:var(--gap-sm)">&#10004;</div>
+          <h3 style="color:var(--success)">${label}</h3>
+          <p class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">
+            ${esc(state.walletAddress)}
+          </p>
         </div>
       `;
     }

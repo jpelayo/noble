@@ -10,6 +10,21 @@
 //! When `tls_config` is provided, connections are served over HTTPS using
 //! tokio-rustls so Tauri client apps (running in a secure context) are not
 //! blocked by mixed-content policy when they open the dashboard.
+//!
+//! ## RPC Proxy (`/rpc`)
+//!
+//! The GUI and the JSON-RPC server run on different ports (8785 and 8783).
+//! Each port has its own TLS certificate acceptance in the browser, so making
+//! cross-port requests to 8783 from the 8785 page fails with a NetworkError
+//! until the user manually accepts the cert for port 8783.
+//!
+//! To avoid this, the GUI server exposes a `/rpc` POST endpoint that proxies
+//! the request body to the RPC server over a loopback connection.  The browser
+//! sends one request to `https://localhost:8785/rpc` (same origin, already
+//! trusted) and never touches port 8783 directly.
+//!
+//! The proxy uses a `NoCertVerifier` for its outbound TLS connection to the
+//! RPC server.  This is safe: the connection never leaves localhost.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -19,9 +34,189 @@ use axum::extract::ConnectInfo;
 use axum::middleware;
 use axum::response::IntoResponse;
 use axum::Router;
+use http_body_util::{BodyExt, Full};
 use tower_http::services::ServeDir;
 
 use noble_api::ip_filter::IpFilter;
+
+// ── NoCertVerifier ─────────────────────────────────────────────────────────
+
+/// Permissive TLS verifier used **only** for localhost loopback proxy
+/// connections.  Accepts any certificate — safe because the connection
+/// stays on 127.0.0.1 and is our own node's self-signed cert.
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dsa: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dsa: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Build a `TlsConnector` that accepts any server certificate.
+/// Used only for the localhost proxy connection.
+fn build_client_tls_connector() -> tokio_rustls::TlsConnector {
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+}
+
+// ── RPC proxy ──────────────────────────────────────────────────────────────
+
+/// Proxy a POST request body to the RPC server on `127.0.0.1:rpc_port`.
+/// Forwards `Content-Type` and `Authorization` headers, returns the raw
+/// JSON-RPC response body to the browser.
+async fn proxy_to_rpc(
+    rpc_port: u16,
+    tls_connector: Option<tokio_rustls::TlsConnector>,
+    headers: http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use hyper::Request;
+
+    let content_type = headers
+        .get(http::header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| http::HeaderValue::from_static("application/json"));
+
+    let mut req_builder = Request::builder()
+        .method(http::Method::POST)
+        .uri("/")
+        .header(http::header::HOST, format!("127.0.0.1:{rpc_port}"))
+        .header(http::header::CONTENT_TYPE, content_type);
+
+    if let Some(auth) = headers.get(http::header::AUTHORIZATION) {
+        req_builder = req_builder.header(http::header::AUTHORIZATION, auth.clone());
+    }
+
+    let req = match req_builder.body(Full::new(body)) {
+        Ok(r) => r,
+        Err(e) => {
+            return (http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", rpc_port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(task = "rpc_proxy", "TCP connect to RPC port {rpc_port} failed: {e}");
+            return (
+                http::StatusCode::BAD_GATEWAY,
+                "RPC server unreachable — ensure the node is running",
+            )
+                .into_response();
+        }
+    };
+
+    // Run the HTTP/1.1 request over TLS or plain TCP.
+    let hyper_response = if let Some(connector) = tls_connector {
+        let server_name = match rustls_pki_types::ServerName::try_from("localhost") {
+            Ok(n) => n.to_owned(),
+            Err(_) => {
+                return (http::StatusCode::INTERNAL_SERVER_ERROR, "invalid server name")
+                    .into_response();
+            }
+        };
+        let tls_stream = match connector.connect(server_name, tcp).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(task = "rpc_proxy", "TLS handshake to RPC failed: {e}");
+                return (http::StatusCode::BAD_GATEWAY, "TLS handshake failed").into_response();
+            }
+        };
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
+            Ok(p) => p,
+            Err(e) => {
+                return (http::StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+        };
+        tokio::spawn(conn);
+        match sender.send_request(req).await {
+            Ok(r) => r,
+            Err(e) => {
+                return (http::StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+        }
+    } else {
+        let io = hyper_util::rt::TokioIo::new(tcp);
+        let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
+            Ok(p) => p,
+            Err(e) => {
+                return (http::StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+        };
+        tokio::spawn(conn);
+        match sender.send_request(req).await {
+            Ok(r) => r,
+            Err(e) => {
+                return (http::StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+        }
+    };
+
+    let status = hyper_response.status();
+    let resp_headers = hyper_response.headers().clone();
+    let resp_body = match hyper_response.into_body().collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return (http::StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+        }
+    };
+
+    let mut builder = axum::response::Response::builder().status(status);
+    if let Some(ct) = resp_headers.get(http::header::CONTENT_TYPE) {
+        builder = builder.header(http::header::CONTENT_TYPE, ct.clone());
+    }
+    builder
+        .body(axum::body::Body::from(resp_body))
+        .unwrap_or_else(|_| {
+            (http::StatusCode::INTERNAL_SERVER_ERROR, "response build error").into_response()
+        })
+}
 
 /// Start the embedded GUI HTTP(S) server.
 ///
@@ -97,12 +292,30 @@ pub async fn start_gui_server(
         }
     });
 
+    // /rpc proxy — same-origin POST endpoint that forwards to the RPC server.
+    // The browser sends requests to /rpc (port 8785, already trusted) and the
+    // proxy opens a loopback connection to the RPC port internally.
+    let proxy_port = rpc_port;
+    let proxy_tls = if tls_config.is_some() {
+        Some(build_client_tls_connector())
+    } else {
+        None
+    };
+    let rpc_proxy_handler = axum::routing::post(
+        move |headers: http::HeaderMap, body: axum::body::Bytes| {
+            let conn = proxy_tls.clone();
+            async move { proxy_to_rpc(proxy_port, conn, headers, body).await }
+        },
+    );
+
     let mut app = Router::new()
         .route("/", root_handler)
+        .route("/rpc", rpc_proxy_handler)
         .fallback_service(serve_dir);
 
     // Dynamic CSP middleware — reads rpc_origins on every request so that
     // setAllowedIps updates are reflected immediately without a restart.
+    // 'self' is included in connect-src so the /rpc proxy route is allowed.
     let rpc_origins_csp = rpc_origins.clone();
     app = app.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
         let origins = rpc_origins_csp.clone();
@@ -111,10 +324,10 @@ pub async fn start_gui_server(
             let connect_src = {
                 let guard = origins.read();
                 if guard.is_empty() {
-                    "http://127.0.0.1:8783 http://localhost:8783 ws://127.0.0.1:8783 ws://localhost:8783"
+                    "'self' http://127.0.0.1:8783 http://localhost:8783 ws://127.0.0.1:8783 ws://localhost:8783"
                         .to_string()
                 } else {
-                    guard.join(" ")
+                    format!("'self' {}", guard.join(" "))
                 }
             };
             let csp = format!(
