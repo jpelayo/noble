@@ -150,6 +150,13 @@ const ctx = { rpc, ws, state, subscribe, getState };
 const content = document.getElementById('content');
 const router = new Router(content, ctx);
 
+// Issue 8: Server injects window.NOBLE_SETUP_MODE=true when identity.json is absent.
+// Redirect synchronously before router.start() so the setup page is shown
+// immediately — no async RPC calls, no race with Overview rendering.
+if (window.NOBLE_SETUP_MODE) {
+  location.hash = '#/setup';
+}
+
 router
   .add('/', overviewPage)
   .add('/blocks', blocksPage)
@@ -265,28 +272,7 @@ async function bootstrap() {
       return;
     }
     console.error('[app] bootstrap error:', e);
-    // Continue — still attempt first-run detection even if bootstrap RPCs fail.
   }
-
-  // First-run detection: always runs, independent of bootstrap success.
-  // Uses noble_getNodeIdentity (node_name empty = setup mode) as the primary
-  // signal; wallet key_count === 0 is a secondary confirmation.
-  await checkFirstRun();
-}
-
-async function checkFirstRun() {
-  if (location.hash === '#/setup') return;
-  try {
-    const identity = await rpc.call('noble_getNodeIdentity');
-    // Setup mode: node_name is empty (not yet configured via wizard or CLI).
-    if (!identity.node_name) {
-      location.hash = '#/setup';
-      return;
-    }
-    // Wallet key_count === 0 is intentional when the operator chose "skip wallet"
-    // during setup. The wallet can be created later from the Wallet page.
-    // Do not redirect back to setup — it would overwrite existing identity.
-  } catch { /* RPC unavailable (TOTP locked, not connected, etc.) — skip */ }
 }
 
 // ── WebSocket subscriptions for global state ──

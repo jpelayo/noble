@@ -637,6 +637,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
 
+        // Clone setup_token before ApiState consumes it — GUI server also needs it
+        // to inject window.NOBLE_SETUP_TOKEN into index.html (Issue 9).
+        let gui_setup_token = setup_token_val.clone();
+
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
             storage: self.storage.clone(),
@@ -758,6 +762,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     gui_tls,
                     gui_rpc_origins,
                     rpc_port,
+                    setup_mode,
+                    gui_setup_token,
                 )
                 .await
                 {

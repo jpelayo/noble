@@ -193,11 +193,10 @@ export function init(root, ctx) {
 
   // ── Step 1: Welcome ──
   function renderWelcome() {
-    body.innerHTML = `
-      <div style="text-align:center;padding:var(--gap-lg) 0 var(--gap)">
-        <h2 style="margin-bottom:var(--gap-sm)">Welcome to NOBLE</h2>
-        <p style="color:var(--text-secondary)">This wizard will configure your node identity and wallet.</p>
-      </div>
+    // Issue 9: When NOBLE_SETUP_TOKEN was injected server-side, the token field
+    // is not needed — the operator is already authorized via IP-filter + TLS.
+    const tokenInjected = !!window.NOBLE_SETUP_TOKEN;
+    const tokenField = tokenInjected ? '' : `
       <div class="form-group" style="margin-bottom:var(--gap-lg)">
         <label for="setup-token" style="display:flex;align-items:center;gap:var(--gap-sm)">
           Setup Token
@@ -209,7 +208,13 @@ export function init(root, ctx) {
         <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
           Copy the token printed in the node terminal at startup (under "SETUP MODE").
         </div>
+      </div>`;
+    body.innerHTML = `
+      <div style="text-align:center;padding:var(--gap-lg) 0 var(--gap)">
+        <h2 style="margin-bottom:var(--gap-sm)">Welcome to NOBLE</h2>
+        <p style="color:var(--text-secondary)">This wizard will configure your node identity and wallet.</p>
       </div>
+      ${tokenField}
       <div class="form-group">
         <label for="setup-node-name">Node Name</label>
         <input type="text" id="setup-node-name" maxlength="64" placeholder="e.g. my-noble-node"
@@ -550,6 +555,14 @@ export function init(root, ctx) {
       // Always clear the raw setup token so it doesn't persist in memory.
       rpc.setRawAuthToken(null);
     }
+  }
+
+  // Issue 9: Auto-apply setup token when injected server-side (IP-gated + TLS).
+  // If NOBLE_SETUP_TOKEN is present, the operator is already authenticated via
+  // network access — no need to copy the token from the console.
+  if (window.NOBLE_SETUP_TOKEN) {
+    state.setupToken = window.NOBLE_SETUP_TOKEN;
+    rpc.setRawAuthToken(window.NOBLE_SETUP_TOKEN);
   }
 
   // Start

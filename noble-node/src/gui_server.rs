@@ -47,6 +47,8 @@ pub async fn start_gui_server(
     tls_config: Option<Arc<rustls::ServerConfig>>,
     rpc_origins: Arc<parking_lot::RwLock<Vec<String>>>,
     rpc_port: u16,
+    setup_mode: bool,
+    setup_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let serve_dir = ServeDir::new(&gui_dir);
 
@@ -56,15 +58,28 @@ pub async fn start_gui_server(
     let gui_dir_clone = gui_dir.clone();
     let root_handler = axum::routing::get(move || {
         let dir = gui_dir_clone.clone();
+        let token_clone = setup_token.clone();
         async move {
             let index_path = dir.join("index.html");
             match tokio::fs::read_to_string(&index_path).await {
                 Ok(html) => {
-                    let script = format!(
+                    let mut script = format!(
                         "<script>window.NOBLE_RPC_PORT={};</script>",
                         rpc_port
                     );
-                    // Inject before </head> so the variable is available when app.js loads.
+                    // Issue 8: inject setup mode flag synchronously so app.js can
+                    // redirect to #/setup before router.start() — no async RPC needed.
+                    if setup_mode {
+                        script.push_str("<script>window.NOBLE_SETUP_MODE=true;</script>");
+                    }
+                    // Issue 9: inject setup token so the wizard can auto-apply it.
+                    // Token is 64 hex chars (safe to embed in a JS string literal).
+                    if let Some(ref tok) = token_clone {
+                        script.push_str(&format!(
+                            "<script>window.NOBLE_SETUP_TOKEN='{tok}';</script>"
+                        ));
+                    }
+                    // Inject before </head> so the variables are available when app.js loads.
                     let injected = if html.contains("</head>") {
                         html.replacen("</head>", &format!("{script}</head>"), 1)
                     } else {
@@ -149,8 +164,24 @@ pub async fn start_gui_server(
 
             let acceptor_c = acceptor.clone();
             let app_c = app.clone();
+            let https_port = addr.port();
 
             tokio::spawn(async move {
+                // Peek at the first byte: TLS ClientHello starts with 0x16.
+                // If a plain-HTTP client connects, send a 301 redirect to https://
+                // instead of letting them see raw TLS bytes.
+                let mut first = [0u8; 1];
+                if tcp.peek(&mut first).await.is_ok() && first[0] != 0x16 {
+                    use tokio::io::AsyncWriteExt as _;
+                    let mut tcp = tcp;
+                    let host = peer_addr.ip();
+                    let redirect = format!(
+                        "HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}:{https_port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = tcp.write_all(redirect.as_bytes()).await;
+                    return;
+                }
+
                 let tls = match acceptor_c.accept(tcp).await {
                     Ok(s) => s,
                     Err(e) => {
