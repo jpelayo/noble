@@ -157,8 +157,19 @@ const router = new Router(content, ctx);
 // Issue 8: Server injects window.NOBLE_SETUP_MODE=true when identity.json is absent.
 // Redirect synchronously before router.start() so the setup page is shown
 // immediately — no async RPC calls, no race with Overview rendering.
+// Lock all navigation to /setup only — other pages are blocked until setup completes.
 if (window.NOBLE_SETUP_MODE) {
   location.hash = '#/setup';
+  router.setGuard((path) => path === '/setup' ? null : '/setup');
+
+  // Visually disable all sidebar links except setup
+  document.querySelectorAll('#sidebar a').forEach(a => {
+    if (a.getAttribute('href') !== '#/setup') {
+      a.style.opacity = '0.35';
+      a.style.pointerEvents = 'none';
+      a.style.cursor = 'default';
+    }
+  });
 }
 
 // Hide setup link in sidebar when node is fully configured.

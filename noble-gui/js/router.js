@@ -15,11 +15,18 @@ export class Router {
   #root = null;
   #current = null;
   #ctx = {};
+  #guard = null;
 
   constructor(root, ctx = {}) {
     this.#root = root;
     this.#ctx = ctx;
   }
+
+  /** Set a navigation guard. fn(path) should return null to allow, or a string to redirect. */
+  setGuard(fn) { this.#guard = fn; return this; }
+
+  /** Remove the navigation guard. */
+  clearGuard() { this.#guard = null; return this; }
 
   add(pattern, page) {
     const paramNames = [];
@@ -44,6 +51,15 @@ export class Router {
     const raw = location.hash.slice(1) || '/';
     const [path, queryStr] = raw.split('?', 2);
     const hash = path || '/';
+
+    // Navigation guard — redirect if blocked
+    if (this.#guard) {
+      const redirect = this.#guard(hash);
+      if (redirect && redirect !== hash) {
+        location.hash = '#' + redirect;
+        return;
+      }
+    }
 
     // Parse query parameters from hash
     const query = {};
