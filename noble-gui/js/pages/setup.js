@@ -3,7 +3,7 @@
  * Multi-step onboarding: Welcome → Role → Identity → Rewards → Storage → Networking → Review
  */
 
-import { createPassphraseForm, createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
+import { createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
 
 const STEPS = [
   { key: 'welcome',    label: 'Welcome'    },
@@ -474,56 +474,50 @@ export function init(root, ctx) {
       terminalArea.innerHTML = '';
     }
 
-    generateBtn.addEventListener('click', () => {
+    generateBtn.addEventListener('click', async () => {
       clearWalletAreas();
-      activeGenForm = createPassphraseForm(generateArea, {
-        submitLabel: 'Generate Wallet',
-        onSubmit: async (passphrase) => {
-          try {
-            generateBtn.disabled = true;
-            generateBtn.textContent = 'Generating...';
-            const result = await rpc.call('noble_generateMnemonic', {
-              word_count: 24,
-              passphrase,
-            });
-            walletResult = result;
-            if (activeGenForm) { activeGenForm.destroy(); activeGenForm = null; }
-            generateArea.innerHTML = '';
+      try {
+        generateBtn.disabled = true;
+        generateBtn.textContent = 'Generating...';
+        const result = await rpc.call('noble_generateMnemonic', {
+          word_count: 24,
+          passphrase: '',
+        });
+        walletResult = result;
+        generateArea.innerHTML = '';
 
-            const header = document.createElement('div');
-            header.style.cssText = 'font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)';
-            header.textContent = 'Backup Your Mnemonic Phrase';
-            generateArea.appendChild(header);
+        const header = document.createElement('div');
+        header.style.cssText = 'font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)';
+        header.textContent = 'Backup Your Mnemonic Phrase';
+        generateArea.appendChild(header);
 
-            const words = result.mnemonic.split(/\s+/);
-            const gridEl = createMnemonicGrid(generateArea, words);
+        const words = result.mnemonic.split(/\s+/);
+        const gridEl = createMnemonicGrid(generateArea, words);
 
-            const warning = document.createElement('div');
-            warning.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)';
-            warning.textContent = 'Write these words down and store them securely. They cannot be recovered from the node.';
-            generateArea.appendChild(warning);
+        const warning = document.createElement('div');
+        warning.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)';
+        warning.textContent = 'Write these words down and store them securely. They cannot be recovered from the node.';
+        generateArea.appendChild(warning);
 
-            autoClear = startAutoClearTimer(generateArea, gridEl, 300_000);
+        autoClear = startAutoClearTimer(generateArea, gridEl, 300_000);
 
-            const termEl = document.createElement('div');
-            termEl.className = 'terminal-output';
-            termEl.innerHTML = formatSetupTerminal(result, false);
-            terminalArea.innerHTML = '';
-            terminalArea.appendChild(termEl);
+        const termEl = document.createElement('div');
+        termEl.className = 'terminal-output';
+        termEl.innerHTML = formatSetupTerminal(result, false);
+        terminalArea.innerHTML = '';
+        terminalArea.appendChild(termEl);
 
-            // Auto-fill reward address with the generated public key
-            prefillRewardAddress(result);
-          } catch (e) {
-            const err = document.createElement('div');
-            err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
-            err.textContent = 'Failed to generate: ' + (e.message || e);
-            generateArea.appendChild(err);
-          } finally {
-            generateBtn.disabled = false;
-            generateBtn.textContent = 'Generate New Wallet';
-          }
-        },
-      });
+        // Auto-fill reward address with the generated public key
+        prefillRewardAddress(result);
+      } catch (e) {
+        const err = document.createElement('div');
+        err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
+        err.textContent = 'Failed to generate: ' + (e.message || e);
+        generateArea.appendChild(err);
+      } finally {
+        generateBtn.disabled = false;
+        generateBtn.textContent = 'Generate New Wallet';
+      }
     });
 
     importBtn.addEventListener('click', () => {
@@ -544,56 +538,57 @@ export function init(root, ctx) {
       textarea.style.cssText = 'width:100%;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-sm);resize:vertical';
       wrapper.appendChild(textarea);
 
-      const passArea = document.createElement('div');
-      passArea.style.cssText = 'margin-top:var(--gap-sm)';
-      wrapper.appendChild(passArea);
-
       const resultEl = document.createElement('div');
       resultEl.style.cssText = 'display:none;margin-top:var(--gap-sm);font-size:var(--font-size-sm)';
       wrapper.appendChild(resultEl);
 
-      importArea.appendChild(wrapper);
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;gap:var(--gap-sm);margin-top:var(--gap-sm)';
 
-      const passForm = createPassphraseForm(passArea, {
-        submitLabel: 'Import',
-        onSubmit: async (passphrase) => {
-          const mWords = textarea.value.trim();
-          if (!mWords) { resultEl.style.display = 'block'; resultEl.innerHTML = '<span style="color:var(--error)">Please enter your mnemonic phrase.</span>'; return; }
-          try {
-            const result = await rpc.call('noble_importMnemonic', { mnemonic: mWords, passphrase });
-            walletResult = result;
-            wipeInput(textarea);
-            if (passForm) passForm.destroy();
+      const submitBtn = document.createElement('button');
+      submitBtn.className = 'btn';
+      submitBtn.style.cssText = 'padding:6px 14px';
+      submitBtn.textContent = 'Import';
+      submitBtn.addEventListener('click', async () => {
+        const mWords = textarea.value.trim();
+        if (!mWords) { resultEl.style.display = 'block'; resultEl.innerHTML = '<span style="color:var(--error)">Please enter your mnemonic phrase.</span>'; return; }
+        try {
+          const result = await rpc.call('noble_importMnemonic', { mnemonic: mWords, passphrase: '' });
+          walletResult = result;
+          wipeInput(textarea);
 
-            resultEl.style.display = 'block';
-            resultEl.innerHTML = result.already_exists
-              ? '<span style="color:var(--warning)">Key already exists.</span>'
-              : '<span style="color:var(--success)">Key imported successfully.</span>';
+          resultEl.style.display = 'block';
+          resultEl.innerHTML = result.already_exists
+            ? '<span style="color:var(--warning)">Key already exists.</span>'
+            : '<span style="color:var(--success)">Key imported successfully.</span>';
 
-            const termEl = document.createElement('div');
-            termEl.className = 'terminal-output';
-            termEl.innerHTML = formatSetupTerminal(result, false);
-            terminalArea.innerHTML = '';
-            terminalArea.appendChild(termEl);
+          const termEl = document.createElement('div');
+          termEl.className = 'terminal-output';
+          termEl.innerHTML = formatSetupTerminal(result, false);
+          terminalArea.innerHTML = '';
+          terminalArea.appendChild(termEl);
 
-            // Auto-fill reward address with the imported public key
-            prefillRewardAddress(result);
-          } catch (e) {
-            resultEl.style.display = 'block';
-            resultEl.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
-          }
-        },
+          // Auto-fill reward address with the imported public key
+          prefillRewardAddress(result);
+        } catch (e) {
+          resultEl.style.display = 'block';
+          resultEl.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
+        }
       });
+      btnRow.appendChild(submitBtn);
 
       const cancelBtn = document.createElement('button');
       cancelBtn.className = 'btn btn-secondary';
-      cancelBtn.style.cssText = 'padding:6px 12px;margin-top:var(--gap-sm)';
+      cancelBtn.style.cssText = 'padding:6px 12px';
       cancelBtn.textContent = 'Cancel';
       cancelBtn.addEventListener('click', () => { wipeInput(textarea); clearWalletAreas(); });
-      wrapper.appendChild(cancelBtn);
+      btnRow.appendChild(cancelBtn);
+
+      wrapper.appendChild(btnRow);
+      importArea.appendChild(wrapper);
 
       activeImpForm = {
-        destroy() { wipeInput(textarea); if (passForm) passForm.destroy(); wrapper.remove(); },
+        destroy() { wipeInput(textarea); wrapper.remove(); },
       };
     });
 

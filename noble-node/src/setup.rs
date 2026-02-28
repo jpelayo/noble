@@ -718,16 +718,10 @@ fn run_wallet_generate() -> Result<Option<String>, Box<dyn std::error::Error>> {
         .interact()?;
     let word_count: usize = if word_sel == 0 { 24 } else { 12 };
 
-    let passphrase: String = Input::new()
-        .with_prompt("BIP-39 passphrase (optional \"25th word\", press Enter to skip)")
-        .default(String::new())
-        .allow_empty(true)
-        .interact_text()?;
-
     let mnemonic = bip39::Mnemonic::generate(word_count)
         .map_err(|e| format!("mnemonic generation failed: {e}"))?;
 
-    let address_hex = print_wallet_info(&mnemonic, &passphrase);
+    let address_hex = print_wallet_info(&mnemonic, "");
     Ok(Some(address_hex))
 }
 
@@ -742,13 +736,7 @@ fn run_wallet_recover() -> Result<Option<String>, Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("invalid mnemonic: {e}"))?;
 
-    let passphrase: String = Input::new()
-        .with_prompt("BIP-39 passphrase (press Enter if none)")
-        .default(String::new())
-        .allow_empty(true)
-        .interact_text()?;
-
-    let address_hex = print_wallet_info(&mnemonic, &passphrase);
+    let address_hex = print_wallet_info(&mnemonic, "");
     Ok(Some(address_hex))
 }
 
