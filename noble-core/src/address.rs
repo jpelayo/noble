@@ -159,14 +159,15 @@ impl NobleAddress {
 
     /// For a secp256k1 public key, derive the corresponding BitcoinTaproot address.
     ///
-    /// The x-only public key is bytes[1..33] of the 33-byte compressed key.
+    /// Applies the BIP-341 key-path-only tweak: the stored 32-byte output key is
+    /// `x(P + tagged_hash("TapTweak", x(P)) · G)`, NOT the raw x-only pubkey.
     /// Returns None for Ed25519 keys (no Taproot mapping).
     pub fn bitcoin_taproot_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {
         match pk {
             NoblePublicKey::Secp256k1(bytes) if bytes.len() == 33 => {
-                let mut xonly = [0u8; 32];
-                xonly.copy_from_slice(&bytes[1..33]);
-                Some(NobleAddress::BitcoinTaproot(xonly))
+                let compressed: [u8; 33] = bytes.as_slice().try_into().ok()?;
+                let output_key = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed)?;
+                Some(NobleAddress::BitcoinTaproot(output_key))
             }
             _ => None,
         }
@@ -371,8 +372,17 @@ mod tests {
         let tap_addr = tap_addr.unwrap();
         assert_eq!(tap_addr.address_type(), "bitcoin_taproot");
         assert_eq!(tap_addr.data_bytes().len(), 32);
-        // x-only should be bytes[1..33] of the compressed key
-        assert_eq!(tap_addr.data_bytes(), &pk_bytes[1..33]);
+        // BIP-341: output key is the TWEAKED x-only key, NOT raw pubkey[1..33]
+        let raw_xonly = &pk_bytes[1..33];
+        assert_ne!(
+            tap_addr.data_bytes(),
+            raw_xonly,
+            "Taproot output must be tweaked, not raw x-only"
+        );
+        // Verify it matches the BIP-341 tweak function
+        let compressed: [u8; 33] = pk_bytes.as_slice().try_into().unwrap();
+        let expected = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed).unwrap();
+        assert_eq!(tap_addr.data_bytes(), &expected[..]);
     }
 
     #[test]

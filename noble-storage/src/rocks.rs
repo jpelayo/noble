@@ -426,12 +426,20 @@ impl StorageEngine for RocksDbStorage {
                 .to_noble_public_key()
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
             // S34: Canonical debit address resolution
+            // S35 F1: delta-aware balance closure — each tx sees effective balances
+            // including earlier in-block changes
             let need = tx.amount.unwrap_or(0) + tx.fee;
             let sender_addr = noble_core::resolve_debit_address(
                 &tx.source_address,
                 &sender_pk,
                 need,
-                |a| self.read_balance_raw(&a.to_wire_bytes()).unwrap_or(0),
+                |a| {
+                    let key = a.to_wire_bytes();
+                    let base = self.read_balance_raw(&key).unwrap_or(0) as i128;
+                    let delta = deltas.get(&key).copied().unwrap_or(0);
+                    let effective = base + delta;
+                    if effective > 0 { effective as u64 } else { 0 }
+                },
             )
             .map_err(|e| StorageError::Codec(e.to_string()))?;
             let sender_key = sender_addr.to_wire_bytes();
@@ -909,6 +917,7 @@ impl StorageEngine for RocksDbStorage {
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
                 // S34: Use canonical debit resolution (fixes P0 replay divergence)
+                // S35 F1: replay uses accumulated balances (already delta-aware)
                 let need = tx.amount.unwrap_or(0) + tx.fee;
                 let sender_addr = noble_core::resolve_debit_address(
                     &tx.source_address,

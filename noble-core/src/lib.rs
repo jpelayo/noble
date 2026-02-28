@@ -38,6 +38,6 @@ pub use peer_record::PeerRecord;
 pub use pst::{PartiallySignedTransaction, PstError, SignerEntry, SignerRole, PST_VERSION};
 pub use transaction::Transaction;
 pub use validation::{
-    median_timestamp, validate_block, validate_block_timestamp, validate_transaction,
-    BlockValidationContext, TxValidationContext,
+    median_timestamp, validate_block, validate_block_timestamp, validate_source_address,
+    validate_transaction, BlockValidationContext, TxValidationContext,
 };

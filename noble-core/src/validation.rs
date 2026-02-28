@@ -403,11 +403,11 @@ pub fn validate_transaction(
 /// - T31: ownership proof:
 ///   - Noble(pk): must equal publisher key
 ///   - BitcoinHash160(h160): publisher must be secp256k1, h160 == HASH160(pubkey)
-///   - BitcoinTaproot(xonly): publisher must be secp256k1, xonly == pubkey[1..33]
+///   - BitcoinTaproot(xonly): publisher must be secp256k1, xonly == BIP-341 tweaked output key
 ///
 /// If `source_address` is absent AND height >= SOURCE_ADDRESS_ACTIVATION_HEIGHT:
 /// - T32: secp256k1 transfer transactions MUST include source_address
-fn validate_source_address(tx: &Transaction, chain_height: u64) -> Result<(), ValidationError> {
+pub fn validate_source_address(tx: &Transaction, chain_height: u64) -> Result<(), ValidationError> {
     let wire = match tx.source_address {
         Some(ref w) => w,
         None => {
@@ -474,7 +474,7 @@ fn validate_source_address(tx: &Transaction, chain_height: u64) -> Result<(), Va
             if let crate::NobleAddress::BitcoinTaproot(expected_xonly) = expected {
                 if *xonly != expected_xonly {
                     return Err(ValidationError::InvalidSourceAddress(
-                        "Taproot x-only does not match publisher_pubkey[1..33]".into(),
+                        "Taproot output key does not match BIP-341 tweaked publisher key".into(),
                     ));
                 }
             }

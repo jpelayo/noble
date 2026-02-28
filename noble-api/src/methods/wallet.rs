@@ -143,9 +143,22 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .create_key(scheme_id, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+        // Derive Bitcoin display addresses for secp256k1 keys
+        let bitcoin_addresses = match &pubkey {
+            noble_crypto::NoblePublicKey::Secp256k1(raw) => {
+                if let Ok(compressed) = <&[u8; 33]>::try_from(raw.as_slice()) {
+                    derive_bitcoin_addresses(compressed)
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        };
+
         Ok(CreateAddressResponse {
             address: hex::encode(pubkey.to_wire_bytes()),
             scheme_id: pubkey.scheme_id(),
+            bitcoin_addresses,
         })
     }
 
@@ -219,8 +232,16 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 total_balance += tb;
             }
 
-            // Pending debits (by sender key — covers all buckets)
-            total_pending += mempool.pending_debit(pk);
+            // Pending debits per bucket (bucket-aware)
+            let noble_addr = noble_core::NobleAddress::Noble(pk.clone());
+            total_pending += mempool.pending_debit_for_address(&noble_addr);
+
+            if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                total_pending += mempool.pending_debit_for_address(&h160_addr);
+            }
+            if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                total_pending += mempool.pending_debit_for_address(&tap_addr);
+            }
         }
         drop(mempool);
         drop(storage);
@@ -311,11 +332,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         let tx_id = {
             let storage = self.storage.read();
+            let chain_height = storage
+                .get_chain_tip()
+                .ok()
+                .flatten()
+                .map(|t| t.height)
+                .unwrap_or(0);
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
             let mut mempool = self.mempool.lock();
             mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup)
+                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 
@@ -366,17 +393,25 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .import_secp256k1_key(&key_input, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        // Derive the Bitcoin P2WPKH display address
-        let bitcoin_address = if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
-            let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
-            noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&key, true)
-        } else {
-            String::new()
-        };
+        // Derive Bitcoin display addresses
+        let (bitcoin_address, bitcoin_addresses) =
+            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
+                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+                let addrs = derive_bitcoin_addresses(&key);
+                let p2wpkh = addrs
+                    .iter()
+                    .find(|a| a.address_type == "p2wpkh")
+                    .map(|a| a.address.clone())
+                    .unwrap_or_default();
+                (p2wpkh, addrs)
+            } else {
+                (String::new(), vec![])
+            };
 
         Ok(ImportKeyResponse {
             public_key: hex::encode(pubkey.to_wire_bytes()),
             bitcoin_address,
+            bitcoin_addresses,
         })
     }
 
@@ -393,9 +428,19 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     SCHEME_SEC => "secp256k1",
                     _ => "unknown",
                 };
+                let bitcoin_addresses = if let NoblePublicKey::Secp256k1(ref bytes) = pk {
+                    if let Ok(key) = <[u8; 33]>::try_from(bytes.as_slice()) {
+                        derive_bitcoin_addresses(&key)
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
                 WalletKeyEntry {
                     pubkey_hex: hex::encode(pk.to_wire_bytes()),
                     scheme: scheme.to_string(),
+                    bitcoin_addresses,
                 }
             })
             .collect();
@@ -540,11 +585,17 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
 
         let tx_id = {
             let storage = self.storage.read();
+            let chain_height = storage
+                .get_chain_tip()
+                .ok()
+                .flatten()
+                .map(|t| t.height)
+                .unwrap_or(0);
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
             let mut mempool = self.mempool.lock();
             mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup)
+                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
                 .map_err(|e| e.to_string())?
         };
 
@@ -558,4 +609,22 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
 
         Ok((hash_to_hex(&tx_id), hash_to_hex(&checksum)))
     }
+}
+
+/// Derive all Bitcoin display addresses for a secp256k1 compressed public key.
+fn derive_bitcoin_addresses(compressed: &[u8; 33]) -> Vec<BitcoinAddressEntry> {
+    vec![
+        BitcoinAddressEntry {
+            address_type: "p2pkh".to_string(),
+            address: noble_crypto::bitcoin_addr::pubkey_to_p2pkh(compressed, true),
+        },
+        BitcoinAddressEntry {
+            address_type: "p2wpkh".to_string(),
+            address: noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(compressed, true),
+        },
+        BitcoinAddressEntry {
+            address_type: "p2tr".to_string(),
+            address: noble_crypto::bitcoin_addr::pubkey_to_p2tr(compressed, true),
+        },
+    ]
 }

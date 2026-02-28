@@ -55,4 +55,6 @@ pub enum CycleIo {
     Log(String),
     /// Request mempool transactions from the node for block proposal (P0.3).
     RequestMempoolTransactions { max_count: usize },
+    /// Evict transactions that failed validation during self-proposal.
+    EvictTransactions(Vec<Hash256>),
 }

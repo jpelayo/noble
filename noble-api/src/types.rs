@@ -503,6 +503,8 @@ pub struct UploadTlsCertResponse {
 pub struct CreateAddressResponse {
     pub address: String,
     pub scheme_id: u8,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bitcoin_addresses: Vec<BitcoinAddressEntry>,
 }
 
 /// Response for `noble_walletUnlock`.
@@ -817,6 +819,15 @@ pub struct SetNodeIdentityResponse {
     pub validator_pubkey: Option<String>,
 }
 
+/// A derived Bitcoin display address for a secp256k1 key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BitcoinAddressEntry {
+    /// Address type: `"p2pkh"`, `"p2wpkh"`, or `"p2tr"`.
+    pub address_type: String,
+    /// The Bitcoin address string (`1...`, `bc1q...`, or `bc1p...`).
+    pub address: String,
+}
+
 /// A single wallet key entry returned by `noble_listAddresses`.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletKeyEntry {
@@ -824,6 +835,9 @@ pub struct WalletKeyEntry {
     pub pubkey_hex: String,
     /// Signature scheme: `"ed25519"` or `"secp256k1"`.
     pub scheme: String,
+    /// Derived Bitcoin display addresses (secp256k1 keys only).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bitcoin_addresses: Vec<BitcoinAddressEntry>,
 }
 
 /// Response for `noble_listAddresses`.
@@ -900,6 +914,8 @@ pub struct ImportKeyResponse {
     pub public_key: String,
     /// Derived Bitcoin P2WPKH address (bc1q...) for this key.
     pub bitcoin_address: String,
+    /// All derived Bitcoin display addresses.
+    pub bitcoin_addresses: Vec<BitcoinAddressEntry>,
 }
 
 /// Response for `noble_setConfigValue`.

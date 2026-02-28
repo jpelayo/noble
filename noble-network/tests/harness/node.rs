@@ -190,7 +190,12 @@ impl TestNode {
                 for tx in &txs {
                     let _ = self
                         .mempool
-                        .admit(tx, now, &NoChainLookup, &NoBalanceLookup);
+                        .admit(tx, now, &NoChainLookup, &NoBalanceLookup, 0);
+                }
+            }
+            CycleIo::EvictTransactions(tx_ids) => {
+                for tx_id in &tx_ids {
+                    self.mempool.remove(tx_id);
                 }
             }
             CycleIo::SetTimer { .. } | CycleIo::EmitMetric { .. } | CycleIo::Log(_) => {

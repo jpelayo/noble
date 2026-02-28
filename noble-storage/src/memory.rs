@@ -167,12 +167,19 @@ impl StorageEngine for MemoryStorage {
                 .to_noble_public_key()
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
             // S34: Canonical debit address resolution
+            // S35 F1: delta-aware balance closure — each tx sees effective balances
+            // including earlier in-block changes (credits and debits)
             let need = (tx.amount.unwrap_or(0) + tx.fee) as u64;
             let sender_addr = noble_core::resolve_debit_address(
                 &tx.source_address,
                 &sender_pk,
                 need,
-                |a| *inner.balances.get(a).unwrap_or(&0) as u64,
+                |a| {
+                    let base = *inner.balances.get(a).unwrap_or(&0) as i128;
+                    let delta = deltas.get(a).copied().unwrap_or(0);
+                    let effective = base + delta;
+                    if effective > 0 { effective as u64 } else { 0 }
+                },
             )
             .map_err(|e| StorageError::Codec(e.to_string()))?;
 
@@ -459,12 +466,18 @@ impl StorageEngine for MemoryStorage {
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
                 // S34: Use canonical debit resolution (fixes P0 replay divergence)
+                // S35 F1: delta-aware balance closure for replay path too
                 let need = (tx.amount.unwrap_or(0) + tx.fee) as u64;
                 let sender_addr = noble_core::resolve_debit_address(
                     &tx.source_address,
                     &sender_pk,
                     need,
-                    |a| *inner.balances.get(a).unwrap_or(&0) as u64,
+                    |a| {
+                        let base = *inner.balances.get(a).unwrap_or(&0) as i128;
+                        let delta = deltas.get(a).copied().unwrap_or(0);
+                        let effective = base + delta;
+                        if effective > 0 { effective as u64 } else { 0 }
+                    },
                 )
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
                 let tx_id = tx
@@ -2425,5 +2438,110 @@ mod tests {
         let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
         let count = store.count_address_history(&sender_addr).unwrap();
         assert_eq!(count, 2, "sender should have 2 history entries");
+    }
+
+    // --- S35 F1: Forward execution delta-aware debit resolution ---
+
+    #[test]
+    fn commit_block_delta_aware_bucket_switch() {
+        // Two transfers from same secp256k1 sender in one block:
+        // tx1 debits Noble balance, tx2 debits Hash160 bucket.
+        // Without delta-aware closure, the legacy fallback would see stale pre-block balances.
+        let store = MemoryStorage::new();
+
+        // Setup: generate secp256k1 sender keypair
+        let (secp_sk, secp_pk_raw) = noble_crypto::secp256k1::generate_keypair();
+        let sender_pk = NoblePublicKey::Secp256k1(secp_pk_raw.clone());
+
+        let (_, recip_pk) = ed25519::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(recip_pk.to_vec()));
+
+        let noble_addr = NobleAddress::Noble(sender_pk.clone());
+        let h160_addr = NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
+
+        // Block 0: empty genesis with a validator
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (b0, h0, ids0) =
+            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
+        store.commit_block(&b0, &h0, &ids0).unwrap();
+
+        // Seed sender balances directly for test
+        {
+            let mut inner = store.inner.write().unwrap();
+            inner.balances.insert(noble_addr.clone(), 10_000);
+            inner.balances.insert(h160_addr.clone(), 10_000);
+        }
+
+        // Create tx1: drain Noble bucket (amount=8000, fee=1000 = 9000 from Noble)
+        let mut tx1 = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: sha256(b"delta_tx1"),
+            timestamp: 1_700_000_000,
+            fee: 1_000,
+            recipient: Some(recipient.clone()),
+            amount: Some(8_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: noble_crypto::SCHEME_SECP256K1,
+                public_key: secp_pk_raw.clone(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            source_address: Some(noble_addr.to_wire_bytes()), // explicit Noble
+        };
+        let msg1 = tx1.compute_signing_message().unwrap();
+        let sig1 = noble_crypto::secp256k1::sign(&secp_sk, &msg1).unwrap();
+        tx1.publisher_sig.signature = sig1;
+        let tx1_id = tx1.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+        // Create tx2: debit Hash160 bucket (amount=5000, fee=1000)
+        let mut tx2 = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            checksum: sha256(b"delta_tx2"),
+            timestamp: 1_700_000_001,
+            fee: 1_000,
+            recipient: Some(recipient.clone()),
+            amount: Some(5_000),
+            publisher_sig: SignatureEnvelope {
+                scheme_id: noble_crypto::SCHEME_SECP256K1,
+                public_key: secp_pk_raw.clone(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            source_address: Some(h160_addr.to_wire_bytes()), // explicit Hash160
+        };
+        let msg2 = tx2.compute_signing_message().unwrap();
+        let sig2 = noble_crypto::secp256k1::sign(&secp_sk, &msg2).unwrap();
+        tx2.publisher_sig.signature = sig2;
+        let tx2_id = tx2.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+
+        // Build block with both txs
+        let block = make_block_with_validator(
+            vec![(tx1, tx1_id), (tx2, tx2_id)],
+            1,
+            h0,
+            1_700_000_010,
+            &val_sk,
+            &val_pk,
+        );
+        let result = store.commit_block(&block.0, &block.1, &block.2);
+        assert!(result.is_ok(), "two-tx block with bucket switch should commit: {result:?}");
+
+        // Verify final balances
+        let noble_bal = store.get_balance(&noble_addr).unwrap();
+        let h160_bal = store.get_balance(&h160_addr).unwrap();
+        // Noble: 10000 - 9000 = 1000 (subsidy goes to validator, not sender)
+        assert_eq!(noble_bal, 1_000, "Noble should be 10000 - 9000 = 1000");
+        // Hash160: 10000 - 6000 = 4000
+        assert_eq!(h160_bal, 4_000, "Hash160 should be 10000 - 6000 = 4000");
     }
 }

@@ -6,7 +6,10 @@
 //! Orchestrates cycle management, block proposals, vote collection,
 //! and chain tip advancement using deterministic event-driven processing.
 
-use noble_core::{validate_block, Block, BlockHeader, BlockValidationContext};
+use noble_core::{
+    validate_block, validate_transaction, Block, BlockHeader, BlockValidationContext,
+    TxValidationContext,
+};
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use tracing::{debug, info};
 
@@ -687,6 +690,23 @@ impl CycleEngine {
                         "cycle {}: self-proposed block failed validation: {e}",
                         self.tracked_cycle
                     )));
+                    // Identify which tx(s) failed validation and evict them
+                    let mut bad_tx_ids = Vec::new();
+                    for tx in &block.transactions {
+                        let tx_ctx = TxValidationContext {
+                            chain_id: self.chain_id,
+                            current_time,
+                            chain_height: self.tip_height + 1,
+                        };
+                        if let Ok(tx_id) = tx.compute_tx_id(self.chain_id) {
+                            if validate_transaction(tx, &tx_id, &tx_ctx).is_err() {
+                                bad_tx_ids.push(tx_id);
+                            }
+                        }
+                    }
+                    if !bad_tx_ids.is_empty() {
+                        outputs.push(CycleIo::EvictTransactions(bad_tx_ids));
+                    }
                     return outputs;
                 }
 

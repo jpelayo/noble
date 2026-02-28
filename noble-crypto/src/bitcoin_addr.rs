@@ -83,16 +83,58 @@ pub fn pubkey_to_p2wpkh(compressed: &[u8; 33], mainnet: bool) -> String {
 
 /// Derive a P2TR address (`bc1p...`) from a compressed secp256k1 public key.
 ///
-/// Note: This uses the x-only public key (drops the parity byte).
+/// Applies the BIP-341 key-path-only tweak: `Q = P + tagged_hash("TapTweak", x(P)) · G`
+/// and encodes the tweaked x-only output key as a Bech32m address.
 pub fn pubkey_to_p2tr(compressed: &[u8; 33], mainnet: bool) -> String {
-    // x-only key = drop the first byte (02 or 03)
-    let xonly = &compressed[1..];
+    let output_key = taproot_tweak_pubkey(compressed)
+        .expect("valid secp256k1 key must produce valid tweak");
     let hrp = if mainnet {
         bech32::Hrp::parse("bc").unwrap()
     } else {
         bech32::Hrp::parse("tb").unwrap()
     };
-    encode_segwit(hrp, 1, xonly)
+    encode_segwit(hrp, 1, &output_key)
+}
+
+/// Derive the BIP-341 Taproot output key from a compressed secp256k1 public key.
+///
+/// Applies the key-path-only tweak (no script tree):
+/// `Q = P + tagged_hash("TapTweak", x_only(P)) · G`
+///
+/// Returns the 32-byte x-only output key (even Y), or `None` if the tweak is invalid.
+pub fn taproot_tweak_pubkey(compressed: &[u8; 33]) -> Option<[u8; 32]> {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::PrimeField;
+    use k256::{ProjectivePoint, PublicKey, Scalar};
+
+    // 1. Extract x-only (internal key)
+    let xonly = &compressed[1..];
+
+    // 2. Compute tweak: t = tagged_hash("TapTweak", xonly)
+    let t_hash = crate::hash::tagged_hash("TapTweak", xonly);
+
+    // 3. Parse tweak as scalar (fails if t >= curve order)
+    let t_repr = k256::FieldBytes::from_slice(t_hash.as_bytes());
+    let t: Scalar = Option::from(Scalar::from_repr(*t_repr))?;
+
+    // 4. lift_x: parse x-only as point with even Y (0x02 prefix)
+    let mut even_compressed = [0u8; 33];
+    even_compressed[0] = 0x02;
+    even_compressed[1..].copy_from_slice(xonly);
+    let p = PublicKey::from_sec1_bytes(&even_compressed).ok()?;
+    let p_proj: ProjectivePoint = p.to_projective();
+
+    // 5. Q = P + t·G
+    let q = p_proj + ProjectivePoint::GENERATOR * t;
+
+    // 6. Extract x-only from Q (always even Y per BIP-341 convention)
+    let q_affine = q.to_affine();
+    let q_point = q_affine.to_encoded_point(false);
+    let q_x = q_point.x()?;
+
+    let mut output = [0u8; 32];
+    output.copy_from_slice(q_x.as_slice());
+    Some(output)
 }
 
 /// Parse a Bitcoin address string into its components.
@@ -484,6 +526,72 @@ mod tests {
         assert_eq!(result.len(), 32);
         let expected = hex::decode("0c28fca386c7a227600b2fe50b7cae11ec86d3bf1fbe471be89827e19d72aa1d").unwrap();
         assert_eq!(result, expected);
+    }
+
+    // --- BIP-341 Taproot tweak ---
+
+    #[test]
+    fn taproot_tweak_pubkey_valid() {
+        // Any valid compressed key should produce a tweaked output
+        let compressed =
+            hex::decode("0250863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b2352")
+                .unwrap();
+        let mut key = [0u8; 33];
+        key.copy_from_slice(&compressed);
+
+        let output = taproot_tweak_pubkey(&key);
+        assert!(output.is_some(), "valid key must produce tweaked output");
+        let output = output.unwrap();
+        // Tweaked key should differ from raw x-only
+        assert_ne!(&output[..], &key[1..33], "tweak must change the key");
+    }
+
+    #[test]
+    fn p2tr_bip341_tweak_vector() {
+        // BIP-341 wallet-test-vectors.json: key-path-only (scriptTree = null)
+        let internal_hex = "d6889cb081036e0faefa3a35157ad71086b123b2b144b649798b494c300a961d";
+        let expected_output_hex =
+            "53a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343";
+        let expected_addr = "bc1p2wsldez5mud2yam29q22wgfh9439spgduvct83k3pm50fcxa5dps59h4z5";
+
+        let internal = hex::decode(internal_hex).unwrap();
+        let mut compressed = [0u8; 33];
+        compressed[0] = 0x02;
+        compressed[1..].copy_from_slice(&internal);
+
+        let output = taproot_tweak_pubkey(&compressed).unwrap();
+        assert_eq!(hex::encode(output), expected_output_hex);
+
+        let addr = pubkey_to_p2tr(&compressed, true);
+        assert_eq!(addr, expected_addr);
+    }
+
+    #[test]
+    fn p2tr_uses_tweaked_key_not_raw_xonly() {
+        // Verify P2TR address uses the tweaked key, not the raw x-only pubkey
+        let compressed =
+            hex::decode("0250863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b2352")
+                .unwrap();
+        let mut key = [0u8; 33];
+        key.copy_from_slice(&compressed);
+
+        let addr = pubkey_to_p2tr(&key, true);
+        let parsed = parse_bitcoin_address(&addr).unwrap();
+
+        // The witness program in the address should be the TWEAKED key, not raw x-only
+        let raw_xonly = &key[1..33];
+        assert_ne!(
+            parsed.data.as_slice(),
+            raw_xonly,
+            "P2TR address must contain tweaked key, not raw x-only"
+        );
+
+        let tweaked = taproot_tweak_pubkey(&key).unwrap();
+        assert_eq!(
+            parsed.data.as_slice(),
+            &tweaked[..],
+            "P2TR address must contain the BIP-341 tweaked output key"
+        );
     }
 
     #[test]

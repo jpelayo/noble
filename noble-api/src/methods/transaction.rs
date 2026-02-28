@@ -98,12 +98,18 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         // Admit to mempool with storage-backed lookups
         let tx_id = {
             let storage = self.storage.read();
+            let chain_height = storage
+                .get_chain_tip()
+                .ok()
+                .flatten()
+                .map(|t| t.height)
+                .unwrap_or(0);
             let chain_lookup = StorageChainLookup { storage: &*storage };
             let balance_lookup = StorageBalanceLookup { storage: &*storage };
 
             let mut mempool = self.mempool.lock();
             mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup)
+                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 

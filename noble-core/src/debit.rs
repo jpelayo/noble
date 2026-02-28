@@ -158,15 +158,8 @@ mod tests {
     #[test]
     fn resolve_with_source_address_taproot() {
         let pk = make_secp_pk();
-        let xonly = match &pk {
-            NoblePublicKey::Secp256k1(bytes) => {
-                let mut x = [0u8; 32];
-                x.copy_from_slice(&bytes[1..33]);
-                x
-            }
-            _ => unreachable!(),
-        };
-        let taproot_addr = NobleAddress::BitcoinTaproot(xonly);
+        // BIP-341: use the tweaked output key, not raw x-only
+        let taproot_addr = NobleAddress::bitcoin_taproot_for_pubkey(&pk).unwrap();
         let wire = taproot_addr.to_wire_bytes();
 
         let result = resolve_debit_address(&Some(wire), &pk, 100, |_| 0);

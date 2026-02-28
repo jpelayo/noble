@@ -1221,11 +1221,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
 
                     let storage = self.storage.read();
+                    let chain_height = storage
+                        .get_chain_tip()
+                        .ok()
+                        .flatten()
+                        .map(|t| t.height)
+                        .unwrap_or(0);
                     let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
                     let balance_lookup = StorageBalanceLookupAdapter { storage: &*storage };
                     let mut mempool = self.mempool.lock();
                     for tx in txs {
-                        let _ = mempool.admit(&tx, now, &chain_lookup, &balance_lookup);
+                        let _ = mempool.admit(&tx, now, &chain_lookup, &balance_lookup, chain_height);
                     }
                 }
                 CycleIo::Log(msg) => {
@@ -1239,6 +1245,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         task = "consensus",
                         "consensus timer: {duration_secs}s (handled by tick interval)"
                     );
+                }
+                CycleIo::EvictTransactions(tx_ids) => {
+                    let mut mempool = self.mempool.lock();
+                    for tx_id in &tx_ids {
+                        if mempool.remove(tx_id).is_some() {
+                            tracing::warn!(task = "mempool", "evicted poison tx {tx_id}");
+                        }
+                    }
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.

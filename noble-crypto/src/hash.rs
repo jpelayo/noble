@@ -123,6 +123,18 @@ pub fn double_sha256(data: &[u8]) -> Hash256 {
     sha256(&first.0)
 }
 
+/// BIP-340 tagged hash: `SHA256(SHA256(tag) || SHA256(tag) || msg)`.
+///
+/// Used for domain-separated hashing in BIP-341 Taproot (e.g., `"TapTweak"`).
+pub fn tagged_hash(tag: &str, msg: &[u8]) -> Hash256 {
+    let tag_hash = sha256(tag.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(tag_hash.as_bytes());
+    hasher.update(tag_hash.as_bytes());
+    hasher.update(msg);
+    Hash256(hasher.finalize().into())
+}
+
 /// Compute the SHA-256 hash of a type's canonical CBOR encoding.
 ///
 /// This is the standard way to hash protocol objects in NOBLE.
@@ -325,5 +337,28 @@ mod tests {
         let single = canonical_hash(&val).unwrap();
         let double = canonical_double_hash(&val).unwrap();
         assert_ne!(single, double);
+    }
+
+    // --- BIP-340 tagged hash ---
+
+    #[test]
+    fn tagged_hash_deterministic() {
+        let h1 = tagged_hash("TapTweak", b"test");
+        let h2 = tagged_hash("TapTweak", b"test");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn tagged_hash_domain_separated() {
+        let h1 = tagged_hash("TapTweak", b"data");
+        let h2 = tagged_hash("TapLeaf", b"data");
+        assert_ne!(h1, h2, "different tags must produce different hashes");
+    }
+
+    #[test]
+    fn tagged_hash_differs_from_plain_sha256() {
+        let plain = sha256(b"TapTweak");
+        let tagged = tagged_hash("TapTweak", b"");
+        assert_ne!(plain, tagged);
     }
 }
