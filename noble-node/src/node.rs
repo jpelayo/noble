@@ -370,7 +370,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let (peer_update_tx, _) = broadcast::channel(64);
 
         // --- IP access control ---
-        let setup_mode = !config.storage.data_dir.join("identity.json").exists();
+        // Setup mode when identity.json is absent OR has no node_name configured.
+        let setup_mode = !config.storage.data_dir.join("identity.json").exists()
+            || node_identity.node_name.trim().is_empty();
 
         let ip_filter = if setup_mode {
             let gui_scheme = if config.api.tls_enabled { "https" } else { "http" };

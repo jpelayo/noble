@@ -388,7 +388,7 @@ export class MockRpcClient {
   #authToken = null;
   #totpSecret = null;
   #allowedIps = [];
-  #mockFirstRun = false;
+  #mockFirstRun = true;
   #storageConfig = null;
   #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
@@ -1125,6 +1125,23 @@ export class MockRpcClient {
       }
 
       case 'noble_getNodeIdentity':
+        if (this.#mockFirstRun) {
+          return {
+            node_name: '',
+            org_type: '',
+            org_name: '',
+            node_role: '',
+            contact_email: '',
+            website: '',
+            host_address: '',
+            governance_class: '',
+            wants_to_validate: false,
+            wants_to_vote: false,
+            p2p_port: 8780,
+            pki_attestation: null,
+            pkcs12_configured: false,
+          };
+        }
         return {
           node_name: 'noble-dev-01',
           org_type: 'Individual',
@@ -1142,6 +1159,7 @@ export class MockRpcClient {
         };
 
       case 'noble_setNodeIdentity':
+        this.#mockFirstRun = false;
         return { success: true };
 
       case 'noble_setRewardAddress': {

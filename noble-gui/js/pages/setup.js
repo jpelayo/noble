@@ -848,6 +848,11 @@ export function init(root, ctx) {
       backBtn.style.display = 'none';
       nextBtn.style.display = 'none';
 
+      // Unlock navigation — setup is complete
+      if (typeof ctx.deactivateSetupGuard === 'function') {
+        ctx.deactivateSetupGuard();
+      }
+
     } catch (e) {
       body.innerHTML += `<div style="color:var(--error);margin-top:var(--gap)">Setup error: ${e.message || e}</div>`;
       nextBtn.disabled = false;

@@ -154,15 +154,17 @@ const ctx = { rpc, ws, state, subscribe, getState };
 const content = document.getElementById('content');
 const router = new Router(content, ctx);
 
-// Issue 8: Server injects window.NOBLE_SETUP_MODE=true when identity.json is absent.
-// Redirect synchronously before router.start() so the setup page is shown
-// immediately — no async RPC calls, no race with Overview rendering.
-// Lock all navigation to /setup only — other pages are blocked until setup completes.
-if (window.NOBLE_SETUP_MODE) {
+// Setup guard: block all navigation except /setup when node is unconfigured.
+//
+// Two activation paths:
+//   1. Server-injected NOBLE_SETUP_MODE (synchronous, before router.start)
+//   2. RPC-based check (async, covers mock mode AND production edge cases
+//      where identity.json exists from CLI setup but GUI wizard wasn't completed)
+
+function activateSetupGuard() {
   location.hash = '#/setup';
   router.setGuard((path) => path === '/setup' ? null : '/setup');
 
-  // Visually disable all sidebar links except setup
   document.querySelectorAll('#sidebar a').forEach(a => {
     if (a.getAttribute('href') !== '#/setup') {
       a.style.opacity = '0.35';
@@ -172,20 +174,45 @@ if (window.NOBLE_SETUP_MODE) {
   });
 }
 
-// Hide setup link in sidebar when node is fully configured.
-// In production the server sets NOBLE_SETUP_MODE; in mock mode we check the RPC.
-if (!window.NOBLE_SETUP_MODE) {
+function deactivateSetupGuard() {
+  router.clearGuard();
+
+  document.querySelectorAll('#sidebar a').forEach(a => {
+    if (a.getAttribute('href') !== '#/setup') {
+      a.style.opacity = '';
+      a.style.pointerEvents = '';
+      a.style.cursor = '';
+    }
+  });
+
+  // Hide setup link — it's no longer needed
   const setupNavItem = document.querySelector('a[href="#/setup"]');
-  if (setupNavItem) {
-    // Check via RPC — if identity exists, hide setup.
-    rpc.call('noble_getNodeIdentity').then((ident) => {
-      if (ident && ident.node_name) {
-        setupNavItem.parentElement.style.display = 'none';
-      }
-    }).catch(() => {
-      // RPC unavailable or first-run — keep setup visible
-    });
-  }
+  if (setupNavItem) setupNavItem.parentElement.style.display = 'none';
+}
+
+// Expose for setup.js to call after completion
+ctx.deactivateSetupGuard = deactivateSetupGuard;
+
+// Path 1: synchronous server-injected flag (production first-boot)
+if (window.NOBLE_SETUP_MODE) {
+  activateSetupGuard();
+}
+
+// Path 2: async RPC check (mock mode + production where identity.json exists
+// but GUI wizard was never completed)
+if (!window.NOBLE_SETUP_MODE) {
+  rpc.call('noble_getNodeIdentity').then((ident) => {
+    if (!ident || !ident.node_name) {
+      // Not configured — lock to setup
+      activateSetupGuard();
+    } else {
+      // Configured — hide setup link
+      const setupNavItem = document.querySelector('a[href="#/setup"]');
+      if (setupNavItem) setupNavItem.parentElement.style.display = 'none';
+    }
+  }).catch(() => {
+    // RPC unavailable — keep setup visible, don't lock
+  });
 }
 
 router
