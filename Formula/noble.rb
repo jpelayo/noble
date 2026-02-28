@@ -20,12 +20,17 @@ class Noble < Formula
   license "Apache-2.0"
   head "https://github.com/jpelayo/noble.git", branch: "main"
 
-  # Remote access is configured via the NOBLE_ALLOWED_IPS environment variable.
-  # Examples:
-  #   NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install --HEAD noble   # home LAN
-  #   NOBLE_ALLOWED_IPS=10.0.0.0/8     brew install --HEAD noble   # corporate
-  #   NOBLE_ALLOWED_IPS=localonly       brew install --HEAD noble   # localhost only
-  # Without the env var, post_install defaults to localhost-only (no prompt).
+  # Remote access flags (set at install time, applied to noble.toml):
+  #   brew install --HEAD noble --with-192   # allow 192.168.0.0/16
+  #   brew install --HEAD noble --with-10    # allow 10.0.0.0/8
+  #   brew install --HEAD noble --with-172   # allow 172.16.0.0/12
+  #   brew install --HEAD noble --localonly  # force localhost only (default)
+  # Alternatively: NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install ...
+
+  option "with-192", "Allow remote access from 192.168.0.0/16 (home LAN)"
+  option "with-10",  "Allow remote access from 10.0.0.0/8 (corporate LAN)"
+  option "with-172", "Allow remote access from 172.16.0.0/12 (Docker/private)"
+  option "localonly", "Force localhost-only mode (default)"
 
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
@@ -75,23 +80,34 @@ class Noble < Formula
       config.gsub!('data_dir = "data"', "data_dir = \"#{var}/noble/data\"")
       config.gsub!('keystore_path = "keystore"', "keystore_path = \"#{var}/noble/keystore\"")
 
-      # Remote access via NOBLE_ALLOWED_IPS env var (no interactive prompt).
-      allowed = ENV["NOBLE_ALLOWED_IPS"].to_s.strip
-      if !allowed.empty? && allowed != "localonly"
-        require "ipaddr"
-        entries = allowed.split(",").map(&:strip).reject(&:empty?)
-        bad = entries.reject { |e| IPAddr.new(e) rescue false }
-        unless bad.empty?
-          opoo "Invalid NOBLE_ALLOWED_IPS entries ignored: #{bad.join(", ")}"
-          entries -= bad
+      # Remote access — CLI flags (--allow192 etc.) or NOBLE_ALLOWED_IPS env var.
+      # Never prompts interactively. Default: localhost-only.
+      cidrs = []
+      cidrs << "192.168.0.0/16" if build.with?("192")
+      cidrs << "10.0.0.0/8"     if build.with?("10")
+      cidrs << "172.16.0.0/12"  if build.with?("172")
+
+      # Env var fallback (for CI / scripted installs).
+      if cidrs.empty? && !build.include?("localonly")
+        allowed = ENV["NOBLE_ALLOWED_IPS"].to_s.strip
+        if !allowed.empty? && allowed != "localonly"
+          require "ipaddr"
+          entries = allowed.split(",").map(&:strip).reject(&:empty?)
+          bad = entries.reject { |e| IPAddr.new(e) rescue false }
+          unless bad.empty?
+            opoo "Invalid NOBLE_ALLOWED_IPS entries ignored: #{bad.join(", ")}"
+            entries -= bad
+          end
+          cidrs = entries
         end
-        unless entries.empty?
-          cidrs = entries.map { |s| "\"#{s}\"" }.join(", ")
-          config.gsub!('allowed_ips = []', "allowed_ips = [#{cidrs}]")
-          puts
-          puts "  Remote access enabled for: #{entries.join(", ")}"
-          puts "  After starting, the dashboard will be at: https://<this-host>:8785"
-        end
+      end
+
+      unless cidrs.empty?
+        cidr_str = cidrs.map { |s| "\"#{s}\"" }.join(", ")
+        config.gsub!('allowed_ips = []', "allowed_ips = [#{cidr_str}]")
+        puts
+        puts "  Remote access enabled for: #{cidrs.join(", ")}"
+        puts "  After starting, the dashboard will be at: https://<this-host>:8785"
       else
         puts
         puts "  Localhost-only mode: Dashboard and RPC are accessible on this machine only."
@@ -129,8 +145,9 @@ class Noble < Formula
 
       Remote access (set before install, or edit noble.toml later):
 
-        NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install --HEAD noble   # home LAN
-        NOBLE_ALLOWED_IPS=10.0.0.0/8     brew install --HEAD noble   # corporate
+        brew install --HEAD noble --with-192  # home LAN  (192.168.0.0/16)
+        brew install --HEAD noble --with-10   # corporate (10.0.0.0/8)
+        brew install --HEAD noble --with-172  # Docker    (172.16.0.0/12)
 
       Ports that should be reachable:
 
