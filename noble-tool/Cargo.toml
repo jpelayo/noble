@@ -21,6 +21,9 @@ noble-storage.workspace = true
 clap = { workspace = true }
 hex.workspace = true
 serde_json.workspace = true
+bip39.workspace = true
+bip32.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

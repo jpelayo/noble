@@ -389,6 +389,7 @@ export class MockRpcClient {
   #totpSecret = null;
   #allowedIps = [];
   #mockFirstRun = false;
+  #storageConfig = null;
   #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
   constructor({ latencyMin = 50, latencyMax = 150, firstRun = false } = {}) {
@@ -1143,6 +1144,18 @@ export class MockRpcClient {
       case 'noble_setNodeIdentity':
         return { success: true };
 
+      case 'noble_setRewardAddress': {
+        const addr = (params.address || '').trim();
+        if (!addr) throw { code: -32602, message: 'address is required' };
+        // Detect address type from prefix
+        let addrType = 'Unknown';
+        if (addr.startsWith('bc1q')) addrType = 'P2WPKH';
+        else if (addr.startsWith('bc1p')) addrType = 'P2TR';
+        else if (addr.startsWith('1')) addrType = 'P2PKH';
+        else if (/^[0-9a-fA-F]+$/.test(addr)) addrType = 'Noble';
+        return { success: true, address_type: addrType };
+      }
+
       case 'noble_getPeerAnnounces':
         return [
           {
@@ -1413,11 +1426,20 @@ export class MockRpcClient {
         for (let i = 0; i < wc; i++) words.push(wordList[i % wordList.length]);
         // First-run complete after wallet creation
         this.#mockFirstRun = false;
+        const pubkey = randomHex(32);
         return {
           mnemonic: words.join(' '),
-          address: '02' + randomHex(32),
+          address: '02' + pubkey,
           scheme_id: 2,
           word_count: wc,
+          private_key: randomHex(32),
+          public_key: '02' + pubkey,
+          wire_hex: '02' + '02' + pubkey,
+          bitcoin_addresses: [
+            { address_type: 'p2pkh', address: '1' + randomHex(24).slice(0, 33) },
+            { address_type: 'p2wpkh', address: 'bc1q' + randomHex(20).slice(0, 38) },
+            { address_type: 'p2tr', address: 'bc1p' + randomHex(32).slice(0, 58) },
+          ],
         };
       }
 
@@ -1428,10 +1450,19 @@ export class MockRpcClient {
         }
         // First-run complete after wallet import
         this.#mockFirstRun = false;
+        const impPubkey = randomHex(32);
         return {
-          address: '02' + randomHex(32),
+          address: '02' + impPubkey,
           scheme_id: 2,
           already_exists: Math.random() > 0.5,
+          private_key: randomHex(32),
+          public_key: '02' + impPubkey,
+          wire_hex: '02' + '02' + impPubkey,
+          bitcoin_addresses: [
+            { address_type: 'p2pkh', address: '1' + randomHex(24).slice(0, 33) },
+            { address_type: 'p2wpkh', address: 'bc1q' + randomHex(20).slice(0, 38) },
+            { address_type: 'p2tr', address: 'bc1p' + randomHex(32).slice(0, 58) },
+          ],
         };
       }
 
@@ -1439,8 +1470,8 @@ export class MockRpcClient {
         const tip = this.#chain.blocks[this.#chain.blocks.length - 1];
         return {
           chain_height: tip ? tip.header.height : 0,
-          pruning_mode: 'archive',
-          keep_blocks: 10000,
+          pruning_mode: this.#storageConfig?.pruning_mode || 'archive',
+          keep_blocks: this.#storageConfig?.keep_blocks || 10000,
           pruned_up_to: 0,
           lowest_full_height: 0,
         };
@@ -1448,12 +1479,36 @@ export class MockRpcClient {
 
       case 'noble_getPruningStatus':
         return {
-          mode: 'archive',
+          mode: this.#storageConfig?.pruning_mode || 'archive',
           blocks_pruned: 0,
           transactions_removed: 0,
           lowest_full_height: 0,
           more_remaining: false,
         };
+
+      case 'noble_getStorageConfig':
+        return this.#storageConfig || {
+          data_dir: '~/.noble/data',
+          cache_size_mb: 256,
+          compression: true,
+          pruning_mode: 'archive',
+          keep_blocks: 10000,
+          max_db_size_gb: 0,
+          volumes: [],
+        };
+
+      case 'noble_setStorageConfig': {
+        this.#storageConfig = {
+          data_dir: params.data_dir || '~/.noble/data',
+          cache_size_mb: params.cache_size_mb || 256,
+          compression: params.compression !== false,
+          pruning_mode: params.pruning_mode || 'archive',
+          keep_blocks: params.keep_blocks || 10000,
+          max_db_size_gb: params.max_db_size_gb || 0,
+          volumes: params.volumes || [],
+        };
+        return { success: true };
+      }
 
       case 'noble_rotateTotpSecret': {
         if (!params.current_code_hash || params.current_code_hash.length !== 64) {

@@ -3118,6 +3118,8 @@ name = "noble-node"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bip32",
+ "bip39",
  "clap",
  "clap_complete",
  "dialoguer",
@@ -3159,6 +3161,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -3192,6 +3195,8 @@ dependencies = [
 name = "noble-tool"
 version = "0.1.0"
 dependencies = [
+ "bip32",
+ "bip39",
  "clap",
  "hex",
  "noble-codec",
@@ -3200,6 +3205,7 @@ dependencies = [
  "noble-storage",
  "serde_json",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use zeroize::Zeroize;
 
 use noble_codec::NobleCbor;
 use noble_core::{
@@ -97,6 +98,45 @@ enum Commands {
         #[arg(long, default_value_os_t = default_key_path())]
         key_file: PathBuf,
     },
+
+    /// Generate or recover a Noble wallet (offline — nothing is persisted).
+    Wallet {
+        #[command(subcommand)]
+        action: WalletCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum WalletCommand {
+    /// Generate a new BIP-39 mnemonic and derive the Noble wallet key.
+    Generate {
+        /// Number of mnemonic words (12 or 24).
+        #[arg(long, default_value_t = 24)]
+        words: u32,
+
+        /// Optional BIP-39 passphrase ("25th word").
+        #[arg(long, default_value = "")]
+        passphrase: String,
+
+        /// Output machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Recover a wallet from an existing BIP-39 mnemonic phrase.
+    Recover {
+        /// The mnemonic phrase (12 or 24 words, quoted).
+        #[arg(long)]
+        mnemonic: String,
+
+        /// Optional BIP-39 passphrase ("25th word").
+        #[arg(long, default_value = "")]
+        passphrase: String,
+
+        /// Output machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -130,6 +170,7 @@ fn main() {
         Commands::ValidateChain { data_dir } => cmd_validate_chain(data_dir),
         Commands::GenerateKey { output, scheme } => cmd_generate_key(output, scheme),
         Commands::ShowKey { key_file } => cmd_show_key(key_file),
+        Commands::Wallet { action } => cmd_wallet(action),
     }
 }
 
@@ -475,6 +516,161 @@ fn cmd_show_key(key_file: PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
+// wallet (offline generate / recover)
+// ---------------------------------------------------------------------------
+
+/// All derived wallet information (no persistence).
+struct WalletInfo {
+    mnemonic: String,
+    private_key_hex: String,
+    public_key_hex: String,
+    wire_hex: String,
+    p2pkh: String,
+    p2wpkh: String,
+    p2tr: String,
+}
+
+/// Derive a Noble wallet from a BIP-39 mnemonic (no persistence).
+///
+/// Path: `m/44'/9999'/0'/0/0` (same as `noble-wallet` `KeyStore`).
+fn derive_wallet_info(mnemonic: &bip39::Mnemonic, passphrase: &str) -> WalletInfo {
+    use noble_crypto::bitcoin_addr::{pubkey_to_p2pkh, pubkey_to_p2wpkh, pubkey_to_p2tr};
+    use noble_crypto::NoblePrivateKey;
+
+    // 1. Seed
+    let mut seed = mnemonic.to_seed(passphrase);
+
+    // 2. BIP-32 derivation at m/44'/9999'/0'/0/0
+    let xprv = bip32::XPrv::derive_from_path(
+        &seed,
+        &"m/44'/9999'/0'/0/0".parse().expect("valid derivation path"),
+    )
+    .expect("BIP-32 derivation failed");
+
+    seed.zeroize();
+
+    // 3. Build private/public keys
+    let mut sk_bytes = xprv.private_key().to_bytes().to_vec();
+    let private_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
+    let public_key = private_key.public_key();
+    let wire_bytes = public_key.to_wire_bytes();
+    let pk_bytes = public_key.key_bytes();
+
+    // 4. Compressed secp256k1 public key (33 bytes)
+    let mut compressed = [0u8; 33];
+    compressed.copy_from_slice(pk_bytes);
+
+    // 5. Bitcoin addresses
+    let p2pkh = pubkey_to_p2pkh(&compressed, true);
+    let p2wpkh = pubkey_to_p2wpkh(&compressed, true);
+    let p2tr = pubkey_to_p2tr(&compressed, true);
+
+    let info = WalletInfo {
+        mnemonic: mnemonic.to_string(),
+        private_key_hex: hex::encode(&sk_bytes),
+        public_key_hex: hex::encode(pk_bytes),
+        wire_hex: hex::encode(&wire_bytes),
+        p2pkh,
+        p2wpkh,
+        p2tr,
+    };
+
+    sk_bytes.zeroize();
+    info
+}
+
+fn cmd_wallet(action: WalletCommand) {
+    match action {
+        WalletCommand::Generate {
+            words,
+            passphrase,
+            json,
+        } => {
+            if words != 12 && words != 24 {
+                eprintln!("Error: --words must be 12 or 24.");
+                std::process::exit(1);
+            }
+            let mnemonic = bip39::Mnemonic::generate(words as usize)
+                .expect("failed to generate mnemonic");
+            let info = derive_wallet_info(&mnemonic, &passphrase);
+            if json {
+                print_wallet_json(&info);
+            } else {
+                print_wallet_human(&info);
+            }
+        }
+        WalletCommand::Recover {
+            mnemonic,
+            passphrase,
+            json,
+        } => {
+            let parsed: bip39::Mnemonic = match mnemonic.parse() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error: invalid mnemonic — {e}");
+                    std::process::exit(1);
+                }
+            };
+            let info = derive_wallet_info(&parsed, &passphrase);
+            if json {
+                print_wallet_json(&info);
+            } else {
+                print_wallet_human(&info);
+            }
+        }
+    }
+}
+
+fn print_wallet_human(info: &WalletInfo) {
+    // Warning on stderr
+    eprintln!("WARNING: The private key and mnemonic below grant full");
+    eprintln!("control of this wallet. Store them securely and NEVER");
+    eprintln!("share them. This output is NOT saved anywhere.");
+    eprintln!();
+
+    // Data on stdout
+    println!("=== Noble Wallet ===");
+    println!();
+
+    // Format mnemonic in numbered 4-column grid
+    let words: Vec<&str> = info.mnemonic.split_whitespace().collect();
+    println!("Mnemonic ({} words):", words.len());
+    for (i, word) in words.iter().enumerate() {
+        print!("{:>3}. {:<14}", i + 1, word);
+        if (i + 1) % 4 == 0 {
+            println!();
+        }
+    }
+    println!();
+
+    println!("Derivation Path: m/44'/9999'/0'/0/0");
+    println!("Private Key:     {}", info.private_key_hex);
+    println!("Public Key:      {}", info.public_key_hex);
+    println!("Wire Hex:        {}", info.wire_hex);
+    println!();
+    println!("Bitcoin Addresses:");
+    println!("  P2PKH  (1...):   {}", info.p2pkh);
+    println!("  P2WPKH (bc1q):   {}", info.p2wpkh);
+    println!("  P2TR   (bc1p):   {}", info.p2tr);
+}
+
+fn print_wallet_json(info: &WalletInfo) {
+    let obj = serde_json::json!({
+        "mnemonic": info.mnemonic,
+        "derivation_path": "m/44'/9999'/0'/0/0",
+        "private_key": info.private_key_hex,
+        "public_key": info.public_key_hex,
+        "wire_hex": info.wire_hex,
+        "bitcoin_addresses": {
+            "p2pkh": info.p2pkh,
+            "p2wpkh": info.p2wpkh,
+            "p2tr": info.p2tr,
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -620,5 +816,109 @@ mod tests {
             wire
         });
         assert_eq!(pubkey_hex, expected_hex);
+    }
+
+    // ── Wallet tests ──
+
+    #[test]
+    fn wallet_generate_24_words() {
+        let mnemonic = bip39::Mnemonic::generate(24).unwrap();
+        let info = derive_wallet_info(&mnemonic, "");
+
+        let words: Vec<&str> = info.mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 24);
+        assert_eq!(info.private_key_hex.len(), 64); // 32 bytes hex
+        assert_eq!(info.public_key_hex.len(), 66); // 33 bytes hex (compressed)
+        assert!(info.wire_hex.starts_with("02")); // secp256k1 scheme prefix
+        assert!(info.p2pkh.starts_with('1') || info.p2pkh.starts_with('L'));
+        assert!(info.p2wpkh.starts_with("bc1q"));
+        assert!(info.p2tr.starts_with("bc1p"));
+    }
+
+    #[test]
+    fn wallet_generate_12_words() {
+        let mnemonic = bip39::Mnemonic::generate(12).unwrap();
+        let info = derive_wallet_info(&mnemonic, "");
+
+        let words: Vec<&str> = info.mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 12);
+        assert_eq!(info.private_key_hex.len(), 64);
+        assert!(info.p2pkh.starts_with('1'));
+        assert!(info.p2wpkh.starts_with("bc1q"));
+        assert!(info.p2tr.starts_with("bc1p"));
+    }
+
+    #[test]
+    fn wallet_recover_deterministic() {
+        let mnemonic = bip39::Mnemonic::generate(24).unwrap();
+        let info1 = derive_wallet_info(&mnemonic, "");
+        let info2 = derive_wallet_info(&mnemonic, "");
+
+        assert_eq!(info1.private_key_hex, info2.private_key_hex);
+        assert_eq!(info1.public_key_hex, info2.public_key_hex);
+        assert_eq!(info1.wire_hex, info2.wire_hex);
+        assert_eq!(info1.p2pkh, info2.p2pkh);
+        assert_eq!(info1.p2wpkh, info2.p2wpkh);
+        assert_eq!(info1.p2tr, info2.p2tr);
+    }
+
+    #[test]
+    fn wallet_passphrase_changes_key() {
+        let mnemonic = bip39::Mnemonic::generate(24).unwrap();
+        let info_a = derive_wallet_info(&mnemonic, "");
+        let info_b = derive_wallet_info(&mnemonic, "my secret passphrase");
+
+        assert_ne!(info_a.private_key_hex, info_b.private_key_hex);
+        assert_ne!(info_a.public_key_hex, info_b.public_key_hex);
+        assert_ne!(info_a.p2wpkh, info_b.p2wpkh);
+    }
+
+    #[test]
+    fn wallet_recover_roundtrip() {
+        let mnemonic = bip39::Mnemonic::generate(24).unwrap();
+        let mnemonic_str = mnemonic.to_string();
+        let parsed: bip39::Mnemonic = mnemonic_str.parse().unwrap();
+
+        let info1 = derive_wallet_info(&mnemonic, "test");
+        let info2 = derive_wallet_info(&parsed, "test");
+
+        assert_eq!(info1.private_key_hex, info2.private_key_hex);
+        assert_eq!(info1.p2wpkh, info2.p2wpkh);
+    }
+
+    #[test]
+    fn wallet_json_output_parses() {
+        let mnemonic = bip39::Mnemonic::generate(24).unwrap();
+        let info = derive_wallet_info(&mnemonic, "");
+
+        let obj = serde_json::json!({
+            "mnemonic": info.mnemonic,
+            "derivation_path": "m/44'/9999'/0'/0/0",
+            "private_key": info.private_key_hex,
+            "public_key": info.public_key_hex,
+            "wire_hex": info.wire_hex,
+            "bitcoin_addresses": {
+                "p2pkh": info.p2pkh,
+                "p2wpkh": info.p2wpkh,
+                "p2tr": info.p2tr,
+            },
+        });
+
+        let json_str = serde_json::to_string_pretty(&obj).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["mnemonic"].is_string());
+        assert!(parsed["private_key"].is_string());
+        assert!(parsed["public_key"].is_string());
+        assert!(parsed["wire_hex"].is_string());
+        assert!(parsed["bitcoin_addresses"]["p2pkh"].is_string());
+        assert!(parsed["bitcoin_addresses"]["p2wpkh"].is_string());
+        assert!(parsed["bitcoin_addresses"]["p2tr"].is_string());
+    }
+
+    #[test]
+    fn wallet_invalid_mnemonic_rejected() {
+        let bad = "foo bar baz quux wibble wobble";
+        let result: Result<bip39::Mnemonic, _> = bad.parse();
+        assert!(result.is_err());
     }
 }

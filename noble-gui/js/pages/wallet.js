@@ -14,9 +14,12 @@ export function init(root, ctx) {
   const PAGE_SIZE = 20;
 
   root.innerHTML = `
-    <div class="page-header">
-      <h1>Wallet</h1>
-      <p>Node wallet inspector — incoming subsidies, fees, and transfers (read-only)</p>
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div>
+        <h1>Wallet</h1>
+        <p>Node wallet inspector — incoming subsidies, fees, and transfers (read-only)</p>
+      </div>
+      <button id="w-wallet-gear" title="Mnemonic Wallet Tool" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;margin-top:4px">&#9881;</button>
     </div>
 
     <div class="kpi-grid">
@@ -123,10 +126,19 @@ export function init(root, ctx) {
       <div class="pagination" id="w-pagination"></div>
     </div>
 
-    <!-- Mnemonic Wallet Management -->
-    <div class="panel">
-      <div class="panel-header">Mnemonic Wallet</div>
-      <div class="panel-body" id="w-mnemonic-panel">
+    <!-- Mnemonic Wallet — gear button triggers modal -->
+    <div id="w-mnemonic-panel"></div>
+
+    <!-- Modal overlay -->
+    <div id="w-wallet-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:900px;width:92%;max-height:85vh;overflow-y:auto;padding:var(--gap-lg);position:relative">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)">
+          <h3 style="margin:0">Mnemonic Wallet</h3>
+          <button id="w-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
+        </div>
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)">
+          Generate or import a Noble wallet offline. Nothing is saved to the node.
+        </p>
         <div style="display:flex;gap:var(--gap);flex-wrap:wrap;margin-bottom:var(--gap)">
           <button id="w-generate-btn" class="btn btn-primary" style="padding:8px 16px">Generate New Wallet</button>
           <button id="w-import-btn" class="btn btn-secondary" style="padding:8px 16px">Import from Mnemonic</button>
@@ -387,7 +399,10 @@ export function init(root, ctx) {
   // Filter change
   wFilter.addEventListener('change', () => { currentPage = 0; renderTransactions(); });
 
-  // ── Mnemonic wallet management (security-hardened) ──
+  // ── Mnemonic wallet modal (security-hardened) ──
+  const walletGear = root.querySelector('#w-wallet-gear');
+  const walletModal = root.querySelector('#w-wallet-modal');
+  const modalClose = root.querySelector('#w-modal-close');
   const generateBtn = root.querySelector('#w-generate-btn');
   const importBtn = root.querySelector('#w-import-btn');
   const generateArea = root.querySelector('#w-generate-area');
@@ -397,10 +412,24 @@ export function init(root, ctx) {
   let activeImportForm = null;
   let autoClearHandle = null;
 
+  function openWalletModal() { walletModal.style.display = 'flex'; }
+  function closeWalletModal() {
+    if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; generateArea.innerHTML = ''; }
+    if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; importArea.innerHTML = ''; }
+    if (autoClearHandle) { autoClearHandle.stop(); autoClearHandle = null; }
+    destroySecureElements(walletModal);
+    walletModal.style.display = 'none';
+  }
+  walletGear.addEventListener('click', openWalletModal);
+  modalClose.addEventListener('click', closeWalletModal);
+  walletModal.addEventListener('click', (e) => { if (e.target === walletModal) closeWalletModal(); });
+
   generateBtn.addEventListener('click', () => {
     // Collapse import, toggle generate
     if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; importArea.innerHTML = ''; }
     if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; generateArea.innerHTML = ''; return; }
+    // Clear any previous terminal output
+    generateArea.querySelectorAll('.terminal-output').forEach(t => t.remove());
 
     generateArea.innerHTML = '';
     activeGenerateForm = createPassphraseForm(generateArea, {
@@ -434,11 +463,11 @@ export function init(root, ctx) {
           // Auto-clear timer (5 minutes)
           autoClearHandle = startAutoClearTimer(generateArea, gridEl, 300_000);
 
-          // Derived address
-          const addrEl = document.createElement('div');
-          addrEl.style.cssText = 'margin-top:var(--gap-sm)';
-          addrEl.innerHTML = `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">Derived Address</span><br><span class="mono" style="font-size:var(--font-size-sm)">${result.address}</span>`;
-          generateArea.appendChild(addrEl);
+          // Terminal output with full key info
+          const termEl = document.createElement('div');
+          termEl.className = 'terminal-output';
+          termEl.innerHTML = formatTerminalOutput(result, false);
+          generateArea.appendChild(termEl);
 
         } catch (e) {
           const err = document.createElement('div');
@@ -458,6 +487,7 @@ export function init(root, ctx) {
     if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; generateArea.innerHTML = ''; }
     if (autoClearHandle) { autoClearHandle.stop(); autoClearHandle = null; }
     if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; importArea.innerHTML = ''; return; }
+    importArea.querySelectorAll('.terminal-output').forEach(t => t.remove());
 
     importArea.innerHTML = '';
     const wrapper = document.createElement('div');
@@ -502,10 +532,15 @@ export function init(root, ctx) {
 
           resultEl.style.display = 'block';
           if (result.already_exists) {
-            resultEl.innerHTML = `<span style="color:var(--warning)">Key already exists.</span> Address: <span class="mono">${result.address}</span>`;
+            resultEl.innerHTML = `<span style="color:var(--warning)">Key already exists.</span>`;
           } else {
-            resultEl.innerHTML = `<span style="color:var(--success)">Key imported successfully.</span> Address: <span class="mono">${result.address}</span>`;
+            resultEl.innerHTML = `<span style="color:var(--success)">Key imported successfully.</span>`;
           }
+          // Terminal output with full key info (no mnemonic display for import)
+          const importTermEl = document.createElement('div');
+          importTermEl.className = 'terminal-output';
+          importTermEl.innerHTML = formatTerminalOutput(result, false);
+          resultEl.appendChild(importTermEl);
         } catch (e) {
           resultEl.style.display = 'block';
           resultEl.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message || e}</span>`;
@@ -544,9 +579,7 @@ export function init(root, ctx) {
   return {
     destroy() {
       unsubs.forEach(fn => { try { fn(); } catch {} });
-      if (activeGenerateForm) { activeGenerateForm.destroy(); activeGenerateForm = null; }
-      if (activeImportForm) { activeImportForm.destroy(); activeImportForm = null; }
-      if (autoClearHandle) { autoClearHandle.stop(); autoClearHandle = null; }
+      closeWalletModal();
       destroySecureElements(mnemonicPanel);
     },
   };
@@ -585,4 +618,59 @@ function typeLabel(type) {
     case 'doc_registration':   return 'Doc Registration';
     default: return type;
   }
+}
+
+/**
+ * Build a terminal-styled HTML block showing full wallet key info.
+ * @param {Object}  result       — RPC response from generateMnemonic/importMnemonic
+ * @param {boolean} showMnemonic — whether to include the mnemonic words
+ * @returns {string} HTML string
+ */
+function formatTerminalOutput(result, showMnemonic) {
+  const lines = [];
+
+  lines.push('<span class="term-warn">WARNING: The information below grants full control of this</span>');
+  lines.push('<span class="term-warn">wallet. Store it securely and NEVER share it.</span>');
+  lines.push('');
+  lines.push('<span class="term-heading">=== Noble Wallet ===</span>');
+  lines.push('');
+
+  if (showMnemonic && result.mnemonic) {
+    const words = result.mnemonic.split(/\s+/);
+    lines.push(`<span class="term-label">Mnemonic (${words.length} words):</span>`);
+    for (let i = 0; i < words.length; i += 4) {
+      const row = words.slice(i, i + 4)
+        .map((w, j) => `${String(i + j + 1).padStart(3)}. ${w.padEnd(14)}`)
+        .join('');
+      lines.push(`<span class="term-value">${row}</span>`);
+    }
+    lines.push('');
+  }
+
+  lines.push(`<span class="term-label">Derivation Path:</span> <span class="term-value">m/44'/9999'/0'/0/0</span>`);
+
+  if (result.private_key) {
+    lines.push(`<span class="term-label">Private Key:    </span> <span class="term-warn">${result.private_key}</span>`);
+  }
+  if (result.public_key) {
+    lines.push(`<span class="term-label">Public Key:     </span> <span class="term-value">${result.public_key}</span>`);
+  }
+  if (result.wire_hex) {
+    lines.push(`<span class="term-label">Wire Hex:       </span> <span class="term-value">${result.wire_hex}</span>`);
+  }
+  lines.push(`<span class="term-label">Address:        </span> <span class="term-value">${result.address}</span>`);
+
+  if (result.bitcoin_addresses && result.bitcoin_addresses.length > 0) {
+    lines.push('');
+    lines.push('<span class="term-label">Bitcoin Addresses:</span>');
+    for (const ba of result.bitcoin_addresses) {
+      const label = ba.address_type === 'p2pkh' ? 'P2PKH  (1...)' :
+                    ba.address_type === 'p2wpkh' ? 'P2WPKH (bc1q)' :
+                    ba.address_type === 'p2tr'   ? 'P2TR   (bc1p)' :
+                    ba.address_type;
+      lines.push(`  <span class="term-label">${label}:</span>  <span class="term-addr">${ba.address}</span>`);
+    }
+  }
+
+  return lines.join('\n');
 }

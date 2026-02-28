@@ -161,6 +161,22 @@ if (window.NOBLE_SETUP_MODE) {
   location.hash = '#/setup';
 }
 
+// Hide setup link in sidebar when node is fully configured.
+// In production the server sets NOBLE_SETUP_MODE; in mock mode we check the RPC.
+if (!window.NOBLE_SETUP_MODE) {
+  const setupNavItem = document.querySelector('a[href="#/setup"]');
+  if (setupNavItem) {
+    // Check via RPC — if identity exists, hide setup.
+    rpc.call('noble_getNodeIdentity').then((ident) => {
+      if (ident && ident.node_name) {
+        setupNavItem.parentElement.style.display = 'none';
+      }
+    }).catch(() => {
+      // RPC unavailable or first-run — keep setup visible
+    });
+  }
+}
+
 router
   .add('/', overviewPage)
   .add('/blocks', blocksPage)

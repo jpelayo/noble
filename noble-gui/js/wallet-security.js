@@ -25,6 +25,9 @@ export function destroySecureElements(container) {
   const grids = container.querySelectorAll('.mnemonic-grid');
   grids.forEach((g) => g.remove());
 
+  const terminals = container.querySelectorAll('.terminal-output');
+  terminals.forEach((t) => t.remove());
+
   // Clear any auto-clear timers attached to the container
   if (container._securityTimers) {
     container._securityTimers.forEach((id) => clearInterval(id));

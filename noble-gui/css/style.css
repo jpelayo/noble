@@ -996,3 +996,38 @@ body {
   color: var(--text-primary);
   font-size: var(--font-size-sm);
 }
+
+/* ── Terminal output widget (wallet key info) ── */
+.terminal-output {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin-top: var(--gap);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.terminal-output .term-warn {
+  color: #f0883e;
+  font-weight: 600;
+}
+.terminal-output .term-label {
+  color: #8b949e;
+}
+.terminal-output .term-value {
+  color: #79c0ff;
+}
+.terminal-output .term-addr {
+  color: #56d364;
+}
+.terminal-output .term-heading {
+  color: #e6edf3;
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+}

@@ -375,11 +375,29 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .create_key_from_mnemonic(wc, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+        let key_bytes = pubkey.key_bytes();
+        let (private_key_hex, public_key_hex, wire_hex_str, btc_addrs) =
+            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
+                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+                (
+                    None, // Private key stays in keystore — not exposed over RPC
+                    Some(hex::encode(key_bytes)),
+                    Some(hex::encode(pubkey.to_wire_bytes())),
+                    Some(derive_bitcoin_addresses(&key)),
+                )
+            } else {
+                (None, Some(hex::encode(key_bytes)), Some(hex::encode(pubkey.to_wire_bytes())), None)
+            };
+
         Ok(GenerateMnemonicResponse {
             mnemonic,
             address: hex::encode(pubkey.to_wire_bytes()),
             scheme_id: pubkey.scheme_id(),
             word_count: wc,
+            private_key: private_key_hex,
+            public_key: public_key_hex,
+            wire_hex: wire_hex_str,
+            bitcoin_addresses: btc_addrs,
         })
     }
 
@@ -464,10 +482,27 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .iter()
             .any(|k| k.to_wire_bytes() == pubkey.to_wire_bytes());
 
+        let key_bytes = pubkey.key_bytes();
+        let (public_key_hex, wire_hex_str, btc_addrs) =
+            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
+                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+                (
+                    Some(hex::encode(key_bytes)),
+                    Some(hex::encode(pubkey.to_wire_bytes())),
+                    Some(derive_bitcoin_addresses(&key)),
+                )
+            } else {
+                (Some(hex::encode(key_bytes)), Some(hex::encode(pubkey.to_wire_bytes())), None)
+            };
+
         Ok(ImportMnemonicResponse {
             address: hex::encode(pubkey.to_wire_bytes()),
             scheme_id: pubkey.scheme_id(),
             already_exists,
+            private_key: None, // Private key stays in keystore
+            public_key: public_key_hex,
+            wire_hex: wire_hex_str,
+            bitcoin_addresses: btc_addrs,
         })
     }
 

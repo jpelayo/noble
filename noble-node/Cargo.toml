@@ -51,6 +51,9 @@ http-body-util.workspace = true
 time.workspace = true
 pem.workspace = true
 if-addrs.workspace = true
+bip39.workspace = true
+bip32.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 noble-test-utils.workspace = true

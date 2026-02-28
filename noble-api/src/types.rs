@@ -648,6 +648,14 @@ pub struct GenerateMnemonicResponse {
     pub address: String,
     pub scheme_id: u8,
     pub word_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_addresses: Option<Vec<BitcoinAddressEntry>>,
 }
 
 /// Response for `noble_importMnemonic`.
@@ -656,6 +664,14 @@ pub struct ImportMnemonicResponse {
     pub address: String,
     pub scheme_id: u8,
     pub already_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitcoin_addresses: Option<Vec<BitcoinAddressEntry>>,
 }
 
 /// Response for `noble_getVotingStrategy`.

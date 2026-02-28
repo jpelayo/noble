@@ -15,7 +15,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input, Select};
-use noble_crypto::{ed25519, secp256k1, NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1};
+use noble_crypto::{
+    bitcoin_addr::{pubkey_to_p2pkh, pubkey_to_p2wpkh, pubkey_to_p2tr},
+    ed25519, secp256k1, NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1,
+};
+use zeroize::Zeroize;
 
 use crate::config::{
     ApiConfig, ConsensusConfig, GatewayConfig, IdentityConfig, LoggingConfig, MetricsConfig,
@@ -333,16 +337,55 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .interact_text()?;
 
     // -----------------------------------------------------------------------
-    // Step 4: Reward Address
+    // Step 4: Wallet (offline generate / recover)
     // -----------------------------------------------------------------------
-    section_header("4", "Reward Address");
+    section_header("4", "Wallet (optional)");
+
+    println!("  Generate or recover a Noble wallet offline.");
+    println!("  This does NOT persist anything to the node — it displays keys");
+    println!("  so you can record them before configuring the reward address.");
+    println!();
+
+    let wallet_choices = &[
+        "Generate new wallet (BIP-39 mnemonic)",
+        "Recover wallet from existing mnemonic",
+        "Skip — I already have a wallet",
+    ];
+    let wallet_sel = Select::new()
+        .with_prompt("Wallet action")
+        .items(wallet_choices)
+        .default(2)
+        .interact()?;
+
+    let wallet_address = match wallet_sel {
+        0 => run_wallet_generate()?,
+        1 => run_wallet_recover()?,
+        _ => {
+            println!("  Skipped.");
+            None
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Step 5: Reward Address
+    // -----------------------------------------------------------------------
+    section_header("5", "Reward Address");
 
     println!("{REWARD_ADDR_HELP}");
     println!();
 
+    // Pre-fill with the wallet address if one was just generated/recovered
+    let reward_default = if let Some(ref addr) = wallet_address {
+        println!("  (Pre-filled with the wallet address generated above.)");
+        println!();
+        addr.clone()
+    } else {
+        defaults.rewards.reward_address.clone()
+    };
+
     let reward_address: String = Input::new()
         .with_prompt("Reward address")
-        .default(defaults.rewards.reward_address.clone())
+        .default(reward_default)
         .allow_empty(true)
         .interact_text()?;
 
@@ -366,7 +409,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Step 5: TOTP Security
     // -----------------------------------------------------------------------
-    section_header("5", "TOTP Security");
+    section_header("6", "TOTP Security");
 
     let totp_enabled_default = defaults.api.totp_enabled;
     let totp_enabled = Confirm::new()
@@ -418,7 +461,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Step 6: Storage
     // -----------------------------------------------------------------------
-    section_header("6", "Storage");
+    section_header("7", "Storage");
 
     let default_data_dir = if defaults.storage.data_dir == Path::new("data") {
         platform_data_dir().to_string_lossy().to_string()
@@ -444,7 +487,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Step 7: Networking (optional)
     // -----------------------------------------------------------------------
-    section_header("7", "Networking");
+    section_header("8", "Networking");
 
     let configure_network = Confirm::new()
         .with_prompt("Configure networking? (defaults are fine for most users)")
@@ -499,7 +542,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Step 8: Review & Write
     // -----------------------------------------------------------------------
-    section_header("8", "Review & Write");
+    section_header("9", "Review & Write");
 
     let config = NodeConfig {
         node: NodeSectionConfig {
@@ -664,6 +707,109 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Run inline wallet generation during setup (no persistence).
+fn run_wallet_generate() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let word_choices = &["24 words (recommended)", "12 words"];
+    let word_sel = Select::new()
+        .with_prompt("Mnemonic length")
+        .items(word_choices)
+        .default(0)
+        .interact()?;
+    let word_count: usize = if word_sel == 0 { 24 } else { 12 };
+
+    let passphrase: String = Input::new()
+        .with_prompt("BIP-39 passphrase (optional \"25th word\", press Enter to skip)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let mnemonic = bip39::Mnemonic::generate(word_count)
+        .map_err(|e| format!("mnemonic generation failed: {e}"))?;
+
+    let address_hex = print_wallet_info(&mnemonic, &passphrase);
+    Ok(Some(address_hex))
+}
+
+/// Run inline wallet recovery during setup (no persistence).
+fn run_wallet_recover() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mnemonic_str: String = Input::new()
+        .with_prompt("Enter mnemonic phrase (12 or 24 words)")
+        .interact_text()?;
+
+    let mnemonic: bip39::Mnemonic = mnemonic_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid mnemonic: {e}"))?;
+
+    let passphrase: String = Input::new()
+        .with_prompt("BIP-39 passphrase (press Enter if none)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()?;
+
+    let address_hex = print_wallet_info(&mnemonic, &passphrase);
+    Ok(Some(address_hex))
+}
+
+/// Derive and display full wallet info from a mnemonic (same as noble-tool).
+/// Returns the hex-encoded wire address for reward address prefill.
+fn print_wallet_info(mnemonic: &bip39::Mnemonic, passphrase: &str) -> String {
+    let mut seed = mnemonic.to_seed(passphrase);
+
+    let xprv = bip32::XPrv::derive_from_path(
+        &seed,
+        &"m/44'/9999'/0'/0/0".parse().expect("valid derivation path"),
+    )
+    .expect("BIP-32 derivation failed");
+
+    seed.zeroize();
+
+    let mut sk_bytes = xprv.private_key().to_bytes().to_vec();
+    let private_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
+    let public_key = private_key.public_key();
+    let wire_bytes = public_key.to_wire_bytes();
+    let pk_bytes = public_key.key_bytes();
+
+    let mut compressed = [0u8; 33];
+    compressed.copy_from_slice(pk_bytes);
+
+    let p2pkh = pubkey_to_p2pkh(&compressed, true);
+    let p2wpkh = pubkey_to_p2wpkh(&compressed, true);
+    let p2tr = pubkey_to_p2tr(&compressed, true);
+
+    let words: Vec<&str> = mnemonic.to_string().leak().split_whitespace().collect();
+
+    eprintln!();
+    eprintln!("  \x1b[33mWARNING: The private key and mnemonic below grant full\x1b[0m");
+    eprintln!("  \x1b[33mcontrol of this wallet. Store them securely and NEVER\x1b[0m");
+    eprintln!("  \x1b[33mshare them. This output is NOT saved anywhere.\x1b[0m");
+    println!();
+    println!("  === Noble Wallet ===");
+    println!();
+    println!("  Mnemonic ({} words):", words.len());
+    for (i, word) in words.iter().enumerate() {
+        print!("  {:>3}. {:<14}", i + 1, word);
+        if (i + 1) % 4 == 0 {
+            println!();
+        }
+    }
+    println!();
+    println!("  Derivation Path: m/44'/9999'/0'/0/0");
+    println!("  Private Key:     {}", hex::encode(&sk_bytes));
+    println!("  Public Key:      {}", hex::encode(pk_bytes));
+    println!("  Wire Hex:        {}", hex::encode(&wire_bytes));
+    println!();
+    println!("  Bitcoin Addresses:");
+    println!("    P2PKH  (1...):   {p2pkh}");
+    println!("    P2WPKH (bc1q):   {p2wpkh}");
+    println!("    P2TR   (bc1p):   {p2tr}");
+    println!();
+
+    let address_hex = hex::encode(&wire_bytes);
+    sk_bytes.zeroize();
+    address_hex
+}
 
 /// Print a section header.
 fn section_header(number: &str, title: &str) {
