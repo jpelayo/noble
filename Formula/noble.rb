@@ -20,10 +20,12 @@ class Noble < Formula
   license "Apache-2.0"
   head "https://github.com/jpelayo/noble.git", branch: "main"
 
-  option "localonly", "Localhost-only access — skip the CIDR prompt (most secure)"
-  option "allow192",  "Allow remote access from 192.168.0.0/16 (home / office LAN)"
-  option "allow10",   "Allow remote access from 10.0.0.0/8 (corporate / VPN LAN)"
-  option "allow172",  "Allow remote access from 172.16.0.0/12 (Docker / VPN range)"
+  # Remote access is configured via the NOBLE_ALLOWED_IPS environment variable.
+  # Examples:
+  #   NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install --HEAD noble   # home LAN
+  #   NOBLE_ALLOWED_IPS=10.0.0.0/8     brew install --HEAD noble   # corporate
+  #   NOBLE_ALLOWED_IPS=localonly       brew install --HEAD noble   # localhost only
+  # Without the env var, post_install defaults to localhost-only (no prompt).
 
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
@@ -73,51 +75,28 @@ class Noble < Formula
       config.gsub!('data_dir = "data"', "data_dir = \"#{var}/noble/data\"")
       config.gsub!('keystore_path = "keystore"', "keystore_path = \"#{var}/noble/keystore\"")
 
-      # Option flags encode well-known CIDRs; no interactive prompt needed.
-      preset_cidr = if build.with?("allow192") then "192.168.0.0/16"
-                    elsif build.with?("allow10")  then "10.0.0.0/8"
-                    elsif build.with?("allow172") then "172.16.0.0/12"
-                    end
-
-      if build.with?("localonly")
-        # allowed_ips stays [] — localhost only, no changes needed.
-        puts
-        puts "  Localhost-only mode: Dashboard and RPC are accessible on this machine only."
-
-      elsif preset_cidr
-        config.gsub!('allowed_ips = []', "allowed_ips = [\"#{preset_cidr}\"]")
-        puts
-        puts "  Remote access enabled for: #{preset_cidr}"
-        puts "  After starting, the dashboard will be at: https://<this-host>:8785"
-
-      # Interactive CIDR prompt (skipped in non-TTY environments like CI).
-      elsif $stdin.tty?
+      # Remote access via NOBLE_ALLOWED_IPS env var (no interactive prompt).
+      allowed = ENV["NOBLE_ALLOWED_IPS"].to_s.strip
+      if !allowed.empty? && allowed != "localonly"
         require "ipaddr"
-        puts
-        puts "  Remote access — allow connections to the Dashboard GUI and JSON-RPC API."
-        puts "  Enter IP addresses or CIDR blocks (comma-separated)."
-        puts "  Press Enter for localhost-only access."
-        puts
-        loop do
-          print "  Allowed IPs (e.g. 10.0.0.0/8): "
-          input = $stdin.gets.chomp.strip
-          break if input.empty?
-
-          entries = input.split(",").map(&:strip).reject(&:empty?)
-          bad = entries.reject { |e| IPAddr.new(e) rescue false }
-          unless bad.empty?
-            puts "  Invalid entries: #{bad.join(", ")}"
-            puts "  Expected: IP address (e.g. 192.168.5.20) or CIDR (e.g. 192.168.5.0/24)"
-            next
-          end
-
+        entries = allowed.split(",").map(&:strip).reject(&:empty?)
+        bad = entries.reject { |e| IPAddr.new(e) rescue false }
+        unless bad.empty?
+          opoo "Invalid NOBLE_ALLOWED_IPS entries ignored: #{bad.join(", ")}"
+          entries -= bad
+        end
+        unless entries.empty?
           cidrs = entries.map { |s| "\"#{s}\"" }.join(", ")
           config.gsub!('allowed_ips = []', "allowed_ips = [#{cidrs}]")
           puts
           puts "  Remote access enabled for: #{entries.join(", ")}"
           puts "  After starting, the dashboard will be at: https://<this-host>:8785"
-          break
         end
+      else
+        puts
+        puts "  Localhost-only mode: Dashboard and RPC are accessible on this machine only."
+        puts "  To allow remote access later, edit: #{etc}/noble/noble.toml"
+        puts "    allowed_ips = [\"192.168.0.0/16\"]"
       end
 
       (etc/"noble/noble.toml").write(config)
@@ -147,6 +126,11 @@ class Noble < Formula
 
         brew services start noble       # starts in setup mode
         open https://<server-ip>:8785   # complete wizard in browser
+
+      Remote access (set before install, or edit noble.toml later):
+
+        NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install --HEAD noble   # home LAN
+        NOBLE_ALLOWED_IPS=10.0.0.0/8     brew install --HEAD noble   # corporate
 
       Ports that should be reachable:
 
