@@ -810,6 +810,12 @@ pub struct PruningStatusResponse {
     pub more_remaining: bool,
 }
 
+/// Response for `noble_getSetupStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupStatusResponse {
+    pub setup_complete: bool,
+}
+
 /// Response for `noble_getNodeIdentity`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeIdentityResponse {

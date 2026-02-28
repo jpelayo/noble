@@ -116,6 +116,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
             wants_to_validate: false,
             wants_to_vote: false,
             p2p_port: 8780,
+            setup_complete: false,
         })),
         identity_path: None,
         tls_fingerprint: parking_lot::RwLock::new(None),

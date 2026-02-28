@@ -668,6 +668,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         wants_to_validate: config.identity.wants_to_validate,
         wants_to_vote: config.identity.wants_to_vote,
         p2p_port: extract_port_from_listen_addr(&config.network.listen_addr),
+        setup_complete: true,
     }) {
         fs::create_dir_all(&data_dir_path)?;
         let identity_path = data_dir_path.join("identity.json");

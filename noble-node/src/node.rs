@@ -370,9 +370,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let (peer_update_tx, _) = broadcast::channel(64);
 
         // --- IP access control ---
-        // Setup mode when identity.json is absent OR has no node_name configured.
-        let setup_mode = !config.storage.data_dir.join("identity.json").exists()
-            || node_identity.node_name.trim().is_empty();
+        // Setup mode when the wizard has not been completed (explicit flag).
+        let setup_mode = !node_identity.setup_complete;
 
         let ip_filter = if setup_mode {
             let gui_scheme = if config.api.tls_enabled { "https" } else { "http" };
@@ -1474,6 +1473,8 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
         }
     }
     // Fallback: build from noble.toml [identity] section.
+    // setup_complete defaults to false — noble.toml alone does not constitute
+    // a completed setup wizard.
     NodeIdentityData {
         node_name: config.identity.node_name.clone(),
         org_type: config.identity.org_type.clone(),
@@ -1485,6 +1486,7 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
         wants_to_validate: config.identity.wants_to_validate,
         wants_to_vote: config.identity.wants_to_vote,
         p2p_port: 8780,
+        setup_complete: false,
     }
 }
 

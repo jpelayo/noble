@@ -201,9 +201,9 @@ if (window.NOBLE_SETUP_MODE) {
 // Path 2: async RPC check (mock mode + production where identity.json exists
 // but GUI wizard was never completed)
 if (!window.NOBLE_SETUP_MODE) {
-  rpc.call('noble_getNodeIdentity').then((ident) => {
-    if (!ident || !ident.node_name) {
-      // Not configured — lock to setup
+  rpc.call('noble_getSetupStatus').then((res) => {
+    if (!res || !res.setup_complete) {
+      // Setup wizard not completed — lock to setup
       activateSetupGuard();
     } else {
       // Configured — hide setup link

@@ -39,6 +39,11 @@ pub struct NodeIdentityData {
     /// Preferred P2P port (8780, 8781, or 8782). Applied on node restart.
     #[serde(default = "default_p2p_port")]
     pub p2p_port: u16,
+    /// Explicit completion marker. Only `true` after the full setup wizard
+    /// (CLI or GUI) has finished. Presence of `identity.json` or a non-empty
+    /// `node_name` alone does NOT constitute completion.
+    #[serde(default)]
+    pub setup_complete: bool,
 }
 
 fn default_p2p_port() -> u16 {
@@ -186,15 +191,14 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// `None` when TLS is disabled or in tests that don't wire up TLS.
     pub tls_upload: Option<Arc<dyn Fn(String, String, Option<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>>,
 
-    /// True when the node is running in first-boot setup mode (no identity.json yet).
-    /// Affects CORS policy: origins are narrowed to the GUI allow-list even when IP filter
-    /// is allow-all.
+    /// True when the node has not completed the setup wizard (`setup_complete` is false
+    /// in `identity.json`). Affects CORS policy and GUI navigation guard.
     pub setup_mode: bool,
 
     /// Setup authorization token for first-boot write operations.
     /// `Some(token)` when `setup_mode` is true and no TOTP validator is configured.
     /// Write-method RPC calls must include `Authorization: Bearer <token>` in this mode.
-    /// `None` after `identity.json` exists or when TOTP is enabled.
+    /// `None` after setup completes or when TOTP is enabled.
     pub setup_token: Option<String>,
 
     /// Allowed CORS origins for the RPC server (e.g. "https://127.0.0.1:8785").

@@ -1442,8 +1442,6 @@ export class MockRpcClient {
         ];
         const words = [];
         for (let i = 0; i < wc; i++) words.push(wordList[i % wordList.length]);
-        // First-run complete after wallet creation
-        this.#mockFirstRun = false;
         const pubkey = randomHex(32);
         return {
           mnemonic: words.join(' '),
@@ -1466,8 +1464,6 @@ export class MockRpcClient {
         if (words.length !== 12 && words.length !== 24) {
           throw { code: -32602, message: 'Mnemonic must be 12 or 24 words' };
         }
-        // First-run complete after wallet import
-        this.#mockFirstRun = false;
         const impPubkey = randomHex(32);
         return {
           address: '02' + impPubkey,

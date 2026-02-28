@@ -69,6 +69,13 @@ pub trait NodeApi {
         public_key: String,
     ) -> Result<RotateGatewayKeyResponse, ErrorObjectOwned>;
 
+    /// Check whether the node has completed the setup wizard.
+    ///
+    /// Returns `{ setup_complete: true }` only after the full wizard (CLI or GUI)
+    /// has finished. Does not require authentication.
+    #[method(name = "getSetupStatus")]
+    async fn get_setup_status(&self) -> Result<SetupStatusResponse, ErrorObjectOwned>;
+
     /// Get the current node identity configuration.
     #[method(name = "getNodeIdentity")]
     async fn get_node_identity(&self) -> Result<NodeIdentityResponse, ErrorObjectOwned>;
@@ -437,6 +444,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         })
     }
 
+    async fn get_setup_status(&self) -> Result<SetupStatusResponse, ErrorObjectOwned> {
+        let complete = self.node_identity.read().setup_complete;
+        Ok(SetupStatusResponse {
+            setup_complete: complete,
+        })
+    }
+
     async fn get_node_identity(&self) -> Result<NodeIdentityResponse, ErrorObjectOwned> {
         let id = self.node_identity.read();
         Ok(NodeIdentityResponse {
@@ -488,6 +502,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             wants_to_validate,
             wants_to_vote,
             p2p_port: port,
+            setup_complete: true,
         };
 
         // Persist to identity.json atomically.
