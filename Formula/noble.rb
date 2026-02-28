@@ -140,7 +140,7 @@ class Noble < Formula
 
       GUI setup (headless):
 
-        brew services start noble       # unneeded: already started by brew post-install
+        brew services start noble       # start the background service
         open https://<server-ip>:8785   # complete wizard in browser
 
       Remote access (set before install, or edit noble.toml later):
