@@ -117,6 +117,29 @@ class Noble < Formula
 
       (etc/"noble/noble.toml").write(config)
     end
+
+    # Warn if Noble ports are already occupied (avoids confusion with mock servers, etc.)
+    blocked = []
+    {8780 => "P2P", 8783 => "RPC/WebSocket", 8785 => "Dashboard GUI"}.each do |port, label|
+      pid = `lsof -ti :#{port} 2>/dev/null`.strip
+      unless pid.empty?
+        proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
+        blocked << {port: port, label: label, pid: pid, proc: proc_name}
+      end
+    end
+    unless blocked.empty?
+      puts
+      puts "  " + "!" * 60
+      puts "  !!  BLOCKED PORTS — Noble cannot start until freed  !!"
+      puts "  " + "!" * 60
+      blocked.each do |b|
+        puts "  !!  Port #{b[:port]} (#{b[:label]}): PID #{b[:pid]} (#{b[:proc]})"
+      end
+      puts "  !!"
+      puts "  !!  Fix:  #{blocked.map { |b| "kill #{b[:pid]}" }.join(" && ")}"
+      puts "  " + "!" * 60
+      puts
+    end
   end
 
   # Background service definition.
