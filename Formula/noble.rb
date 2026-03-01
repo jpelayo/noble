@@ -62,7 +62,10 @@ class Noble < Formula
     rm_rf prefix/"noble-gui"
     (prefix/"noble-gui").install Dir["noble-gui/*"]
 
-    # Shell completions (bash, zsh, fish).
+    # Shell completions (bash, zsh, fish) — remove stale files first.
+    rm_f bash_completion/"noble-node"
+    rm_f zsh_completion/"_noble-node"
+    rm_f fish_completion/"noble-node.fish"
     generate_completions_from_executable(bin/"noble-node", "completions")
 
     # Sample configuration file (always overwrite with latest).
