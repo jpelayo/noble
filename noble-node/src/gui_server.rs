@@ -334,6 +334,12 @@ pub async fn start_gui_server(
                     val,
                 );
             }
+            // Prevent browser from caching JS/CSS — ensures code changes take
+            // effect immediately after a node rebuild without manual hard-refresh.
+            resp.headers_mut().insert(
+                http::header::CACHE_CONTROL,
+                http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+            );
             resp
         }
     }));

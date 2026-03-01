@@ -219,8 +219,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     hex::encode(pk.to_wire_bytes()),
                 );
             }
-            // Always refresh the friendly name from config/identity on startup.
-            let self_name = config.identity.node_name.clone();
+            // Always refresh the friendly name from the canonical identity source.
+            // Prefer identity.json (written by GUI/CLI wizard) over noble.toml.
+            let self_name = {
+                let identity_path = config.storage.data_dir.join("identity.json");
+                if identity_path.exists() {
+                    std::fs::read_to_string(&identity_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .and_then(|v| v.get("node_name")?.as_str().map(String::from))
+                        .unwrap_or_default()
+                } else {
+                    config.identity.node_name.clone()
+                }
+            };
             if !self_name.is_empty() {
                 validator_list.set_friendly_name(pk, self_name);
             }
