@@ -58,6 +58,8 @@ class Noble < Formula
     # Dashboard GUI static files.
     # gui_server.rs detect_gui_dir() searches <binary_dir>/../noble-gui/ first,
     # which resolves through the Homebrew symlink to the Cellar prefix.
+    # Remove stale GUI dir from previous installs so files are always fresh.
+    rm_rf prefix/"noble-gui"
     (prefix/"noble-gui").install Dir["noble-gui/*"]
 
     # Shell completions (bash, zsh, fish).
