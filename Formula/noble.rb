@@ -65,8 +65,9 @@ class Noble < Formula
     # Shell completions (bash, zsh, fish).
     generate_completions_from_executable(bin/"noble-node", "completions")
 
-    # Sample configuration file.
+    # Sample configuration file (always overwrite with latest).
     (etc/"noble").mkpath
+    rm_f etc/"noble/noble.toml.sample"
     (etc/"noble").install "noble.toml" => "noble.toml.sample"
   end
 
