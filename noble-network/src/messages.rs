@@ -164,6 +164,8 @@ pub enum NetworkCommand {
     PublishNodeAnnounce(Box<NodeAnnounce>),
     /// Publish double-proposal evidence to the network.
     PublishEvidence(Box<DoubleProposalEvidence>),
+    /// Dial a specific peer by multiaddr (used by `noble_dialPeer` RPC).
+    DialPeer(libp2p::Multiaddr),
     /// Shut down the network service.
     Shutdown,
 }

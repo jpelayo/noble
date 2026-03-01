@@ -24,6 +24,10 @@ serde_json.workspace = true
 bip39.workspace = true
 bip32.workspace = true
 zeroize.workspace = true
+serde.workspace = true
+ureq.workspace = true
+rustls = { workspace = true, features = ["ring"] }
+rustls-pki-types.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

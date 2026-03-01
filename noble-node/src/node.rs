@@ -181,7 +181,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // C-003: Load persisted validator list if the file exists.
         let validator_list_path = config.consensus.validator_list_path.clone();
-        let validator_list = if validator_list_path.exists() {
+        let mut validator_list = if validator_list_path.exists() {
             match std::fs::read(&validator_list_path) {
                 Ok(bytes) => {
                     use noble_codec::NobleCbor;
@@ -204,6 +204,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         } else {
             ValidatorList::new()
         };
+
+        // Self-register: if this node has a validator key, ensure it is in the list.
+        if let Some((_sk, pk)) = &validator_key {
+            if !validator_list.is_validator(pk) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                validator_list.add_validator(pk.clone(), 1, now);
+                tracing::info!(
+                    task = "config_load",
+                    "Self-registered as validator: {}",
+                    hex::encode(pk.to_wire_bytes()),
+                );
+            }
+        }
+
         let mut engine = CycleEngine::new(
             consensus_config,
             validator_list,
@@ -814,6 +831,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             set_config_value: set_config_value_closure,
             config_path,
             chain_meta: self.chain_meta,
+            seeds: parking_lot::RwLock::new(config.network.seeds.clone()),
         });
 
         // --- Determine RPC bind address ---

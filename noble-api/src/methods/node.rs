@@ -804,6 +804,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let allowed = [
             ("network", "listen_addr"),
             ("network", "max_peers"),
+            ("network", "seeds"),
             ("api", "rpc_port"),
             ("api", "gui_port"),
             ("storage", "data_dir"),

@@ -254,4 +254,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Per-installation entropy for at-rest file encryption (`.chain_meta`).
     pub chain_meta: [u8; 32],
+
+    /// Live seed node list. Initialized from `[network] seeds` in noble.toml.
+    pub seeds: RwLock<Vec<String>>,
 }

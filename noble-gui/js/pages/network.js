@@ -44,6 +44,21 @@ export function init(root, ctx) {
     </div>
 
     <div class="panel">
+      <div class="panel-header">Dial Peer</div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
+          Manually connect to a peer by entering their multiaddr.
+        </p>
+        <div style="display:flex;gap:var(--gap-sm);align-items:center">
+          <input id="net-dial-addr" type="text" placeholder="/ip4/192.168.5.20/tcp/8780"
+            style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+          <button id="net-dial-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm);white-space:nowrap">Dial Peer</button>
+        </div>
+        <div id="net-dial-msg" style="font-size:var(--font-size-xs);margin-top:var(--gap-sm);display:none"></div>
+      </div>
+    </div>
+
+    <div class="panel">
       <div class="panel-header">Peer Table</div>
       <div class="panel-body" style="padding:0">
         <table class="data-table">
@@ -69,6 +84,33 @@ export function init(root, ctx) {
   const netSync = root.querySelector('#net-sync');
   const netSyncDetail = root.querySelector('#net-sync-detail');
   const peersTbody = root.querySelector('#net-peers');
+  const dialAddrInput = root.querySelector('#net-dial-addr');
+  const dialBtn = root.querySelector('#net-dial-btn');
+  const dialMsg = root.querySelector('#net-dial-msg');
+
+  dialBtn.addEventListener('click', async () => {
+    const addr = dialAddrInput.value.trim();
+    if (!addr) return;
+    dialBtn.disabled = true;
+    dialMsg.style.display = 'block';
+    dialMsg.style.color = 'var(--text-muted)';
+    dialMsg.textContent = 'Dialing...';
+    try {
+      const result = await rpc.call('noble_dialPeer', { multiaddr: addr });
+      dialMsg.style.color = 'var(--success)';
+      dialMsg.textContent = result.message || 'Dial request sent';
+      dialAddrInput.value = '';
+      setTimeout(() => { dialMsg.style.display = 'none'; }, 5000);
+    } catch (e) {
+      dialMsg.style.color = 'var(--error)';
+      dialMsg.textContent = e.message || 'Failed to dial peer';
+    } finally {
+      dialBtn.disabled = false;
+    }
+  });
+  dialAddrInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') dialBtn.click();
+  });
 
   async function loadNetwork() {
     try {

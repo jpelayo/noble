@@ -1,7 +1,8 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Network-related RPC methods: getPeerInfo, getNetworkInfo, getSyncStatus, peer memory.
+//! Network-related RPC methods: getPeerInfo, getNetworkInfo, getSyncStatus, peer memory,
+//! dialPeer, seed management.
 
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
 use noble_consensus::ConsensusStateMachine;
+use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
@@ -46,6 +48,22 @@ pub trait NetworkApi {
         &self,
         max_age_secs: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Dial a peer by multiaddr (e.g. "/ip4/192.168.5.20/tcp/8780").
+    #[method(name = "dialPeer")]
+    async fn dial_peer(&self, multiaddr: String) -> Result<DialPeerResponse, ErrorObjectOwned>;
+
+    /// Get the current configured seed node list.
+    #[method(name = "getSeeds")]
+    async fn get_seeds(&self) -> Result<SeedsResponse, ErrorObjectOwned>;
+
+    /// Add a seed node, dial it immediately, and persist to noble.toml.
+    #[method(name = "addSeed")]
+    async fn add_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned>;
+
+    /// Remove a seed node from the list and persist to noble.toml.
+    #[method(name = "removeSeed")]
+    async fn remove_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -149,5 +167,79 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             .prune_peer_records(now, max_age_secs)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         Ok(serde_json::json!({ "pruned": pruned }))
+    }
+
+    async fn dial_peer(&self, multiaddr: String) -> Result<DialPeerResponse, ErrorObjectOwned> {
+        let addr: libp2p::Multiaddr = multiaddr
+            .parse()
+            .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
+        self.network_cmd
+            .send(NetworkCommand::DialPeer(addr))
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to send dial command: {e}")))?;
+        Ok(DialPeerResponse {
+            success: true,
+            message: format!("Dialing {multiaddr}"),
+        })
+    }
+
+    async fn get_seeds(&self) -> Result<SeedsResponse, ErrorObjectOwned> {
+        let seeds = self.seeds.read().clone();
+        Ok(SeedsResponse { seeds })
+    }
+
+    async fn add_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned> {
+        // Validate multiaddr syntax.
+        let addr: libp2p::Multiaddr = multiaddr
+            .parse()
+            .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
+
+        // Add to live list (skip duplicates).
+        {
+            let mut seeds = self.seeds.write();
+            if !seeds.contains(&multiaddr) {
+                seeds.push(multiaddr.clone());
+            }
+        }
+
+        // Dial immediately.
+        let _ = self
+            .network_cmd
+            .send(NetworkCommand::DialPeer(addr))
+            .await;
+
+        // Persist to noble.toml via set_config_value callback.
+        self.persist_seeds();
+
+        let seeds = self.seeds.read().clone();
+        Ok(SeedsResponse { seeds })
+    }
+
+    async fn remove_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned> {
+        {
+            let mut seeds = self.seeds.write();
+            seeds.retain(|s| s != &multiaddr);
+        }
+
+        // Persist to noble.toml.
+        self.persist_seeds();
+
+        let seeds = self.seeds.read().clone();
+        Ok(SeedsResponse { seeds })
+    }
+}
+
+/// Helper for seed persistence.
+impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
+    /// Write the current seed list to noble.toml via set_config_value.
+    fn persist_seeds(&self) {
+        if let Some(ref set_config) = self.set_config_value {
+            let seeds = self.seeds.read();
+            // Serialize as comma-separated multiaddr list.
+            let value = seeds.join(",");
+            if let Err(e) = set_config("network", "seeds", &value) {
+                tracing::warn!(task = "rpc", %e, "Failed to persist seeds to noble.toml");
+            }
+        }
     }
 }

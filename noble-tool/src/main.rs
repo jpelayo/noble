@@ -110,6 +110,12 @@ enum Commands {
         #[command(subcommand)]
         action: SecurityCommand,
     },
+
+    /// Manage peers and seed nodes on a running node via JSON-RPC.
+    Peer {
+        #[command(subcommand)]
+        action: PeerCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,6 +180,34 @@ enum WalletCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum PeerCommand {
+    /// Dial a peer by multiaddr on a running node.
+    Dial {
+        /// Multiaddr to dial (e.g. /ip4/192.168.5.20/tcp/8780).
+        multiaddr: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+
+    /// List configured seed nodes.
+    ListSeeds {
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+
+    /// Add a seed node (dials immediately and persists to noble.toml).
+    AddSeed {
+        /// Multiaddr of the seed (e.g. /ip4/192.168.5.20/tcp/8780).
+        multiaddr: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+}
+
 #[derive(Clone, ValueEnum)]
 enum Network {
     Mainnet,
@@ -207,6 +241,7 @@ fn main() {
         Commands::ShowKey { key_file } => cmd_show_key(key_file),
         Commands::Wallet { action } => cmd_wallet(action),
         Commands::Security { action } => cmd_security(action),
+        Commands::Peer { action } => cmd_peer(action),
     }
 }
 
@@ -776,6 +811,146 @@ fn cmd_security(action: SecurityCommand) {
 }
 
 // ---------------------------------------------------------------------------
+// peer (RPC client)
+// ---------------------------------------------------------------------------
+
+/// Make a JSON-RPC 2.0 call to a running Noble node.
+fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    // Ensure a crypto provider is installed (idempotent — ignores if already set).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+
+    // Build agent — accept self-signed certs (nodes use auto-generated TLS certs).
+    let agent = ureq::AgentBuilder::new()
+        .tls_config(
+            std::sync::Arc::new(
+                rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(NoVerify))
+                    .with_no_client_auth(),
+            ),
+        )
+        .build();
+
+    let resp = agent
+        .post(rpc_url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    let resp_str = resp.into_string().map_err(|e| format!("invalid response body: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| format!("invalid JSON response: {e}"))?;
+
+    if let Some(error) = json.get("error") {
+        let msg = error["message"].as_str().unwrap_or("unknown error");
+        return Err(format!("RPC error: {msg}"));
+    }
+
+    json.get("result")
+        .cloned()
+        .ok_or_else(|| "no 'result' field in RPC response".to_string())
+}
+
+/// TLS verifier that accepts any certificate (for self-signed node certs).
+#[derive(Debug)]
+struct NoVerify;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn cmd_peer(action: PeerCommand) {
+    match action {
+        PeerCommand::Dial { multiaddr, rpc_url } => {
+            let params = serde_json::json!({ "multiaddr": multiaddr });
+            match rpc_call(&rpc_url, "noble_dialPeer", params) {
+                Ok(result) => {
+                    let msg = result.get("message").and_then(|m| m.as_str()).unwrap_or("OK");
+                    println!("{msg}");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PeerCommand::ListSeeds { rpc_url } => {
+            match rpc_call(&rpc_url, "noble_getSeeds", serde_json::json!({})) {
+                Ok(result) => {
+                    let seeds = result.get("seeds").and_then(|s| s.as_array());
+                    match seeds {
+                        Some(list) if !list.is_empty() => {
+                            println!("Configured seeds ({}):", list.len());
+                            for seed in list {
+                                println!("  {}", seed.as_str().unwrap_or("?"));
+                            }
+                        }
+                        _ => println!("No seeds configured."),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PeerCommand::AddSeed { multiaddr, rpc_url } => {
+            let params = serde_json::json!({ "multiaddr": multiaddr });
+            match rpc_call(&rpc_url, "noble_addSeed", params) {
+                Ok(result) => {
+                    let seeds = result.get("seeds").and_then(|s| s.as_array());
+                    let count = seeds.map_or(0, |s| s.len());
+                    println!("Seed added. Total seeds: {count}");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1024,6 +1199,20 @@ mod tests {
     fn wallet_invalid_mnemonic_rejected() {
         let bad = "foo bar baz quux wibble wobble";
         let result: Result<bip39::Mnemonic, _> = bad.parse();
+        assert!(result.is_err());
+    }
+
+    // ── Peer RPC tests (offline — verify bad URL gives error, not panic) ──
+
+    #[test]
+    fn peer_rpc_bad_url_returns_error() {
+        let result = rpc_call("https://127.0.0.1:1", "noble_getSeeds", serde_json::json!({}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn peer_rpc_invalid_url_returns_error() {
+        let result = rpc_call("not-a-url", "noble_dialPeer", serde_json::json!({}));
         assert!(result.is_err());
     }
 

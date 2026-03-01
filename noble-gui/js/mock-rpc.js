@@ -1626,6 +1626,29 @@ export class MockRpcClient {
         };
       }
 
+      case 'noble_dialPeer': {
+        const addr = params.multiaddr || '';
+        if (!addr.startsWith('/')) throw { code: -32602, message: 'Invalid multiaddr' };
+        return { success: true, message: `Dialing ${addr}` };
+      }
+
+      case 'noble_getSeeds':
+        return { seeds: this._mockSeeds || [] };
+
+      case 'noble_addSeed': {
+        const seedAddr = params.multiaddr || '';
+        if (!seedAddr.startsWith('/')) throw { code: -32602, message: 'Invalid multiaddr' };
+        if (!this._mockSeeds) this._mockSeeds = [];
+        if (!this._mockSeeds.includes(seedAddr)) this._mockSeeds.push(seedAddr);
+        return { seeds: [...this._mockSeeds] };
+      }
+
+      case 'noble_removeSeed': {
+        const rmAddr = params.multiaddr || '';
+        if (this._mockSeeds) this._mockSeeds = this._mockSeeds.filter(s => s !== rmAddr);
+        return { seeds: this._mockSeeds ? [...this._mockSeeds] : [] };
+      }
+
       case 'noble_rotateTotpSecret': {
         if (!params.current_code_hash || params.current_code_hash.length !== 64) {
           throw { code: -32012, message: 'authentication required' };

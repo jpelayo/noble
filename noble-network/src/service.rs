@@ -1295,6 +1295,13 @@ async fn handle_command(
             }
         }
 
+        NetworkCommand::DialPeer(addr) => {
+            match swarm.dial(addr.clone()) {
+                Ok(_) => tracing::info!(task = "network", %addr, "Dialing peer"),
+                Err(e) => tracing::warn!(task = "network", %addr, %e, "Failed to dial peer"),
+            }
+        }
+
         NetworkCommand::BanPeer(peer_bytes) => {
             if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
                 peer_manager.record_misbehavior(

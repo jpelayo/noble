@@ -111,6 +111,30 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Seed Nodes -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Seed Nodes</span>
+        <span id="s-seed-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
+          Seed nodes are dialed on startup and used for initial peer discovery.
+          Changes are persisted to <code>noble.toml</code>.
+        </p>
+
+        <div id="s-seed-list" style="margin-bottom:var(--gap)"></div>
+
+        <div style="display:flex;gap:var(--gap-sm);align-items:center;margin-bottom:var(--gap)">
+          <input id="s-new-seed" type="text" placeholder="/ip4/192.168.5.20/tcp/8780"
+            style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+          <button id="s-add-seed" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm);white-space:nowrap">Add Seed</button>
+        </div>
+        <div id="s-seed-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
+        <div id="s-seed-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:none"></div>
+      </div>
+    </div>
+
     <!-- Node Ports -->
     <div class="panel">
       <div class="panel-header">Port Configuration</div>
@@ -271,6 +295,14 @@ export function init(root, ctx) {
   const encSwitchBtn = root.querySelector('#s-enc-switch-btn');
   const encSwitchMsg = root.querySelector('#s-enc-switch-msg');
   const encError = root.querySelector('#s-enc-error');
+
+  // Seed node refs
+  const seedBadge = root.querySelector('#s-seed-badge');
+  const seedListEl = root.querySelector('#s-seed-list');
+  const newSeedInput = root.querySelector('#s-new-seed');
+  const addSeedBtn = root.querySelector('#s-add-seed');
+  const seedError = root.querySelector('#s-seed-error');
+  const seedMsg = root.querySelector('#s-seed-msg');
 
   let allowedIps = [];
   let currentEncMode = 'automatic';
@@ -724,11 +756,79 @@ export function init(root, ctx) {
     }
   });
 
+  // --- Seed node management ---
+  function renderSeedList(seeds) {
+    if (!seeds || seeds.length === 0) {
+      seedListEl.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm);font-style:italic">No seed nodes configured (using default bootstrap)</div>`;
+      seedBadge.textContent = '0 seeds';
+      seedBadge.className = 'badge';
+      seedBadge.style.background = 'var(--text-muted)';
+      return;
+    }
+    seedBadge.textContent = `${seeds.length} seed${seeds.length > 1 ? 's' : ''}`;
+    seedBadge.className = 'badge inbound';
+    seedBadge.style.background = '';
+    seedListEl.innerHTML = seeds.map((s, i) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin-bottom:2px;background:var(--bg-tertiary);border-radius:var(--radius-sm)">
+        <code style="font-size:var(--font-size-sm)">${s}</code>
+        <button class="seed-remove" data-addr="${s}" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:var(--font-size-sm);padding:2px 6px" title="Remove">&times;</button>
+      </div>
+    `).join('');
+    seedListEl.querySelectorAll('.seed-remove').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const addr = btn.dataset.addr;
+        try {
+          const result = await rpc.call('noble_removeSeed', { multiaddr: addr });
+          renderSeedList(result.seeds);
+        } catch (e) {
+          seedError.textContent = e.message || 'Remove failed';
+          seedError.style.display = 'block';
+        }
+      });
+    });
+  }
+
+  addSeedBtn.addEventListener('click', async () => {
+    const value = newSeedInput.value.trim();
+    if (!value) return;
+    seedError.style.display = 'none';
+    addSeedBtn.disabled = true;
+    seedMsg.style.display = 'block';
+    seedMsg.textContent = 'Adding...';
+    try {
+      const result = await rpc.call('noble_addSeed', { multiaddr: value });
+      renderSeedList(result.seeds);
+      newSeedInput.value = '';
+      seedMsg.style.color = 'var(--success)';
+      seedMsg.textContent = 'Seed added and dial initiated';
+      setTimeout(() => { seedMsg.style.display = 'none'; }, 3000);
+    } catch (e) {
+      seedError.textContent = e.message || 'Failed to add seed';
+      seedError.style.display = 'block';
+      seedMsg.style.display = 'none';
+    } finally {
+      addSeedBtn.disabled = false;
+    }
+  });
+  newSeedInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addSeedBtn.click();
+  });
+
+  async function loadSeeds() {
+    try {
+      const result = await rpc.call('noble_getSeeds');
+      renderSeedList(result.seeds);
+    } catch {
+      seedListEl.innerHTML = '<div style="color:var(--text-muted);font-size:var(--font-size-sm)">Unable to load seeds.</div>';
+    }
+  }
+
   // Load data
   async function loadSettings() {
-    // Load TLS cert and encryption status in parallel (independent from other calls).
+    // Load TLS cert, encryption status, and seeds in parallel (independent from other calls).
     loadTlsCert();
     loadEncryptionStatus();
+    loadSeeds();
 
     try {
       const [ipResult, nodeInfo, vkeyInfo, gwInfo] = await Promise.all([

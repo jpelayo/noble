@@ -973,6 +973,19 @@ pub struct EncryptionStatusResponse {
     pub is_locked: bool,
 }
 
+/// Response for `noble_dialPeer`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DialPeerResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Response for `noble_getSeeds` / `noble_addSeed` / `noble_removeSeed`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SeedsResponse {
+    pub seeds: Vec<String>,
+}
+
 /// Response for `noble_setEncryptionMode`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetEncryptionModeResponse {

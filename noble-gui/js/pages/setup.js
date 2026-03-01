@@ -1082,7 +1082,7 @@ export function init(root, ctx) {
       </dl>
       <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
-          ${state.seeds ? 'Seed nodes require manual entry in <code>noble.toml</code> under <code>[network] seeds</code>.<br>' : ''}
+          ${state.seeds ? 'Seed nodes will be saved to <code>noble.toml</code> and dialed on startup.<br>' : ''}
           TOTP and advanced settings can be configured in
           <code>noble.toml</code> before (re)starting the node.
         </p>
@@ -1126,6 +1126,16 @@ export function init(root, ctx) {
       configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${state.p2pPort}` }));
       configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'max_peers', value: String(state.maxPeers) }));
       await Promise.allSettled(configCalls);
+
+      // Persist seed nodes via addSeed RPC (also dials each immediately).
+      if (state.seeds) {
+        const seedAddrs = state.seeds.split(',').map(s => s.trim()).filter(Boolean);
+        for (const addr of seedAddrs) {
+          // Convert bare IP to multiaddr if needed.
+          const multiaddr = addr.startsWith('/') ? addr : `/ip4/${addr}/tcp/8780`;
+          try { await rpc.call('noble_addSeed', { multiaddr }); } catch { /* best effort */ }
+        }
+      }
 
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
       const result = await rpc.call('noble_setNodeIdentity', {
