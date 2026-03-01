@@ -20,7 +20,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -90,7 +90,7 @@ parking_lot = "0.12"
 prometheus = { version = "0.13", features = ["process"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 rcgen = "0.11"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = "1"
 tokio-rustls = "0.26"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2", "service"] }

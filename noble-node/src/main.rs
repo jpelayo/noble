@@ -198,6 +198,9 @@ fn rewrite_legacy_args() -> Vec<String> {
 
 #[tokio::main]
 async fn main() {
+    // Ensure rustls has a CryptoProvider (ring) before any TLS usage.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse_from(rewrite_legacy_args());
 
     let command = cli.command.unwrap_or(Commands::Run {
