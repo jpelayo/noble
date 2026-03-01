@@ -30,6 +30,14 @@ export function init(root, ctx) {
   const unsubs = [];
   let countdownInterval = null;
 
+  // Helper: extract hex key from ValidatorEntry.public_key
+  // Live API returns a hex string; mock returns { Ed25519: [u8] } or { Secp256k1: [u8] }.
+  function valKeyHex(pk) {
+    if (typeof pk === 'string') return pk;
+    const k = pk.Ed25519 || pk.Secp256k1 || [];
+    return k.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
   root.innerHTML = `
     <div class="page-header"><h1>Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
 
@@ -236,7 +244,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th>Node Name</th><th>Org Type</th><th>Role</th><th>Participation</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
+          <thead><tr><th>Node Name</th><th>IP</th><th>Country</th><th>Org Type</th><th>Role</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
           <tbody id="cs-candidates"></tbody>
         </table>
       </div>
@@ -694,8 +702,7 @@ export function init(root, ctx) {
       const sorted = [...validators].sort((a, b) => b.reputation_score - a.reputation_score);
       validatorsTbody.innerHTML = '';
       sorted.forEach((v, i) => {
-        const key = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-        const keyHex = bytesToHex(key);
+        const keyHex = valKeyHex(v.public_key);
         const br = v.reputation_breakdown;
         const statusClass = v.status === 'online' ? 'inbound' : 'pending';
         const isSelf = selfKey && keyHex === selfKey;
@@ -744,7 +751,7 @@ export function init(root, ctx) {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           const pubkey = btn.dataset.pubkey;
-          const name = sorted.find(v => bytesToHex(v.public_key.Ed25519 || v.public_key.Secp256k1 || []) === pubkey)?.name || pubkey.slice(0, 16);
+          const name = sorted.find(v => valKeyHex(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
           showRemoveConfirmation(pubkey, name);
         });
       });
@@ -754,15 +761,16 @@ export function init(root, ctx) {
   }
 
   function showValidatorDetail(v) {
-    const key = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-    const keyHex = bytesToHex(key);
-    const scheme = v.public_key.Ed25519 ? 'Ed25519' : 'secp256k1';
+    const keyHex = valKeyHex(v.public_key);
+    const scheme = typeof v.public_key === 'string'
+      ? (v.public_key.startsWith('00') ? 'Ed25519' : 'secp256k1')
+      : (v.public_key.Ed25519 ? 'Ed25519' : 'secp256k1');
     const br = v.reputation_breakdown;
 
     detailPanel.innerHTML = `
       <div class="panel" style="border-color:var(--accent)">
         <div class="panel-header">
-          <span>${v.name} — Validator Detail</span>
+          <span>${v.name || 'Validator'} — Detail</span>
           <button class="btn btn-secondary" id="cs-close-detail" style="padding:2px 8px;font-size:var(--font-size-xs)">Close</button>
         </div>
         <div class="panel-body">
@@ -955,10 +963,7 @@ export function init(root, ctx) {
 
       // Build set of validator identity keys for exclusion
       const validatorKeys = new Set(
-        valResult.validators.map(v => {
-          const k = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-          return k.map(b => b.toString(16).padStart(2, '0')).join('');
-        })
+        valResult.validators.map(v => valKeyHex(v.public_key))
       );
 
       // Filter: wants to participate AND not already a validator
@@ -1016,8 +1021,9 @@ export function init(root, ctx) {
             <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)}</div>
           </td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}</td>
+          <td style="font-size:var(--font-size-xs)">${peer.country_code || '--'}</td>
           <td style="font-size:var(--font-size-xs)">${peer.org_type || '—'}</td>
-          <td style="font-size:var(--font-size-xs)">${peer.node_role || '—'}</td>
           <td>
             <span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:var(--font-size-xs);font-weight:600;border:1px solid ${part.color};color:${part.color}">${part.label}</span>
           </td>
