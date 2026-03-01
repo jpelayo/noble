@@ -55,7 +55,7 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     tls_config: Option<Arc<rustls::ServerConfig>>,
     max_connections: u32,
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
-    let auth_layer = AuthLayer::new(state.totp_validator.clone(), state.totp_scope, state.setup_token.clone());
+    let auth_layer = AuthLayer::new(state.totp_validator.clone(), state.totp_scope);
 
     // AUD3-D2: Always layer IpFilter — use allow_all() fallback when no list configured.
     let ip_filter = state.ip_filter.clone().unwrap_or_else(IpFilter::allow_all);

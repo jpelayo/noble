@@ -1,6 +1,6 @@
 /**
  * NOBLE Dashboard — First-Run Setup Wizard
- * Multi-step onboarding: Welcome → Role → Identity → Rewards → Storage → Networking → Review
+ * Multi-step onboarding: Welcome → Role → Identity → Rewards → Storage → Encryption → Networking → Review
  */
 
 import { createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
@@ -11,6 +11,7 @@ const STEPS = [
   { key: 'identity',   label: 'Identity'   },
   { key: 'rewards',    label: 'Rewards'    },
   { key: 'storage',    label: 'Storage'    },
+  { key: 'encryption', label: 'Encryption' },
   { key: 'networking', label: 'Network'    },
   { key: 'review',     label: 'Review'     },
 ];
@@ -84,13 +85,22 @@ export function init(root, ctx) {
     rewardAddressType: '', // e.g. 'P2WPKH', 'Ed25519'
     rewardSkipped: false,  // true when user chose to skip
     walletSkipped: false,  // true when user chose to skip wallet step
-    dataDir: '',
-    cacheSizeMb: 256,
-    allocatedGb: 50,
-    compression: true,
     p2pPort: 8780,
     seeds: '',
     maxPeers: 50,
+    // Storage
+    dataDir: '',
+    cacheSizeMb: 512,
+    compression: true,
+    pruningMode: 'archive',
+    keepBlocks: 0,
+    dataDirValid: null,   // null=unchecked, true/false
+    dataDirError: '',
+    diskAvailable: 0,
+    // Encryption
+    encryptionMode: 'automatic',
+    encryptionPassword: '',
+    encryptionConfirm: '',
   };
 
   // ── Shell ──
@@ -145,6 +155,7 @@ export function init(root, ctx) {
       case 'identity':   renderIdentity(); break;
       case 'rewards':    renderRewards(); break;
       case 'storage':    renderStorage(); break;
+      case 'encryption': renderEncryption(); break;
       case 'networking': renderNetworking(); break;
       case 'review':     renderReview(); break;
     }
@@ -191,9 +202,10 @@ export function init(root, ctx) {
       const addr = addrInput?.value?.trim() || '';
 
       // If the skip checkbox is checked, allow advancing without an address.
-      const skipCheckbox = body.querySelector('#setup-reward-skip');
+      const skipCheckbox = body.querySelector('#setup-skip-rewards');
       if (skipCheckbox?.checked || state.rewardSkipped) {
         state.rewardSkipped = true;
+        state.walletSkipped = true;
         state.rewardAddress = '';
         return true;
       }
@@ -222,7 +234,34 @@ export function init(root, ctx) {
       return true;
     }
 
+    if (stepKey === 'encryption') {
+      if (state.encryptionMode === 'manual') {
+        const pw = body.querySelector('#setup-enc-password')?.value || '';
+        const cf = body.querySelector('#setup-enc-confirm')?.value || '';
+        if (pw.length < 8) {
+          showStepError('setup-enc-error', 'Password must be at least 8 characters.');
+          return false;
+        }
+        if (pw !== cf) {
+          showStepError('setup-enc-error', 'Passwords do not match.');
+          return false;
+        }
+      }
+    }
+
     return true;
+  }
+
+  function showStepError(id, msg) {
+    let err = body.querySelector('#' + id);
+    if (!err) {
+      err = document.createElement('div');
+      err.id = id;
+      err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm)';
+      body.appendChild(err);
+    }
+    err.style.display = 'block';
+    err.textContent = msg;
   }
 
   function showRewardError(msg) {
@@ -256,18 +295,38 @@ export function init(root, ctx) {
         break;
       }
       case 'rewards': {
-        const skipCb = body.querySelector('#setup-w-skip');
-        state.walletSkipped = skipCb?.checked || false;
+        const skipCb = body.querySelector('#setup-skip-rewards');
+        if (skipCb?.checked) {
+          state.rewardSkipped = true;
+          state.walletSkipped = true;
+        }
         break;
       }
       case 'storage': {
         state.dataDir = body.querySelector('#setup-data-dir')?.value?.trim() || '';
         const cache = parseInt(body.querySelector('#setup-cache-size')?.value, 10);
-        if (!isNaN(cache) && cache > 0) state.cacheSizeMb = cache;
-        const alloc = parseInt(body.querySelector('#setup-allocated-gb')?.value, 10);
-        if (!isNaN(alloc) && alloc >= 0) state.allocatedGb = alloc;
-        const comprCb = body.querySelector('#setup-compression');
-        state.compression = comprCb ? comprCb.checked : true;
+        if (!isNaN(cache) && cache >= 64) state.cacheSizeMb = cache;
+        const compCb = body.querySelector('#setup-compression');
+        if (compCb) state.compression = compCb.checked;
+        const pruneEl = body.querySelector('input[name="pruning"]:checked');
+        if (pruneEl) state.pruningMode = pruneEl.value;
+        const keepEl = body.querySelector('#setup-keep-blocks');
+        if (keepEl) {
+          const kb = parseInt(keepEl.value, 10);
+          if (!isNaN(kb) && kb >= 0) state.keepBlocks = kb;
+        }
+        break;
+      }
+      case 'encryption': {
+        const modeEl = body.querySelector('input[name="enc-mode"]:checked');
+        if (modeEl) state.encryptionMode = modeEl.value;
+        if (state.encryptionMode === 'manual') {
+          state.encryptionPassword = body.querySelector('#setup-enc-password')?.value || '';
+          state.encryptionConfirm = body.querySelector('#setup-enc-confirm')?.value || '';
+        } else {
+          state.encryptionPassword = '';
+          state.encryptionConfirm = '';
+        }
         break;
       }
       case 'networking': {
@@ -283,9 +342,6 @@ export function init(root, ctx) {
 
   // ── Step 1: Welcome ──
   function renderWelcome() {
-    // Setup token is handled transparently: the server injects
-    // window.NOBLE_SETUP_TOKEN for localhost, and remote access is gated
-    // by allowed_ips + TLS. No manual token field needed in the GUI.
     body.innerHTML = `
       <div style="text-align:center;padding:var(--gap-lg) 0 var(--gap)">
         <h2 style="margin-bottom:var(--gap-sm)">Welcome to NOBLE</h2>
@@ -386,13 +442,6 @@ export function init(root, ctx) {
            background:color-mix(in srgb, var(--success) 10%, transparent);border:1px solid var(--success);
            border-radius:var(--radius-sm);font-size:var(--font-size-sm)"></div>
 
-      <label style="display:flex;align-items:center;gap:var(--gap-sm);margin-top:var(--gap);cursor:pointer">
-        <input type="checkbox" id="setup-reward-skip" ${state.rewardSkipped ? 'checked' : ''}>
-        <span style="font-size:var(--font-size-sm);color:var(--text-muted)">
-          Skip — configure later in Settings
-        </span>
-      </label>
-
       <div id="setup-reward-error" style="color:var(--error);font-size:var(--font-size-sm);margin-top:var(--gap-sm);display:none"></div>
 
       <!-- Wallet tool (ancillary) -->
@@ -405,7 +454,7 @@ export function init(root, ctx) {
         </p>
       </div>
 
-      <div style="display:flex;gap:var(--gap);flex-wrap:wrap;margin-bottom:var(--gap)">
+      <div id="setup-w-buttons" style="display:flex;gap:var(--gap);flex-wrap:wrap;margin-bottom:var(--gap)">
         <button id="setup-w-generate" class="btn btn-primary btn-sm" style="padding:6px 14px">Generate New Wallet</button>
         <button id="setup-w-import" class="btn btn-secondary btn-sm" style="padding:6px 14px">Import from Mnemonic</button>
       </div>
@@ -413,26 +462,38 @@ export function init(root, ctx) {
       <div id="setup-w-import-area"></div>
       <div id="setup-w-terminal-area"></div>
 
-      <label style="display:flex;align-items:center;gap:var(--gap-sm);margin-top:var(--gap-sm);cursor:pointer">
-        <input type="checkbox" id="setup-w-skip" ${state.walletSkipped ? 'checked' : ''}>
-        <span style="font-size:var(--font-size-xs);color:var(--text-muted)">
-          Skip — I already have a wallet or will set up later
+      <hr style="border:none;border-top:1px solid var(--border);margin:var(--gap) 0 var(--gap-sm)">
+      <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
+        <input type="checkbox" id="setup-skip-rewards" ${(state.rewardSkipped && state.walletSkipped) ? 'checked' : ''}>
+        <span style="font-size:var(--font-size-sm);color:var(--text-muted)">
+          Skip — I'll configure rewards and wallet later
         </span>
       </label>
     `;
 
-    // ── Reward address logic ──
+    // ── Reward address + skip logic ──
     const addrInput = body.querySelector('#setup-reward-address');
-    const rewardSkipCb = body.querySelector('#setup-reward-skip');
+    const skipCb = body.querySelector('#setup-skip-rewards');
+    const walletBtns = body.querySelector('#setup-w-buttons');
 
-    rewardSkipCb.addEventListener('change', () => {
-      addrInput.disabled = rewardSkipCb.checked;
-      addrInput.style.opacity = rewardSkipCb.checked ? '0.5' : '1';
-      if (!rewardSkipCb.checked) addrInput.focus();
+    function applySkipState(skipped) {
+      addrInput.disabled = skipped;
+      addrInput.style.opacity = skipped ? '0.5' : '1';
+      if (walletBtns) walletBtns.style.opacity = skipped ? '0.5' : '1';
+      const genBtn = body.querySelector('#setup-w-generate');
+      const impBtn = body.querySelector('#setup-w-import');
+      if (genBtn) genBtn.disabled = skipped;
+      if (impBtn) impBtn.disabled = skipped;
+    }
+
+    skipCb.addEventListener('change', () => {
+      state.rewardSkipped = skipCb.checked;
+      state.walletSkipped = skipCb.checked;
+      applySkipState(skipCb.checked);
+      if (!skipCb.checked) addrInput.focus();
     });
-    if (state.rewardSkipped) {
-      addrInput.disabled = true;
-      addrInput.style.opacity = '0.5';
+    if (state.rewardSkipped && state.walletSkipped) {
+      applySkipState(true);
     }
 
     // Prefill reward address from generated/imported wallet
@@ -443,11 +504,11 @@ export function init(root, ctx) {
         addrInput.value = result.address;
         state.rewardAddress = result.address;
         // Uncheck the skip checkbox if it was checked
-        if (rewardSkipCb.checked) {
-          rewardSkipCb.checked = false;
-          addrInput.disabled = false;
-          addrInput.style.opacity = '1';
+        if (skipCb.checked) {
+          skipCb.checked = false;
           state.rewardSkipped = false;
+          state.walletSkipped = false;
+          applySkipState(false);
         }
         // Flash the input briefly to draw attention
         addrInput.style.borderColor = 'var(--success)';
@@ -640,60 +701,218 @@ export function init(root, ctx) {
 
   // ── Step 5: Storage ──
   function renderStorage() {
-    const defaultDataDir = state.dataDir || '~/.noble/data';
+    const pruningModes = [
+      { value: 'archive',    label: 'Archive',    desc: 'Full history, no pruning (recommended for validators)' },
+      { value: 'moderate',   label: 'Moderate',   desc: 'Keep recent blocks, prune old state' },
+      { value: 'aggressive', label: 'Aggressive', desc: 'Minimal storage, headers + recent blocks only' },
+    ];
+
     body.innerHTML = `
       <div style="text-align:center;margin-bottom:var(--gap-lg)">
         <h3 style="margin-bottom:var(--gap-xs)">Storage</h3>
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary)">
-          Configure where the blockchain data is stored and cache settings.
+          Configure where data is stored and how much disk to use.
         </p>
       </div>
 
       <div class="form-group">
         <label for="setup-data-dir" style="font-weight:600">Data Directory</label>
-        <input type="text" id="setup-data-dir" autocomplete="off" spellcheck="false"
-          placeholder="~/.noble/data"
-          value="${esc(defaultDataDir)}"
-          style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
-        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-          Path where blockchain data, keys, and state are stored.
+        <div style="display:flex;gap:var(--gap-sm);align-items:center">
+          <input type="text" id="setup-data-dir" autocomplete="off" spellcheck="false"
+            placeholder="Leave empty for default (~/.noble)"
+            value="${esc(state.dataDir)}"
+            style="flex:1;font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+          <button id="setup-check-dir" class="btn btn-secondary btn-sm" style="white-space:nowrap;padding:4px 10px">Check</button>
+        </div>
+        <div id="setup-dir-status" style="font-size:var(--font-size-xs);margin-top:var(--gap-xs);color:var(--text-muted)">
+          ${state.dataDirValid === true ? '<span style="color:var(--success)">Directory OK</span>' :
+            state.dataDirValid === false ? '<span style="color:var(--error)">' + esc(state.dataDirError) + '</span>' :
+            'Click "Check" to validate the path and see available disk space.'}
+        </div>
+        <div id="setup-disk-bar" style="display:${state.dataDirValid ? 'block' : 'none'};margin-top:var(--gap-sm)">
+          <div style="height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden">
+            <div id="setup-disk-fill" style="height:100%;background:var(--accent);width:0%;transition:width 0.3s"></div>
+          </div>
+          <div id="setup-disk-label" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px"></div>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--gap)">
-        <div class="form-group">
-          <label for="setup-allocated-gb" style="font-weight:600">Allocated Space (GB)</label>
-          <input type="number" id="setup-allocated-gb" min="1" max="50000" step="1"
-            value="${state.allocatedGb}"
-            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
-          <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-            Max disk space for chain data. 0 = unlimited.
-          </div>
-        </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)">
         <div class="form-group">
           <label for="setup-cache-size" style="font-weight:600">Cache Size (MB)</label>
-          <input type="number" id="setup-cache-size" min="64" max="16384" step="64"
+          <input type="number" id="setup-cache-size" min="64" max="8192" step="64"
             value="${state.cacheSizeMb}"
-            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm);max-width:140px">
           <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-            RocksDB block cache. More = faster reads.
+            RocksDB block cache (64–8192 MB)
           </div>
         </div>
         <div class="form-group">
-          <label style="font-weight:600">&nbsp;</label>
-          <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer;margin-top:var(--gap-xs)">
+          <label style="font-weight:600;display:block;margin-bottom:var(--gap-sm)">Compression</label>
+          <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
             <input type="checkbox" id="setup-compression" ${state.compression ? 'checked' : ''}>
-            <span style="font-size:var(--font-size-sm)">Enable Zstd compression</span>
+            <span style="font-size:var(--font-size-sm)">Enable LZ4 compression</span>
           </label>
-          <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-            Reduces disk usage ~40%, slight CPU overhead.
-          </div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label style="font-weight:600;display:block;margin-bottom:var(--gap-sm)">Pruning Mode</label>
+        <div id="setup-pruning-modes" style="display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap-sm)"></div>
+      </div>
+
+      <div id="setup-keep-blocks-group" class="form-group" style="display:${state.pruningMode !== 'archive' ? 'block' : 'none'}">
+        <label for="setup-keep-blocks" style="font-weight:600">Keep Blocks</label>
+        <input type="number" id="setup-keep-blocks" min="1000" max="10000000" step="1000"
+          value="${state.keepBlocks || 100000}"
+          style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm);max-width:160px">
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Number of recent blocks to retain when pruning.
         </div>
       </div>
     `;
+
+    // Pruning radio cards
+    const pruningContainer = body.querySelector('#setup-pruning-modes');
+    pruningModes.forEach(m => {
+      const checked = state.pruningMode === m.value;
+      const card = document.createElement('label');
+      card.style.cssText = 'padding:var(--gap-sm);background:var(--bg-tertiary);border:2px solid ' +
+        (checked ? 'var(--accent)' : 'var(--border)') +
+        ';border-radius:var(--radius-sm);cursor:pointer;transition:border-color 0.15s;text-align:center';
+      card.innerHTML = `
+        <input type="radio" name="pruning" value="${m.value}" ${checked ? 'checked' : ''} style="display:none">
+        <div style="font-weight:600;font-size:var(--font-size-sm)">${m.label}</div>
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${m.desc}</div>
+      `;
+      card.querySelector('input').addEventListener('change', (e) => {
+        pruningContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
+        card.style.borderColor = 'var(--accent)';
+        const keepGroup = body.querySelector('#setup-keep-blocks-group');
+        if (keepGroup) keepGroup.style.display = e.target.value !== 'archive' ? 'block' : 'none';
+      });
+      pruningContainer.appendChild(card);
+    });
+
+    // Check directory button
+    const checkBtn = body.querySelector('#setup-check-dir');
+    checkBtn.addEventListener('click', async () => {
+      const dir = body.querySelector('#setup-data-dir').value.trim();
+      const statusEl = body.querySelector('#setup-dir-status');
+      const diskBar = body.querySelector('#setup-disk-bar');
+      checkBtn.disabled = true;
+      checkBtn.textContent = 'Checking...';
+      try {
+        const result = await rpc.call('noble_checkDataDir', { path: dir || '' });
+        if (result.error) {
+          state.dataDirValid = false;
+          state.dataDirError = result.error;
+          statusEl.innerHTML = `<span style="color:var(--error)">${esc(result.error)}</span>`;
+          diskBar.style.display = 'none';
+        } else {
+          state.dataDirValid = true;
+          state.dataDirError = '';
+          state.diskAvailable = result.available_bytes || 0;
+          const gb = (state.diskAvailable / (1024 ** 3)).toFixed(1);
+          statusEl.innerHTML = `<span style="color:var(--success)">Directory OK — ${gb} GB available</span>`;
+          diskBar.style.display = 'block';
+          // Simple usage bar (available vs 100GB reference)
+          const pct = Math.min(100, (state.diskAvailable / (100 * 1024 ** 3)) * 100);
+          const fill = diskBar.querySelector('#setup-disk-fill');
+          const label = diskBar.querySelector('#setup-disk-label');
+          if (fill) fill.style.width = pct + '%';
+          if (label) label.textContent = `${gb} GB free`;
+        }
+      } catch (e) {
+        state.dataDirValid = false;
+        state.dataDirError = e.message || 'Check failed';
+        statusEl.innerHTML = `<span style="color:var(--error)">${esc(state.dataDirError)}</span>`;
+        diskBar.style.display = 'none';
+      } finally {
+        checkBtn.disabled = false;
+        checkBtn.textContent = 'Check';
+      }
+    });
   }
 
-  // ── Step 6: Networking ──
+  // ── Step 6: Encryption ──
+  function renderEncryption() {
+    const modes = [
+      {
+        value: 'automatic',
+        label: 'Automatic (Recommended)',
+        desc: 'Key files are encrypted at rest with a machine-specific key. No password required on startup.',
+        icon: '&#x1F512;',
+      },
+      {
+        value: 'manual',
+        label: 'Password Protected',
+        desc: 'Key files are encrypted with a password you provide. Password is required on every startup.',
+        icon: '&#x1F511;',
+      },
+    ];
+
+    body.innerHTML = `
+      <div style="text-align:center;margin-bottom:var(--gap-lg)">
+        <h3 style="margin-bottom:var(--gap-xs)">Encryption</h3>
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary)">
+          All private keys (validator, TLS, P2P, TOTP) are encrypted at rest.<br>
+          Choose how the encryption key is managed.
+        </p>
+      </div>
+
+      <div id="setup-enc-modes" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-bottom:var(--gap)"></div>
+
+      <div id="setup-enc-password-area" style="display:${state.encryptionMode === 'manual' ? 'block' : 'none'}">
+        <div class="form-group">
+          <label for="setup-enc-password" style="font-weight:600">Encryption Password</label>
+          <input type="password" id="setup-enc-password" autocomplete="new-password"
+            placeholder="Minimum 8 characters"
+            value="${esc(state.encryptionPassword)}"
+            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+        </div>
+        <div class="form-group">
+          <label for="setup-enc-confirm" style="font-weight:600">Confirm Password</label>
+          <input type="password" id="setup-enc-confirm" autocomplete="new-password"
+            placeholder="Type password again"
+            value="${esc(state.encryptionConfirm)}"
+            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+        </div>
+        <div style="padding:var(--gap-sm);background:color-mix(in srgb, var(--warning) 10%, transparent);border:1px solid var(--warning);border-radius:var(--radius-sm);font-size:var(--font-size-xs);color:var(--text-secondary)">
+          <strong style="color:var(--warning)">Important:</strong> This password will be required every time the node starts.
+          If lost, encrypted key files cannot be recovered — you will need to regenerate all keys.
+        </div>
+      </div>
+      <div id="setup-enc-error" style="display:none"></div>
+    `;
+
+    // Mode radio cards
+    const modesContainer = body.querySelector('#setup-enc-modes');
+    const pwArea = body.querySelector('#setup-enc-password-area');
+
+    modes.forEach(m => {
+      const checked = state.encryptionMode === m.value;
+      const card = document.createElement('label');
+      card.style.cssText = 'padding:var(--gap);background:var(--bg-tertiary);border:2px solid ' +
+        (checked ? 'var(--accent)' : 'var(--border)') +
+        ';border-radius:var(--radius-sm);cursor:pointer;transition:border-color 0.15s;text-align:center';
+      card.innerHTML = `
+        <input type="radio" name="enc-mode" value="${m.value}" ${checked ? 'checked' : ''} style="display:none">
+        <div style="font-size:1.5rem;margin-bottom:var(--gap-xs)">${m.icon}</div>
+        <div style="font-weight:600;font-size:var(--font-size-sm)">${m.label}</div>
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">${m.desc}</div>
+      `;
+      card.querySelector('input').addEventListener('change', () => {
+        modesContainer.querySelectorAll('label').forEach(l => l.style.borderColor = 'var(--border)');
+        card.style.borderColor = 'var(--accent)';
+        state.encryptionMode = m.value;
+        pwArea.style.display = m.value === 'manual' ? 'block' : 'none';
+      });
+      modesContainer.appendChild(card);
+    });
+  }
+
+  // ── Step 7: Networking ──
   function renderNetworking() {
     body.innerHTML = `
       <div style="text-align:center;margin-bottom:var(--gap-lg)">
@@ -735,7 +954,7 @@ export function init(root, ctx) {
     `;
   }
 
-  // ── Step 7: Review ──
+  // ── Step 8: Review ──
   function renderReview() {
     const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
     const validatorRow = roleObj.validate
@@ -753,8 +972,11 @@ export function init(root, ctx) {
         <dt>Reward Address</dt><dd>${state.rewardAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.rewardAddress)}</span>` : '(skipped)'}</dd>
         <dt>Wallet</dt><dd>${walletResult ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(walletResult.address)}</span>` : '(skipped)'}</dd>
         ${validatorRow}
-        <dt>Data Dir</dt><dd><span class="mono" style="font-size:var(--font-size-xs)">${esc(state.dataDir || '~/.noble/data')}</span></dd>
-        <dt>Cache</dt><dd>${state.cacheSizeMb} MB${state.compression ? ' + Zstd' : ''}</dd>
+        <dt>Data Directory</dt><dd>${state.dataDir ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.dataDir)}</span>` : '(default)'}</dd>
+        <dt>Cache Size</dt><dd>${state.cacheSizeMb} MB</dd>
+        <dt>Compression</dt><dd>${state.compression ? 'LZ4 enabled' : 'Disabled'}</dd>
+        <dt>Pruning</dt><dd>${state.pruningMode === 'archive' ? 'Archive (full history)' : state.pruningMode + ' (keep ' + state.keepBlocks + ' blocks)'}</dd>
+        <dt>Encryption</dt><dd>${state.encryptionMode === 'manual' ? 'Password protected' : 'Automatic (machine key)'}</dd>
         <dt>P2P Port</dt><dd>${state.p2pPort}</dd>
         <dt>Max Peers</dt><dd>${state.maxPeers}</dd>
         <dt>Seeds</dt><dd>${state.seeds ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.seeds)}</span>` : '(default bootstrap)'}</dd>
@@ -790,6 +1012,18 @@ export function init(root, ctx) {
     nextBtn.textContent = 'Completing...';
 
     try {
+      // Apply storage + encryption config values
+      const configCalls = [];
+      if (state.dataDir) configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.data_dir', value: state.dataDir }));
+      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.cache_size_mb', value: String(state.cacheSizeMb) }));
+      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.compression', value: String(state.compression) }));
+      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.pruning_mode', value: state.pruningMode }));
+      if (state.pruningMode !== 'archive') {
+        configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.keep_blocks', value: String(state.keepBlocks) }));
+      }
+      configCalls.push(rpc.call('noble_setConfigValue', { key: 'security.encryption_mode', value: state.encryptionMode }));
+      await Promise.allSettled(configCalls);
+
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
       const result = await rpc.call('noble_setNodeIdentity', {
         node_name: state.nodeName,
@@ -857,18 +1091,7 @@ export function init(root, ctx) {
       body.innerHTML += `<div style="color:var(--error);margin-top:var(--gap)">Setup error: ${e.message || e}</div>`;
       nextBtn.disabled = false;
       nextBtn.textContent = 'Complete Setup';
-    } finally {
-      // Always clear the raw setup token so it doesn't persist in memory.
-      rpc.setRawAuthToken(null);
     }
-  }
-
-  // Issue 9: Auto-apply setup token when injected server-side (IP-gated + TLS).
-  // If NOBLE_SETUP_TOKEN is present, the operator is already authenticated via
-  // network access — no need to copy the token from the console.
-  if (window.NOBLE_SETUP_TOKEN) {
-    state.setupToken = window.NOBLE_SETUP_TOKEN;
-    rpc.setRawAuthToken(window.NOBLE_SETUP_TOKEN);
   }
 
   // Start
@@ -877,8 +1100,6 @@ export function init(root, ctx) {
   return {
     destroy() {
       cleanupFns.forEach(fn => { try { fn(); } catch {} });
-      // Clear setup token from RPC client when navigating away from setup.
-      rpc.setRawAuthToken(null);
     },
   };
 }

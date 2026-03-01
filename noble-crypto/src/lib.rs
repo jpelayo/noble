@@ -15,6 +15,7 @@ pub mod bitcoin_addr;
 pub mod ecies;
 pub mod ed25519;
 pub mod error;
+pub mod file_encrypt;
 pub mod hash;
 pub mod keys;
 pub mod schemes;

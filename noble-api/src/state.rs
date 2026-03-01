@@ -195,12 +195,6 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// in `identity.json`). Affects CORS policy and GUI navigation guard.
     pub setup_mode: bool,
 
-    /// Setup authorization token for first-boot write operations.
-    /// `Some(token)` when `setup_mode` is true and no TOTP validator is configured.
-    /// Write-method RPC calls must include `Authorization: Bearer <token>` in this mode.
-    /// `None` after setup completes or when TOTP is enabled.
-    pub setup_token: Option<String>,
-
     /// Allowed CORS origins for the RPC server (e.g. "https://127.0.0.1:8785").
     /// Built at startup from localhost defaults plus any LAN IPs in TLS SANs or allowed_ips.
     /// Wrapped in Arc<RwLock> so `setAllowedIps` can update origins at runtime.
@@ -257,4 +251,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Path to noble.toml for config updates.
     pub config_path: Option<std::path::PathBuf>,
+
+    /// Per-installation entropy for at-rest file encryption (`.chain_meta`).
+    pub chain_meta: [u8; 32],
 }

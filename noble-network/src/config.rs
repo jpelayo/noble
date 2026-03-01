@@ -101,6 +101,10 @@ pub struct NetworkConfig {
 
     /// Interval in seconds between peer quality rotation checks.
     pub peer_rotation_interval_secs: u64,
+
+    /// Per-installation entropy for at-rest encryption of `p2p_identity.key`.
+    /// `None` means no encryption (for tests). Set by the node from `.chain_meta`.
+    pub chain_meta: Option<[u8; 32]>,
 }
 
 impl Default for NetworkConfig {
@@ -124,6 +128,7 @@ impl Default for NetworkConfig {
             max_addrs_per_exchange: 1000,
             max_outbound_per_subnet: 2,
             peer_rotation_interval_secs: 600,
+            chain_meta: None,
         }
     }
 }

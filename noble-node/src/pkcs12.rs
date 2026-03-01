@@ -92,21 +92,62 @@ impl Pkcs12Identity {
     }
 }
 
-/// Save an attestation to disk as CBOR.
-pub fn save_attestation(path: &Path, attestation: &ExternalAttestation) -> Result<(), String> {
+/// Save an attestation to disk as encrypted CBOR (Noble envelope).
+pub fn save_attestation(
+    path: &Path,
+    attestation: &ExternalAttestation,
+    chain_meta: &[u8; 32],
+) -> Result<(), String> {
     use noble_codec::NobleCbor;
-    let bytes = attestation
+    let cbor_bytes = attestation
         .to_cbor()
         .map_err(|e| format!("serialize attestation: {e}"))?;
-    std::fs::write(path, bytes).map_err(|e| format!("write attestation to {}: {e}", path.display()))
+    let encrypted = noble_crypto::file_encrypt::encrypt_file_data(&cbor_bytes, chain_meta)
+        .map_err(|e| format!("encrypt attestation: {e}"))?;
+    std::fs::write(path, &encrypted)
+        .map_err(|e| format!("write attestation to {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
-/// Load a saved attestation from disk.
-pub fn load_attestation(path: &Path) -> Result<ExternalAttestation, String> {
+/// Load a saved attestation from disk (supports encrypted Noble envelope and legacy plaintext CBOR).
+pub fn load_attestation(
+    path: &Path,
+    chain_meta: &[u8; 32],
+) -> Result<ExternalAttestation, String> {
     use noble_codec::NobleCbor;
-    let bytes = std::fs::read(path)
+    let file_bytes = std::fs::read(path)
         .map_err(|e| format!("read attestation from {}: {e}", path.display()))?;
-    ExternalAttestation::from_cbor(&bytes).map_err(|e| format!("deserialize attestation: {e}"))
+    let cbor_bytes = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+        let (decrypted, migrated) = noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta)
+            .map_err(|e| format!("decrypt attestation: {e}"))?;
+        if migrated {
+            if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&decrypted, chain_meta) {
+                let _ = std::fs::write(path, &re_encrypted);
+            }
+            tracing::info!(task = "key_migration", "Migrated attestation to current encryption key");
+        }
+        decrypted
+    } else {
+        // Legacy plaintext CBOR — migrate in place.
+        if let Ok(encrypted) =
+            noble_crypto::file_encrypt::encrypt_file_data(&file_bytes, chain_meta)
+        {
+            if std::fs::write(path, &encrypted).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+        file_bytes
+    };
+    ExternalAttestation::from_cbor(&cbor_bytes).map_err(|e| format!("deserialize attestation: {e}"))
 }
 
 #[cfg(test)]
@@ -176,8 +217,8 @@ mod tests {
             signature_data: vec![1, 2, 3, 4],
         };
         let path = dir.path().join("attestation.cbor");
-        save_attestation(&path, &att).unwrap();
-        let loaded = load_attestation(&path).unwrap();
+        save_attestation(&path, &att, &[0x42u8; 32]).unwrap();
+        let loaded = load_attestation(&path, &[0x42u8; 32]).unwrap();
         assert_eq!(loaded.scheme, "pkcs7");
         assert_eq!(loaded.signer_fingerprint, [0xAB; 32]);
         assert_eq!(loaded.signature_data, vec![1, 2, 3, 4]);

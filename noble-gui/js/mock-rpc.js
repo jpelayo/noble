@@ -1524,6 +1524,33 @@ export class MockRpcClient {
         return { success: true };
       }
 
+      case 'noble_checkDataDir': {
+        const path = params.path || '';
+        // Mock: always succeed with a simulated disk check
+        return {
+          exists: true,
+          writable: true,
+          available_bytes: 107_374_182_400, // ~100 GB
+          error: null,
+        };
+      }
+
+      case 'noble_setConfigValue': {
+        const key = params.key || '';
+        const value = params.value || '';
+        // Mock: accept any whitelisted key
+        const whitelist = [
+          'network.listen_addr', 'network.max_peers', 'network.ban_threshold',
+          'storage.data_dir', 'storage.cache_size_mb', 'storage.compression',
+          'storage.pruning_mode', 'storage.keep_blocks',
+          'security.encryption_mode',
+        ];
+        if (!whitelist.includes(key)) {
+          throw { code: -32602, message: `Config key not whitelisted: ${key}` };
+        }
+        return { success: true };
+      }
+
       case 'noble_rotateTotpSecret': {
         if (!params.current_code_hash || params.current_code_hash.length !== 64) {
           throw { code: -32012, message: 'authentication required' };

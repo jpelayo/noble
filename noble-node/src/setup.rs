@@ -23,8 +23,8 @@ use zeroize::Zeroize;
 
 use crate::config::{
     ApiConfig, ConsensusConfig, GatewayConfig, IdentityConfig, LoggingConfig, MetricsConfig,
-    NetworkConfig, NetworkId, NodeConfig, NodeSectionConfig, OperationalRole, StorageConfig,
-    TraceConfig, WalletConfig,
+    NetworkConfig, NetworkId, NodeConfig, NodeSectionConfig, OperationalRole, SecurityConfig,
+    StorageConfig, TraceConfig, WalletConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -484,6 +484,73 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .default(defaults.storage.compression)
         .interact()?;
 
+    let pruning_choices = &[
+        "Archive      — full history, no pruning (recommended for validators)",
+        "Moderate     — keep recent blocks, prune old state",
+        "Aggressive   — minimal storage, headers + recent blocks only",
+    ];
+    let pruning_default = match defaults.storage.pruning_mode.as_str() {
+        "moderate" => 1,
+        "aggressive" => 2,
+        _ => 0,
+    };
+    let pruning_sel = Select::new()
+        .with_prompt("Pruning mode")
+        .items(pruning_choices)
+        .default(pruning_default)
+        .interact()?;
+    let pruning_mode = match pruning_sel {
+        1 => "moderate".to_string(),
+        2 => "aggressive".to_string(),
+        _ => "archive".to_string(),
+    };
+
+    let keep_blocks: u64 = if pruning_mode != "archive" {
+        let default_keep = if defaults.storage.keep_blocks > 0 {
+            defaults.storage.keep_blocks
+        } else {
+            100_000
+        };
+        Input::new()
+            .with_prompt("Number of recent blocks to keep")
+            .default(default_keep)
+            .interact_text()?
+    } else {
+        0
+    };
+
+    // -----------------------------------------------------------------------
+    // Step 6b: Security (Encryption Mode)
+    // -----------------------------------------------------------------------
+    section_header("7b", "Encryption");
+
+    println!("  All private keys (validator, TLS, P2P, TOTP) are encrypted at rest.");
+    println!("  Choose how the encryption key is managed:");
+    println!();
+
+    let enc_choices = &[
+        "Automatic  — machine-specific key, no password on startup (recommended)",
+        "Manual     — password required every startup (stronger protection)",
+    ];
+    let enc_default = match defaults.security.encryption_mode.as_str() {
+        "manual" => 1,
+        _ => 0,
+    };
+    let enc_sel = Select::new()
+        .with_prompt("Encryption mode")
+        .items(enc_choices)
+        .default(enc_default)
+        .interact()?;
+    let encryption_mode = match enc_sel {
+        1 => {
+            println!();
+            println!("  The password will be required every time the node starts.");
+            println!("  If lost, encrypted key files cannot be recovered.");
+            "manual".to_string()
+        }
+        _ => "automatic".to_string(),
+    };
+
     // -----------------------------------------------------------------------
     // Step 7: Networking (optional)
     // -----------------------------------------------------------------------
@@ -559,6 +626,11 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             data_dir: PathBuf::from(&data_dir),
             cache_size_mb: cache_size,
             compression,
+            pruning_mode: pruning_mode.clone(),
+            keep_blocks,
+        },
+        security: SecurityConfig {
+            encryption_mode: encryption_mode.clone(),
         },
         consensus: ConsensusConfig {
             validator_key_path,
@@ -995,6 +1067,11 @@ fn print_summary(config: &NodeConfig, config_path: &str) {
             "none"
         },
     );
+    summary_line("Pruning", &config.storage.pruning_mode);
+    if config.storage.pruning_mode != "archive" && config.storage.keep_blocks > 0 {
+        summary_line("Keep blocks", &config.storage.keep_blocks.to_string());
+    }
+    summary_line("Encryption", &config.security.encryption_mode);
     summary_line("P2P listen", &config.network.listen_addr);
     summary_line("Max peers", &config.network.max_peers.to_string());
     if !config.network.seeds.is_empty() {

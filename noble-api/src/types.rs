@@ -949,6 +949,19 @@ pub struct SetConfigValueResponse {
     pub restart_required: bool,
 }
 
+/// Response for `noble_checkDataDir`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckDataDirResponse {
+    /// Whether the path exists.
+    pub exists: bool,
+    /// Whether the path is writable.
+    pub writable: bool,
+    /// Available disk space in bytes.
+    pub available_bytes: u64,
+    /// Error message if any check failed.
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -80,8 +80,57 @@ pub async fn start_network(
         let key_path = data_dir.join("p2p_identity.key");
         if key_path.exists() {
             match std::fs::read(&key_path) {
-                Ok(bytes) => {
-                    match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                Ok(file_bytes) => {
+                    // Decrypt Noble envelope (with legacy IKM fallback) or read legacy protobuf.
+                    let proto_bytes =
+                        if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+                            match config.chain_meta.as_ref().and_then(|cm| {
+                                noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, cm).ok()
+                            }) {
+                                Some((d, migrated)) => {
+                                    if migrated {
+                                        if let Some(ref cm) = config.chain_meta {
+                                            if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&d, cm) {
+                                                let _ = std::fs::write(&key_path, &re_encrypted);
+                                            }
+                                            tracing::info!(task = "key_migration", "Migrated P2P identity key to current encryption key");
+                                        }
+                                    }
+                                    d
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        task = "network_startup",
+                                        "Failed to decrypt P2P keypair, generating new one"
+                                    );
+                                    Vec::new() // will fail protobuf decode → generate new
+                                }
+                            }
+                        } else {
+                            // Legacy plaintext protobuf — migrate in place.
+                            if let Some(ref cm) = config.chain_meta {
+                                if let Ok(encrypted) =
+                                    noble_crypto::file_encrypt::encrypt_file_data(&file_bytes, cm)
+                                {
+                                    if std::fs::write(&key_path, &encrypted).is_ok() {
+                                        #[cfg(unix)]
+                                        {
+                                            use std::os::unix::fs::PermissionsExt;
+                                            let _ = std::fs::set_permissions(
+                                                &key_path,
+                                                std::fs::Permissions::from_mode(0o600),
+                                            );
+                                        }
+                                        tracing::info!(
+                                            task = "network_startup",
+                                            "Migrated p2p_identity.key to encrypted Noble envelope"
+                                        );
+                                    }
+                                }
+                            }
+                            file_bytes
+                        };
+                    match libp2p::identity::Keypair::from_protobuf_encoding(&proto_bytes) {
                         Ok(kp) => {
                             tracing::info!(
                                 task = "network_startup",
@@ -96,7 +145,9 @@ pub async fn start_network(
                                 "Failed to decode P2P keypair ({}), generating new one",
                                 e
                             );
-                            libp2p::identity::Keypair::generate_ed25519()
+                            let kp = libp2p::identity::Keypair::generate_ed25519();
+                            save_p2p_keypair(&kp, &key_path, config.chain_meta.as_ref());
+                            kp
                         }
                     }
                 }
@@ -111,39 +162,7 @@ pub async fn start_network(
             }
         } else {
             let kp = libp2p::identity::Keypair::generate_ed25519();
-            match kp.to_protobuf_encoding() {
-                Ok(encoded) => {
-                    if let Err(e) = std::fs::write(&key_path, &encoded) {
-                        tracing::warn!(
-                            task = "network_startup",
-                            "Failed to save P2P keypair ({}), continuing with ephemeral identity",
-                            e
-                        );
-                    } else {
-                        // Restrict file permissions on Unix.
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(
-                                &key_path,
-                                std::fs::Permissions::from_mode(0o600),
-                            );
-                        }
-                        tracing::info!(
-                            task = "network_startup",
-                            "Generated and saved P2P keypair to {}",
-                            key_path.display()
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task = "network_startup",
-                        "Failed to encode P2P keypair for persistence ({}), continuing",
-                        e
-                    );
-                }
-            }
+            save_p2p_keypair(&kp, &key_path, config.chain_meta.as_ref());
             kp
         }
     } else {
@@ -248,6 +267,52 @@ pub async fn start_network(
         bound_port,
         local_peer_id,
     })
+}
+
+/// Save a P2P keypair to disk, optionally encrypted with Noble envelope.
+fn save_p2p_keypair(
+    kp: &libp2p::identity::Keypair,
+    key_path: &std::path::Path,
+    chain_meta: Option<&[u8; 32]>,
+) {
+    match kp.to_protobuf_encoding() {
+        Ok(encoded) => {
+            let file_data = if let Some(cm) = chain_meta {
+                noble_crypto::file_encrypt::encrypt_file_data(&encoded, cm)
+                    .unwrap_or_else(|_| encoded.clone())
+            } else {
+                encoded
+            };
+            if let Err(e) = std::fs::write(key_path, &file_data) {
+                tracing::warn!(
+                    task = "network_startup",
+                    "Failed to save P2P keypair ({}), continuing with ephemeral identity",
+                    e
+                );
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        key_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                tracing::info!(
+                    task = "network_startup",
+                    "Generated and saved P2P keypair to {}",
+                    key_path.display()
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                task = "network_startup",
+                "Failed to encode P2P keypair for persistence ({}), continuing",
+                e
+            );
+        }
+    }
 }
 
 /// Internal event loop.

@@ -28,8 +28,6 @@ use http_body_util::{BodyExt, Full};
 use tower::{Layer, Service};
 use tracing::Instrument;
 
-use subtle::ConstantTimeEq;
-
 use crate::auth::TotpValidator;
 use crate::error::AUTH_REQUIRED;
 
@@ -105,26 +103,20 @@ pub struct AuthLayer {
     scope: TotpScope,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
-    /// F1: Setup-mode authorization token. When `Some`, write methods require
-    /// `Authorization: Bearer <token>` when no TOTP validator is configured.
-    setup_token: Option<String>,
 }
 
 impl AuthLayer {
     /// Create a new auth layer.
     ///
     /// Pass `None` for `validator` to disable TOTP authentication.
-    /// Pass `Some(token)` for `setup_token` to enforce setup-mode write authorization.
     pub fn new(
         validator: Option<Arc<RwLock<TotpValidator>>>,
         scope: TotpScope,
-        setup_token: Option<String>,
     ) -> Self {
         Self {
             validator,
             scope,
             next_request_id: Arc::new(AtomicU64::new(1)),
-            setup_token,
         }
     }
 }
@@ -138,7 +130,6 @@ impl<S> Layer<S> for AuthLayer {
             validator: self.validator.clone(),
             scope: self.scope,
             next_request_id: self.next_request_id.clone(),
-            setup_token: self.setup_token.clone(),
         }
     }
 }
@@ -152,8 +143,6 @@ pub struct AuthService<S> {
     scope: TotpScope,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
-    /// F1: Setup-mode authorization token.
-    setup_token: Option<String>,
 }
 
 /// In `WriteOnly` scope, the middleware must inspect the JSON-RPC method name
@@ -187,7 +176,6 @@ where
         let validator = self.validator.clone();
         let scope = self.scope;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let setup_token = self.setup_token.clone();
 
         Box::pin(async move {
             // Collect the request body upfront. JSON-RPC payloads are small (< 2 MB
@@ -216,42 +204,8 @@ where
                 return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
             }
 
-            // --- No validator: setup-token check (F1) or pass-through. ---
+            // --- No validator: pass through without auth. ---
             let Some(validator) = &validator else {
-                if let Some(ref token) = setup_token {
-                    // F1: Setup mode — write methods require Bearer token.
-                    // WebSocket upgrades are treated as read-only (subscription only).
-                    let is_ws = parts
-                        .headers
-                        .get("upgrade")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|v| v.eq_ignore_ascii_case("websocket"))
-                        .unwrap_or(false);
-                    if !is_ws && !is_read_method(&rpc_method) {
-                        let provided = parts
-                            .headers
-                            .get(http::header::AUTHORIZATION)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.strip_prefix("Bearer "));
-                        let valid = provided
-                            .map(|p| p.as_bytes().ct_eq(token.as_bytes()).into())
-                            .unwrap_or(false);
-                        if !valid {
-                            tracing::warn!(
-                                task = "rpc_auth",
-                                method = %rpc_method,
-                                "setup mode: write rejected — missing/invalid setup token"
-                            );
-                            let resp = auth_error_response();
-                            return Ok(resp.map(|b| {
-                                b.map_err(|never: std::convert::Infallible| -> BoxError {
-                                    match never {}
-                                })
-                                .boxed_unsync()
-                            }));
-                        }
-                    }
-                }
                 let new_req = Request::from_parts(parts, Full::new(body_bytes));
                 let resp = inner.call(new_req).instrument(rpc_span).await?;
                 return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
@@ -394,14 +348,14 @@ mod tests {
 
     #[test]
     fn auth_layer_none_creates_passthrough() {
-        let layer = AuthLayer::new(None, TotpScope::All, None);
+        let layer = AuthLayer::new(None, TotpScope::All);
         let _service = layer.layer(DummyService);
     }
 
     #[test]
     fn auth_layer_some_creates_checking_service() {
         let (validator, _) = TotpValidator::generate().unwrap();
-        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::All, None);
+        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::All);
         let _service = layer.layer(DummyService);
     }
 
@@ -458,63 +412,9 @@ mod tests {
     fn auth_layer_write_only_scope_propagates() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let layer =
-            AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::WriteOnly, None);
+            AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::WriteOnly);
         let service = layer.layer(DummyService);
         assert_eq!(service.scope, TotpScope::WriteOnly);
-    }
-
-    // F1: Setup token enforced for write methods (async service tests).
-
-    #[tokio::test]
-    async fn setup_token_blocks_write_without_auth() {
-        let layer = AuthLayer::new(None, TotpScope::All, Some("secret-token".to_string()));
-        let mut service = layer.layer(DummyService);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .body(Full::from(Bytes::from(
-                r#"{"jsonrpc":"2.0","id":1,"method":"noble_setNodeIdentity","params":{}}"#,
-            )))
-            .unwrap();
-
-        let resp = service.call(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn setup_token_allows_write_with_valid_bearer() {
-        let layer = AuthLayer::new(None, TotpScope::All, Some("secret-token".to_string()));
-        let mut service = layer.layer(DummyService);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("Authorization", "Bearer secret-token")
-            .body(Full::from(Bytes::from(
-                r#"{"jsonrpc":"2.0","id":1,"method":"noble_setNodeIdentity","params":{}}"#,
-            )))
-            .unwrap();
-
-        let resp = service.call(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn setup_token_allows_read_without_auth() {
-        let layer = AuthLayer::new(None, TotpScope::All, Some("secret-token".to_string()));
-        let mut service = layer.layer(DummyService);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .body(Full::from(Bytes::from(
-                r#"{"jsonrpc":"2.0","id":1,"method":"noble_getBlockCount","params":{}}"#,
-            )))
-            .unwrap();
-
-        let resp = service.call(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // F3: WebSocket upgrade authenticated via ?token= query parameter.
@@ -525,7 +425,6 @@ mod tests {
         let layer = AuthLayer::new(
             Some(Arc::new(RwLock::new(validator))),
             TotpScope::All,
-            None,
         );
         let mut service = layer.layer(DummyService);
 
@@ -547,7 +446,6 @@ mod tests {
         let layer = AuthLayer::new(
             Some(Arc::new(RwLock::new(validator))),
             TotpScope::All,
-            None,
         );
         let mut service = layer.layer(DummyService);
 
@@ -581,7 +479,6 @@ mod tests {
         let layer = AuthLayer::new(
             Some(Arc::new(RwLock::new(validator))),
             TotpScope::All,
-            None,
         );
         let mut service = layer.layer(DummyService);
 

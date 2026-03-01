@@ -29,6 +29,7 @@ bip32.workspace = true
 ripemd.workspace = true
 bs58.workspace = true
 bech32.workspace = true
+argon2.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

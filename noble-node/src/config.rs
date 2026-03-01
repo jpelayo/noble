@@ -33,6 +33,9 @@ pub struct NodeConfig {
     /// Reward address configuration.
     #[serde(default)]
     pub rewards: RewardsConfig,
+    /// Security configuration (at-rest encryption).
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Operational role of the node binary.
@@ -104,6 +107,20 @@ pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub cache_size_mb: u32,
     pub compression: bool,
+    /// Pruning mode: "archive" (keep everything), "moderate", or "aggressive".
+    #[serde(default = "default_pruning_mode")]
+    pub pruning_mode: String,
+    /// Number of blocks to keep when pruning. 0 = archive (keep all).
+    #[serde(default = "default_keep_blocks")]
+    pub keep_blocks: u64,
+}
+
+fn default_pruning_mode() -> String {
+    "archive".to_string()
+}
+
+fn default_keep_blocks() -> u64 {
+    0
 }
 
 /// PoR consensus configuration.
@@ -397,6 +414,27 @@ impl Default for RewardsConfig {
     }
 }
 
+/// `[security]` section — at-rest encryption configuration.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SecurityConfig {
+    /// Encryption mode: "automatic" (default, uses random .chain_meta)
+    /// or "manual" (operator password required on every startup).
+    #[serde(default = "default_encryption_mode")]
+    pub encryption_mode: String,
+}
+
+fn default_encryption_mode() -> String {
+    "automatic".to_string()
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            encryption_mode: default_encryption_mode(),
+        }
+    }
+}
+
 impl NodeConfig {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -468,6 +506,8 @@ impl Default for StorageConfig {
             data_dir: PathBuf::from("data"),
             cache_size_mb: 256,
             compression: true,
+            pruning_mode: default_pruning_mode(),
+            keep_blocks: default_keep_blocks(),
         }
     }
 }
@@ -600,6 +640,8 @@ mod tests {
         assert_eq!(config.network.max_peers, 50);
         assert_eq!(config.storage.cache_size_mb, 256);
         assert!(config.storage.compression);
+        assert_eq!(config.storage.pruning_mode, "archive");
+        assert_eq!(config.storage.keep_blocks, 0);
         assert_eq!(config.api.rpc_addr, "127.0.0.1:8783");
         assert_eq!(config.api.ws_addr, "127.0.0.1:8784");
         assert_eq!(config.api.gui_addr, "127.0.0.1:8785");
@@ -608,6 +650,7 @@ mod tests {
         assert_eq!(config.identity.org_type, "Individual");
         assert_eq!(config.identity.node_role, "FullNode");
         assert!(config.identity.node_name.is_empty());
+        assert_eq!(config.security.encryption_mode, "automatic");
     }
 
     #[test]
@@ -866,6 +909,7 @@ mod tests {
         assert!(toml_str.contains("[metrics]"), "missing [metrics]");
         assert!(toml_str.contains("[identity]"), "missing [identity]");
         assert!(toml_str.contains("[trace]"), "missing [trace]");
+        assert!(toml_str.contains("[security]"), "missing [security]");
     }
 
     #[test]

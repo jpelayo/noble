@@ -34,6 +34,13 @@ cache_size_mb = 256
 # Enable Zstd compression on the blocks column family.
 compression = true
 
+# Pruning mode: "archive" (full history), "moderate" (keep recent state),
+# or "aggressive" (minimal storage, headers + recent blocks).
+# pruning_mode = "archive"
+
+# Number of recent blocks to retain when pruning (only for moderate/aggressive).
+# keep_blocks = 100000
+
 [consensus]
 # Path to the validator's private key file (Ed25519 or secp256k1).
 # Leave empty to run as a non-validating (observer) node.
@@ -182,6 +189,20 @@ key_path = ""
 # Receives gateway fee splits. Block subsidy goes to the validator key.
 # Leave empty to use the gateway key as the fee-split destination.
 reward_address = ""
+
+[security]
+# At-rest encryption mode for private key files (validator key, P2P identity,
+# TLS key, TOTP secret, PKI attestation).
+#
+# "automatic" — Machine-specific key. No password required on startup.
+#               Files are encrypted with AES-256-GCM using a key derived from
+#               an obfuscated hardcoded IKM + per-installation .chain_meta.
+#               Provides casual-exposure reduction (prevents plaintext in backups/logs).
+#
+# "manual"   — Password-protected. Operator must enter a password on every startup.
+#               The .chain_meta file is locked with Argon2id + AES-GCM using the
+#               password. Stronger protection at the cost of manual intervention.
+encryption_mode = "automatic"
 
 [identity]
 # Human-readable name for this node (max 64 chars).

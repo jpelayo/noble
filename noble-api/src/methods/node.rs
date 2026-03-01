@@ -172,10 +172,7 @@ pub trait NodeApi {
 
     /// Update a configuration value in noble.toml.
     ///
-    /// Only a whitelist of keys is allowed:
-    /// - `network.listen_port` (P2P port)
-    /// - `api.rpc_port`
-    /// - `api.gui_port`
+    /// Only a whitelist of keys is allowed.
     #[method(name = "setConfigValue")]
     async fn set_config_value(
         &self,
@@ -183,6 +180,13 @@ pub trait NodeApi {
         key: String,
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
+
+    /// Check a data directory path for existence, writeability, and disk space.
+    #[method(name = "checkDataDir")]
+    async fn check_data_dir(
+        &self,
+        path: String,
+    ) -> Result<CheckDataDirResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -530,10 +534,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                     let vkey_path = data_dir.join("validator.key");
                     if vkey_path.exists() {
                         // Already exists — just read the pubkey.
-                        read_validator_pubkey(&vkey_path)
+                        read_validator_pubkey(&vkey_path, &self.chain_meta)
                     } else {
                         // Auto-generate.
-                        match generate_validator_key(&vkey_path) {
+                        match generate_validator_key(&vkey_path, &self.chain_meta) {
                             Ok(pubkey) => {
                                 tracing::info!(
                                     task = "setup",
@@ -779,6 +783,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("network", "listen_port"),
             ("api", "rpc_port"),
             ("api", "gui_port"),
+            ("storage", "data_dir"),
+            ("storage", "cache_size_mb"),
+            ("storage", "compression"),
+            ("storage", "pruning_mode"),
+            ("storage", "keep_blocks"),
+            ("security", "encryption_mode"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {
@@ -805,6 +815,55 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             restart_required,
         })
     }
+
+    async fn check_data_dir(
+        &self,
+        path: String,
+    ) -> Result<CheckDataDirResponse, ErrorObjectOwned> {
+        let p = std::path::Path::new(&path);
+
+        let exists = p.exists();
+        let mut writable = false;
+        let available_bytes: u64;
+        let mut error: Option<String> = None;
+
+        if exists {
+            // Test writeability with a temp file
+            let test_file = p.join(".noble_write_test");
+            match std::fs::write(&test_file, b"test") {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&test_file);
+                    writable = true;
+                }
+                Err(e) => {
+                    error = Some(format!("not writable: {e}"));
+                }
+            }
+        } else {
+            // Try to create the directory
+            match std::fs::create_dir_all(p) {
+                Ok(_) => {
+                    writable = true;
+                    // Clean up the test directory if we just created it
+                    let _ = std::fs::remove_dir(p);
+                }
+                Err(e) => {
+                    error = Some(format!("cannot create directory: {e}"));
+                }
+            }
+        }
+
+        // Get disk space via sysinfo
+        let check_path = if exists { p } else { p.parent().unwrap_or(p) };
+        available_bytes = disk_available(check_path);
+
+        Ok(CheckDataDirResponse {
+            exists,
+            writable,
+            available_bytes,
+            error,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -813,10 +872,16 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
 /// Generate a new Ed25519 validator key, write it to `path` (33 bytes: scheme_id + 32-byte secret),
 /// set permissions to 0o600 on Unix, and return the hex-encoded wire pubkey.
-fn generate_validator_key(path: &std::path::Path) -> Result<String, ErrorObjectOwned> {
+fn generate_validator_key(
+    path: &std::path::Path,
+    chain_meta: &[u8; 32],
+) -> Result<String, ErrorObjectOwned> {
     let (secret_bytes, _) = noble_crypto::ed25519::generate_keypair();
-    let mut file_bytes = vec![SCHEME_ED25519];
-    file_bytes.extend_from_slice(&secret_bytes);
+    let mut raw = vec![SCHEME_ED25519];
+    raw.extend_from_slice(&secret_bytes);
+    // Encrypt with Noble envelope.
+    let file_bytes = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta)
+        .map_err(|e| ApiError::Internal(format!("encrypt validator.key: {e}")))?;
     std::fs::write(path, &file_bytes)
         .map_err(|e| ApiError::Internal(format!("write validator.key: {e}")))?;
     #[cfg(unix)]
@@ -869,6 +934,24 @@ fn disk_capacity(path: &std::path::Path) -> u64 {
     0
 }
 
+/// Get the available (free) disk space at the given path.
+fn disk_available(path: &std::path::Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                return stat.f_bavail as u64 * stat.f_frsize as u64;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+    0
+}
+
 /// Derive a display address for a NobleAddress.
 fn derive_display_address(addr: &noble_core::NobleAddress, original: &str) -> String {
     match addr {
@@ -892,10 +975,17 @@ fn derive_display_address(addr: &noble_core::NobleAddress, original: &str) -> St
     }
 }
 
-/// Read an existing validator key file (33 bytes) and return the hex-encoded wire pubkey.
+/// Read an existing validator key file and return the hex-encoded wire pubkey.
+/// Handles both Noble-envelope encrypted and legacy plaintext (33-byte) formats.
 /// Returns `None` on any read or parse error.
-fn read_validator_pubkey(path: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read(path).ok()?;
+fn read_validator_pubkey(path: &std::path::Path, chain_meta: &[u8; 32]) -> Option<String> {
+    let file_bytes = std::fs::read(path).ok()?;
+    let raw = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+        let (d, _migrated) = noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta).ok()?;
+        d
+    } else {
+        file_bytes
+    };
     if raw.len() != 33 {
         return None;
     }

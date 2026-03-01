@@ -225,12 +225,14 @@ impl KeyStore {
     ///
     /// **The mnemonic must be backed up by the user** — it cannot be recovered
     /// from the encrypted key file.
+    ///
+    /// The encryption passphrase can be empty — Argon2id+AES-GCM still runs
+    /// and `walletUnlock("")` works correctly.
     pub fn create_key_from_mnemonic(
         &mut self,
         word_count: usize,
         encryption_passphrase: &str,
     ) -> Result<(String, NoblePublicKey), WalletError> {
-        Self::validate_passphrase(encryption_passphrase)?;
 
         if word_count != 12 && word_count != 24 {
             return Err(WalletError::Crypto(format!(
@@ -299,12 +301,13 @@ impl KeyStore {
     /// 2. Derives the same seed/path as `create_key_from_mnemonic`.
     /// 3. If the key already exists, returns it without re-encrypting.
     /// 4. Otherwise, encrypts and stores the derived key.
+    ///
+    /// The encryption passphrase can be empty.
     pub fn recover_from_mnemonic(
         &mut self,
         mnemonic_words: &str,
         encryption_passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
-        Self::validate_passphrase(encryption_passphrase)?;
 
         // Parse and validate mnemonic
         let mnemonic: bip39::Mnemonic = mnemonic_words
@@ -428,12 +431,13 @@ impl KeyStore {
 
     /// Import a secp256k1 private key from WIF (Wallet Import Format) or raw hex.
     /// Returns the derived public key.
+    ///
+    /// The encryption passphrase can be empty.
     pub fn import_secp256k1_key(
         &mut self,
         key_input: &str,
         passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
-        Self::validate_passphrase(passphrase)?;
 
         let mut secret_bytes = if key_input.len() == 64
             && key_input.chars().all(|c| c.is_ascii_hexdigit())
@@ -877,6 +881,28 @@ mod tests {
             pk2.to_wire_bytes(),
             "recovered key must match original"
         );
+    }
+
+    #[test]
+    fn mnemonic_empty_passphrase_succeeds() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        // Empty passphrase should work for mnemonic-based key generation
+        let (mnemonic, pk) = ks.create_key_from_mnemonic(24, "").unwrap();
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        assert_eq!(words.len(), 24);
+
+        // Unlock with empty passphrase should work
+        ks.lock();
+        ks.unlock("").unwrap();
+        assert!(ks.is_unlocked());
+
+        // Recover with empty passphrase should also work
+        let dir2 = tempdir().unwrap();
+        let mut ks2 = KeyStore::new(dir2.path().join("keys")).unwrap();
+        let pk2 = ks2.recover_from_mnemonic(&mnemonic, "").unwrap();
+        assert_eq!(pk.to_wire_bytes(), pk2.to_wire_bytes());
     }
 
     #[test]

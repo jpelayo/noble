@@ -319,6 +319,31 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
 
     let cfg_path = Some(std::path::PathBuf::from(config_path));
 
+    // Prompt for encryption password if manual mode is configured.
+    let encryption_password: Option<String> = if config.security.encryption_mode == "manual" {
+        tracing::info!("Manual encryption mode — password required to unlock key files");
+        eprintln!();
+        eprintln!("  Encryption mode: manual");
+        eprintln!("  Enter the encryption password to unlock key files.");
+        eprintln!();
+        match dialoguer::Password::new()
+            .with_prompt("  Encryption password")
+            .interact()
+        {
+            Ok(pw) if !pw.is_empty() => Some(pw),
+            Ok(_) => {
+                eprintln!("  Empty password not allowed in manual mode.");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("  Failed to read password: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let exit_code = if use_memory {
         tracing::info!("Using in-memory storage (--memory flag)");
         run_with_memory(&config, trace_handle, cfg_path).await
@@ -327,7 +352,7 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
             "RocksDB mode — data_dir: {}",
             config.storage.data_dir.display()
         );
-        run_with_rocksdb(&config, trace_handle, cfg_path).await
+        run_with_rocksdb(&config, trace_handle, cfg_path, encryption_password.as_deref()).await
     };
 
     // Cleanup PID file on exit
@@ -368,9 +393,9 @@ async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHan
     }
 }
 
-async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>, config_path: Option<std::path::PathBuf>) -> i32 {
+async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>, config_path: Option<std::path::PathBuf>, encryption_password: Option<&str>) -> i32 {
     match noble_storage::RocksDbStorage::open_with_repair(&config.storage.data_dir) {
-        Ok(storage) => match node::Node::init_with_storage(config, storage) {
+        Ok(storage) => match node::Node::init_with_storage(config, storage, encryption_password) {
             Ok(n) => {
                 tracing::info!("Node initialized — chain height: {}", n.chain_height());
 

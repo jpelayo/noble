@@ -57,17 +57,18 @@ pub struct TlsCertInfo {
 pub fn load_or_generate(
     data_dir: &Path,
     extra_sans: &[String],
+    chain_meta: &[u8; 32],
 ) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
     let cert_path = data_dir.join("tls-cert.pem");
     let key_path = data_dir.join("tls-key.pem");
 
     let (cert_ders, key_der) = if cert_path.exists() && key_path.exists() {
-        let (all_certs, key) = load_from_files(&cert_path, &key_path)?;
+        let (all_certs, key) = load_from_files(&cert_path, &key_path, chain_meta)?;
         // Run expiry check and SAN diff against the loaded cert.
         check_existing_cert(&cert_path, &key_path, extra_sans)?;
         (all_certs, key)
     } else {
-        let (cert, key) = generate_and_save(&cert_path, &key_path, extra_sans)?;
+        let (cert, key) = generate_and_save(&cert_path, &key_path, extra_sans, chain_meta)?;
         (vec![cert], key)
     };
 
@@ -149,6 +150,7 @@ pub fn certificate_details(data_dir: &Path) -> Option<TlsCertInfo> {
 pub fn regenerate(
     data_dir: &Path,
     extra_sans: &[String],
+    chain_meta: &[u8; 32],
 ) -> Result<TlsCertInfo, Box<dyn std::error::Error + Send + Sync>> {
     let cert_path = data_dir.join("tls-cert.pem");
     let key_path = data_dir.join("tls-key.pem");
@@ -160,7 +162,7 @@ pub fn regenerate(
         std::fs::remove_file(&key_path)?;
     }
 
-    let (cert_der, _) = generate_and_save(&cert_path, &key_path, extra_sans)?;
+    let (cert_der, _) = generate_and_save(&cert_path, &key_path, extra_sans, chain_meta)?;
 
     // Parse the written cert for metadata.
     let cert_pem = std::fs::read(&cert_path)?;
@@ -195,6 +197,7 @@ pub fn validate_and_write(
     cert_pem: &str,
     key_pem: &str,
     chain_pem: Option<&str>,
+    chain_meta: &[u8; 32],
 ) -> Result<TlsCertInfo, Box<dyn std::error::Error + Send + Sync>> {
     // Parse and validate cert + key.
     let cert = X509::from_pem(cert_pem.as_bytes())
@@ -246,7 +249,10 @@ pub fn validate_and_write(
     let key_tmp = key_path.with_extension("tmp");
 
     std::fs::write(&cert_tmp, final_cert_pem.as_bytes())?;
-    std::fs::write(&key_tmp, key_pem.as_bytes())?;
+    // Encrypt the private key with Noble envelope.
+    let encrypted_key = noble_crypto::file_encrypt::encrypt_file_data(key_pem.as_bytes(), chain_meta)
+        .map_err(|e| format!("encrypt TLS key: {e}"))?;
+    std::fs::write(&key_tmp, &encrypted_key)?;
 
     #[cfg(unix)]
     {
@@ -408,6 +414,7 @@ fn generate_and_save(
     cert_path: &Path,
     key_path: &Path,
     extra_sans: &[String],
+    chain_meta: &[u8; 32],
 ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), Box<dyn std::error::Error + Send + Sync>>
 {
     let mut params = CertificateParams::default();
@@ -450,7 +457,10 @@ fn generate_and_save(
     }
 
     std::fs::write(cert_path, &cert_pem)?;
-    std::fs::write(key_path, &key_pem)?;
+    // Encrypt the private key with Noble envelope.
+    let encrypted_key = noble_crypto::file_encrypt::encrypt_file_data(key_pem.as_bytes(), chain_meta)
+        .map_err(|e| format!("encrypt TLS key: {e}"))?;
+    std::fs::write(key_path, &encrypted_key)?;
 
     // Restrict key file permissions on Unix
     #[cfg(unix)]
@@ -475,10 +485,48 @@ fn generate_and_save(
 fn load_from_files(
     cert_path: &Path,
     key_path: &Path,
+    chain_meta: &[u8; 32],
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Box<dyn std::error::Error + Send + Sync>>
 {
     let cert_pem = std::fs::read_to_string(cert_path)?;
-    let key_pem = std::fs::read_to_string(key_path)?;
+    let key_file_bytes = std::fs::read(key_path)?;
+
+    // Decrypt Noble envelope (with legacy IKM fallback) or read legacy PEM plaintext.
+    let key_pem = if noble_crypto::file_encrypt::is_noble_envelope(&key_file_bytes) {
+        let (decrypted, migrated) = noble_crypto::file_encrypt::decrypt_file_data_with_migration(&key_file_bytes, chain_meta)
+            .map_err(|e| format!("decrypt TLS key: {e}"))?;
+        if migrated {
+            if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&decrypted, chain_meta) {
+                let _ = std::fs::write(key_path, &re_encrypted);
+            }
+            tracing::info!(task = "key_migration", "Migrated TLS key to current encryption key");
+        }
+        String::from_utf8(decrypted)
+            .map_err(|e| format!("TLS key is not valid UTF-8: {e}"))?
+    } else {
+        // Legacy plaintext PEM — migrate in place.
+        let pem_str = String::from_utf8(key_file_bytes.clone())
+            .map_err(|e| format!("TLS key is not valid UTF-8: {e}"))?;
+        if let Ok(encrypted) =
+            noble_crypto::file_encrypt::encrypt_file_data(&key_file_bytes, chain_meta)
+        {
+            if std::fs::write(key_path, &encrypted).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        key_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                tracing::info!(
+                    task = "tls_cert",
+                    "Migrated tls-key.pem to encrypted Noble envelope"
+                );
+            }
+        }
+        pem_str
+    };
 
     // Parse all PEM blocks (leaf + any intermediate chain certs).
     // After the validate_and_write ordering fix, the leaf cert is always first.
@@ -519,6 +567,8 @@ fn load_from_files(
 mod tests {
     use super::*;
 
+    const TEST_CHAIN_META: [u8; 32] = [0x42u8; 32];
+
     fn make_test_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
     }
@@ -531,7 +581,7 @@ mod tests {
         let key_path = dir.path().join("tls-key.pem");
 
         let extra_sans = vec!["192.168.1.100".to_string(), "mynode.local".to_string()];
-        generate_and_save(&cert_path, &key_path, &extra_sans).expect("generate");
+        generate_and_save(&cert_path, &key_path, &extra_sans, &TEST_CHAIN_META).expect("generate");
 
         // Expiry should be ~10 years from now.
         let expiry = certificate_expiry(dir.path()).expect("expiry");
@@ -557,10 +607,10 @@ mod tests {
         let cert_path = dir.path().join("tls-cert.pem");
         let key_path = dir.path().join("tls-key.pem");
 
-        generate_and_save(&cert_path, &key_path, &[]).expect("initial generate");
+        generate_and_save(&cert_path, &key_path, &[], &TEST_CHAIN_META).expect("initial generate");
         let fp1 = certificate_fingerprint(dir.path()).expect("fp1");
 
-        let info = regenerate(dir.path(), &[]).expect("regenerate");
+        let info = regenerate(dir.path(), &[], &TEST_CHAIN_META).expect("regenerate");
         assert_ne!(info.fingerprint, fp1, "regenerated cert must have new fingerprint");
         assert!(!info.expires_at.is_empty());
     }
@@ -575,13 +625,19 @@ mod tests {
         let key_path1 = dir.path().join("tls-key.pem");
         let cert_path2 = dir2.path().join("tls-cert.pem");
         let key_path2 = dir2.path().join("tls-key.pem");
-        generate_and_save(&cert_path1, &key_path1, &[]).expect("gen1");
-        generate_and_save(&cert_path2, &key_path2, &[]).expect("gen2");
+        generate_and_save(&cert_path1, &key_path1, &[], &TEST_CHAIN_META).expect("gen1");
+        generate_and_save(&cert_path2, &key_path2, &[], &TEST_CHAIN_META).expect("gen2");
 
         let cert_pem = std::fs::read_to_string(&cert_path1).unwrap();
-        let wrong_key = std::fs::read_to_string(&key_path2).unwrap(); // key from different cert
+        // Key file is now encrypted — decrypt it to get the PEM for validate_and_write.
+        let wrong_key_bytes = std::fs::read(&key_path2).unwrap();
+        let wrong_key = String::from_utf8(
+            noble_crypto::file_encrypt::decrypt_file_data(&wrong_key_bytes, &TEST_CHAIN_META)
+                .expect("decrypt key2"),
+        )
+        .unwrap(); // key from different cert
 
-        let result = validate_and_write(dir.path(), &cert_pem, &wrong_key, None);
+        let result = validate_and_write(dir.path(), &cert_pem, &wrong_key, None, &TEST_CHAIN_META);
         assert!(result.is_err(), "mismatched key should be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("does not match"), "error: {msg}");
@@ -593,14 +649,20 @@ mod tests {
         let src_dir = make_test_dir();
         let src_cert = src_dir.path().join("tls-cert.pem");
         let src_key = src_dir.path().join("tls-key.pem");
-        generate_and_save(&src_cert, &src_key, &[]).expect("gen");
+        generate_and_save(&src_cert, &src_key, &[], &TEST_CHAIN_META).expect("gen");
 
         let cert_pem = std::fs::read_to_string(&src_cert).unwrap();
-        let key_pem = std::fs::read_to_string(&src_key).unwrap();
+        // Key file is now encrypted — decrypt to get the PEM.
+        let key_enc = std::fs::read(&src_key).unwrap();
+        let key_pem = String::from_utf8(
+            noble_crypto::file_encrypt::decrypt_file_data(&key_enc, &TEST_CHAIN_META)
+                .expect("decrypt key"),
+        )
+        .unwrap();
 
         let dst_dir = make_test_dir();
         let info =
-            validate_and_write(dst_dir.path(), &cert_pem, &key_pem, None).expect("upload");
+            validate_and_write(dst_dir.path(), &cert_pem, &key_pem, None, &TEST_CHAIN_META).expect("upload");
         assert_eq!(info.fingerprint.len(), 64);
         assert!(!info.auto_generated);
 
@@ -621,11 +683,17 @@ mod tests {
         let chain_cert_path = chain_dir.path().join("tls-cert.pem");
         let chain_key_path = chain_dir.path().join("tls-key.pem");
 
-        generate_and_save(&leaf_cert_path, &leaf_key_path, &[]).expect("gen leaf");
-        generate_and_save(&chain_cert_path, &chain_key_path, &[]).expect("gen chain");
+        generate_and_save(&leaf_cert_path, &leaf_key_path, &[], &TEST_CHAIN_META).expect("gen leaf");
+        generate_and_save(&chain_cert_path, &chain_key_path, &[], &TEST_CHAIN_META).expect("gen chain");
 
         let cert_pem = std::fs::read_to_string(&leaf_cert_path).unwrap();
-        let key_pem = std::fs::read_to_string(&leaf_key_path).unwrap();
+        // Key file is now encrypted — decrypt to get the PEM.
+        let key_enc = std::fs::read(&leaf_key_path).unwrap();
+        let key_pem = String::from_utf8(
+            noble_crypto::file_encrypt::decrypt_file_data(&key_enc, &TEST_CHAIN_META)
+                .expect("decrypt leaf key"),
+        )
+        .unwrap();
         let chain_pem_str = std::fs::read_to_string(&chain_cert_path).unwrap();
 
         // Record the expected leaf fingerprint before upload.
@@ -639,6 +707,7 @@ mod tests {
             &cert_pem,
             &key_pem,
             Some(&chain_pem_str),
+            &TEST_CHAIN_META,
         )
         .expect("upload with chain");
 
@@ -672,7 +741,7 @@ mod tests {
         let dir = make_test_dir();
         let cert_path = dir.path().join("tls-cert.pem");
         let key_path = dir.path().join("tls-key.pem");
-        generate_and_save(&cert_path, &key_path, &[]).expect("gen");
+        generate_and_save(&cert_path, &key_path, &[], &TEST_CHAIN_META).expect("gen");
 
         let result = check_existing_cert(&cert_path, &key_path, &[]);
         assert!(result.is_ok(), "fresh cert should not fail: {:?}", result);

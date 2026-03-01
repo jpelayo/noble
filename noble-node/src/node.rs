@@ -95,13 +95,15 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// TODO: Wire into peer message validation (PKI peer verification).
     #[allow(dead_code)]
     pub ca_store: Option<CaStore>,
+    /// Per-installation entropy for at-rest file encryption (`.chain_meta`).
+    pub chain_meta: [u8; 32],
 }
 
 impl Node<MemoryStorage> {
     /// Initialize a node with in-memory storage (for testing or `--memory` mode).
     pub fn init_memory(config: &NodeConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = MemoryStorage::new();
-        Self::init_with_storage(config, storage)
+        Self::init_with_storage(config, storage, None)
     }
 }
 
@@ -113,6 +115,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     pub fn init_with_storage(
         config: &NodeConfig,
         storage: S,
+        encryption_password: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
@@ -158,10 +161,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
+        // --- Load per-installation encryption entropy ---
+        let chain_meta = noble_crypto::file_encrypt::load_or_create_chain_meta(
+            &config.storage.data_dir,
+            &config.security.encryption_mode,
+            encryption_password,
+        )
+        .map_err(|e| format!("failed to load/create .chain_meta: {e}"))?;
+
         // --- Load validator key (if configured) ---
         let validator_key = load_validator_key(
             &config.consensus.validator_key_path,
             &config.storage.data_dir,
+            &chain_meta,
         );
 
         // --- Build consensus config from TOML ---
@@ -214,7 +226,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let peer_info = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
         // --- PKI identity attestation ---
-        let pki_attestation = init_pki_attestation(config);
+        let pki_attestation = init_pki_attestation(config, &chain_meta);
 
         // --- CA trust store ---
         let ca_store = init_ca_store(config);
@@ -231,6 +243,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             start_time: std::time::Instant::now(),
             pki_attestation,
             ca_store,
+            chain_meta,
         })
     }
 
@@ -339,6 +352,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         net_config.chain_id = self.chain_id;
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
+        net_config.chain_meta = Some(self.chain_meta);
 
         let mut network = noble_network::start_network(net_config, block_provider, tx_provider)
             .await
@@ -357,11 +371,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             compute_validator_key_info(
                 &config.consensus.validator_key_path,
                 &config.storage.data_dir,
+                &self.chain_meta,
             );
 
         // --- Initialize TOTP auth ---
         let (totp_validator, totp_secret_path) =
-            init_totp_validator(config).map_err(|e| NodeError::Config(e.to_string()))?;
+            init_totp_validator(config, &self.chain_meta)
+                .map_err(|e| NodeError::Config(e.to_string()))?;
 
         // --- Build broadcast channels for WebSocket subscriptions ---
         let (new_block_tx, _) = broadcast::channel(64);
@@ -461,38 +477,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
-        // --- F1: Setup mode security token ---
-        // Generate a random one-time token printed to stdout so only the operator
-        // who has console/log access can initiate setup actions.
-        let setup_token_val: Option<String> = if setup_mode {
-            let token = generate_setup_token(&config.storage.data_dir);
-            let sep = "═".repeat(60);
-            tracing::warn!(task = "node_startup", "{sep}");
-            tracing::warn!(task = "node_startup", "  SETUP MODE — FIRST-BOOT CONFIGURATION REQUIRED");
-            tracing::warn!(task = "node_startup", "  Setup token: {token}");
-            tracing::warn!(task = "node_startup", "  This token is required to authorize setup write");
-            tracing::warn!(task = "node_startup", "  operations. Keep it private.");
-            tracing::warn!(task = "node_startup", "{sep}");
-
-            // Spawn 30-minute expiry warning.
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-                tracing::warn!(
-                    task = "node_startup",
-                    "SETUP WINDOW EXPIRED: 30 minutes have passed in setup mode. \
-                     Restart the node if setup is incomplete to refresh the setup token."
-                );
-            });
-
-            Some(token)
-        } else {
-            None
-        };
+        // Setup token removed in S38 — setup RPCs are already gated by allowed_ips + TLS.
 
         // --- Build TLS config (shared by RPC and GUI servers) — fail-closed by default ---
         let (tls_config, tls_plaintext_mode): (Option<std::sync::Arc<rustls::ServerConfig>>, bool) =
             if config.api.tls_enabled {
-                match crate::tls_cert::load_or_generate(&config.storage.data_dir, &extra_sans) {
+                match crate::tls_cert::load_or_generate(&config.storage.data_dir, &extra_sans, &self.chain_meta) {
                     Ok(cfg) => (Some(cfg), false),
                     Err(e) => {
                         if config.api.tls_allow_plaintext_fallback {
@@ -564,9 +554,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Build TLS lifecycle callbacks for ApiState ---
         let tls_active = tls_config.is_some();
         let data_dir_regen = config.storage.data_dir.clone();
+        let chain_meta_regen = self.chain_meta;
         let tls_regenerate: Option<std::sync::Arc<dyn Fn(Vec<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>> = if tls_active {
             Some(std::sync::Arc::new(move |extra_sans: Vec<String>| {
-                crate::tls_cert::regenerate(&data_dir_regen, &extra_sans)
+                crate::tls_cert::regenerate(&data_dir_regen, &extra_sans, &chain_meta_regen)
                     .map(|info| (info.fingerprint, info.expires_at, info.expiry_secs, info.sans))
                     .map_err(|e| e.to_string())
             }))
@@ -574,9 +565,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
         let data_dir_upload = config.storage.data_dir.clone();
+        let chain_meta_upload = self.chain_meta;
         let tls_upload: Option<std::sync::Arc<dyn Fn(String, String, Option<String>) -> Result<(String, String, i64, Vec<String>), String> + Send + Sync>> = if tls_active {
             Some(std::sync::Arc::new(move |cert_pem: String, key_pem: String, chain_pem: Option<String>| {
-                crate::tls_cert::validate_and_write(&data_dir_upload, &cert_pem, &key_pem, chain_pem.as_deref())
+                crate::tls_cert::validate_and_write(&data_dir_upload, &cert_pem, &key_pem, chain_pem.as_deref(), &chain_meta_upload)
                     .map(|info| (info.fingerprint, info.expires_at, info.expiry_secs, info.sans))
                     .map_err(|e| e.to_string())
             }))
@@ -590,6 +582,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // validator — the RPC handler does that directly.
         let totp_data_dir = config.storage.data_dir.clone();
         let totp_secret_file_cfg = config.api.totp_secret_file.clone();
+        let chain_meta_totp = self.chain_meta;
         let enable_totp_closure: Option<Arc<dyn Fn() -> Result<(String, String), String> + Send + Sync>> =
             if config.api.totp_enabled {
                 None // already enabled
@@ -605,7 +598,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         std::path::PathBuf::from(&totp_secret_file_cfg)
                     };
 
-                    atomic_write_file(&secret_path, base32.as_bytes())
+                    let encrypted = noble_crypto::file_encrypt::encrypt_file_data(
+                        base32.as_bytes(),
+                        &chain_meta_totp,
+                    )
+                    .map_err(|e| format!("encrypt TOTP secret: {e}"))?;
+                    atomic_write_file(&secret_path, &encrypted)
                         .map_err(|e| format!("write TOTP secret: {e}"))?;
 
                     #[cfg(unix)]
@@ -740,10 +738,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
 
-        // Clone setup_token before ApiState consumes it — GUI server also needs it
-        // to inject window.NOBLE_SETUP_TOKEN into index.html (Issue 9).
-        let gui_setup_token = setup_token_val.clone();
-
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
             storage: self.storage.clone(),
@@ -789,7 +783,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tls_regenerate,
             tls_upload,
             setup_mode,
-            setup_token: setup_token_val,
             allowed_cors_origins: allowed_cors_origins.clone(),
             rpc_origins: rpc_origins.clone(),
             cors_scheme: rpc_scheme.to_string(),
@@ -800,8 +793,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_scheme: validator_scheme_str,
             validator_key_path: validator_key_path_str,
             data_dir: Some(config.storage.data_dir.clone()),
-            pruning_mode: "archive".to_string(),
-            keep_blocks: 0,
+            pruning_mode: config.storage.pruning_mode.clone(),
+            keep_blocks: config.storage.keep_blocks,
             reward_address: parking_lot::RwLock::new(
                 if config.rewards.reward_address.is_empty() {
                     None
@@ -812,6 +805,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             enable_totp: enable_totp_closure,
             set_config_value: set_config_value_closure,
             config_path,
+            chain_meta: self.chain_meta,
         });
 
         // --- Determine RPC bind address ---
@@ -883,7 +877,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     gui_rpc_origins,
                     rpc_port,
                     setup_mode,
-                    gui_setup_token,
                 )
                 .await
                 {
@@ -1318,6 +1311,7 @@ impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
 fn load_validator_key(
     path: &str,
     data_dir: &std::path::Path,
+    chain_meta: &[u8; 32],
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
     // When validator_key_path is empty, check the data_dir fallback location.
     // This covers nodes whose validator.key was auto-generated during setup.
@@ -1350,7 +1344,7 @@ fn load_validator_key(
         return None;
     }
 
-    let raw = match std::fs::read(key_path) {
+    let file_bytes = match std::fs::read(key_path) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!(
@@ -1359,6 +1353,51 @@ fn load_validator_key(
             );
             return None;
         }
+    };
+
+    // Decrypt Noble envelope (with legacy IKM fallback) or read legacy plaintext.
+    let raw = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+        match noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta) {
+            Ok((decrypted, migrated)) => {
+                if migrated {
+                    if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&decrypted, chain_meta) {
+                        let _ = atomic_write_file(key_path, &re_encrypted);
+                    }
+                    tracing::info!(task = "key_migration", "Migrated validator.key to current encryption key");
+                }
+                decrypted
+            }
+            Err(e) => {
+                tracing::error!(
+                    task = "config_load",
+                    "Failed to decrypt validator key file: {e}"
+                );
+                return None;
+            }
+        }
+    } else {
+        // Legacy plaintext — re-encrypt in place for migration.
+        if file_bytes.len() == 33 {
+            if let Ok(encrypted) =
+                noble_crypto::file_encrypt::encrypt_file_data(&file_bytes, chain_meta)
+            {
+                if atomic_write_file(key_path, &encrypted).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            key_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
+                    tracing::info!(
+                        task = "config_load",
+                        "Migrated validator.key to encrypted Noble envelope"
+                    );
+                }
+            }
+        }
+        file_bytes
     };
 
     if raw.len() != 33 {
@@ -1401,6 +1440,7 @@ fn load_validator_key(
 fn compute_validator_key_info(
     path: &str,
     data_dir: &std::path::Path,
+    chain_meta: &[u8; 32],
 ) -> (Option<String>, Option<String>, Option<String>) {
     let key_path_owned;
     let key_path = if path.is_empty() {
@@ -1418,10 +1458,29 @@ fn compute_validator_key_info(
         p
     };
 
-    let raw = match std::fs::read(key_path) {
+    let file_bytes = match std::fs::read(key_path) {
         Ok(b) => b,
         Err(_) => return (None, None, None),
     };
+
+    // Decrypt Noble envelope (with legacy IKM fallback) or read legacy plaintext.
+    let raw = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+        match noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta) {
+            Ok((d, migrated)) => {
+                if migrated {
+                    if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&d, chain_meta) {
+                        let _ = std::fs::write(key_path, &re_encrypted);
+                    }
+                    tracing::info!(task = "key_migration", "Migrated validator.key to current encryption key");
+                }
+                d
+            }
+            Err(_) => return (None, None, None),
+        }
+    } else {
+        file_bytes
+    };
+
     if raw.len() != 33 {
         return (None, None, None);
     }
@@ -1565,47 +1624,6 @@ fn parse_voting_strategy(
 /// 1. If `[gateway] key_path` is set and file exists, load from file.
 /// 2. Else auto-derive from the first wallet key (with deprecation warning if key_path is empty).
 /// 3. If `[gateway] enabled = false`, returns None.
-/// Generate (or load) a one-time setup token for setup-mode authentication.
-///
-/// On first call, a 32-byte random hex token is written to
-/// `<data_dir>/setup-token.txt` with 0o600 permissions. On subsequent calls
-/// the same file is returned so a node restart prints the same token until
-/// setup completes.  The file is NOT automatically deleted — the operator
-/// should delete it after completing setup, or it is overwritten on the next
-/// setup-mode boot (i.e. when identity.json is absent again).
-fn generate_setup_token(data_dir: &std::path::Path) -> String {
-    use rand::RngCore as _;
-    let token_path = data_dir.join("setup-token.txt");
-
-    // Re-use existing token if present (stable across restarts during the same setup session).
-    if let Ok(existing) = std::fs::read_to_string(&token_path) {
-        let t = existing.trim().to_string();
-        if t.len() == 64 {
-            return t;
-        }
-    }
-
-    // Generate a fresh 32-byte (64 hex char) token.
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let token = hex::encode(bytes);
-
-    if let Some(parent) = token_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&token_path, &token) {
-        tracing::warn!(task = "node_startup", "Could not write setup-token.txt: {e}");
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
-        }
-    }
-
-    token
-}
-
 fn resolve_gateway_key(
     config: &NodeConfig,
     wallet_keystore: &Arc<Mutex<noble_wallet::KeyStore>>,
@@ -1728,6 +1746,7 @@ type TotpInitResult = (
 ///   a secret and writes it to `"totp_secret.txt"` in the data directory.
 pub fn init_totp_validator(
     config: &crate::config::NodeConfig,
+    chain_meta: &[u8; 32],
 ) -> Result<TotpInitResult, Box<dyn std::error::Error>> {
     if !config.api.totp_enabled {
         return Ok((None, None));
@@ -1740,7 +1759,43 @@ pub fn init_totp_validator(
     };
 
     let (validator, base32) = if secret_path.exists() {
-        let base32 = std::fs::read_to_string(&secret_path)?.trim().to_string();
+        let file_bytes = std::fs::read(&secret_path)?;
+        let base32 = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+            let (decrypted, migrated) = noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta)
+                .map_err(|e| format!("decrypt TOTP secret: {e}"))?;
+            if migrated {
+                if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&decrypted, chain_meta) {
+                    let _ = std::fs::write(&secret_path, &re_encrypted);
+                }
+                tracing::info!(task = "key_migration", "Migrated TOTP secret to current encryption key");
+            }
+            String::from_utf8(decrypted)
+                .map_err(|e| format!("TOTP secret is not valid UTF-8: {e}"))?
+        } else {
+            // Legacy plaintext — migrate in place.
+            let text = String::from_utf8(file_bytes.clone())
+                .map_err(|e| format!("TOTP secret is not valid UTF-8: {e}"))?;
+            let trimmed = text.trim().to_string();
+            if let Ok(encrypted) =
+                noble_crypto::file_encrypt::encrypt_file_data(trimmed.as_bytes(), chain_meta)
+            {
+                if atomic_write_file(&secret_path, &encrypted).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &secret_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
+                    tracing::info!(
+                        task = "config_load",
+                        "Migrated totp_secret.txt to encrypted Noble envelope"
+                    );
+                }
+            }
+            trimmed
+        };
         let v = TotpValidator::from_base32(&base32)?;
         tracing::info!(
             task = "config_load",
@@ -1750,8 +1805,9 @@ pub fn init_totp_validator(
         (v, base32)
     } else {
         let (v, base32) = TotpValidator::generate()?;
-        atomic_write_file(&secret_path, base32.as_bytes())?;
-        // Restrict TOTP secret file to owner-only (0o600)
+        let encrypted = noble_crypto::file_encrypt::encrypt_file_data(base32.as_bytes(), chain_meta)
+            .map_err(|e| format!("encrypt TOTP secret: {e}"))?;
+        atomic_write_file(&secret_path, &encrypted)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1762,11 +1818,10 @@ pub fn init_totp_validator(
             "TOTP auth: new secret generated at {}",
             secret_path.display()
         );
-        // Security: TOTP secret is persisted to file only — never logged.
         (v, base32)
     };
 
-    let _ = base32; // used only for logging/file write above
+    let _ = base32;
     Ok((Some(Arc::new(RwLock::new(validator))), Some(secret_path)))
 }
 
@@ -1775,12 +1830,15 @@ pub fn init_totp_validator(
 /// 1. If a saved attestation file exists, load it.
 /// 2. Else if a PKCS#12 file is configured, sign a binding and save the attestation.
 /// 3. Otherwise, no attestation.
-fn init_pki_attestation(config: &NodeConfig) -> Option<noble_core::ExternalAttestation> {
+fn init_pki_attestation(
+    config: &NodeConfig,
+    chain_meta: &[u8; 32],
+) -> Option<noble_core::ExternalAttestation> {
     let attestation_path = config.storage.data_dir.join("identity_attestation.cbor");
 
     // Try loading existing attestation
     if attestation_path.exists() {
-        match crate::pkcs12::load_attestation(&attestation_path) {
+        match crate::pkcs12::load_attestation(&attestation_path, chain_meta) {
             Ok(att) => {
                 tracing::info!(
                     task = "config_load",
@@ -1891,6 +1949,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
+        config.storage.data_dir = dir.path().to_path_buf();
 
         let node = Node::init_memory(&config).unwrap();
 
@@ -1919,6 +1978,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
+        config.storage.data_dir = dir.path().to_path_buf();
 
         // First init commits genesis.
         let node1 = Node::init_memory(&config).unwrap();
@@ -1928,7 +1988,7 @@ mod tests {
         let storage = Arc::try_unwrap(node1.storage)
             .unwrap_or_else(|_| panic!("storage has multiple owners"))
             .into_inner();
-        let node2 = Node::init_with_storage(&config, storage).unwrap();
+        let node2 = Node::init_with_storage(&config, storage, None).unwrap();
         let height2 = node2.chain_height();
 
         assert_eq!(height1, height2);
@@ -2014,7 +2074,8 @@ mod tests {
     fn init_totp_disabled_returns_none() {
         let config = NodeConfig::default();
         assert!(!config.api.totp_enabled);
-        let (validator, path) = init_totp_validator(&config).unwrap();
+        let chain_meta = [0x42u8; 32];
+        let (validator, path) = init_totp_validator(&config, &chain_meta).unwrap();
         assert!(validator.is_none());
         assert!(path.is_none());
     }
@@ -2025,8 +2086,9 @@ mod tests {
         let mut config = NodeConfig::default();
         config.api.totp_enabled = true;
         config.api.totp_secret_file = dir.path().join("totp.txt").to_str().unwrap().to_string();
+        let chain_meta = [0x42u8; 32];
 
-        let (validator, path) = init_totp_validator(&config).unwrap();
+        let (validator, path) = init_totp_validator(&config, &chain_meta).unwrap();
         assert!(validator.is_some());
         assert!(path.is_some());
 
@@ -2034,7 +2096,7 @@ mod tests {
         assert!(secret_path.exists(), "secret file should be created");
 
         // Re-init should load from the existing file.
-        let (v2, _) = init_totp_validator(&config).unwrap();
+        let (v2, _) = init_totp_validator(&config, &chain_meta).unwrap();
         assert!(v2.is_some());
 
         // Both should accept the same code.
@@ -2163,6 +2225,10 @@ mod tests {
         config.wallet.keystore_path = dir.path().join("keystore");
         config.storage.data_dir = dir.path().to_path_buf();
 
+        // Pre-seed .chain_meta so Node::init_memory uses the same key.
+        let chain_meta = [0x42u8; 32];
+        std::fs::write(dir.path().join(".chain_meta"), &chain_meta).unwrap();
+
         // Save a mock attestation
         let att = noble_core::ExternalAttestation {
             scheme: "pkcs7".to_string(),
@@ -2171,7 +2237,7 @@ mod tests {
             signature_data: vec![10, 20, 30],
         };
         let att_path = dir.path().join("identity_attestation.cbor");
-        crate::pkcs12::save_attestation(&att_path, &att).unwrap();
+        crate::pkcs12::save_attestation(&att_path, &att, &chain_meta).unwrap();
 
         let node = Node::init_memory(&config).unwrap();
         assert!(

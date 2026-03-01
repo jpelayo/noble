@@ -126,7 +126,6 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         tls_regenerate: None,
         tls_upload: None,
         setup_mode: false,
-        setup_token: None,
         allowed_cors_origins: std::sync::Arc::new(parking_lot::RwLock::new(vec![
             "http://127.0.0.1:8785".into(),
             "http://localhost:8785".into(),
@@ -149,6 +148,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         enable_totp: None,
         set_config_value: None,
         config_path: None,
+        chain_meta: [0x42u8; 32],
     });
 
     (state, dir)

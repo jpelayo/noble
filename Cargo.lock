@@ -3038,6 +3038,7 @@ name = "noble-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "bech32",
  "bip32",
  "bip39",

@@ -243,7 +243,6 @@ pub async fn start_gui_server(
     rpc_origins: Arc<parking_lot::RwLock<Vec<String>>>,
     rpc_port: u16,
     setup_mode: bool,
-    setup_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let serve_dir = ServeDir::new(&gui_dir);
 
@@ -253,7 +252,6 @@ pub async fn start_gui_server(
     let gui_dir_clone = gui_dir.clone();
     let root_handler = axum::routing::get(move || {
         let dir = gui_dir_clone.clone();
-        let token_clone = setup_token.clone();
         async move {
             let index_path = dir.join("index.html");
             match tokio::fs::read_to_string(&index_path).await {
@@ -266,13 +264,6 @@ pub async fn start_gui_server(
                     // redirect to #/setup before router.start() — no async RPC needed.
                     if setup_mode {
                         script.push_str("<script>window.NOBLE_SETUP_MODE=true;</script>");
-                    }
-                    // Issue 9: inject setup token so the wizard can auto-apply it.
-                    // Token is 64 hex chars (safe to embed in a JS string literal).
-                    if let Some(ref tok) = token_clone {
-                        script.push_str(&format!(
-                            "<script>window.NOBLE_SETUP_TOKEN='{tok}';</script>"
-                        ));
                     }
                     // Inject before </head> so the variables are available when app.js loads.
                     let injected = if html.contains("</head>") {
