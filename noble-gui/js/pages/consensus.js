@@ -935,9 +935,11 @@ export function init(root, ctx) {
 
   async function loadCandidates() {
     try {
-      const [peers, valResult] = await Promise.all([
+      const [peers, valResult, nodeInfo, identity] = await Promise.all([
         rpc.call('noble_getPeerMemory'),
         rpc.call('noble_getValidatorList'),
+        rpc.call('noble_getNodeInfo'),
+        rpc.call('noble_getNodeIdentity'),
       ]);
 
       // Build set of validator identity keys for exclusion
@@ -952,6 +954,24 @@ export function init(root, ctx) {
       const candidates = peers.filter(p =>
         (p.wants_to_validate || p.wants_to_vote) && !validatorKeys.has(p.identity_key)
       );
+
+      // Inject SELF if this node is a validator candidate but not yet accepted
+      const selfKey = nodeInfo.validator_pubkey;
+      if (selfKey && !validatorKeys.has(selfKey)) {
+        const now = Math.floor(Date.now() / 1000);
+        candidates.unshift({
+          identity_key: selfKey,
+          node_name: identity.node_name || 'This Node',
+          org_type: identity.org_type || null,
+          node_role: identity.node_role || null,
+          wants_to_validate: identity.wants_to_validate ?? true,
+          wants_to_vote: identity.wants_to_vote ?? true,
+          first_seen: now,
+          last_seen: now,
+          connection_count: null,
+          _isSelf: true,
+        });
+      }
 
       csCandidateCount.textContent = `${candidates.length} candidate${candidates.length !== 1 ? 's' : ''}`;
 
@@ -972,10 +992,17 @@ export function init(root, ctx) {
         const isStale = live.label !== 'alive';
 
         const tr = document.createElement('tr');
-        if (isStale) tr.style.opacity = '0.6';
+        if (isStale && !peer._isSelf) tr.style.opacity = '0.6';
+        const youBadge = peer._isSelf
+          ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;vertical-align:middle;margin-left:4px">YOU</span>'
+          : '';
+        const connCount = peer.connection_count != null ? peer.connection_count : '—';
+        const removeBtn = peer._isSelf
+          ? ''
+          : `<button class="btn btn-danger btn-sm cs-remove-candidate" data-key="${peer.identity_key}" title="Remove from peer memory">&#10005;</button>`;
         tr.innerHTML = `
           <td>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}</div>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)}</div>
           </td>
           <td style="font-size:var(--font-size-xs)">${peer.org_type || '—'}</td>
@@ -988,11 +1015,11 @@ export function init(root, ctx) {
             <div style="color:var(--text-muted)">${timeAgo(peer.last_seen)}</div>
           </td>
           <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${timeAgo(peer.first_seen)}</td>
-          <td style="font-size:var(--font-size-xs);text-align:center">${peer.connection_count}</td>
+          <td style="font-size:var(--font-size-xs);text-align:center">${connCount}</td>
           <td>
             <div style="display:flex;gap:var(--gap-xs)">
               <button class="btn btn-sm cs-add-candidate" data-key="${peer.identity_key}" data-name="${peer.node_name || ''}" title="Add to validator list">+</button>
-              <button class="btn btn-danger btn-sm cs-remove-candidate" data-key="${peer.identity_key}" title="Remove from peer memory">&#10005;</button>
+              ${removeBtn}
             </div>
           </td>
         `;

@@ -17,6 +17,15 @@ use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
 
+/// Auto-convert bare IP (e.g. "192.168.5.20") to multiaddr "/ip4/{ip}/tcp/8780".
+fn normalize_multiaddr(input: &str) -> String {
+    if input.starts_with('/') {
+        input.to_string()
+    } else {
+        format!("/ip4/{}/tcp/8780", input)
+    }
+}
+
 #[rpc(server, namespace = "noble")]
 pub trait NetworkApi {
     /// Get information about connected peers.
@@ -170,6 +179,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn dial_peer(&self, multiaddr: String) -> Result<DialPeerResponse, ErrorObjectOwned> {
+        let multiaddr = normalize_multiaddr(&multiaddr);
         let addr: libp2p::Multiaddr = multiaddr
             .parse()
             .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
@@ -189,6 +199,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn add_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned> {
+        let multiaddr = normalize_multiaddr(&multiaddr);
         // Validate multiaddr syntax.
         let addr: libp2p::Multiaddr = multiaddr
             .parse()

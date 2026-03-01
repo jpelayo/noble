@@ -901,6 +901,11 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 fn cmd_peer(action: PeerCommand) {
     match action {
         PeerCommand::Dial { multiaddr, rpc_url } => {
+            let multiaddr = if multiaddr.starts_with('/') {
+                multiaddr.clone()
+            } else {
+                format!("/ip4/{}/tcp/8780", multiaddr)
+            };
             let params = serde_json::json!({ "multiaddr": multiaddr });
             match rpc_call(&rpc_url, "noble_dialPeer", params) {
                 Ok(result) => {
@@ -934,6 +939,11 @@ fn cmd_peer(action: PeerCommand) {
             }
         }
         PeerCommand::AddSeed { multiaddr, rpc_url } => {
+            let multiaddr = if multiaddr.starts_with('/') {
+                multiaddr.clone()
+            } else {
+                format!("/ip4/{}/tcp/8780", multiaddr)
+            };
             let params = serde_json::json!({ "multiaddr": multiaddr });
             match rpc_call(&rpc_url, "noble_addSeed", params) {
                 Ok(result) => {

@@ -590,6 +590,13 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.starts_with('/') {
+                    s
+                } else {
+                    format!("/ip4/{}/tcp/8780", s)
+                }
+            })
             .collect();
 
         let peers: u32 = Input::new()

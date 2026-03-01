@@ -935,9 +935,13 @@ export class MockRpcClient {
       case 'noble_castVote':
         return true;
 
-      case 'noble_getNodeInfo':
+      case 'noble_getNodeInfo': {
+        // validator_pubkey: use the first validator's key hex (simulates this node being a validator)
+        const selfVal = this.#validators[0];
+        const selfKeyBytes = selfVal ? (selfVal.public_key.Ed25519 || selfVal.public_key.Secp256k1 || []) : [];
+        const selfKeyHex = selfKeyBytes.map(b => b.toString(16).padStart(2, '0')).join('') || null;
         return {
-          version: '0.1.0',
+          version: '0.6.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
           network: 'mainnet',
@@ -949,7 +953,9 @@ export class MockRpcClient {
           p2p_port: 8780,
           data_dir: '/var/noble/data',
           totp_enabled: this.#authEnabled,
+          validator_pubkey: selfKeyHex,
         };
+      }
 
       case 'noble_getWalletInfo': {
         // First-run mode: no keys yet
@@ -1647,8 +1653,9 @@ export class MockRpcClient {
       }
 
       case 'noble_dialPeer': {
-        const addr = params.multiaddr || '';
-        if (!addr.startsWith('/')) throw { code: -32602, message: 'Invalid multiaddr' };
+        let addr = params.multiaddr || '';
+        if (!addr.startsWith('/')) addr = `/ip4/${addr}/tcp/8780`;
+        if (!/^\/ip[46]\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
         return { success: true, message: `Dialing ${addr}` };
       }
 
@@ -1656,8 +1663,9 @@ export class MockRpcClient {
         return { seeds: this._mockSeeds || [] };
 
       case 'noble_addSeed': {
-        const seedAddr = params.multiaddr || '';
-        if (!seedAddr.startsWith('/')) throw { code: -32602, message: 'Invalid multiaddr' };
+        let seedAddr = params.multiaddr || '';
+        if (!seedAddr.startsWith('/')) seedAddr = `/ip4/${seedAddr}/tcp/8780`;
+        if (!/^\/ip[46]\//.test(seedAddr)) throw { code: -32602, message: 'Invalid multiaddr' };
         if (!this._mockSeeds) this._mockSeeds = [];
         if (!this._mockSeeds.includes(seedAddr)) this._mockSeeds.push(seedAddr);
         return { seeds: [...this._mockSeeds] };
