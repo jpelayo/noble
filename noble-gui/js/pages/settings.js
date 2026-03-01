@@ -137,7 +137,7 @@ export function init(root, ctx) {
             <div>
               <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">New Mode</label>
               <select id="s-enc-mode-select" style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
-                <option value="automatic">Automatic (no startup password)</option>
+                <option value="automatic">Automatic — less secure (no startup password)</option>
                 <option value="manual">Manual (password on every startup)</option>
               </select>
             </div>
@@ -441,7 +441,7 @@ export function init(root, ctx) {
     try {
       const result = await rpc.call('noble_regenerateTlsCert', { extra_sans: [] });
       tlsRegenMsg.style.color = 'var(--success)';
-      tlsRegenMsg.textContent = `Done — new fingerprint: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
+      tlsRegenMsg.innerHTML = `Done — new fingerprint: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
       // Refresh the cert panel to show updated info.
       loadTlsCert();
     } catch (e) {
@@ -469,7 +469,7 @@ export function init(root, ctx) {
     try {
       const result = await rpc.call('noble_uploadTlsCert', { cert_pem: certPem, key_pem: keyPem, chain_pem: chainPem });
       tlsUploadMsg.style.color = 'var(--success)';
-      tlsUploadMsg.textContent = `Uploaded — SHA-256: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
+      tlsUploadMsg.innerHTML = `Uploaded — SHA-256: ${result.fingerprint.slice(0, 16)}… Restart node to apply.`;
       tlsCertPem.value = '';
       tlsKeyPem.value = '';
       tlsChainPem.value = '';
@@ -657,7 +657,7 @@ export function init(root, ctx) {
 
       const modeLabel = currentEncMode === 'manual'
         ? 'Manual (password required on every startup)'
-        : 'Automatic (no startup password)';
+        : 'Automatic — less secure (no startup password)';
       const formatLabel = info.is_locked ? 'NBLK (password-locked)' : 'raw 32-byte entropy';
 
       encDetails.innerHTML = `
@@ -710,7 +710,7 @@ export function init(root, ctx) {
 
       const result = await rpc.call('noble_setEncryptionMode', rpcParams);
       encSwitchMsg.style.color = 'var(--success)';
-      encSwitchMsg.textContent = result.message || 'Mode switched successfully. Restart required.';
+      encSwitchMsg.textContent = result.message || 'Mode switched. Restart node to apply.';
       encCurrentPw.value = '';
       encNewPw.value = '';
       encConfirmPw.value = '';
@@ -830,7 +830,7 @@ export function init(root, ctx) {
             try {
               const result = await rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${port}` });
               msg.style.color = 'var(--success)';
-              msg.textContent = result.restart_required ? 'Saved — restart required' : 'Saved';
+              msg.innerHTML = result.restart_required ? 'Saved — run <code>brew services restart noble</code>' : 'Saved';
               setTimeout(() => loadSettings(), 2000);
             } catch (e) {
               msg.style.color = 'var(--error)';

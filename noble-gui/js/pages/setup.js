@@ -937,7 +937,7 @@ export function init(root, ctx) {
     const modes = [
       {
         value: 'automatic',
-        label: 'Automatic (Recommended)',
+        label: 'Automatic — less secure',
         desc: 'Key files are encrypted at rest with a machine-specific key. No password required on startup.',
         icon: '&#x1F512;',
       },
