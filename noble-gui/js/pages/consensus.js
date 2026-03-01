@@ -675,7 +675,11 @@ export function init(root, ctx) {
 
   async function loadValidators() {
     try {
-      const result = await rpc.call('noble_getValidatorList');
+      const [result, nodeInfo] = await Promise.all([
+        rpc.call('noble_getValidatorList'),
+        rpc.call('noble_getNodeInfo'),
+      ]);
+      const selfKey = nodeInfo.validator_pubkey || null;
       const validators = result.validators;
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
@@ -694,12 +698,19 @@ export function init(root, ctx) {
         const keyHex = bytesToHex(key);
         const br = v.reputation_breakdown;
         const statusClass = v.status === 'online' ? 'inbound' : 'pending';
+        const isSelf = selfKey && keyHex === selfKey;
+        const youBadge = isSelf
+          ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;vertical-align:middle;margin-left:4px">YOU</span>'
+          : '';
+        const removeCell = isSelf
+          ? '<td></td>'
+          : `<td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>`;
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.innerHTML = `
           <td>${i + 1}</td>
           <td>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name}</div>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)}</div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}</td>
@@ -717,9 +728,9 @@ export function init(root, ctx) {
           <td class="mono" style="font-size:var(--font-size-xs)">${(br.uptime * 100).toFixed(1)}%</td>
           <td class="mono" style="font-size:var(--font-size-xs)">${br.trust_score.toFixed(3)}</td>
           <td>${formatNumber(v.blocks_produced)}</td>
-          <td>${v.listers_count}</td>
-          <td style="font-size:var(--font-size-xs)">${v.status === 'online' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)}</td>
-          <td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>
+          <td>${v.listers_count ?? 0}</td>
+          <td style="font-size:var(--font-size-xs)">${v.last_active ? (v.status === 'online' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)) : '--'}</td>
+          ${removeCell}
         `;
         tr.addEventListener('click', (e) => {
           if (e.target.closest('.cs-remove-btn')) return;
@@ -765,7 +776,7 @@ export function init(root, ctx) {
               <dt>Status</dt><dd><span class="badge ${v.status === 'online' ? 'inbound' : 'pending'}">${v.status}</span></dd>
               <dt>Last Active</dt><dd>${formatTimestamp(v.last_active)}</dd>
               <dt>Proposed This Cycle</dt><dd>${v.proposed_this_cycle ? 'Yes' : 'No'}</dd>
-              <dt>Nodes Listing</dt><dd>${v.listers_count} peers trust this validator</dd>
+              <dt>Nodes Listing</dt><dd>${v.listers_count ?? 0} peers trust this validator</dd>
             </dl>
             <div>
               <h4 style="margin-bottom:var(--gap);font-size:var(--font-size-sm)">Reputation Breakdown</h4>
@@ -774,7 +785,7 @@ export function init(root, ctx) {
               </p>
               ${repBar('Block Acceptance B(V)', br.block_acceptance_rate, `${v.blocks_accepted} / ${v.cycles_active} cycles`, 0.4)}
               ${repBar('Uptime U(V)', br.uptime, `${v.cycles_reachable} / ${v.total_cycles} cycles reachable`, 0.3)}
-              ${repBar('Trust Score T(V)', br.trust_score, `${v.listers_count} peers listing`, 0.3)}
+              ${repBar('Trust Score T(V)', br.trust_score, `${v.listers_count ?? 0} peers listing`, 0.3)}
               <div style="margin-top:var(--gap);padding-top:var(--gap);border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-weight:700">Combined Reputation</span>
                 <span class="mono" style="font-size:var(--font-size-lg);font-weight:700;color:${repColor(v.reputation_score)}">${v.reputation_score.toFixed(4)}</span>

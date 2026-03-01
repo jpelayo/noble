@@ -219,6 +219,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     hex::encode(pk.to_wire_bytes()),
                 );
             }
+            // Always refresh the friendly name from config/identity on startup.
+            let self_name = config.identity.node_name.clone();
+            if !self_name.is_empty() {
+                validator_list.set_friendly_name(pk, self_name);
+            }
         }
 
         let mut engine = CycleEngine::new(

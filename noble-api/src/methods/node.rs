@@ -248,6 +248,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_bytes,
             storage_capacity_bytes,
             data_dir: data_dir_str,
+            validator_pubkey: self.validator_pubkey.clone(),
         })
     }
 

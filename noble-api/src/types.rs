@@ -443,6 +443,9 @@ pub struct NodeInfoResponse {
     /// Path to the data directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// Hex-encoded validator public key, if configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_pubkey: Option<String>,
 }
 
 /// Response for `noble_getApiVersion`.
