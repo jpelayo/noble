@@ -1520,11 +1520,20 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
     if identity_path.exists() {
         match std::fs::read_to_string(&identity_path) {
             Ok(json) => match serde_json::from_str::<NodeIdentityData>(&json) {
-                Ok(id) => {
+                Ok(mut id) => {
+                    // No node_name means setup was never truly completed.
+                    if id.node_name.trim().is_empty() {
+                        tracing::warn!(
+                            task = "config_load",
+                            "identity.json lacks node_name — marking setup incomplete"
+                        );
+                        id.setup_complete = false;
+                    }
                     tracing::info!(
                         task = "config_load",
-                        "Loaded identity from {}",
-                        identity_path.display()
+                        "Loaded identity from {} (setup_complete={})",
+                        identity_path.display(),
+                        id.setup_complete,
                     );
                     return id;
                 }
