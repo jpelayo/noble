@@ -651,7 +651,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .entry(section)
                         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
                     if let toml::Value::Table(ref mut t) = table {
-                        t.insert(key.to_string(), toml::Value::String(value.to_string()));
+                        // Infer the correct TOML type: try integer, then boolean, then string.
+                        let toml_value = if let Ok(n) = value.parse::<i64>() {
+                            toml::Value::Integer(n)
+                        } else if value == "true" || value == "false" {
+                            toml::Value::Boolean(value == "true")
+                        } else {
+                            toml::Value::String(value.to_string())
+                        };
+                        t.insert(key.to_string(), toml_value);
                     } else {
                         return Err(format!("config section '{section}' is not a table"));
                     }

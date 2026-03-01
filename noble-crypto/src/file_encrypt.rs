@@ -458,6 +458,79 @@ pub fn load_or_create_chain_meta(
     }
 }
 
+/// Check the status of the `.chain_meta` file in a data directory.
+///
+/// Returns `(exists, is_locked)`:
+/// - `(false, false)` — no `.chain_meta` file found
+/// - `(true, false)` — raw 32-byte automatic mode
+/// - `(true, true)` — password-protected NBLK format (manual mode)
+pub fn chain_meta_status(data_dir: &std::path::Path) -> (bool, bool) {
+    let path = data_dir.join(".chain_meta");
+    match std::fs::read(&path) {
+        Ok(bytes) => (true, is_locked_chain_meta(&bytes)),
+        Err(_) => (false, false),
+    }
+}
+
+/// Switch the on-disk encryption mode of `.chain_meta`.
+///
+/// The in-memory `chain_meta` (32-byte entropy) never changes — only the
+/// on-disk format is converted between raw bytes (automatic) and
+/// password-locked NBLK envelope (manual).
+///
+/// - `automatic → manual`: requires `new_password`
+/// - `manual → automatic`: requires `current_password` (verified against file)
+/// - Same mode → no-op Ok
+pub fn switch_encryption_mode(
+    data_dir: &std::path::Path,
+    chain_meta: &[u8; 32],
+    new_mode: &str,
+    current_password: Option<&str>,
+    new_password: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = data_dir.join(".chain_meta");
+    if !path.exists() {
+        return Err("no .chain_meta file found in data directory".into());
+    }
+
+    let file_bytes = std::fs::read(&path)?;
+    let currently_locked = is_locked_chain_meta(&file_bytes);
+    let current_mode = if currently_locked { "manual" } else { "automatic" };
+
+    // Same mode → no-op
+    if current_mode == new_mode {
+        return Ok(());
+    }
+
+    match new_mode {
+        "manual" => {
+            // automatic → manual: lock with new_password
+            let pw = new_password.ok_or("new_password is required when switching to manual mode")?;
+            if pw.is_empty() {
+                return Err("new_password must not be empty".into());
+            }
+            let locked = lock_chain_meta(chain_meta, pw)?;
+            write_atomic(&path, &locked)?;
+        }
+        "automatic" => {
+            // manual → automatic: verify current_password, write raw bytes
+            let pw = current_password
+                .ok_or("current_password is required when switching from manual mode")?;
+            let unlocked = unlock_chain_meta(&file_bytes, pw)?;
+            // Verify the unlocked chain_meta matches the in-memory value
+            if unlocked != *chain_meta {
+                return Err("unlocked chain_meta does not match in-memory chain_meta".into());
+            }
+            write_atomic(&path, chain_meta)?;
+        }
+        _ => {
+            return Err(format!("invalid encryption mode: '{new_mode}' (expected 'automatic' or 'manual')").into());
+        }
+    }
+
+    Ok(())
+}
+
 /// Atomic write helper: write to .tmp, set permissions, rename.
 fn write_atomic(
     path: &std::path::Path,
@@ -714,6 +787,155 @@ mod tests {
         garbage.extend_from_slice(&[0xBB; 48]); // fake ciphertext+tag
         let result = decrypt_file_data_with_migration(&garbage, &meta);
         assert!(result.is_err());
+    }
+
+    // --- Encryption mode switch tests ---
+
+    #[test]
+    fn switch_auto_to_manual() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_switch_a2m_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Create raw chain_meta
+        let meta = [0xCCu8; 32];
+        std::fs::write(dir.join(".chain_meta"), &meta).unwrap();
+
+        switch_encryption_mode(&dir, &meta, "manual", None, Some("pw123")).unwrap();
+
+        // File should now be locked
+        let file_data = std::fs::read(dir.join(".chain_meta")).unwrap();
+        assert!(is_locked_chain_meta(&file_data));
+
+        // Unlock and verify same entropy
+        let unlocked = unlock_chain_meta(&file_data, "pw123").unwrap();
+        assert_eq!(unlocked, meta);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switch_manual_to_auto() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_switch_m2a_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Create locked chain_meta
+        let meta = [0xDDu8; 32];
+        let locked = lock_chain_meta(&meta, "secret").unwrap();
+        std::fs::write(dir.join(".chain_meta"), &locked).unwrap();
+
+        switch_encryption_mode(&dir, &meta, "automatic", Some("secret"), None).unwrap();
+
+        // File should now be raw 32 bytes
+        let file_data = std::fs::read(dir.join(".chain_meta")).unwrap();
+        assert_eq!(file_data.len(), 32);
+        assert!(!is_locked_chain_meta(&file_data));
+        assert_eq!(file_data, meta);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switch_manual_wrong_password() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_switch_badpw_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let meta = [0xEEu8; 32];
+        let locked = lock_chain_meta(&meta, "correct").unwrap();
+        std::fs::write(dir.join(".chain_meta"), &locked).unwrap();
+
+        let result = switch_encryption_mode(&dir, &meta, "automatic", Some("wrong"), None);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switch_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_switch_rt_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let meta = [0x55u8; 32];
+        std::fs::write(dir.join(".chain_meta"), &meta).unwrap();
+
+        // auto → manual
+        switch_encryption_mode(&dir, &meta, "manual", None, Some("roundtrip")).unwrap();
+        let file_data = std::fs::read(dir.join(".chain_meta")).unwrap();
+        assert!(is_locked_chain_meta(&file_data));
+
+        // manual → auto
+        switch_encryption_mode(&dir, &meta, "automatic", Some("roundtrip"), None).unwrap();
+        let file_data = std::fs::read(dir.join(".chain_meta")).unwrap();
+        assert_eq!(file_data.len(), 32);
+        assert_eq!(file_data, meta);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switch_same_mode_noop() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_switch_noop_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let meta = [0x77u8; 32];
+        std::fs::write(dir.join(".chain_meta"), &meta).unwrap();
+
+        // auto → auto is a no-op
+        switch_encryption_mode(&dir, &meta, "automatic", None, None).unwrap();
+        let file_data = std::fs::read(dir.join(".chain_meta")).unwrap();
+        assert_eq!(file_data.len(), 32);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chain_meta_status_checks() {
+        let dir = std::env::temp_dir().join(format!(
+            "noble_test_status_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Non-existent
+        let (exists, locked) = chain_meta_status(&dir);
+        assert!(!exists);
+        assert!(!locked);
+
+        // Raw 32 bytes
+        let meta = [0x99u8; 32];
+        std::fs::write(dir.join(".chain_meta"), &meta).unwrap();
+        let (exists, locked) = chain_meta_status(&dir);
+        assert!(exists);
+        assert!(!locked);
+
+        // Locked NBLK
+        let locked_data = lock_chain_meta(&meta, "test").unwrap();
+        std::fs::write(dir.join(".chain_meta"), &locked_data).unwrap();
+        let (exists, locked) = chain_meta_status(&dir);
+        assert!(exists);
+        assert!(locked);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

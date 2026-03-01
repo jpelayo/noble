@@ -4,8 +4,8 @@
 //! Interactive setup wizard for creating or editing `noble.toml`.
 //!
 //! Guides the operator through network selection, node role, identity,
-//! wallet creation/import, TOTP security, storage, and networking
-//! configuration. Produces a fully populated `noble.toml`.
+//! wallet creation/import, TOTP security, storage, encryption, and
+//! networking configuration. Produces a fully populated `noble.toml`.
 //!
 //! Supports **reconfiguration mode** (E4): when the target config file
 //! already exists it is parsed and all prompts are pre-filled with the
@@ -407,7 +407,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 5: TOTP Security
+    // Step 6: TOTP Security
     // -----------------------------------------------------------------------
     section_header("6", "TOTP Security");
 
@@ -459,7 +459,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 6: Storage
+    // Step 7: Storage
     // -----------------------------------------------------------------------
     section_header("7", "Storage");
 
@@ -520,9 +520,9 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 6b: Security (Encryption Mode)
+    // Step 8: Security (Encryption Mode)
     // -----------------------------------------------------------------------
-    section_header("7b", "Encryption");
+    section_header("8", "Encryption");
 
     println!("  All private keys (validator, TLS, P2P, TOTP) are encrypted at rest.");
     println!("  Choose how the encryption key is managed:");
@@ -552,9 +552,9 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 7: Networking (optional)
+    // Step 9: Networking (optional)
     // -----------------------------------------------------------------------
-    section_header("8", "Networking");
+    section_header("9", "Networking");
 
     let configure_network = Confirm::new()
         .with_prompt("Configure networking? (defaults are fine for most users)")
@@ -607,9 +607,9 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 8: Review & Write
+    // Step 10: Review & Write
     // -----------------------------------------------------------------------
-    section_header("9", "Review & Write");
+    section_header("10", "Review & Write");
 
     let config = NodeConfig {
         node: NodeSectionConfig {

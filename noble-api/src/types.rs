@@ -962,6 +962,28 @@ pub struct CheckDataDirResponse {
     pub error: Option<String>,
 }
 
+/// Response for `noble_getEncryptionStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EncryptionStatusResponse {
+    /// Current encryption mode: "automatic" or "manual".
+    pub mode: String,
+    /// Whether the `.chain_meta` file exists in the data directory.
+    pub chain_meta_exists: bool,
+    /// Whether the `.chain_meta` file is password-locked (NBLK format).
+    pub is_locked: bool,
+}
+
+/// Response for `noble_setEncryptionMode`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetEncryptionModeResponse {
+    /// Whether the mode switch succeeded.
+    pub success: bool,
+    /// Whether a node restart is required for the change to take effect.
+    pub restart_required: bool,
+    /// Human-readable status message.
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

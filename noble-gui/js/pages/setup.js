@@ -90,6 +90,7 @@ export function init(root, ctx) {
     maxPeers: 50,
     // Storage
     dataDir: '',
+    allocatedGb: 50,
     cacheSizeMb: 512,
     compression: true,
     pruningMode: 'archive',
@@ -97,6 +98,7 @@ export function init(root, ctx) {
     dataDirValid: null,   // null=unchecked, true/false
     dataDirError: '',
     diskAvailable: 0,
+    volumes: [],          // additional volume paths [{path: string}]
     // Encryption
     encryptionMode: 'automatic',
     encryptionPassword: '',
@@ -304,6 +306,8 @@ export function init(root, ctx) {
       }
       case 'storage': {
         state.dataDir = body.querySelector('#setup-data-dir')?.value?.trim() || '';
+        const alloc = parseInt(body.querySelector('#setup-allocated-gb')?.value, 10);
+        if (!isNaN(alloc) && alloc >= 1) state.allocatedGb = alloc;
         const cache = parseInt(body.querySelector('#setup-cache-size')?.value, 10);
         if (!isNaN(cache) && cache >= 64) state.cacheSizeMb = cache;
         const compCb = body.querySelector('#setup-compression');
@@ -737,18 +741,45 @@ export function init(root, ctx) {
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)">
-        <div class="form-group">
+      <div class="form-group">
+        <label for="setup-allocated-gb" style="font-weight:600">Space Allocation (GB)</label>
+        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+          <input type="range" id="setup-allocated-range" min="1" max="500" step="1"
+            value="${state.allocatedGb}"
+            style="flex:1;accent-color:var(--accent)">
+          <input type="number" id="setup-allocated-gb" min="1" max="10000" step="1"
+            value="${state.allocatedGb}"
+            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm);width:80px;text-align:right">
+          <span style="font-size:var(--font-size-sm);color:var(--text-muted)">GB</span>
+        </div>
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Maximum disk space the node will use for blockchain data. Archive mode requires more space.
+        </div>
+      </div>
+
+      <!-- Additional volumes -->
+      <div class="form-group">
+        <label style="font-weight:600;display:block;margin-bottom:var(--gap-sm)">Additional Volumes (optional)</label>
+        <div id="setup-volumes-list" style="display:flex;flex-direction:column;gap:var(--gap-xs)"></div>
+        <button id="setup-add-volume" class="btn btn-secondary btn-sm" style="margin-top:var(--gap-sm);padding:4px 12px">
+          + Add Volume
+        </button>
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
+          Spread storage across multiple disks. Each volume stores a shard of the database.
+        </div>
+      </div>
+
+      <div style="display:flex;gap:var(--gap-lg);align-items:flex-start;flex-wrap:wrap">
+        <div class="form-group" style="flex:0 0 auto">
           <label for="setup-cache-size" style="font-weight:600">Cache Size (MB)</label>
           <input type="number" id="setup-cache-size" min="64" max="8192" step="64"
             value="${state.cacheSizeMb}"
-            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm);max-width:140px">
+            style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm);width:140px">
           <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
             RocksDB block cache (64–8192 MB)
           </div>
         </div>
-        <div class="form-group">
-          <label style="font-weight:600;display:block;margin-bottom:var(--gap-sm)">Compression</label>
+        <div class="form-group" style="flex:0 0 auto;padding-top:1.7em">
           <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
             <input type="checkbox" id="setup-compression" ${state.compression ? 'checked' : ''}>
             <span style="font-size:var(--font-size-sm)">Enable LZ4 compression</span>
@@ -833,6 +864,72 @@ export function init(root, ctx) {
         checkBtn.textContent = 'Check';
       }
     });
+
+    // Sync range slider ↔ number input for allocation
+    const allocRange = body.querySelector('#setup-allocated-range');
+    const allocNum = body.querySelector('#setup-allocated-gb');
+    if (allocRange && allocNum) {
+      allocRange.addEventListener('input', () => {
+        allocNum.value = allocRange.value;
+        state.allocatedGb = parseInt(allocRange.value, 10);
+      });
+      allocNum.addEventListener('input', () => {
+        const v = parseInt(allocNum.value, 10);
+        if (!isNaN(v) && v >= 1) {
+          allocRange.value = Math.min(v, 500);
+          state.allocatedGb = v;
+        }
+      });
+    }
+
+    // Additional volumes
+    const volumesList = body.querySelector('#setup-volumes-list');
+    const addVolumeBtn = body.querySelector('#setup-add-volume');
+
+    function renderVolumes() {
+      volumesList.innerHTML = '';
+      state.volumes.forEach((vol, i) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm)';
+        row.innerHTML = `
+          <input type="text" class="vol-path" data-idx="${i}" autocomplete="off" spellcheck="false"
+            placeholder="/mnt/disk${i + 2}"
+            value="${esc(vol.path)}"
+            style="flex:1;font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+          <button class="btn btn-secondary btn-sm vol-remove" data-idx="${i}"
+            style="padding:2px 8px;font-size:var(--font-size-xs);color:var(--error)">✕</button>
+        `;
+        volumesList.appendChild(row);
+      });
+
+      // Wire remove buttons
+      volumesList.querySelectorAll('.vol-remove').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.idx, 10);
+          state.volumes.splice(idx, 1);
+          renderVolumes();
+        });
+      });
+
+      // Wire path inputs
+      volumesList.querySelectorAll('.vol-path').forEach(input => {
+        input.addEventListener('input', () => {
+          const idx = parseInt(input.dataset.idx, 10);
+          state.volumes[idx].path = input.value.trim();
+        });
+      });
+    }
+
+    addVolumeBtn.addEventListener('click', () => {
+      state.volumes.push({ path: '' });
+      renderVolumes();
+      // Focus the new input
+      const inputs = volumesList.querySelectorAll('.vol-path');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    });
+
+    // Render existing volumes on step load
+    if (state.volumes.length > 0) renderVolumes();
   }
 
   // ── Step 6: Encryption ──
@@ -973,6 +1070,8 @@ export function init(root, ctx) {
         <dt>Wallet</dt><dd>${walletResult ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(walletResult.address)}</span>` : '(skipped)'}</dd>
         ${validatorRow}
         <dt>Data Directory</dt><dd>${state.dataDir ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.dataDir)}</span>` : '(default)'}</dd>
+        <dt>Allocated</dt><dd>${state.allocatedGb} GB</dd>
+        ${state.volumes.length ? `<dt>Volumes</dt><dd>${state.volumes.filter(v => v.path).map(v => esc(v.path)).join(', ') || '(none)'}</dd>` : ''}
         <dt>Cache Size</dt><dd>${state.cacheSizeMb} MB</dd>
         <dt>Compression</dt><dd>${state.compression ? 'LZ4 enabled' : 'Disabled'}</dd>
         <dt>Pruning</dt><dd>${state.pruningMode === 'archive' ? 'Archive (full history)' : state.pruningMode + ' (keep ' + state.keepBlocks + ' blocks)'}</dd>
@@ -983,6 +1082,7 @@ export function init(root, ctx) {
       </dl>
       <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--border)">
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
+          ${state.seeds ? 'Seed nodes require manual entry in <code>noble.toml</code> under <code>[network] seeds</code>.<br>' : ''}
           TOTP and advanced settings can be configured in
           <code>noble.toml</code> before (re)starting the node.
         </p>
@@ -1012,16 +1112,19 @@ export function init(root, ctx) {
     nextBtn.textContent = 'Completing...';
 
     try {
-      // Apply storage + encryption config values
+      // Apply storage + encryption config values (backend expects section + key separately)
       const configCalls = [];
-      if (state.dataDir) configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.data_dir', value: state.dataDir }));
-      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.cache_size_mb', value: String(state.cacheSizeMb) }));
-      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.compression', value: String(state.compression) }));
-      configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.pruning_mode', value: state.pruningMode }));
+      if (state.dataDir) configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'data_dir', value: state.dataDir }));
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'cache_size_mb', value: String(state.cacheSizeMb) }));
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'compression', value: String(state.compression) }));
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'pruning_mode', value: state.pruningMode }));
       if (state.pruningMode !== 'archive') {
-        configCalls.push(rpc.call('noble_setConfigValue', { key: 'storage.keep_blocks', value: String(state.keepBlocks) }));
+        configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'keep_blocks', value: String(state.keepBlocks) }));
       }
-      configCalls.push(rpc.call('noble_setConfigValue', { key: 'security.encryption_mode', value: state.encryptionMode }));
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'security', key: 'encryption_mode', value: state.encryptionMode }));
+      // Networking config
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${state.p2pPort}` }));
+      configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'max_peers', value: String(state.maxPeers) }));
       await Promise.allSettled(configCalls);
 
       const roleObj = NODE_ROLES.find(r => r.value === state.roleValue) || NODE_ROLES[0];
@@ -1035,7 +1138,7 @@ export function init(root, ctx) {
         host_address: '',
         wants_to_validate: roleObj.validate,
         wants_to_vote: roleObj.vote,
-        p2p_port: 8780,
+        p2p_port: state.p2pPort,
       });
 
       // Show validator pubkey if one was auto-generated.

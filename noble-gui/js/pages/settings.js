@@ -120,6 +120,57 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- At-Rest Encryption -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>At-Rest Encryption</span>
+        <span id="s-enc-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-enc-details">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
+
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Switch Encryption Mode</p>
+          <div style="display:grid;gap:var(--gap-sm);max-width:400px">
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">New Mode</label>
+              <select id="s-enc-mode-select" style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
+                <option value="automatic">Automatic (no startup password)</option>
+                <option value="manual">Manual (password on every startup)</option>
+              </select>
+            </div>
+            <div id="s-enc-current-pw-row" style="display:none">
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Current Password</label>
+              <input id="s-enc-current-pw" type="text" placeholder="Current encryption password"
+                style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div id="s-enc-new-pw-row" style="display:none">
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">New Password</label>
+              <input id="s-enc-new-pw" type="text" placeholder="New encryption password"
+                style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div id="s-enc-confirm-pw-row" style="display:none">
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Confirm Password</label>
+              <input id="s-enc-confirm-pw" type="text" placeholder="Confirm password"
+                style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+              <button id="s-enc-switch-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Switch Mode</button>
+              <span id="s-enc-switch-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+            </div>
+          </div>
+          <div id="s-enc-error" style="color:var(--error);font-size:var(--font-size-xs);margin-top:var(--gap-sm);display:none"></div>
+        </div>
+
+        <div style="margin-top:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs);color:var(--text-muted)">
+          <strong>Warning:</strong> If you set manual mode and lose the password, all key material is unrecoverable.
+          A node restart is required after switching modes.
+        </div>
+      </div>
+    </div>
+
     <!-- TLS Certificate -->
     <div class="panel">
       <div class="panel-header">
@@ -207,8 +258,22 @@ export function init(root, ctx) {
   const tlsUploadBtn = root.querySelector('#s-tls-upload-btn');
   const tlsUploadMsg = root.querySelector('#s-tls-upload-msg');
   const tlsUploadError = root.querySelector('#s-tls-upload-error');
+  // Encryption refs
+  const encBadge = root.querySelector('#s-enc-badge');
+  const encDetails = root.querySelector('#s-enc-details');
+  const encModeSelect = root.querySelector('#s-enc-mode-select');
+  const encCurrentPwRow = root.querySelector('#s-enc-current-pw-row');
+  const encCurrentPw = root.querySelector('#s-enc-current-pw');
+  const encNewPwRow = root.querySelector('#s-enc-new-pw-row');
+  const encNewPw = root.querySelector('#s-enc-new-pw');
+  const encConfirmPwRow = root.querySelector('#s-enc-confirm-pw-row');
+  const encConfirmPw = root.querySelector('#s-enc-confirm-pw');
+  const encSwitchBtn = root.querySelector('#s-enc-switch-btn');
+  const encSwitchMsg = root.querySelector('#s-enc-switch-msg');
+  const encError = root.querySelector('#s-enc-error');
 
   let allowedIps = [];
+  let currentEncMode = 'automatic';
 
   // Validate an IP or CIDR string
   function isValidIpOrCidr(str) {
@@ -566,10 +631,104 @@ export function init(root, ctx) {
     });
   }
 
+  // --- Encryption helpers ---
+  function updateEncPasswordFields() {
+    const target = encModeSelect.value;
+    // Show current password when switching FROM manual
+    encCurrentPwRow.style.display = (currentEncMode === 'manual' && target !== 'manual') ? '' : 'none';
+    // Show new/confirm password when switching TO manual
+    const toManual = (target === 'manual' && currentEncMode !== 'manual');
+    encNewPwRow.style.display = toManual ? '' : 'none';
+    encConfirmPwRow.style.display = toManual ? '' : 'none';
+  }
+
+  encModeSelect.addEventListener('change', updateEncPasswordFields);
+
+  async function loadEncryptionStatus() {
+    try {
+      const info = await rpc.call('noble_getEncryptionStatus');
+      currentEncMode = info.mode || 'automatic';
+      encModeSelect.value = currentEncMode;
+      updateEncPasswordFields();
+
+      encBadge.textContent = currentEncMode === 'manual' ? 'Manual' : 'Automatic';
+      encBadge.className = 'badge ' + (currentEncMode === 'manual' ? 'inbound' : 'outbound');
+      encBadge.style.background = '';
+
+      const modeLabel = currentEncMode === 'manual'
+        ? 'Manual (password required on every startup)'
+        : 'Automatic (no startup password)';
+      const formatLabel = info.is_locked ? 'NBLK (password-locked)' : 'raw 32-byte entropy';
+
+      encDetails.innerHTML = `
+        <dt>Mode</dt><dd>${modeLabel}</dd>
+        <dt>Chain Meta</dt><dd>${info.chain_meta_exists ? 'exists' : 'not created'}, ${formatLabel}</dd>
+      `;
+    } catch {
+      encDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Unable to load encryption status.</dt>';
+    }
+  }
+
+  encSwitchBtn.addEventListener('click', async () => {
+    encError.style.display = 'none';
+    encSwitchMsg.textContent = '';
+    const target = encModeSelect.value;
+
+    if (target === currentEncMode) {
+      encSwitchMsg.textContent = 'Already in this mode.';
+      return;
+    }
+
+    // Validate passwords
+    if (target === 'manual') {
+      const pw = encNewPw.value;
+      if (!pw) {
+        encError.textContent = 'New password is required for manual mode.';
+        encError.style.display = 'block';
+        return;
+      }
+      if (pw !== encConfirmPw.value) {
+        encError.textContent = 'Passwords do not match.';
+        encError.style.display = 'block';
+        return;
+      }
+    }
+    if (currentEncMode === 'manual' && target === 'automatic') {
+      if (!encCurrentPw.value) {
+        encError.textContent = 'Current password is required to switch from manual mode.';
+        encError.style.display = 'block';
+        return;
+      }
+    }
+
+    encSwitchBtn.disabled = true;
+    encSwitchMsg.textContent = 'Switching...';
+    try {
+      const rpcParams = { mode: target };
+      if (currentEncMode === 'manual') rpcParams.current_password = encCurrentPw.value;
+      if (target === 'manual') rpcParams.new_password = encNewPw.value;
+
+      const result = await rpc.call('noble_setEncryptionMode', rpcParams);
+      encSwitchMsg.style.color = 'var(--success)';
+      encSwitchMsg.textContent = result.message || 'Mode switched successfully. Restart required.';
+      encCurrentPw.value = '';
+      encNewPw.value = '';
+      encConfirmPw.value = '';
+      loadEncryptionStatus();
+    } catch (e) {
+      encError.textContent = e.message || 'Mode switch failed';
+      encError.style.display = 'block';
+      encSwitchMsg.textContent = '';
+    } finally {
+      encSwitchBtn.disabled = false;
+    }
+  });
+
   // Load data
   async function loadSettings() {
-    // Load TLS cert info in parallel (independent from other calls).
+    // Load TLS cert and encryption status in parallel (independent from other calls).
     loadTlsCert();
+    loadEncryptionStatus();
 
     try {
       const [ipResult, nodeInfo, vkeyInfo, gwInfo] = await Promise.all([
@@ -669,7 +828,7 @@ export function init(root, ctx) {
             const port = root.querySelector('#s-p2p-port-input').value;
             const msg = root.querySelector('#s-p2p-save-msg');
             try {
-              const result = await rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_port', value: port });
+              const result = await rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${port}` });
               msg.style.color = 'var(--success)';
               msg.textContent = result.restart_required ? 'Saved — restart required' : 'Saved';
               setTimeout(() => loadSettings(), 2000);

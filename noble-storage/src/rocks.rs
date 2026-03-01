@@ -3,6 +3,25 @@
 
 //! RocksDB-backed storage engine with 12 column families.
 //!
+//! # Panic Safety Audit
+//!
+//! All `.try_into().unwrap()` calls in this module are safe because they are
+//! **always preceded by an explicit length check** that returns `Err(StorageError)`
+//! for wrong-sized data. The `.unwrap()` is unreachable if the length check passes.
+//!
+//! Column family handles are obtained exclusively through `fn cf(&self, name) -> Result`,
+//! which returns `StorageError::Database` on missing CFs. All call sites use `?`.
+//!
+//! All RocksDB I/O operations (`get_cf`, `put_cf`, `write`, `delete_cf`, `iterator_cf`)
+//! use `.map_err(|e| StorageError::Database(...))` — no `.unwrap()` on DB results.
+//!
+//! # Architecture
+//!
+//! Single RocksDB instance, single volume. The 12 column families are logical
+//! partitions within one database directory. If the underlying disk disappears
+//! (I/O failure), all operations surface as `StorageError::Database` — no panics.
+//! Corruption recovery is handled by `open_with_repair()` at startup.
+//!
 //! Column families:
 //! - `blocks`: height (u64 BE) → serialized Block
 //! - `block_hashes`: block_hash (32B) → height (u64 BE)

@@ -187,6 +187,28 @@ pub trait NodeApi {
         &self,
         path: String,
     ) -> Result<CheckDataDirResponse, ErrorObjectOwned>;
+
+    /// Get the current at-rest encryption status.
+    ///
+    /// Returns the encryption mode ("automatic" or "manual"), whether the
+    /// `.chain_meta` file exists, and whether it is password-locked.
+    #[method(name = "getEncryptionStatus")]
+    async fn get_encryption_status(&self) -> Result<EncryptionStatusResponse, ErrorObjectOwned>;
+
+    /// Switch the at-rest encryption mode.
+    ///
+    /// - `automatic → manual`: requires `new_password`
+    /// - `manual → automatic`: requires `current_password`
+    ///
+    /// The in-memory encryption key does not change — only the on-disk format
+    /// of `.chain_meta` is converted.  A node restart is recommended after switching.
+    #[method(name = "setEncryptionMode")]
+    async fn set_encryption_mode(
+        &self,
+        mode: String,
+        current_password: Option<String>,
+        new_password: Option<String>,
+    ) -> Result<SetEncryptionModeResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -780,7 +802,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned> {
         // Whitelist of allowed config keys.
         let allowed = [
-            ("network", "listen_port"),
+            ("network", "listen_addr"),
+            ("network", "max_peers"),
             ("api", "rpc_port"),
             ("api", "gui_port"),
             ("storage", "data_dir"),
@@ -820,7 +843,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         &self,
         path: String,
     ) -> Result<CheckDataDirResponse, ErrorObjectOwned> {
-        let p = std::path::Path::new(&path);
+        // When path is empty, use the node's configured data_dir as default.
+        let effective_path: std::path::PathBuf = if path.trim().is_empty() {
+            self.data_dir
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(&path)
+        };
+        let p = effective_path.as_path();
 
         let exists = p.exists();
         let mut writable = false;
@@ -862,6 +893,62 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             writable,
             available_bytes,
             error,
+        })
+    }
+
+    async fn get_encryption_status(&self) -> Result<EncryptionStatusResponse, ErrorObjectOwned> {
+        let data_dir = self.data_dir.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam("data_dir not configured".into())
+        })?;
+
+        let (exists, is_locked) = noble_crypto::file_encrypt::chain_meta_status(data_dir);
+        let mode = if is_locked { "manual" } else { "automatic" }.to_string();
+
+        Ok(EncryptionStatusResponse {
+            mode,
+            chain_meta_exists: exists,
+            is_locked,
+        })
+    }
+
+    async fn set_encryption_mode(
+        &self,
+        mode: String,
+        current_password: Option<String>,
+        new_password: Option<String>,
+    ) -> Result<SetEncryptionModeResponse, ErrorObjectOwned> {
+        let data_dir = self.data_dir.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam("data_dir not configured".into())
+        })?;
+
+        if mode != "automatic" && mode != "manual" {
+            return Err(ApiError::InvalidParam(format!(
+                "invalid mode '{mode}': expected 'automatic' or 'manual'"
+            ))
+            .into());
+        }
+
+        noble_crypto::file_encrypt::switch_encryption_mode(
+            data_dir,
+            &self.chain_meta,
+            &mode,
+            current_password.as_deref(),
+            new_password.as_deref(),
+        )
+        .map_err(|e| ApiError::Internal(format!("switch encryption mode: {e}")))?;
+
+        // Persist mode to noble.toml
+        if let Some(ref set_fn) = self.set_config_value {
+            let _ = set_fn("security", "encryption_mode", &mode);
+        }
+
+        let message = format!("Encryption mode switched to '{mode}'. Restart recommended.");
+        tracing::info!(task = "encryption", "{message}");
+
+        Ok(SetEncryptionModeResponse {
+            success: true,
+            restart_required: true,
+            message,
         })
     }
 }

@@ -104,6 +104,41 @@ enum Commands {
         #[command(subcommand)]
         action: WalletCommand,
     },
+
+    /// Manage at-rest encryption of key material.
+    Security {
+        #[command(subcommand)]
+        action: SecurityCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecurityCommand {
+    /// Show the current encryption status of the data directory.
+    Status {
+        /// Path to the data directory.
+        #[arg(long, default_value_os_t = default_data_dir())]
+        data_dir: PathBuf,
+    },
+
+    /// Switch the at-rest encryption mode.
+    SetMode {
+        /// Encryption mode: "automatic" or "manual".
+        #[arg(long)]
+        mode: String,
+
+        /// Password for manual mode (required when switching TO manual).
+        #[arg(long)]
+        password: Option<String>,
+
+        /// Current password (required when switching FROM manual).
+        #[arg(long)]
+        current_password: Option<String>,
+
+        /// Path to the data directory.
+        #[arg(long, default_value_os_t = default_data_dir())]
+        data_dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +206,7 @@ fn main() {
         Commands::GenerateKey { output, scheme } => cmd_generate_key(output, scheme),
         Commands::ShowKey { key_file } => cmd_show_key(key_file),
         Commands::Wallet { action } => cmd_wallet(action),
+        Commands::Security { action } => cmd_security(action),
     }
 }
 
@@ -671,6 +707,75 @@ fn print_wallet_json(info: &WalletInfo) {
 }
 
 // ---------------------------------------------------------------------------
+// security (encryption mode management)
+// ---------------------------------------------------------------------------
+
+fn cmd_security(action: SecurityCommand) {
+    use noble_crypto::file_encrypt::{chain_meta_status, load_or_create_chain_meta, switch_encryption_mode};
+
+    match action {
+        SecurityCommand::Status { data_dir } => {
+            let (exists, is_locked) = chain_meta_status(&data_dir);
+            let mode = if is_locked { "manual" } else { "automatic" };
+            println!("Data directory: {}", data_dir.display());
+            println!("Chain meta:     {}", if exists { "exists" } else { "not found" });
+            println!("Format:         {}", if is_locked { "NBLK (password-locked)" } else { "raw 32-byte entropy" });
+            println!("Mode:           {mode}");
+        }
+        SecurityCommand::SetMode {
+            mode,
+            password,
+            current_password,
+            data_dir,
+        } => {
+            if mode != "automatic" && mode != "manual" {
+                eprintln!("Error: --mode must be 'automatic' or 'manual'.");
+                std::process::exit(1);
+            }
+
+            let (exists, is_locked) = chain_meta_status(&data_dir);
+            if !exists {
+                eprintln!("Error: no .chain_meta file found in {}", data_dir.display());
+                eprintln!("Run the node once to create it, or use 'noble-tool genesis' first.");
+                std::process::exit(1);
+            }
+
+            // Load the current chain_meta
+            let current_mode = if is_locked { "manual" } else { "automatic" };
+            let load_pw = if is_locked {
+                current_password.as_deref().or_else(|| {
+                    eprintln!("Error: --current-password is required when chain_meta is password-locked.");
+                    std::process::exit(1);
+                })
+            } else {
+                None
+            };
+
+            let chain_meta = load_or_create_chain_meta(&data_dir, current_mode, load_pw)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error loading chain_meta: {e}");
+                    std::process::exit(1);
+                });
+
+            switch_encryption_mode(
+                &data_dir,
+                &chain_meta,
+                &mode,
+                current_password.as_deref(),
+                password.as_deref(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error switching encryption mode: {e}");
+                std::process::exit(1);
+            });
+
+            println!("Encryption mode switched to '{mode}'.");
+            println!("Remember to update noble.toml: [security] encryption_mode = \"{mode}\"");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -920,5 +1025,47 @@ mod tests {
         let bad = "foo bar baz quux wibble wobble";
         let result: Result<bip39::Mnemonic, _> = bad.parse();
         assert!(result.is_err());
+    }
+
+    // ── Security tests ──
+
+    #[test]
+    fn security_status_empty_dir() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let (exists, is_locked) = noble_crypto::file_encrypt::chain_meta_status(dir.path());
+        assert!(!exists);
+        assert!(!is_locked);
+    }
+
+    #[test]
+    fn security_status_auto_dir() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let meta = noble_crypto::file_encrypt::load_or_create_chain_meta(dir.path(), "automatic", None).unwrap();
+        let (exists, is_locked) = noble_crypto::file_encrypt::chain_meta_status(dir.path());
+        assert!(exists);
+        assert!(!is_locked);
+        assert_eq!(meta.len(), 32);
+    }
+
+    #[test]
+    fn security_mode_switch_roundtrip() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let meta = noble_crypto::file_encrypt::load_or_create_chain_meta(dir.path(), "automatic", None).unwrap();
+
+        // auto → manual
+        noble_crypto::file_encrypt::switch_encryption_mode(dir.path(), &meta, "manual", None, Some("test-pw")).unwrap();
+        let (exists, is_locked) = noble_crypto::file_encrypt::chain_meta_status(dir.path());
+        assert!(exists);
+        assert!(is_locked);
+
+        // manual → auto
+        noble_crypto::file_encrypt::switch_encryption_mode(dir.path(), &meta, "automatic", Some("test-pw"), None).unwrap();
+        let (exists, is_locked) = noble_crypto::file_encrypt::chain_meta_status(dir.path());
+        assert!(exists);
+        assert!(!is_locked);
+
+        // Verify chain_meta preserved
+        let reloaded = noble_crypto::file_encrypt::load_or_create_chain_meta(dir.path(), "automatic", None).unwrap();
+        assert_eq!(meta, reloaded);
     }
 }

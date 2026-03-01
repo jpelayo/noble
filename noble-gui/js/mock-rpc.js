@@ -1160,7 +1160,10 @@ export class MockRpcClient {
 
       case 'noble_setNodeIdentity':
         this.#mockFirstRun = false;
-        return { success: true };
+        return {
+          success: true,
+          validator_pubkey: params.wants_to_validate ? randomHex(32) : null,
+        };
 
       case 'noble_setRewardAddress': {
         const addr = (params.address || '').trim();
@@ -1536,19 +1539,91 @@ export class MockRpcClient {
       }
 
       case 'noble_setConfigValue': {
+        const section = params.section || '';
         const key = params.key || '';
         const value = params.value || '';
-        // Mock: accept any whitelisted key
+        // Mock: accept any whitelisted section.key pair (matches backend whitelist)
         const whitelist = [
-          'network.listen_addr', 'network.max_peers', 'network.ban_threshold',
-          'storage.data_dir', 'storage.cache_size_mb', 'storage.compression',
-          'storage.pruning_mode', 'storage.keep_blocks',
-          'security.encryption_mode',
+          ['network', 'listen_addr'], ['network', 'max_peers'],
+          ['api', 'rpc_port'], ['api', 'gui_port'],
+          ['storage', 'data_dir'], ['storage', 'cache_size_mb'], ['storage', 'compression'],
+          ['storage', 'pruning_mode'], ['storage', 'keep_blocks'],
+          ['security', 'encryption_mode'],
         ];
-        if (!whitelist.includes(key)) {
-          throw { code: -32602, message: `Config key not whitelisted: ${key}` };
+        if (!whitelist.some(([s, k]) => s === section && k === key)) {
+          throw { code: -32602, message: `Config key not whitelisted: ${section}.${key}` };
         }
-        return { success: true };
+        return { success: true, restart_required: true };
+      }
+
+      case 'noble_getTotpStatus':
+        return { enabled: false, scope: 'all' };
+
+      case 'noble_enableTotp':
+        return {
+          secret_base32: 'JBSWY3DPEHPK3PXP',
+          otpauth_uri: 'otpauth://totp/Noble:node?secret=JBSWY3DPEHPK3PXP&issuer=Noble',
+        };
+
+      case 'noble_getValidatorKeyInfo':
+        return {
+          enabled: true,
+          pubkey_hex: '01' + randomHex(32),
+          scheme: 'ed25519',
+          key_path: '/data/noble/validator.key',
+        };
+
+      case 'noble_getGatewayInfo':
+        return {
+          enabled: true,
+          gateway_key: '02' + randomHex(32),
+          key_source: 'wallet_auto',
+        };
+
+      case 'noble_getTlsCertInfo':
+        return {
+          enabled: true,
+          fingerprint: randomHex(32),
+          expires_at: '2027-01-01T00:00:00Z',
+          days_remaining: 300,
+          sans: ['localhost', '127.0.0.1', '::1'],
+          auto_generated: true,
+          plaintext_mode: false,
+        };
+
+      case 'noble_regenerateTlsCert':
+        return {
+          fingerprint: randomHex(32),
+          expires_at: '2028-01-01T00:00:00Z',
+          restart_required: true,
+        };
+
+      case 'noble_uploadTlsCert':
+        return {
+          fingerprint: randomHex(32),
+          expires_at: '2028-06-15T00:00:00Z',
+          sans: ['mynode.example.com', '192.168.1.100'],
+          auto_generated: false,
+          restart_required: true,
+        };
+
+      case 'noble_getEncryptionStatus':
+        return {
+          mode: 'automatic',
+          chain_meta_exists: true,
+          is_locked: false,
+        };
+
+      case 'noble_setEncryptionMode': {
+        const mode = params.mode || 'automatic';
+        if (mode !== 'automatic' && mode !== 'manual') {
+          throw { code: -32602, message: `Invalid mode: ${mode}` };
+        }
+        return {
+          success: true,
+          restart_required: true,
+          message: `Encryption mode switched to '${mode}'. Restart recommended.`,
+        };
       }
 
       case 'noble_rotateTotpSecret': {
