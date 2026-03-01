@@ -223,9 +223,20 @@ const VALIDATORS = Array.from({ length: 15 }, (_, i) => {
   const isOnline = i < 12; // last 3 are offline
   const now = Math.floor(Date.now() / 1000);
 
+  const MOCK_IPS = [
+    '/ip4/203.0.113.1/tcp/8780', '/ip4/198.51.100.2/tcp/8780', '/ip4/52.1.100.50/tcp/8780',
+    '/ip4/18.4.86.10/tcp/8780', '/ip4/85.91.200.12/tcp/8780', '/ip4/192.0.2.55/tcp/8780',
+    '/ip4/10.0.0.1/tcp/8780', '/ip4/172.16.0.1/tcp/8780', '/ip4/100.64.0.1/tcp/8780',
+    '/ip4/198.18.0.1/tcp/8780', '/ip4/203.0.113.42/tcp/8780', '/ip4/198.51.100.7/tcp/8780',
+    '/ip4/192.0.2.100/tcp/8780', '/ip4/203.0.113.200/tcp/8780', '/ip4/198.51.100.99/tcp/8780',
+  ];
+  const MOCK_COUNTRIES = ['USA', 'GBR', 'DEU', 'JPN', 'ESP', 'FRA', 'CHE', 'CAN', 'AUS', 'NLD', 'ITA', 'BRA', 'KOR', 'SGP', 'NOR'];
+
   return {
     public_key: makePublicKey(i * 100),
     name: VALIDATOR_NAMES[i],
+    host_address: MOCK_IPS[i] || null,
+    country_code: MOCK_COUNTRIES[i] || null,
     status: isOnline ? 'online' : 'offline',
     reputation_score: parseFloat(reputation.toFixed(4)),
     reputation_breakdown: {
@@ -715,6 +726,8 @@ export class MockRpcClient {
         const newValidator = {
           public_key: { Ed25519: keyBytes },
           name: params.name || `validator-${hexKey.slice(0, 8)}`,
+          host_address: null,
+          country_code: null,
           status: 'online',
           reputation_score: 0,
           reputation_breakdown: { block_acceptance_rate: 0, uptime: 0, trust_score: 0 },
@@ -1134,6 +1147,7 @@ export class MockRpcClient {
             contact_email: '',
             website: '',
             host_address: '',
+            country_code: '',
             governance_class: '',
             wants_to_validate: false,
             wants_to_vote: false,
@@ -1150,6 +1164,7 @@ export class MockRpcClient {
           contact_email: '',
           website: '',
           host_address: '',
+          country_code: '',
           governance_class: 'individual',
           wants_to_validate: false,
           wants_to_vote: false,
@@ -1188,6 +1203,7 @@ export class MockRpcClient {
             contact_email: 'blockchain@mit.edu',
             website: 'https://blockchain.mit.edu',
             host_address: '/ip4/18.4.86.10/tcp/8780',
+            country_code: 'USA',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 120,
             wants_to_validate: false,
@@ -1208,6 +1224,7 @@ export class MockRpcClient {
             contact_email: 'nodes@treasury.gov',
             website: 'https://treasury.gov/blockchain',
             host_address: '/ip4/52.1.100.50/tcp/8780',
+            country_code: 'USA',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 300,
             wants_to_validate: true,
@@ -1228,6 +1245,7 @@ export class MockRpcClient {
             contact_email: 'infra@acme.com',
             website: 'https://acme.com',
             host_address: '/ip4/203.0.113.42/tcp/8780',
+            country_code: 'GBR',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 60,
             wants_to_validate: false,
@@ -1242,6 +1260,7 @@ export class MockRpcClient {
             contact_email: 'admin@opennoble.org',
             website: 'https://opennoble.org',
             host_address: '/ip4/198.51.100.7/tcp/8780',
+            country_code: 'DEU',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 45,
             wants_to_validate: true,
@@ -1256,6 +1275,7 @@ export class MockRpcClient {
             contact_email: 'blockchain@bcn.cat',
             website: 'https://ajuntament.barcelona.cat',
             host_address: '/ip4/85.91.200.12/tcp/8780',
+            country_code: 'ESP',
             identity_key: '00' + randomHex(32),
             last_seen: Math.floor(Date.now() / 1000) - 180,
             wants_to_validate: true,

@@ -32,6 +32,9 @@ pub struct NodeIdentityData {
     pub website: String,
     #[serde(default)]
     pub host_address: String,
+    /// ISO 3166-1 alpha-3 country code (e.g. "USA", "ESP").
+    #[serde(default)]
+    pub country_code: String,
     #[serde(default)]
     pub wants_to_validate: bool,
     #[serde(default)]

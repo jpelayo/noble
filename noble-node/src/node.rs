@@ -1577,6 +1577,7 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
         contact_email: config.identity.contact_email.clone(),
         website: config.identity.website.clone(),
         host_address: config.identity.host_address.clone(),
+        country_code: config.identity.country_code.clone(),
         wants_to_validate: config.identity.wants_to_validate,
         wants_to_vote: config.identity.wants_to_vote,
         p2p_port: 8780,

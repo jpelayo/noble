@@ -81,6 +81,7 @@ export function init(root, ctx) {
     orgName: '',
     contactEmail: '',
     website: '',
+    countryCode: '',
     rewardAddress: '',     // Bitcoin or NOBLE address entered by user
     rewardAddressType: '', // e.g. 'P2WPKH', 'Ed25519'
     rewardSkipped: false,  // true when user chose to skip
@@ -294,6 +295,7 @@ export function init(root, ctx) {
         state.orgName = body.querySelector('#setup-org-name')?.value || '';
         state.contactEmail = body.querySelector('#setup-email')?.value || '';
         state.website = body.querySelector('#setup-website')?.value || '';
+        state.countryCode = (body.querySelector('#setup-country')?.value || '').trim().toUpperCase();
         break;
       }
       case 'rewards': {
@@ -412,6 +414,10 @@ export function init(root, ctx) {
       <div class="form-group">
         <label for="setup-website">Website (optional)</label>
         <input type="url" id="setup-website" value="${esc(state.website)}" placeholder="https://..." autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label for="setup-country">Country Code (optional, ISO 3166-1 alpha-3)</label>
+        <input type="text" id="setup-country" maxlength="3" value="${esc(state.countryCode)}" placeholder="e.g. USA, GBR, DEU" style="text-transform:uppercase" autocomplete="off">
       </div>
     `;
   }
@@ -1066,6 +1072,7 @@ export function init(root, ctx) {
         <dt>Org Name</dt><dd>${esc(state.orgName || '(not set)')}</dd>
         <dt>Contact Email</dt><dd>${esc(state.contactEmail || '(not set)')}</dd>
         <dt>Website</dt><dd>${esc(state.website || '(not set)')}</dd>
+        <dt>Country</dt><dd>${esc(state.countryCode || '(not set)')}</dd>
         <dt>Reward Address</dt><dd>${state.rewardAddress ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(state.rewardAddress)}</span>` : '(skipped)'}</dd>
         <dt>Wallet</dt><dd>${walletResult ? `<span class="mono" style="font-size:var(--font-size-xs)">${esc(walletResult.address)}</span>` : '(skipped)'}</dd>
         ${validatorRow}
@@ -1146,6 +1153,7 @@ export function init(root, ctx) {
         contact_email: state.contactEmail,
         website: state.website,
         host_address: '',
+        country_code: state.countryCode || undefined,
         wants_to_validate: roleObj.validate,
         wants_to_vote: roleObj.vote,
         p2p_port: state.p2pPort,

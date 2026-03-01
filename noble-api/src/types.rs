@@ -351,6 +351,12 @@ pub struct ValidatorEntry {
     pub total_cycles: u64,
     pub last_active: Option<u64>,
     pub joined_cycle: Option<u64>,
+    /// Multiaddr from peer announcement (e.g. `/ip4/1.2.3.4/tcp/8780`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_address: Option<String>,
+    /// ISO 3166-1 alpha-3 country code from peer announcement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
 }
 
 /// Response for `noble_getValidatorList`.
@@ -829,6 +835,7 @@ pub struct NodeIdentityResponse {
     pub wants_to_validate: bool,
     pub wants_to_vote: bool,
     pub p2p_port: u16,
+    pub country_code: String,
 }
 
 /// Response for `noble_setNodeIdentity`.

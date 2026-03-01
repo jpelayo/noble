@@ -323,6 +323,9 @@ pub struct IdentityConfig {
     pub contact_email: String,
     pub website: String,
     pub host_address: String,
+    /// ISO 3166-1 alpha-3 country code (e.g. "USA", "ESP", "DEU").
+    #[serde(default)]
+    pub country_code: String,
     /// Whether this node wants to produce blocks.
     #[serde(default)]
     pub wants_to_validate: bool,
@@ -353,6 +356,7 @@ impl std::fmt::Debug for IdentityConfig {
             .field("contact_email", &self.contact_email)
             .field("website", &self.website)
             .field("host_address", &self.host_address)
+            .field("country_code", &self.country_code)
             .field("wants_to_validate", &self.wants_to_validate)
             .field("wants_to_vote", &self.wants_to_vote)
             .field("pkcs12_path", &self.pkcs12_path)
@@ -585,6 +589,7 @@ impl Default for IdentityConfig {
             contact_email: String::new(),
             website: String::new(),
             host_address: String::new(),
+            country_code: String::new(),
             wants_to_validate: false,
             wants_to_vote: false,
             pkcs12_path: String::new(),

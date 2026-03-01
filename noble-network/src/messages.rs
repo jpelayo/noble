@@ -110,6 +110,8 @@ pub enum GossipMessage {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        country_code: Option<String>,
         software_version: String,
         #[serde(default)]
         wants_to_validate: bool,
@@ -356,6 +358,7 @@ mod tests {
             contact_email: Some("test@mit.edu".into()),
             website: Some("https://mit.edu".into()),
             host_address: Some("/ip4/1.2.3.4/tcp/8780".into()),
+            country_code: Some("USA".into()),
             software_version: "0.1.0".into(),
             wants_to_validate: true,
             wants_to_vote: false,
@@ -385,6 +388,7 @@ mod tests {
             contact_email: None,
             website: None,
             host_address: None,
+            country_code: None,
             software_version: "0.1.0".into(),
             wants_to_validate: false,
             wants_to_vote: false,

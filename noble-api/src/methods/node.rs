@@ -91,6 +91,7 @@ pub trait NodeApi {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
         p2p_port: Option<u16>,
@@ -490,6 +491,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             wants_to_validate: id.wants_to_validate,
             wants_to_vote: id.wants_to_vote,
             p2p_port: id.p2p_port,
+            country_code: id.country_code.clone(),
         })
     }
 
@@ -502,6 +504,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
         p2p_port: Option<u16>,
@@ -517,6 +520,17 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             );
         }
 
+        // Validate country_code if provided.
+        let cc = country_code.unwrap_or_default();
+        if !cc.is_empty()
+            && (cc.len() != 3 || !cc.bytes().all(|b| b.is_ascii_uppercase()))
+        {
+            return Err(ApiError::InvalidParam(
+                "country_code must be exactly 3 uppercase letters (ISO 3166-1 alpha-3)".into(),
+            )
+            .into());
+        }
+
         let new_identity = NodeIdentityData {
             node_name,
             org_type,
@@ -525,6 +539,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             contact_email: contact_email.unwrap_or_default(),
             website: website.unwrap_or_default(),
             host_address: host_address.unwrap_or_default(),
+            country_code: cc,
             wants_to_validate,
             wants_to_vote,
             p2p_port: port,

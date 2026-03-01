@@ -172,6 +172,18 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let peer_records = storage.list_peer_records().unwrap_or_default();
         drop(storage);
 
+        // Build lookup: identity_key wire bytes → (host_address, country_code)
+        let mut announce_map: std::collections::HashMap<Vec<u8>, (Option<String>, Option<String>)> =
+            std::collections::HashMap::new();
+        for rec in &peer_records {
+            if let Some(ref ann) = rec.last_announce {
+                announce_map.insert(
+                    rec.identity_key.clone(),
+                    (ann.host_address.clone(), ann.country_code.clone()),
+                );
+            }
+        }
+
         let mut consensus = self.consensus.write();
         // Update last_seen from peer records
         for rec in &peer_records {
@@ -230,6 +242,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     0.0
                 };
 
+                let (host_addr, country) = announce_map
+                    .get(&wire.to_vec())
+                    .cloned()
+                    .unwrap_or((None, None));
+
                 ValidatorEntry {
                     public_key: hex::encode(&wire),
                     name: friendly_name,
@@ -248,6 +265,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     total_cycles,
                     last_active: None, // populated from peer records when available
                     joined_cycle: added_at,
+                    host_address: host_addr,
+                    country_code: country,
                 }
             })
             .collect();

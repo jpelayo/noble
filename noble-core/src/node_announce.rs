@@ -120,6 +120,9 @@ pub struct NodeAnnounce {
     pub contact_email: Option<String>,
     pub website: Option<String>,
     pub host_address: Option<String>,
+    /// ISO 3166-1 alpha-3 country code (e.g. "USA", "ESP", "DEU").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
     pub software_version: String,
     /// Operator declares intent to produce blocks.
     #[serde(default)]
@@ -153,6 +156,7 @@ struct AnnounceSigningPayload<'a> {
     contact_email: &'a Option<String>,
     website: &'a Option<String>,
     host_address: &'a Option<String>,
+    country_code: &'a Option<String>,
     software_version: &'a str,
     wants_to_validate: bool,
     wants_to_vote: bool,
@@ -193,6 +197,7 @@ impl NodeAnnounce {
             contact_email: &self.contact_email,
             website: &self.website,
             host_address: &self.host_address,
+            country_code: &self.country_code,
             software_version: &self.software_version,
             wants_to_validate: self.wants_to_validate,
             wants_to_vote: self.wants_to_vote,
@@ -225,6 +230,7 @@ impl NodeAnnounce {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
         timestamp: u64,
@@ -239,6 +245,7 @@ impl NodeAnnounce {
             contact_email,
             website,
             host_address,
+            country_code,
             wants_to_validate,
             wants_to_vote,
             timestamp,
@@ -258,6 +265,7 @@ impl NodeAnnounce {
         contact_email: Option<String>,
         website: Option<String>,
         host_address: Option<String>,
+        country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
         timestamp: u64,
@@ -276,6 +284,7 @@ impl NodeAnnounce {
             contact_email,
             website,
             host_address,
+            country_code,
             software_version: SOFTWARE_VERSION.to_string(),
             wants_to_validate,
             wants_to_vote,
@@ -321,6 +330,14 @@ impl NodeAnnounce {
                 "software_version contains invalid characters (allowed: [a-zA-Z0-9.\\-])"
                     .to_string(),
             );
+        }
+        if let Some(ref cc) = self.country_code {
+            if cc.len() != 3 || !cc.bytes().all(|b| b.is_ascii_uppercase()) {
+                return Err(
+                    "country_code must be exactly 3 uppercase ASCII letters (ISO 3166-1 alpha-3)"
+                        .to_string(),
+                );
+            }
         }
         if let Some(ref att) = self.identity_attestation {
             if att.signature_data.len() > MAX_ATTESTATION_DATA_SIZE {
@@ -369,6 +386,7 @@ mod tests {
             Some("test@example.com".to_string()),
             Some("https://example.com".to_string()),
             Some("/ip4/1.2.3.4/tcp/8780".to_string()),
+            None,
             false,
             false,
             timestamp,
@@ -508,6 +526,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true,
             1_700_000_000,
@@ -535,6 +554,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
             1_700_000_000,
@@ -547,6 +567,7 @@ mod tests {
             OrgType::Individual,
             None,
             NodeRole::FullNode,
+            None,
             None,
             None,
             None,
@@ -572,6 +593,7 @@ mod tests {
                 OrgType::Individual,
                 None,
                 NodeRole::FullNode,
+                None,
                 None,
                 None,
                 None,
@@ -644,6 +666,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
             1_700_000_000,
@@ -689,6 +712,7 @@ mod tests {
             Some("test@example.com".to_string()),
             Some("https://example.com".to_string()),
             Some("/ip4/1.2.3.4/tcp/8780".to_string()),
+            None,
             false,
             false,
             1_700_000_000,
@@ -717,6 +741,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
             1_700_000_000,
@@ -742,6 +767,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             false,
             1_700_000_000,
@@ -752,5 +778,107 @@ mod tests {
         let result = announce.validate(1_700_000_000);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("exceeds"));
+    }
+
+    // ── Country Code Tests ──
+
+    #[test]
+    fn country_code_valid_accepted() {
+        let (sk, pk) = make_ed25519_keypair();
+        let now = 1_700_000_000u64;
+        let announce = NodeAnnounce::sign(
+            pk.clone(),
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            Some("USA".to_string()),
+            false,
+            false,
+            now,
+            &sk,
+        )
+        .unwrap();
+        assert!(announce.validate(now).is_ok());
+        assert_eq!(announce.country_code, Some("USA".to_string()));
+    }
+
+    #[test]
+    fn country_code_none_accepted() {
+        let (sk, pk) = make_ed25519_keypair();
+        let now = 1_700_000_000u64;
+        let announce = make_announce(&sk, &pk, now);
+        assert!(announce.validate(now).is_ok());
+        assert_eq!(announce.country_code, None);
+    }
+
+    #[test]
+    fn country_code_invalid_too_short() {
+        let (sk, pk) = make_ed25519_keypair();
+        let now = 1_700_000_000u64;
+        let mut announce = make_announce(&sk, &pk, now);
+        announce.country_code = Some("US".to_string());
+        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+    }
+
+    #[test]
+    fn country_code_invalid_too_long() {
+        let (sk, pk) = make_ed25519_keypair();
+        let now = 1_700_000_000u64;
+        let mut announce = make_announce(&sk, &pk, now);
+        announce.country_code = Some("USAA".to_string());
+        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+    }
+
+    #[test]
+    fn country_code_invalid_non_alpha() {
+        let (sk, pk) = make_ed25519_keypair();
+        let now = 1_700_000_000u64;
+        let mut announce = make_announce(&sk, &pk, now);
+        announce.country_code = Some("12A".to_string());
+        assert!(announce.validate(now).unwrap_err().contains("country_code"));
+    }
+
+    #[test]
+    fn country_code_in_signing_message() {
+        let (sk, pk) = make_ed25519_keypair();
+        let a1 = NodeAnnounce::sign(
+            pk.clone(),
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            Some("USA".to_string()),
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        let a2 = NodeAnnounce::sign(
+            pk.clone(),
+            "test".to_string(),
+            OrgType::Individual,
+            None,
+            NodeRole::FullNode,
+            None,
+            None,
+            None,
+            Some("ESP".to_string()),
+            false,
+            false,
+            1_700_000_000,
+            &sk,
+        )
+        .unwrap();
+        let msg1 = a1.compute_signing_message().unwrap();
+        let msg2 = a2.compute_signing_message().unwrap();
+        assert_ne!(msg1, msg2);
     }
 }

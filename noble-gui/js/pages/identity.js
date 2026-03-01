@@ -127,6 +127,10 @@ export function init(root, ctx) {
               <label for="id-host">Host Address</label>
               <input type="text" id="id-host" placeholder="e.g. /ip4/1.2.3.4/tcp/8780">
             </div>
+            <div class="form-group">
+              <label for="id-country">Country Code (ISO 3166-1 alpha-3)</label>
+              <input type="text" id="id-country" maxlength="3" placeholder="e.g. USA, GBR, DEU" style="text-transform:uppercase">
+            </div>
             <button type="submit" class="btn btn-primary" id="id-save">Save &amp; Broadcast</button>
             <span id="id-status" class="form-status"></span>
           </form>
@@ -199,6 +203,7 @@ export function init(root, ctx) {
       root.querySelector('#id-email').value = identity.contact_email || '';
       root.querySelector('#id-website').value = identity.website || '';
       root.querySelector('#id-host').value = identity.host_address || '';
+      root.querySelector('#id-country').value = identity.country_code || '';
       updateGovBadge();
     } catch (e) {
       console.error('[identity] load:', e);
@@ -262,6 +267,7 @@ export function init(root, ctx) {
             <dt>Contact</dt><dd>${esc(p.contact_email || 'N/A')}</dd>
             <dt>Website</dt><dd>${p.website ? `<a href="${esc(p.website)}" target="_blank">${esc(p.website)}</a>` : 'N/A'}</dd>
             <dt>Host Address</dt><dd class="mono">${esc(p.host_address || 'N/A')}</dd>
+            <dt>Country</dt><dd>${esc(p.country_code || 'N/A')}</dd>
             <dt>Identity Key</dt><dd class="mono">${esc(p.identity_key || 'N/A')}</dd>
             <dt>Last Seen</dt><dd>${new Date(p.last_seen * 1000).toLocaleString()}</dd>
           `;
@@ -487,6 +493,7 @@ export function init(root, ctx) {
         contact_email: root.querySelector('#id-email').value,
         website: root.querySelector('#id-website').value,
         host_address: root.querySelector('#id-host').value,
+        country_code: root.querySelector('#id-country').value.trim().toUpperCase() || undefined,
         wants_to_validate: composite.validate,
         wants_to_vote: composite.vote,
       });

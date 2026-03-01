@@ -5,6 +5,12 @@
 
 import { formatNumber, formatCountdown, bytesToHex, truncateHash, timeAgo, formatTimestamp } from '../utils.js';
 
+function extractIpFromMultiaddr(ma) {
+  if (!ma) return '--';
+  const m = ma.match(/\/ip[46]\/([^/]+)/);
+  return m ? m[1] : '--';
+}
+
 // ── Phase & status colors ──
 const PHASE_COLORS = {
   Proposal:      { bg: '#3b82f6', fg: '#fff' },
@@ -208,7 +214,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th>#</th><th>Validator</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
       </div>
@@ -696,6 +702,8 @@ export function init(root, ctx) {
             <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)}</div>
           </td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}</td>
+          <td style="font-size:var(--font-size-xs)">${v.country_code || '--'}</td>
           <td><span class="badge ${statusClass}">${v.status}</span></td>
           <td>
             <div style="display:flex;align-items:center;gap:var(--gap-sm)">
@@ -752,6 +760,8 @@ export function init(root, ctx) {
               <dt>Name</dt><dd>${v.name}</dd>
               <dt>Public Key</dt><dd class="mono">${keyHex}</dd>
               <dt>Scheme</dt><dd>${scheme}</dd>
+              <dt>Host Address</dt><dd class="mono">${v.host_address || 'N/A'}</dd>
+              <dt>Country</dt><dd>${v.country_code || 'N/A'}</dd>
               <dt>Status</dt><dd><span class="badge ${v.status === 'online' ? 'inbound' : 'pending'}">${v.status}</span></dd>
               <dt>Last Active</dt><dd>${formatTimestamp(v.last_active)}</dd>
               <dt>Proposed This Cycle</dt><dd>${v.proposed_this_cycle ? 'Yes' : 'No'}</dd>
