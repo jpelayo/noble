@@ -363,35 +363,55 @@ export function init(root, ctx) {
     return d.innerHTML;
   }
 
+  // ── Render a single usage bar row ──
+  function usageBar(label, filled, capacity, fillColor) {
+    const pct = capacity > 0 ? Math.min(filled / capacity * 100, 100) : 0;
+    const pctStr = pct < 0.01 && filled > 0 ? '<0.01' : pct.toFixed(2);
+    return `
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:var(--font-size-xs);color:var(--text-secondary);margin-bottom:3px">
+          <span>${label}</span>
+          <span>${formatBytes(filled)} / ${formatBytes(capacity)} (${pctStr}%)</span>
+        </div>
+        <div style="background:var(--bg-tertiary);border-radius:var(--radius-sm);height:16px;overflow:hidden">
+          <div style="height:100%;width:${Math.max(pct, pct > 0 ? 0.5 : 0).toFixed(2)}%;background:${fillColor};border-radius:var(--radius-sm);transition:width 0.3s"></div>
+        </div>
+      </div>`;
+  }
+
   // ── Render data directory panel ──
   function renderDataDir(stats) {
     const dir = stats.data_dir || 'N/A';
-    const used = stats.total_db_bytes || 0;
+    const db = stats.total_db_bytes || 0;
     const avail = stats.available_bytes || 0;
     const total = stats.total_volume_bytes || 0;
-    const pctUsed = total > 0 ? ((total - avail) / total * 100) : 0;
-    const cacheMb = (stats.cache_size_bytes || 0) / (1024 * 1024);
+    const diskUsed = total > 0 ? total - avail : 0;
+    const cache = stats.cache_size_bytes || 0;
+    const cacheMb = cache / (1024 * 1024);
     const compress = stats.compression_enabled;
 
-    const summaryText = total > 0
-      ? `${formatBytes(used)} used of ${formatBytes(total)} (${pctUsed.toFixed(2)}%) \u2014 ${formatBytes(avail)} free`
-      : `${formatBytes(used)} used`;
+    // Bar 1: Disk usage vs total disk space (how full is the volume)
+    const diskPct = total > 0 ? (diskUsed / total * 100) : 0;
+    const diskColor = usageColor(diskPct);
+
+    // Bar 2: Noble DB vs free disk (how much of the remaining free space Noble occupies)
+    const nobleVsFreeColor = '#3b82f6'; // blue
+
+    // Bar 3: Noble DB vs allocated cache
+    const nobleVsCacheColor = '#8b5cf6'; // purple
 
     dataDirBody.innerHTML = `
-      <div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
+      <div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap)">
         <code style="font-size:var(--font-size-sm);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(dir)}</code>
         <button class="btn btn-secondary btn-sm btn-copy" data-copy="${_esc(dir)}"
           style="padding:2px 10px;font-size:var(--font-size-xs);white-space:nowrap">Copy</button>
       </div>
-      <div style="background:var(--bg-tertiary);border-radius:var(--radius-sm);height:20px;overflow:hidden;margin-bottom:var(--gap-sm)">
-        <div style="height:100%;width:${Math.min(pctUsed, 100).toFixed(1)}%;background:${usageColor(pctUsed)};border-radius:var(--radius-sm);transition:width 0.3s"></div>
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--gap-sm)">
-        <span style="font-size:var(--font-size-xs);color:var(--text-secondary)">${summaryText}</span>
-        <span style="display:flex;gap:var(--gap-sm)">
-          <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)">Cache: ${cacheMb.toFixed(0)} MB</span>
-          <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${compress ? 'var(--success)' : 'var(--text-muted)'}">${compress ? 'Zstd On' : 'No Compression'}</span>
-        </span>
+      ${total > 0 ? usageBar('Disk Usage', diskUsed, total, diskColor) : ''}
+      ${avail > 0 ? usageBar('Noble DB vs Free Disk', db, avail, nobleVsFreeColor) : ''}
+      ${cache > 0 ? usageBar('Noble DB vs Cache', db, cache, nobleVsCacheColor) : ''}
+      <div style="display:flex;justify-content:flex-end;gap:var(--gap-sm);margin-top:4px">
+        <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)">Cache: ${cacheMb.toFixed(0)} MB</span>
+        <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${compress ? 'var(--success)' : 'var(--text-muted)'}">${compress ? 'Zstd On' : 'No Compression'}</span>
       </div>
     `;
   }
