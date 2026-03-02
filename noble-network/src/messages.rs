@@ -167,7 +167,9 @@ pub enum NetworkCommand {
     /// Publish double-proposal evidence to the network.
     PublishEvidence(Box<DoubleProposalEvidence>),
     /// Dial a specific peer by multiaddr (used by `noble_dialPeer` RPC).
-    DialPeer(libp2p::Multiaddr),
+    /// The optional oneshot sender receives `Ok(())` on connection success or
+    /// `Err(reason)` on failure/timeout. When `None`, dial is fire-and-forget.
+    DialPeer(libp2p::Multiaddr, Option<tokio::sync::oneshot::Sender<Result<(), String>>>),
     /// Shut down the network service.
     Shutdown,
 }

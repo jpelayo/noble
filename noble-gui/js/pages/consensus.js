@@ -709,9 +709,7 @@ export function init(root, ctx) {
         const youBadge = isSelf
           ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;vertical-align:middle;margin-left:4px">YOU</span>'
           : '';
-        const removeCell = isSelf
-          ? '<td></td>'
-          : `<td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>`;
+        const removeCell = `<td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>`;
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.innerHTML = `

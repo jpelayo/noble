@@ -4,6 +4,7 @@
  */
 
 import { formatNumber } from '../utils.js';
+import { countrySelectHtml } from '../countries.js';
 
 const GOV_CLASSES = {
   individual: { label: 'Individual', color: '#6b7280' },
@@ -124,12 +125,35 @@ export function init(root, ctx) {
               <input type="url" id="id-website" placeholder="Optional">
             </div>
             <div class="form-group">
-              <label for="id-host">Host Address</label>
-              <input type="text" id="id-host" placeholder="e.g. /ip4/1.2.3.4/tcp/8780">
+              <label>Host Address</label>
+              <div style="display:flex;align-items:center;gap:var(--gap-md);margin-bottom:var(--gap-sm);flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:var(--font-size-sm)">
+                  <input type="radio" name="host-mode" value="ip" checked> Public IP
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:var(--font-size-sm)">
+                  <input type="radio" name="host-mode" value="lan"> LAN IP
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:var(--font-size-sm)">
+                  <input type="radio" name="host-mode" value="dns"> DNS Hostname
+                </label>
+              </div>
+              <div id="id-host-ip-row" style="display:flex;gap:var(--gap-sm)">
+                <input type="text" id="id-host-ip" placeholder="e.g. 203.0.113.42" style="flex:1">
+                <button type="button" class="btn btn-sm" id="id-detect-host">Detect</button>
+              </div>
+              <div id="id-host-lan-row" style="display:none;flex-direction:column;gap:var(--gap-sm)">
+                <input type="text" id="id-host-lan" placeholder="e.g. 192.168.1.100">
+                <small class="form-hint" style="margin:0">For local testnet only. Not reachable from the internet.</small>
+              </div>
+              <div id="id-host-dns-row" style="display:none">
+                <input type="text" id="id-host-dns" placeholder="e.g. noble.example.com">
+              </div>
+              <small class="form-hint">Address broadcast to peers. "Detect" queries your external IP via ipinfo.io and others.</small>
+              <input type="hidden" id="id-host">
             </div>
             <div class="form-group">
-              <label for="id-country">Country Code (ISO 3166-1 alpha-3)</label>
-              <input type="text" id="id-country" maxlength="3" placeholder="e.g. USA, GBR, DEU" style="text-transform:uppercase">
+              <label for="id-country">Country</label>
+              ${countrySelectHtml('id-country')}
             </div>
             <button type="submit" class="btn btn-primary" id="id-save">Save &amp; Broadcast</button>
             <span id="id-status" class="form-status"></span>
@@ -188,6 +212,100 @@ export function init(root, ctx) {
 
   orgTypeSelect.addEventListener('change', updateGovBadge);
 
+  // Host address mode toggle
+  const hostIpRow = root.querySelector('#id-host-ip-row');
+  const hostLanRow = root.querySelector('#id-host-lan-row');
+  const hostDnsRow = root.querySelector('#id-host-dns-row');
+  const hostIpInput = root.querySelector('#id-host-ip');
+  const hostLanInput = root.querySelector('#id-host-lan');
+  const hostDnsInput = root.querySelector('#id-host-dns');
+  const hostRadios = root.querySelectorAll('input[name="host-mode"]');
+
+  function showHostMode(mode) {
+    hostIpRow.style.display = mode === 'ip' ? 'flex' : 'none';
+    hostLanRow.style.display = mode === 'lan' ? 'flex' : 'none';
+    hostDnsRow.style.display = mode === 'dns' ? 'block' : 'none';
+  }
+
+  hostRadios.forEach(radio => {
+    radio.addEventListener('change', () => {
+      showHostMode(root.querySelector('input[name="host-mode"]:checked').value);
+    });
+  });
+
+  // Detect external IP
+  root.querySelector('#id-detect-host').addEventListener('click', async () => {
+    const btn = root.querySelector('#id-detect-host');
+    btn.disabled = true; btn.textContent = '...';
+    try {
+      const result = await rpc.call('noble_detectExternalIp');
+      hostIpInput.value = result.ip;
+    } catch (e) {
+      console.warn('[identity] detect IP failed:', e);
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Detect'; }, 2000);
+      return;
+    } finally {
+      btn.disabled = false;
+      if (btn.textContent === '...') btn.textContent = 'Detect';
+    }
+  });
+
+  /** True if `ip` looks like a private/LAN address (RFC 1918, link-local, loopback). */
+  function isLanIp(ip) {
+    return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.)/.test(ip);
+  }
+
+  /** Build the host_address multiaddr from the current mode + inputs. */
+  function getHostAddress() {
+    const mode = root.querySelector('input[name="host-mode"]:checked').value;
+    if (mode === 'ip') {
+      const ip = hostIpInput.value.trim();
+      if (!ip) return '';
+      return ip.startsWith('/') ? ip : `/ip4/${ip}/tcp/8780`;
+    }
+    if (mode === 'lan') {
+      const ip = hostLanInput.value.trim();
+      if (!ip) return '';
+      return ip.startsWith('/') ? ip : `/ip4/${ip}/tcp/8780`;
+    }
+    const dns = hostDnsInput.value.trim();
+    if (!dns) return '';
+    return `/dns4/${dns}/tcp/8780`;
+  }
+
+  /** Parse a host_address multiaddr and populate the correct mode + input. */
+  function setHostAddress(addr) {
+    if (!addr) return;
+    if (addr.startsWith('/dns4/')) {
+      root.querySelector('input[name="host-mode"][value="dns"]').checked = true;
+      showHostMode('dns');
+      const parts = addr.split('/');
+      hostDnsInput.value = parts[2] || '';
+    } else if (addr.startsWith('/ip4/') || addr.startsWith('/ip6/')) {
+      const parts = addr.split('/');
+      const ip = parts[2] || '';
+      if (isLanIp(ip)) {
+        root.querySelector('input[name="host-mode"][value="lan"]').checked = true;
+        showHostMode('lan');
+        hostLanInput.value = ip;
+      } else {
+        root.querySelector('input[name="host-mode"][value="ip"]').checked = true;
+        showHostMode('ip');
+        hostIpInput.value = ip;
+      }
+    } else {
+      // Unknown format — try to detect LAN
+      if (isLanIp(addr)) {
+        root.querySelector('input[name="host-mode"][value="lan"]').checked = true;
+        showHostMode('lan');
+        hostLanInput.value = addr;
+      } else {
+        hostIpInput.value = addr;
+      }
+    }
+  }
+
   // Load current identity
   async function loadIdentity() {
     try {
@@ -202,7 +320,7 @@ export function init(root, ctx) {
       root.querySelector('#id-org-name').value = identity.org_name || '';
       root.querySelector('#id-email').value = identity.contact_email || '';
       root.querySelector('#id-website').value = identity.website || '';
-      root.querySelector('#id-host').value = identity.host_address || '';
+      setHostAddress(identity.host_address || '');
       root.querySelector('#id-country').value = identity.country_code || '';
       updateGovBadge();
     } catch (e) {
@@ -492,7 +610,7 @@ export function init(root, ctx) {
         node_role: composite.role,
         contact_email: root.querySelector('#id-email').value,
         website: root.querySelector('#id-website').value,
-        host_address: root.querySelector('#id-host').value,
+        host_address: getHostAddress(),
         country_code: root.querySelector('#id-country').value.trim().toUpperCase() || undefined,
         wants_to_validate: composite.validate,
         wants_to_vote: composite.vote,

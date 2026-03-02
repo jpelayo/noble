@@ -1652,11 +1652,23 @@ export class MockRpcClient {
         };
       }
 
+      case 'noble_detectExternalIp':
+        return { ip: '203.0.113.42', multiaddr: '/ip4/203.0.113.42/tcp/8780', source: 'https://ipinfo.io/ip' };
+
       case 'noble_dialPeer': {
         let addr = params.multiaddr || '';
         if (!addr.startsWith('/')) addr = `/ip4/${addr}/tcp/8780`;
         if (!/^\/ip[46]\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
-        return { success: true, message: `Dialing ${addr}` };
+        // Simulate adding a synthetic peer entry
+        const dialPeerId = 'dial' + Math.random().toString(36).slice(2, 10);
+        if (!this.#peers) this.#peers = [];
+        this.#peers.push({
+          peer_id: dialPeerId,
+          direction: 'outbound',
+          connected_at: Math.floor(Date.now() / 1000),
+          ban_score: 0,
+        });
+        return { success: true, message: `Connected to ${addr}` };
       }
 
       case 'noble_getSeeds':

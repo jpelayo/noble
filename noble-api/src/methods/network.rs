@@ -183,14 +183,29 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let addr: libp2p::Multiaddr = multiaddr
             .parse()
             .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.network_cmd
-            .send(NetworkCommand::DialPeer(addr))
+            .send(NetworkCommand::DialPeer(addr, Some(tx)))
             .await
             .map_err(|e| ApiError::Internal(format!("failed to send dial command: {e}")))?;
-        Ok(DialPeerResponse {
-            success: true,
-            message: format!("Dialing {multiaddr}"),
-        })
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(Ok(()))) => Ok(DialPeerResponse {
+                success: true,
+                message: format!("Connected to {multiaddr}"),
+            }),
+            Ok(Ok(Err(reason))) => Ok(DialPeerResponse {
+                success: false,
+                message: reason,
+            }),
+            Ok(Err(_)) => Ok(DialPeerResponse {
+                success: false,
+                message: "Dial cancelled".into(),
+            }),
+            Err(_) => Ok(DialPeerResponse {
+                success: false,
+                message: "Connection timed out (10s)".into(),
+            }),
+        }
     }
 
     async fn get_seeds(&self) -> Result<SeedsResponse, ErrorObjectOwned> {
@@ -213,10 +228,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             }
         }
 
-        // Dial immediately.
+        // Dial immediately (fire-and-forget for seed dial).
         let _ = self
             .network_cmd
-            .send(NetworkCommand::DialPeer(addr))
+            .send(NetworkCommand::DialPeer(addr, None))
             .await;
 
         // Persist to noble.toml via set_config_value callback.

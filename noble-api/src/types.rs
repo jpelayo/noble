@@ -996,6 +996,17 @@ pub struct SeedsResponse {
     pub seeds: Vec<String>,
 }
 
+/// Response for `noble_detectExternalIp`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectIpResponse {
+    /// The detected external IP address.
+    pub ip: String,
+    /// Full multiaddr string (e.g. "/ip4/1.2.3.4/tcp/8780").
+    pub multiaddr: String,
+    /// The URL of the service that provided the IP.
+    pub source: String,
+}
+
 /// Response for `noble_setEncryptionMode`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetEncryptionModeResponse {

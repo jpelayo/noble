@@ -242,10 +242,25 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     0.0
                 };
 
-                let (host_addr, country) = announce_map
+                let (mut host_addr, mut country) = announce_map
                     .get(&wire.to_vec())
                     .cloned()
                     .unwrap_or((None, None));
+
+                // Fallback: for our own validator, use the node's identity data.
+                if host_addr.is_none() && country.is_none() {
+                    if let Some(ref self_pk) = self.validator_pubkey {
+                        if hex::encode(&wire) == *self_pk {
+                            let id = self.node_identity.read();
+                            if !id.host_address.is_empty() {
+                                host_addr = Some(id.host_address.clone());
+                            }
+                            if !id.country_code.is_empty() {
+                                country = Some(id.country_code.clone());
+                            }
+                        }
+                    }
+                }
 
                 ValidatorEntry {
                     public_key: hex::encode(&wire),

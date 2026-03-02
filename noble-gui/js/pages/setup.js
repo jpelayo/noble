@@ -4,6 +4,7 @@
  */
 
 import { createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
+import { countrySelectHtml } from '../countries.js';
 
 const STEPS = [
   { key: 'welcome',    label: 'Welcome'    },
@@ -416,8 +417,8 @@ export function init(root, ctx) {
         <input type="url" id="setup-website" value="${esc(state.website)}" placeholder="https://..." autocomplete="off">
       </div>
       <div class="form-group">
-        <label for="setup-country">Country Code (optional, ISO 3166-1 alpha-3)</label>
-        <input type="text" id="setup-country" maxlength="3" value="${esc(state.countryCode)}" placeholder="e.g. USA, GBR, DEU" style="text-transform:uppercase" autocomplete="off">
+        <label for="setup-country">Country (optional)</label>
+        ${countrySelectHtml('setup-country', state.countryCode)}
       </div>
     `;
   }

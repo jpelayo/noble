@@ -3,6 +3,7 @@
 
 //! Network service: main event loop connecting the swarm to the node via channels.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -348,6 +349,10 @@ async fn run_event_loop(
     let mut tx_rate_limiter =
         TxRateLimiter::new(config.tx_relay_burst, config.tx_relay_rate_per_sec);
 
+    // Pending dial result channels: multiaddr → oneshot sender.
+    let mut pending_dials: HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>> =
+        HashMap::new();
+
     loop {
         tokio::select! {
             // --- Swarm events ---
@@ -364,12 +369,13 @@ async fn run_event_loop(
                     &mut seen_txs,
                     &mut seen_votes,
                     &mut tx_rate_limiter,
+                    &mut pending_dials,
                 ).await;
             }
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &config).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &config, &mut pending_dials).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -467,6 +473,7 @@ async fn handle_swarm_event(
     seen_txs: &mut SeenCache,
     seen_votes: &mut SeenCache,
     tx_rate_limiter: &mut TxRateLimiter,
+    pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -510,6 +517,15 @@ async fn handle_swarm_event(
             if peer_manager.on_connected(peer_id, direction) {
                 peer_manager.update_addr(&peer_id, remote_addr.clone());
                 tracing::debug!(task = "peer_management", %peer_id, ?direction, "peer connected");
+
+                // Resolve pending dial(s) whose addr matches this connection.
+                if direction == Direction::Outbound {
+                    let dial_addr = endpoint.get_remote_address().clone();
+                    if let Some(tx) = pending_dials.remove(&dial_addr) {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+
                 if event_tx
                     .try_send(NetworkEvent::PeerConnected {
                         peer_id: peer_id.to_bytes().to_vec(),
@@ -872,6 +888,27 @@ async fn handle_swarm_event(
             handle_kad_event(&event);
         }
 
+        SwarmEvent::OutgoingConnectionError {
+            error,
+            connection_id: _,
+            ..
+        } => {
+            // Resolve any pending dial whose multiaddr appears in the error.
+            // libp2p DialError embeds the target addr in the error string.
+            let err_str = error.to_string();
+            let mut resolved_addrs = Vec::new();
+            for (addr, _) in pending_dials.iter() {
+                if err_str.contains(&addr.to_string()) {
+                    resolved_addrs.push(addr.clone());
+                }
+            }
+            for addr in resolved_addrs {
+                if let Some(tx) = pending_dials.remove(&addr) {
+                    let _ = tx.send(Err(err_str.clone()));
+                }
+            }
+        }
+
         _ => {}
     }
 }
@@ -1134,6 +1171,7 @@ async fn handle_command(
     swarm: &mut Swarm<NobleBehaviour>,
     peer_manager: &mut PeerManager,
     config: &NetworkConfig,
+    pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -1298,10 +1336,20 @@ async fn handle_command(
             }
         }
 
-        NetworkCommand::DialPeer(addr) => {
+        NetworkCommand::DialPeer(addr, result_tx) => {
             match swarm.dial(addr.clone()) {
-                Ok(_) => tracing::info!(task = "network", %addr, "Dialing peer"),
-                Err(e) => tracing::warn!(task = "network", %addr, %e, "Failed to dial peer"),
+                Ok(_) => {
+                    tracing::info!(task = "network", %addr, "Dialing peer");
+                    if let Some(tx) = result_tx {
+                        pending_dials.insert(addr, tx);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task = "network", %addr, %e, "Failed to dial peer");
+                    if let Some(tx) = result_tx {
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                }
             }
         }
 

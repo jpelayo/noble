@@ -97,10 +97,16 @@ export function init(root, ctx) {
     dialMsg.textContent = 'Dialing...';
     try {
       const result = await rpc.call('noble_dialPeer', { multiaddr: addr });
-      dialMsg.style.color = 'var(--success)';
-      dialMsg.textContent = result.message || 'Dial request sent';
-      dialAddrInput.value = '';
-      setTimeout(() => { dialMsg.style.display = 'none'; }, 5000);
+      if (result.success) {
+        dialMsg.style.color = 'var(--success)';
+        dialMsg.textContent = result.message || 'Connected';
+        dialAddrInput.value = '';
+        setTimeout(loadNetwork, 1000);
+      } else {
+        dialMsg.style.color = 'var(--error)';
+        dialMsg.textContent = result.message || 'Connection failed';
+      }
+      setTimeout(() => { dialMsg.style.display = 'none'; }, 8000);
     } catch (e) {
       dialMsg.style.color = 'var(--error)';
       dialMsg.textContent = e.message || 'Failed to dial peer';

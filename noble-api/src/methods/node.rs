@@ -182,6 +182,13 @@ pub trait NodeApi {
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
+    /// Detect the node's external (public) IP address by querying public services.
+    ///
+    /// Tries multiple IP-detection services in order; returns the first successful result.
+    /// The returned `multiaddr` is pre-formatted for the node's P2P port.
+    #[method(name = "detectExternalIp")]
+    async fn detect_external_ip(&self) -> Result<DetectIpResponse, ErrorObjectOwned>;
+
     /// Check a data directory path for existence, writeability, and disk space.
     #[method(name = "checkDataDir")]
     async fn check_data_dir(
@@ -854,6 +861,59 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             success: true,
             restart_required,
         })
+    }
+
+    async fn detect_external_ip(&self) -> Result<DetectIpResponse, ErrorObjectOwned> {
+        let p2p_port = self.p2p_port;
+        tokio::task::spawn_blocking(move || {
+            // All 4 services return text/plain on their /ip endpoints.
+            // icanhazip.com appends a trailing \n; the rest return bare IP.
+            // All ignore Accept headers on these paths. We set explicit headers
+            // for robustness and to avoid being served HTML error pages.
+            let services = [
+                "https://ipinfo.io/ip",
+                "https://icanhazip.com",
+                "https://ifconfig.me/ip",
+                "https://api.ipify.org",
+            ];
+            let mut last_error = String::new();
+            for url in &services {
+                match ureq::get(url)
+                    .set("Accept", "text/plain")
+                    .set("User-Agent", "noble-node/0.6")
+                    .timeout(std::time::Duration::from_secs(5))
+                    .call()
+                {
+                    Ok(resp) => {
+                        if let Ok(body) = resp.into_string() {
+                            let ip = body.trim().to_string();
+                            // Validate: must parse as a real IP address.
+                            if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+                                let multiaddr = match addr {
+                                    std::net::IpAddr::V4(_) => format!("/ip4/{ip}/tcp/{p2p_port}"),
+                                    std::net::IpAddr::V6(_) => format!("/ip6/{ip}/tcp/{p2p_port}"),
+                                };
+                                return Ok(DetectIpResponse {
+                                    ip,
+                                    multiaddr,
+                                    source: url.to_string(),
+                                });
+                            }
+                            last_error = format!("{url}: response is not a valid IP: {ip}");
+                        }
+                    }
+                    Err(e) => {
+                        last_error = format!("{url}: {e}");
+                    }
+                }
+            }
+            Err(ApiError::Internal(format!(
+                "Could not detect external IP. Last error: {last_error}"
+            ))
+            .into())
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))?
     }
 
     async fn check_data_dir(
