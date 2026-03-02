@@ -691,7 +691,7 @@ export function init(root, ctx) {
       const validators = result.validators;
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
-      const online = validators.filter(v => v.status === 'online').length;
+      const online = validators.filter(v => v.status === 'alive').length;
       const offline = validators.length - online;
       const avgRep = validators.reduce((s, v) => s + v.reputation_score, 0) / validators.length;
       csValTotal.textContent = validators.length;
@@ -704,7 +704,7 @@ export function init(root, ctx) {
       sorted.forEach((v, i) => {
         const keyHex = valKeyHex(v.public_key);
         const br = v.reputation_breakdown;
-        const statusClass = v.status === 'online' ? 'inbound' : 'pending';
+        const statusClass = v.status === 'alive' ? 'inbound' : 'pending';
         const isSelf = selfKey && keyHex === selfKey;
         const youBadge = isSelf
           ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;vertical-align:middle;margin-left:4px">YOU</span>'
@@ -716,7 +716,7 @@ export function init(root, ctx) {
           <td>${i + 1}</td>
           <td>
             <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
-            <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)}</div>
+            <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)} <button class="btn-copy" data-copy="${keyHex}" title="Copy public key">&#128203;</button></div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}</td>
           <td style="font-size:var(--font-size-xs)">${v.country_code || '--'}</td>
@@ -734,7 +734,7 @@ export function init(root, ctx) {
           <td class="mono" style="font-size:var(--font-size-xs)">${br.trust_score.toFixed(3)}</td>
           <td>${formatNumber(v.blocks_produced)}</td>
           <td>${v.listers_count ?? 0}</td>
-          <td style="font-size:var(--font-size-xs)">${v.last_active ? (v.status === 'online' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)) : '--'}</td>
+          <td style="font-size:var(--font-size-xs)">${v.last_active ? (v.status === 'alive' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)) : '--'}</td>
           ${removeCell}
         `;
         tr.addEventListener('click', (e) => {
@@ -779,10 +779,11 @@ export function init(root, ctx) {
               <dt>Scheme</dt><dd>${scheme}</dd>
               <dt>Host Address</dt><dd class="mono">${v.host_address || 'N/A'}</dd>
               <dt>Country</dt><dd>${v.country_code || 'N/A'}</dd>
-              <dt>Status</dt><dd><span class="badge ${v.status === 'online' ? 'inbound' : 'pending'}">${v.status}</span></dd>
+              <dt>Status</dt><dd><span class="badge ${v.status === 'alive' ? 'inbound' : 'pending'}">${v.status}</span></dd>
               <dt>Last Active</dt><dd>${formatTimestamp(v.last_active)}</dd>
               <dt>Proposed This Cycle</dt><dd>${v.proposed_this_cycle ? 'Yes' : 'No'}</dd>
               <dt>Nodes Listing</dt><dd>${v.listers_count ?? 0} peers trust this validator</dd>
+
             </dl>
             <div>
               <h4 style="margin-bottom:var(--gap);font-size:var(--font-size-sm)">Reputation Breakdown</h4>
@@ -1017,7 +1018,7 @@ export function init(root, ctx) {
         tr.innerHTML = `
           <td>
             <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}${youBadge}</div>
-            <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)}</div>
+            <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)} <button class="btn-copy" data-copy="${peer.identity_key}" title="Copy public key">&#128203;</button></div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}</td>
           <td style="font-size:var(--font-size-xs)">${peer.country_code || '--'}</td>
@@ -1100,6 +1101,17 @@ export function init(root, ctx) {
     loadVoteTallies();
   });
   unsubs.push(() => ws.unsubscribe('cyclePhaseChange'));
+
+  // ── Copy-to-clipboard delegation ──
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-copy');
+    if (btn) {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(btn.dataset.copy).catch(() => {});
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
+    }
+  });
 
   // ── Bootstrap ──
   loadCycle();

@@ -169,7 +169,7 @@ export function init(root, ctx) {
         ? ` title="${peer.last_ban_reason.category}: ${peer.last_ban_reason.subject || ''}"`
         : '';
       tr.innerHTML = `
-        <td class="mono">${truncateHash(peer.peer_id, 8)}</td>
+        <td class="mono">${truncateHash(peer.peer_id, 8)} <button class="btn-copy" data-copy="${peer.peer_id}" title="Copy peer ID">&#128203;</button></td>
         <td>${name}</td>
         <td>${addr}</td>
         <td>${country}</td>
@@ -212,6 +212,17 @@ export function init(root, ctx) {
     } catch { /* ignore */ }
   });
   unsubs.push(() => ws.unsubscribe('peerUpdates'));
+
+  // ── Copy-to-clipboard delegation ──
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-copy');
+    if (btn) {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(btn.dataset.copy).catch(() => {});
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
+    }
+  });
 
   loadNetwork();
 

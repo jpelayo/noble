@@ -237,7 +237,7 @@ const VALIDATORS = Array.from({ length: 15 }, (_, i) => {
     name: VALIDATOR_NAMES[i],
     host_address: MOCK_IPS[i] || null,
     country_code: MOCK_COUNTRIES[i] || null,
-    status: isOnline ? 'online' : 'offline',
+    status: isOnline ? 'alive' : 'unreachable',
     reputation_score: parseFloat(reputation.toFixed(4)),
     reputation_breakdown: {
       block_acceptance_rate: parseFloat(blockAcceptanceRate.toFixed(4)),
@@ -747,7 +747,7 @@ export class MockRpcClient {
           name: params.name || `validator-${hexKey.slice(0, 8)}`,
           host_address: null,
           country_code: null,
-          status: 'online',
+          status: 'alive',
           reputation_score: 0,
           reputation_breakdown: { block_acceptance_rate: 0, uptime: 0, trust_score: 0 },
           blocks_produced: 0,
@@ -829,7 +829,7 @@ export class MockRpcClient {
           const proposerCount = (cn % 3 === 0) ? 3 : (cn % 3 === 1) ? 1 : 2;
           const proposals = [];
           for (let p = 0; p < proposerCount; p++) {
-            const onlineVals = this.#validators.filter(v => v.status === 'online');
+            const onlineVals = this.#validators.filter(v => v.status === 'alive');
             const vi = (cn * 3 + p) % Math.max(1, onlineVals.length);
             const val = onlineVals[vi] || this.#validators[0];
             proposals.push({
@@ -1025,6 +1025,19 @@ export class MockRpcClient {
           blocks_validated: blocksValidated,
           first_active: GENESIS_TIMESTAMP + 100 * CYCLE_DURATION_SECS,
         };
+      }
+
+      case 'noble_listAddresses': {
+        const walletKey = this.#validators[0].public_key;
+        const keyBytes = walletKey.Ed25519 || walletKey.Secp256k1 || [];
+        const wireHex = (walletKey.Secp256k1 ? '01' : '00') + keyBytes.map(b => b.toString(16).padStart(2, '0')).join('');
+        const scheme = walletKey.Secp256k1 ? 'secp256k1' : 'ed25519';
+        const btcAddrs = walletKey.Secp256k1 ? [
+          { address_type: 'p2pkh', address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa' },
+          { address_type: 'p2wpkh', address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4' },
+          { address_type: 'p2tr', address: 'bc1p5cyxnuxmeuwuvkwfem96lqzszee2456ypqv9q33' },
+        ] : [];
+        return { keys: [{ pubkey_hex: wireHex, scheme, bitcoin_addresses: btcAddrs }] };
       }
 
       case 'noble_getWalletTransactions': {

@@ -196,6 +196,20 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             }
         }
 
+        // SELF is never in its own peer_records — inject current timestamp
+        // so the local validator doesn't show as "unreachable".
+        if let Some(ref self_pk_hex) = self.validator_pubkey {
+            if let Ok(self_pk) = NoblePublicKey::from_wire_bytes(
+                &hex::decode(self_pk_hex).unwrap_or_default(),
+            ) {
+                if consensus.validator_list().is_validator(&self_pk) {
+                    consensus
+                        .validator_list_mut()
+                        .update_last_seen(&self_pk, now);
+                }
+            }
+        }
+
         let validators = consensus
             .validator_list()
             .list_validators_with_liveness(now);

@@ -182,6 +182,13 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <div class="panel">
+      <div class="panel-header">My Public Keys</div>
+      <div class="panel-body" id="id-keys-body">
+        <p style="color:var(--text-secondary)">Loading keys...</p>
+      </div>
+    </div>
+
     <div class="panel" id="pki-panel">
       <div class="panel-header">PKI Identity</div>
       <div class="panel-body" id="pki-body">
@@ -331,16 +338,16 @@ export function init(root, ctx) {
     }
   }
 
-  // Load peer announces
+  // Load peer identity data from peer memory
   async function loadPeers() {
     try {
-      const peers = await rpc.call('noble_getPeerAnnounces');
+      const peers = await rpc.call('noble_getPeerMemory');
       if (!peers || peers.length === 0) {
         peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">No peer identity data available</td></tr>';
         return;
       }
       peersBody.innerHTML = peers.map((p, i) => {
-        const cls = p.governance_class || govClassForOrgType(p.org_type);
+        const cls = govClassForOrgType(p.org_type || '');
         const ago = Math.floor(Date.now() / 1000 - p.last_seen);
         const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago / 60)}m ago` : `${Math.floor(ago / 3600)}h ago`;
         const orgDisplay = orgTypeLabel(p.org_type || '');
@@ -348,14 +355,14 @@ export function init(root, ctx) {
           c.role === p.node_role && c.validate === !!p.wants_to_validate && c.vote === !!p.wants_to_vote
         );
         const roleDisplay = compositeRole ? compositeRole.label.split(' — ')[0] : (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
-        const pkiBadge = pkiStatusBadge(p.pki_attestation);
+        const peerKey = p.identity_key || p.peer_id || '';
         return `<tr class="clickable-row" data-idx="${i}">
-          <td class="mono">${truncatePeerId(p.peer_id)}</td>
+          <td class="mono">${truncatePeerId(peerKey)} <button class="btn-copy" data-copy="${esc(peerKey)}" title="Copy identity key">&#128203;</button></td>
           <td>${esc(p.node_name)}</td>
           <td>${orgDisplay}</td>
           <td>${govBadge(cls)}</td>
           <td>${roleDisplay}</td>
-          <td>${pkiBadge}</td>
+          <td><span class="badge-pki-none">N/A</span></td>
           <td>${agoStr}</td>
         </tr>`;
       }).join('');
@@ -370,23 +377,16 @@ export function init(root, ctx) {
             c.role === p.node_role && c.validate === !!p.wants_to_validate && c.vote === !!p.wants_to_vote
           );
           const detailRoleLabel = detailComposite ? detailComposite.label : (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
-          const pkiDetail = p.pki_attestation
-            ? `<dt>PKI Status</dt><dd>${pkiStatusBadge(p.pki_attestation)}</dd>
-               <dt>PKI Signer</dt><dd>${esc(p.pki_attestation.signer_cn || 'Unknown')}</dd>
-               <dt>PKI Fingerprint</dt><dd class="mono">${esc((p.pki_attestation.signer_fingerprint || '').slice(0, 16))}...</dd>`
-            : `<dt>PKI Status</dt><dd>${pkiStatusBadge(null)}</dd>`;
+          const peerKey = p.identity_key || p.peer_id || '';
           peerDl.innerHTML = `
-            <dt>Peer ID</dt><dd class="mono">${esc(p.peer_id)}</dd>
+            <dt>Identity Key</dt><dd class="mono">${esc(peerKey)} <button class="btn-copy" data-copy="${esc(peerKey)}" title="Copy identity key">&#128203;</button></dd>
+            ${p.peer_id ? `<dt>Peer ID</dt><dd class="mono">${esc(p.peer_id)}</dd>` : ''}
             <dt>Node Name</dt><dd>${esc(p.node_name)}</dd>
             <dt>Org Type</dt><dd>${orgTypeLabel(p.org_type || '')}</dd>
-            <dt>Governance</dt><dd>${govBadge(p.governance_class || govClassForOrgType(p.org_type))}</dd>
+            <dt>Governance</dt><dd>${govBadge(govClassForOrgType(p.org_type || ''))}</dd>
             <dt>Role</dt><dd>${detailRoleLabel}</dd>
-            ${pkiDetail}
-            <dt>Contact</dt><dd>${esc(p.contact_email || 'N/A')}</dd>
-            <dt>Website</dt><dd>${p.website ? `<a href="${esc(p.website)}" target="_blank">${esc(p.website)}</a>` : 'N/A'}</dd>
-            <dt>Host Address</dt><dd class="mono">${esc(p.host_address || 'N/A')}</dd>
+            <dt>Host Address</dt><dd class="mono">${esc(p.host_address || p.last_addr || 'N/A')}</dd>
             <dt>Country</dt><dd>${esc(p.country_code || 'N/A')}</dd>
-            <dt>Identity Key</dt><dd class="mono">${esc(p.identity_key || 'N/A')}</dd>
             <dt>Last Seen</dt><dd>${new Date(p.last_seen * 1000).toLocaleString()}</dd>
           `;
           peerDetail.style.display = 'block';
@@ -395,6 +395,54 @@ export function init(root, ctx) {
     } catch (e) {
       console.error('[identity] peers:', e);
       peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load peer data</td></tr>';
+    }
+  }
+
+  // --- My Keys Panel ---
+  async function loadMyKeys() {
+    const container = root.querySelector('#id-keys-body');
+    try {
+      const [addrResp, nodeInfo] = await Promise.all([
+        rpc.call('noble_listAddresses'),
+        rpc.call('noble_getNodeInfo'),
+      ]);
+      const keys = addrResp.keys || [];
+      if (keys.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-secondary)">No keys in wallet. Create or import a key on the Wallet page.</p>';
+        return;
+      }
+      const validatorHex = nodeInfo.validator_pubkey || '';
+      container.innerHTML = keys.map(k => {
+        const isValidator = validatorHex && k.pubkey_hex === validatorHex;
+        const badge = isValidator ? ' <span class="badge-pki-verified">Validator</span>' : '';
+        const schemeBadge = k.scheme === 'secp256k1'
+          ? '<span style="color:var(--warning)">secp256k1</span>'
+          : '<span style="color:var(--info,#3b82f6)">ed25519</span>';
+        let btcHtml = '';
+        if (k.bitcoin_addresses && k.bitcoin_addresses.length > 0) {
+          btcHtml = '<div style="margin-top:8px"><strong>Bitcoin Addresses:</strong></div>' +
+            k.bitcoin_addresses.map(ba =>
+              `<div style="display:flex;align-items:center;gap:6px;margin:4px 0 4px 12px">
+                <span style="min-width:48px;color:var(--text-secondary)">${esc((ba.address_type || '').toUpperCase())}</span>
+                <span class="mono" style="font-size:12px;word-break:break-all">${esc(ba.address)}</span>
+                <button class="btn-copy" data-copy="${esc(ba.address)}" title="Copy ${esc(ba.address_type)} address">&#128203;</button>
+              </div>`
+            ).join('');
+        }
+        return `<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            ${schemeBadge}${badge}
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="mono" style="font-size:12px;word-break:break-all">${esc(k.pubkey_hex)}</span>
+            <button class="btn-copy" data-copy="${esc(k.pubkey_hex)}" title="Copy public key hex">&#128203;</button>
+          </div>
+          ${btcHtml}
+        </div>`;
+      }).join('');
+    } catch (e) {
+      console.error('[identity] keys:', e);
+      container.innerHTML = '<p style="color:var(--text-secondary)">Could not load keys</p>';
     }
   }
 
@@ -625,8 +673,20 @@ export function init(root, ctx) {
   });
 
   loadIdentity();
+  loadMyKeys();
   loadPeers();
   loadPkiStatus();
+
+  // ── Copy-to-clipboard delegation ──
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-copy');
+    if (btn) {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(btn.dataset.copy).catch(() => {});
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
+    }
+  });
 
   // Refresh peers every 30s
   const peerInterval = setInterval(loadPeers, 30_000);
