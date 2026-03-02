@@ -129,6 +129,16 @@ pub trait WalletApi {
     /// Does not require the wallet to be unlocked — reads key filenames only.
     #[method(name = "listAddresses")]
     async fn list_addresses(&self) -> Result<ListAddressesResponse, ErrorObjectOwned>;
+
+    /// Delete a wallet key from the keystore.
+    /// Requires the wallet passphrase for verification.
+    /// Refuses to delete the active gateway key.
+    #[method(name = "deleteAddress")]
+    async fn delete_address(
+        &self,
+        pubkey_hex: String,
+        passphrase: String,
+    ) -> Result<DeleteAddressResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -139,6 +149,15 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         passphrase: String,
     ) -> Result<CreateAddressResponse, ErrorObjectOwned> {
         let mut keystore = self.wallet_keystore.lock();
+
+        // Guard: reject if a key of the same scheme already exists
+        let existing = keystore.list_keys().unwrap_or_default();
+        if existing.iter().any(|k| k.scheme_id() == scheme_id) {
+            return Err(ApiError::InvalidParam(
+                "A wallet key with this scheme already exists. Delete it first to create a new one.".into(),
+            ).into());
+        }
+
         let pubkey = keystore
             .create_key(scheme_id, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -371,6 +390,15 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         }
 
         let mut keystore = self.wallet_keystore.lock();
+
+        // Guard: reject if any secp256k1 key already exists
+        let existing = keystore.list_keys().unwrap_or_default();
+        if existing.iter().any(|k| k.scheme_id() == SCHEME_SEC) {
+            return Err(ApiError::InvalidParam(
+                "A secp256k1 wallet key already exists. Delete it first to generate a new one.".into(),
+            ).into());
+        }
+
         let (mnemonic, pubkey) = keystore
             .create_key_from_mnemonic(wc, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -407,6 +435,30 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         passphrase: String,
     ) -> Result<ImportKeyResponse, ErrorObjectOwned> {
         let mut keystore = self.wallet_keystore.lock();
+
+        // Guard: if a secp256k1 key already exists, return it (idempotent import)
+        let existing = keystore.list_keys().unwrap_or_default();
+        if let Some(existing_pk) = existing.iter().find(|k| k.scheme_id() == SCHEME_SEC) {
+            let (bitcoin_address, bitcoin_addresses) =
+                if let NoblePublicKey::Secp256k1(ref bytes) = existing_pk {
+                    let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+                    let addrs = derive_bitcoin_addresses(&key);
+                    let p2wpkh = addrs
+                        .iter()
+                        .find(|a| a.address_type == "p2wpkh")
+                        .map(|a| a.address.clone())
+                        .unwrap_or_default();
+                    (p2wpkh, addrs)
+                } else {
+                    (String::new(), vec![])
+                };
+            return Ok(ImportKeyResponse {
+                public_key: hex::encode(existing_pk.to_wire_bytes()),
+                bitcoin_address,
+                bitcoin_addresses,
+            });
+        }
+
         let pubkey = keystore
             .import_secp256k1_key(&key_input, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -503,6 +555,44 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             public_key: public_key_hex,
             wire_hex: wire_hex_str,
             bitcoin_addresses: btc_addrs,
+        })
+    }
+
+    async fn delete_address(
+        &self,
+        pubkey_hex: String,
+        passphrase: String,
+    ) -> Result<DeleteAddressResponse, ErrorObjectOwned> {
+        // Parse the public key
+        let pubkey = parse_pubkey(&pubkey_hex)?;
+
+        // Refuse to delete the active gateway key
+        {
+            let gw = self.gateway_key.read();
+            if let Some(ref gw_bytes) = *gw {
+                if pubkey.to_wire_bytes() == *gw_bytes {
+                    return Err(ApiError::InvalidParam(
+                        "Cannot delete the active gateway key. Change gateway key first.".into(),
+                    ).into());
+                }
+            }
+        }
+
+        // Delete the key (verifies passphrase internally)
+        let mut keystore = self.wallet_keystore.lock();
+        keystore
+            .delete_key(&pubkey, &passphrase)
+            .map_err(|e| match e {
+                noble_wallet::WalletError::InvalidPassphrase => ApiError::InvalidPassphrase,
+                noble_wallet::WalletError::KeyNotFound(k) => {
+                    ApiError::InvalidParam(format!("Key not found: {k}"))
+                }
+                other => ApiError::Internal(other.to_string()),
+            })?;
+
+        Ok(DeleteAddressResponse {
+            success: true,
+            message: format!("Key {} deleted.", &pubkey_hex[..pubkey_hex.len().min(16)]),
         })
     }
 

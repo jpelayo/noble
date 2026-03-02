@@ -111,6 +111,22 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Wallet Keys -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Wallet Keys</span>
+        <span id="s-wk-badge" class="badge"></span>
+      </div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
+          Keys stored in the wallet keystore. Deleting a key requires your wallet passphrase.
+        </p>
+        <div id="s-wk-list" style="margin-bottom:var(--gap)"></div>
+        <div id="s-wk-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
+        <div id="s-wk-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:none"></div>
+      </div>
+    </div>
+
     <!-- Seed Nodes -->
     <div class="panel">
       <div class="panel-header">
@@ -295,6 +311,12 @@ export function init(root, ctx) {
   const encSwitchBtn = root.querySelector('#s-enc-switch-btn');
   const encSwitchMsg = root.querySelector('#s-enc-switch-msg');
   const encError = root.querySelector('#s-enc-error');
+
+  // Wallet key refs
+  const wkBadge = root.querySelector('#s-wk-badge');
+  const wkListEl = root.querySelector('#s-wk-list');
+  const wkError = root.querySelector('#s-wk-error');
+  const wkMsg = root.querySelector('#s-wk-msg');
 
   // Seed node refs
   const seedBadge = root.querySelector('#s-seed-badge');
@@ -824,11 +846,70 @@ export function init(root, ctx) {
   }
 
   // Load data
+  async function loadWalletKeys() {
+    try {
+      const result = await rpc.call('noble_listAddresses');
+      const keys = result.keys || [];
+      wkBadge.textContent = `${keys.length} key${keys.length !== 1 ? 's' : ''}`;
+      wkBadge.style.background = keys.length > 0 ? 'var(--success)' : 'var(--text-muted)';
+      wkError.style.display = 'none';
+
+      if (keys.length === 0) {
+        wkListEl.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm);font-style:italic">No wallet keys. Generate one from the Identity page.</div>`;
+        return;
+      }
+
+      wkListEl.innerHTML = keys.map(k => {
+        const short = k.pubkey_hex.length > 16 ? k.pubkey_hex.slice(0, 8) + '...' + k.pubkey_hex.slice(-8) : k.pubkey_hex;
+        const btcAddr = (k.bitcoin_addresses && k.bitcoin_addresses.length > 0)
+          ? k.bitcoin_addresses.find(a => a.address_type === 'p2wpkh')
+          : null;
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;margin-bottom:4px;background:var(--bg-tertiary);border-radius:var(--radius-sm)">
+            <div style="flex:1;min-width:0">
+              <span class="badge" style="font-size:10px;padding:1px 6px;margin-right:6px">${k.scheme}</span>
+              <code style="font-size:var(--font-size-xs)" title="${k.pubkey_hex}">${short}</code>
+              ${btcAddr ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${btcAddr.address}</div>` : ''}
+            </div>
+            <button class="wk-delete" data-pubkey="${k.pubkey_hex}" style="background:none;border:1px solid var(--error);color:var(--error);cursor:pointer;font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);white-space:nowrap" title="Delete key">Delete</button>
+          </div>`;
+      }).join('');
+
+      wkListEl.querySelectorAll('.wk-delete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const pubkey = btn.dataset.pubkey;
+          const pw = prompt('Enter wallet passphrase to confirm deletion:');
+          if (!pw) return;
+          btn.disabled = true;
+          btn.textContent = '...';
+          wkError.style.display = 'none';
+          try {
+            const resp = await rpc.call('noble_deleteAddress', { pubkey_hex: pubkey, passphrase: pw });
+            wkMsg.textContent = resp.message || 'Key deleted.';
+            wkMsg.style.color = 'var(--success)';
+            wkMsg.style.display = 'block';
+            setTimeout(() => { wkMsg.style.display = 'none'; }, 4000);
+            loadWalletKeys();
+          } catch (e) {
+            wkError.textContent = e.message || 'Delete failed';
+            wkError.style.display = 'block';
+            btn.disabled = false;
+            btn.textContent = 'Delete';
+          }
+        });
+      });
+    } catch (e) {
+      wkBadge.textContent = '?';
+      wkListEl.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm)">Could not load wallet keys.</div>`;
+    }
+  }
+
   async function loadSettings() {
-    // Load TLS cert, encryption status, and seeds in parallel (independent from other calls).
+    // Load TLS cert, encryption status, seeds, and wallet keys in parallel (independent from other calls).
     loadTlsCert();
     loadEncryptionStatus();
     loadSeeds();
+    loadWalletKeys();
 
     try {
       const [ipResult, nodeInfo, vkeyInfo, gwInfo] = await Promise.all([

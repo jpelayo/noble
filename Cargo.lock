@@ -3237,6 +3237,7 @@ dependencies = [
  "bip39",
  "clap",
  "hex",
+ "libc",
  "noble-codec",
  "noble-core",
  "noble-crypto",

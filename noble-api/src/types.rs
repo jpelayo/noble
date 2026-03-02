@@ -975,6 +975,13 @@ pub struct ImportKeyResponse {
     pub bitcoin_addresses: Vec<BitcoinAddressEntry>,
 }
 
+/// Response for `noble_deleteAddress`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteAddressResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 /// Response for `noble_setConfigValue`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetConfigValueResponse {

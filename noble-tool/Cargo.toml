@@ -28,6 +28,7 @@ serde.workspace = true
 ureq.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

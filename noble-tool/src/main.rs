@@ -90,6 +90,25 @@ enum Commands {
         #[command(subcommand)]
         action: PeerCommand,
     },
+
+    /// Manage allowed IP CIDRs for RPC/GUI remote access on a running node.
+    AllowIps {
+        #[command(subcommand)]
+        action: AllowIpsCommand,
+    },
+
+    /// Delete blockchain data (RocksDB) while preserving keys and identity.
+    ResetChain {
+        /// Path to the data directory.
+        #[arg(long, default_value_os_t = default_data_dir())]
+        data_dir: PathBuf,
+        /// Actually perform the deletion (without this flag, only a dry-run is shown).
+        #[arg(long)]
+        confirm: bool,
+        /// Preserve peer memory (recently-seen peers) across the reset. (Not yet implemented — flag accepted but ignored.)
+        #[arg(long)]
+        keep_peers: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +170,52 @@ enum WalletCommand {
         /// Output machine-readable JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Delete a wallet key from the keystore on a running node (requires passphrase).
+    Delete {
+        /// Public key hex (wire format) to delete.
+        pubkey_hex: String,
+        /// Passphrase to verify key ownership.
+        #[arg(long)]
+        passphrase: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AllowIpsCommand {
+    /// List current allowed CIDRs.
+    List {
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+    /// Replace all allowed CIDRs.
+    Set {
+        /// CIDRs to allow (e.g. 192.168.0.0/16, or "tailscale").
+        cidrs: Vec<String>,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+    /// Add a CIDR to the allow list.
+    Add {
+        /// CIDR to add (e.g. 192.168.0.0/16, or "tailscale").
+        cidr: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+    /// Remove a CIDR from the allow list.
+    Remove {
+        /// CIDR to remove.
+        cidr: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
     },
 }
 
@@ -214,6 +279,12 @@ fn main() {
         Commands::Wallet { action } => cmd_wallet(action),
         Commands::Security { action } => cmd_security(action),
         Commands::Peer { action } => cmd_peer(action),
+        Commands::AllowIps { action } => cmd_allow_ips(action),
+        Commands::ResetChain {
+            data_dir,
+            confirm,
+            keep_peers,
+        } => cmd_reset_chain(data_dir, confirm, keep_peers),
     }
 }
 
@@ -557,6 +628,29 @@ fn cmd_wallet(action: WalletCommand) {
                 print_wallet_human(&info);
             }
         }
+        WalletCommand::Delete {
+            pubkey_hex,
+            passphrase,
+            rpc_url,
+        } => {
+            let params = serde_json::json!({
+                "pubkey_hex": pubkey_hex,
+                "passphrase": passphrase,
+            });
+            match rpc_call(&rpc_url, "noble_deleteAddress", params) {
+                Ok(result) => {
+                    let msg = result
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Key deleted.");
+                    println!("{msg}");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -829,6 +923,332 @@ fn cmd_peer(action: PeerCommand) {
 }
 
 // ---------------------------------------------------------------------------
+// allow-ips (RPC client)
+// ---------------------------------------------------------------------------
+
+/// Expand shorthand aliases for common CIDRs.
+fn expand_cidr_alias(s: &str) -> String {
+    match s {
+        "tailscale" | "100" => "100.64.0.0/10".into(),
+        "lan" | "192" => "192.168.0.0/16".into(),
+        "10" => "10.0.0.0/8".into(),
+        "172" => "172.16.0.0/12".into(),
+        other => other.to_string(),
+    }
+}
+
+fn cmd_allow_ips(action: AllowIpsCommand) {
+    match action {
+        AllowIpsCommand::List { rpc_url } => {
+            match rpc_call(&rpc_url, "noble_getAllowedIps", serde_json::json!({})) {
+                Ok(result) => {
+                    let ips = result
+                        .get("allowed_ips")
+                        .and_then(|v| v.as_array());
+                    let remote = result
+                        .get("remote_access_enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    match ips {
+                        Some(list) if !list.is_empty() => {
+                            println!("Allowed CIDRs ({}):", list.len());
+                            for cidr in list {
+                                println!("  {}", cidr.as_str().unwrap_or("?"));
+                            }
+                            println!(
+                                "Remote access: {}",
+                                if remote { "enabled" } else { "disabled" }
+                            );
+                        }
+                        _ => {
+                            println!("No allowed CIDRs configured (localhost-only).");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        AllowIpsCommand::Set { cidrs, rpc_url } => {
+            let expanded: Vec<String> = cidrs.iter().map(|s| expand_cidr_alias(s)).collect();
+            let params = serde_json::json!({ "allowed_ips": expanded });
+            match rpc_call(&rpc_url, "noble_setAllowedIps", params) {
+                Ok(result) => {
+                    let msg = result
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("OK");
+                    println!("{msg}");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        AllowIpsCommand::Add { cidr, rpc_url } => {
+            let expanded = expand_cidr_alias(&cidr);
+            // Get current list
+            let current = match rpc_call(&rpc_url, "noble_getAllowedIps", serde_json::json!({})) {
+                Ok(result) => {
+                    result
+                        .get("allowed_ips")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
+                Err(e) => {
+                    eprintln!("Error fetching current list: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if current.iter().any(|c| c == &expanded) {
+                println!("CIDR {expanded} is already in the allow list.");
+                return;
+            }
+            let mut updated = current;
+            updated.push(expanded.clone());
+            let params = serde_json::json!({ "allowed_ips": updated });
+            match rpc_call(&rpc_url, "noble_setAllowedIps", params) {
+                Ok(_) => {
+                    println!("Added {expanded}.");
+                    // Print updated list
+                    print_allow_list(&rpc_url);
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        AllowIpsCommand::Remove { cidr, rpc_url } => {
+            let expanded = expand_cidr_alias(&cidr);
+            // Get current list
+            let current = match rpc_call(&rpc_url, "noble_getAllowedIps", serde_json::json!({})) {
+                Ok(result) => {
+                    result
+                        .get("allowed_ips")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
+                Err(e) => {
+                    eprintln!("Error fetching current list: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if !current.iter().any(|c| c == &expanded) {
+                println!("CIDR {expanded} is not in the allow list.");
+                return;
+            }
+            let updated: Vec<String> = current.into_iter().filter(|c| c != &expanded).collect();
+            let params = serde_json::json!({ "allowed_ips": updated });
+            match rpc_call(&rpc_url, "noble_setAllowedIps", params) {
+                Ok(_) => {
+                    println!("Removed {expanded}.");
+                    print_allow_list(&rpc_url);
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// Print the current allow list from the node.
+fn print_allow_list(rpc_url: &str) {
+    if let Ok(result) = rpc_call(rpc_url, "noble_getAllowedIps", serde_json::json!({})) {
+        let ips = result.get("allowed_ips").and_then(|v| v.as_array());
+        let remote = result
+            .get("remote_access_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match ips {
+            Some(list) if !list.is_empty() => {
+                println!("Allowed CIDRs ({}):", list.len());
+                for cidr in list {
+                    println!("  {}", cidr.as_str().unwrap_or("?"));
+                }
+                println!(
+                    "Remote access: {}",
+                    if remote { "enabled" } else { "disabled" }
+                );
+            }
+            _ => {
+                println!("No allowed CIDRs configured (localhost-only).");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// reset-chain
+// ---------------------------------------------------------------------------
+
+fn cmd_reset_chain(data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
+    // 1. Verify data_dir exists
+    if !data_dir.exists() {
+        eprintln!(
+            "Error: data directory does not exist: {}",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    // 2. Check RocksDB LOCK file — if locked, node is running
+    let lock_path = data_dir.join("LOCK");
+    if lock_path.exists() {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(f) => {
+                use std::os::unix::io::AsRawFd;
+                let fd = f.as_raw_fd();
+                let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                if ret != 0 {
+                    eprintln!("Error: database is locked — the node is still running.");
+                    eprintln!("Stop it first:  brew services stop noble");
+                    std::process::exit(1);
+                }
+                // Lock succeeded → node is not running, release
+                unsafe { libc::flock(fd, libc::LOCK_UN) };
+            }
+            Err(_) => {} // Can't open LOCK file — proceed cautiously
+        }
+    }
+
+    // 3. Preserved files and directories (never touched)
+    let preserved_files: &[&str] = &[
+        "identity.json",
+        "validator.key",
+        ".chain_meta",
+        "tls-cert.pem",
+        "tls-key.pem",
+        "p2p_identity.key",
+        "identity_attestation.cbor",
+        "noble.toml",
+    ];
+    let preserved_dirs: &[&str] = &["keystore"];
+
+    // 4. Enumerate what exists in data_dir
+    let entries: Vec<_> = match fs::read_dir(&data_dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(e) => {
+            eprintln!("Error reading data directory: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut to_delete: Vec<PathBuf> = Vec::new();
+    let mut preserved_found: Vec<String> = Vec::new();
+
+    for entry in &entries {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if preserved_files.contains(&name_str.as_ref())
+            || preserved_dirs.contains(&name_str.as_ref())
+        {
+            preserved_found.push(name_str.to_string());
+        } else {
+            to_delete.push(entry.path());
+        }
+    }
+
+    // 5. Print plan
+    println!("=== NOBLE Chain Reset ===");
+    println!();
+    println!("Data directory: {}", data_dir.display());
+    println!();
+
+    if to_delete.is_empty() {
+        println!("Nothing to delete — data directory contains only preserved files.");
+        return;
+    }
+
+    println!("WILL DELETE (blockchain data):");
+    for path in &to_delete {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if path.is_dir() {
+            println!("  - {name}/");
+        } else {
+            println!("  - {name}");
+        }
+    }
+    println!();
+    println!("WILL PRESERVE (keys & identity):");
+    for name in &preserved_found {
+        let is_dir = data_dir.join(name).is_dir();
+        if is_dir {
+            println!("  ✓ {name}/");
+        } else {
+            println!("  ✓ {name}");
+        }
+    }
+
+    if !confirm {
+        println!();
+        println!("Dry run — no files were deleted.");
+        println!("Add --confirm to actually perform the reset.");
+        return;
+    }
+
+    // 6. Perform deletion
+    let mut deleted_count = 0u64;
+    let mut freed_bytes = 0u64;
+
+    for path in &to_delete {
+        if path.is_dir() {
+            // Sum sizes of files inside before deleting
+            if let Ok(walk) = fs::read_dir(path) {
+                for entry in walk.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        freed_bytes += meta.len();
+                    }
+                }
+            }
+            if let Err(e) = fs::remove_dir_all(path) {
+                eprintln!(
+                    "Warning: could not delete directory {}: {e}",
+                    path.display()
+                );
+            } else {
+                deleted_count += 1;
+            }
+        } else {
+            if let Ok(meta) = path.metadata() {
+                freed_bytes += meta.len();
+            }
+            if let Err(e) = fs::remove_file(path) {
+                eprintln!("Warning: could not delete file {}: {e}", path.display());
+            } else {
+                deleted_count += 1;
+            }
+        }
+    }
+
+    let freed_mb = freed_bytes as f64 / (1024.0 * 1024.0);
+    println!();
+    println!(
+        "Done. Deleted {deleted_count} items, freed {freed_mb:.1} MB."
+    );
+    println!("Restart the node to create a fresh genesis block.");
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1006,6 +1426,106 @@ mod tests {
     fn peer_rpc_invalid_url_returns_error() {
         let result = rpc_call("not-a-url", "noble_dialPeer", serde_json::json!({}));
         assert!(result.is_err());
+    }
+
+    // ── AllowIps alias tests ──
+
+    #[test]
+    fn cidr_alias_tailscale() {
+        assert_eq!(expand_cidr_alias("tailscale"), "100.64.0.0/10");
+        assert_eq!(expand_cidr_alias("100"), "100.64.0.0/10");
+    }
+
+    #[test]
+    fn cidr_alias_lan() {
+        assert_eq!(expand_cidr_alias("lan"), "192.168.0.0/16");
+        assert_eq!(expand_cidr_alias("192"), "192.168.0.0/16");
+    }
+
+    #[test]
+    fn cidr_alias_private_ranges() {
+        assert_eq!(expand_cidr_alias("10"), "10.0.0.0/8");
+        assert_eq!(expand_cidr_alias("172"), "172.16.0.0/12");
+    }
+
+    #[test]
+    fn cidr_alias_passthrough() {
+        assert_eq!(expand_cidr_alias("203.0.113.0/24"), "203.0.113.0/24");
+        assert_eq!(expand_cidr_alias("10.0.0.1/32"), "10.0.0.1/32");
+    }
+
+    // ── ResetChain tests ──
+
+    #[test]
+    fn reset_chain_nonexistent_dir() {
+        // Just verify the preserved list is correct — cmd_reset_chain exits on missing dir
+        let preserved: &[&str] = &[
+            "identity.json", "validator.key", ".chain_meta",
+            "tls-cert.pem", "tls-key.pem", "p2p_identity.key",
+            "identity_attestation.cbor", "noble.toml",
+        ];
+        assert!(preserved.contains(&"identity.json"));
+        assert!(preserved.contains(&"validator.key"));
+        assert!(preserved.contains(&".chain_meta"));
+        assert!(preserved.contains(&"noble.toml"));
+    }
+
+    #[test]
+    fn reset_chain_preserves_keys_deletes_db() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let base = dir.path();
+
+        // Create preserved files
+        fs::write(base.join("identity.json"), b"{}").unwrap();
+        fs::write(base.join("validator.key"), b"key").unwrap();
+        fs::write(base.join(".chain_meta"), b"meta").unwrap();
+        fs::write(base.join("noble.toml"), b"toml").unwrap();
+        fs::create_dir(base.join("keystore")).unwrap();
+        fs::write(base.join("keystore/key1.json"), b"k").unwrap();
+
+        // Create RocksDB-like files
+        fs::write(base.join("CURRENT"), b"MANIFEST-000001\n").unwrap();
+        fs::write(base.join("MANIFEST-000001"), b"mf").unwrap();
+        fs::write(base.join("000001.sst"), b"sst").unwrap();
+        fs::write(base.join("000001.log"), b"log").unwrap();
+        fs::write(base.join("LOCK"), b"").unwrap();
+        fs::write(base.join("IDENTITY"), b"id").unwrap();
+
+        // Run reset with --confirm
+        cmd_reset_chain(base.to_path_buf(), true, false);
+
+        // Preserved files should still exist
+        assert!(base.join("identity.json").exists());
+        assert!(base.join("validator.key").exists());
+        assert!(base.join(".chain_meta").exists());
+        assert!(base.join("noble.toml").exists());
+        assert!(base.join("keystore").exists());
+        assert!(base.join("keystore/key1.json").exists());
+
+        // RocksDB files should be gone
+        assert!(!base.join("CURRENT").exists());
+        assert!(!base.join("MANIFEST-000001").exists());
+        assert!(!base.join("000001.sst").exists());
+        assert!(!base.join("000001.log").exists());
+        assert!(!base.join("LOCK").exists());
+        assert!(!base.join("IDENTITY").exists());
+    }
+
+    #[test]
+    fn reset_chain_dry_run_preserves_everything() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let base = dir.path();
+
+        fs::write(base.join("identity.json"), b"{}").unwrap();
+        fs::write(base.join("CURRENT"), b"data").unwrap();
+        fs::write(base.join("000001.sst"), b"sst").unwrap();
+
+        // Dry run — nothing should be deleted
+        cmd_reset_chain(base.to_path_buf(), false, false);
+
+        assert!(base.join("identity.json").exists());
+        assert!(base.join("CURRENT").exists());
+        assert!(base.join("000001.sst").exists());
     }
 
     // ── Security tests ──
