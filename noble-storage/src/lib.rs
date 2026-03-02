@@ -15,7 +15,7 @@ pub use integrity::{verify_chain_integrity, FindingKind, IntegrityFinding, Integ
 pub use memory::MemoryStorage;
 pub use pruning::{PruningConfig, PruningEngine, PruningMode, PruningResult};
 pub use rocks::RocksDbStorage;
-pub use traits::{ChainTip, KeyRotationRecord, StorageEngine};
+pub use traits::{CfStats, ChainTip, KeyRotationRecord, StorageEngine, StorageStats};
 
 /// Maximum number of tx_id registrations per checksum (GAP-M10).
 /// Prevents unbounded growth in the checksum index.

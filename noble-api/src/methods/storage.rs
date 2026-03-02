@@ -23,6 +23,10 @@ pub trait StorageApi {
     /// Get the current pruning status and last run result.
     #[method(name = "getPruningStatus")]
     async fn get_pruning_status(&self) -> Result<PruningStatusResponse, ErrorObjectOwned>;
+
+    /// Get detailed storage statistics: disk usage, column family breakdown, config.
+    #[method(name = "getStorageStats")]
+    async fn get_storage_stats(&self) -> Result<StorageStatsResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -65,6 +69,45 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
             transactions_removed: 0,
             lowest_full_height: lowest_full,
             more_remaining: false,
+        })
+    }
+
+    async fn get_storage_stats(&self) -> Result<StorageStatsResponse, ErrorObjectOwned> {
+        let storage = self.storage.read();
+        let stats = storage
+            .get_storage_stats()
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let column_families: Vec<CfStatsEntry> = stats
+            .column_families
+            .into_iter()
+            .map(|cf| CfStatsEntry {
+                name: cf.name,
+                estimated_bytes: cf.estimated_bytes,
+                estimated_keys: cf.estimated_keys,
+            })
+            .collect();
+
+        let total_db_bytes: u64 = column_families.iter().map(|cf| cf.estimated_bytes).sum();
+
+        let (data_dir_str, available_bytes, total_volume_bytes) =
+            if let Some(ref dd) = self.data_dir {
+                let dir_str = dd.display().to_string();
+                let avail = super::node::disk_available(dd);
+                let cap = super::node::disk_capacity(dd);
+                (Some(dir_str), avail, cap)
+            } else {
+                (None, 0, 0)
+            };
+
+        Ok(StorageStatsResponse {
+            data_dir: data_dir_str,
+            total_db_bytes,
+            available_bytes,
+            total_volume_bytes,
+            cache_size_bytes: u64::from(self.cache_size_mb) * 1024 * 1024,
+            compression_enabled: self.compression_enabled,
+            column_families,
         })
     }
 }

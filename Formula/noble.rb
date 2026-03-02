@@ -24,12 +24,14 @@ class Noble < Formula
   #   brew install --HEAD noble --with-192   # allow 192.168.0.0/16
   #   brew install --HEAD noble --with-10    # allow 10.0.0.0/8
   #   brew install --HEAD noble --with-172   # allow 172.16.0.0/12
+  #   brew install --HEAD noble --with-100   # allow 100.64.0.0/10 (Tailscale)
   #   brew install --HEAD noble --localonly  # force localhost only (default)
   # Alternatively: NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install ...
 
   option "with-192", "Allow remote access from 192.168.0.0/16 (home LAN)"
   option "with-10",  "Allow remote access from 10.0.0.0/8 (corporate LAN)"
   option "with-172", "Allow remote access from 172.16.0.0/12 (Docker/private)"
+  option "with-100", "Allow remote access from 100.64.0.0/10 (Tailscale)"
   option "localonly", "Force localhost-only mode (default)"
 
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
@@ -92,6 +94,7 @@ class Noble < Formula
       cidrs << "192.168.0.0/16" if build.with?("192")
       cidrs << "10.0.0.0/8"     if build.with?("10")
       cidrs << "172.16.0.0/12"  if build.with?("172")
+      cidrs << "100.64.0.0/10"  if build.with?("100")
 
       # Env var fallback (for CI / scripted installs).
       if cidrs.empty? && !build.include?("localonly")
@@ -174,9 +177,10 @@ class Noble < Formula
 
       Remote access (set before install, or edit noble.toml later):
 
-        brew install --HEAD noble --with-192  # home LAN  (192.168.0.0/16)
-        brew install --HEAD noble --with-10   # corporate (10.0.0.0/8)
-        brew install --HEAD noble --with-172  # Docker    (172.16.0.0/12)
+        brew install --HEAD noble --with-192  # home LAN   (192.168.0.0/16)
+        brew install --HEAD noble --with-10   # corporate  (10.0.0.0/8)
+        brew install --HEAD noble --with-172  # Docker     (172.16.0.0/12)
+        brew install --HEAD noble --with-100  # Tailscale  (100.64.0.0/10)
 
       Ports that should be reachable:
 

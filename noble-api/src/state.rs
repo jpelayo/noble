@@ -263,4 +263,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Trigger channel to re-publish NodeAnnounce (e.g. after identity update).
     pub announce_trigger: mpsc::Sender<()>,
+
+    /// RocksDB block cache size in megabytes (from `[storage] cache_size_mb`).
+    pub cache_size_mb: u32,
+
+    /// Whether Zstd compression is enabled on the blocks CF (from `[storage] compression`).
+    pub compression_enabled: bool,
 }

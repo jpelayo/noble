@@ -824,6 +824,26 @@ pub struct PruningStatusResponse {
     pub more_remaining: bool,
 }
 
+/// A single column family entry in the storage stats response.
+#[derive(Debug, Clone, Serialize)]
+pub struct CfStatsEntry {
+    pub name: String,
+    pub estimated_bytes: u64,
+    pub estimated_keys: u64,
+}
+
+/// Response for `noble_getStorageStats`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageStatsResponse {
+    pub data_dir: Option<String>,
+    pub total_db_bytes: u64,
+    pub available_bytes: u64,
+    pub total_volume_bytes: u64,
+    pub cache_size_bytes: u64,
+    pub compression_enabled: bool,
+    pub column_families: Vec<CfStatsEntry>,
+}
+
 /// Response for `noble_getSetupStatus`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupStatusResponse {

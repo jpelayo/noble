@@ -1564,6 +1564,30 @@ export class MockRpcClient {
           more_remaining: false,
         };
 
+      case 'noble_getStorageStats':
+        return {
+          data_dir: '~/.noble/data',
+          total_db_bytes: 44_350_000,
+          available_bytes: 250_685_440_000,
+          total_volume_bytes: 499_963_174_912,
+          cache_size_bytes: 67_108_864,
+          compression_enabled: true,
+          column_families: [
+            { name: 'blocks',           estimated_bytes: 28_900_000, estimated_keys: 1247 },
+            { name: 'block_hashes',     estimated_bytes: 3_200_000,  estimated_keys: 1247 },
+            { name: 'tx_index',         estimated_bytes: 5_100_000,  estimated_keys: 3890 },
+            { name: 'checksum_index',   estimated_bytes: 2_800_000,  estimated_keys: 2105 },
+            { name: 'chain_state',      estimated_bytes: 4_096,      estimated_keys: 3 },
+            { name: 'validator_state',  estimated_bytes: 12_288,     estimated_keys: 5 },
+            { name: 'address_balances', estimated_bytes: 890_000,    estimated_keys: 412 },
+            { name: 'address_history',  estimated_bytes: 2_340_000,  estimated_keys: 7820 },
+            { name: 'bans',             estimated_bytes: 1_024,      estimated_keys: 2 },
+            { name: 'peer_memory',      estimated_bytes: 48_000,     estimated_keys: 23 },
+            { name: 'version_chain',    estimated_bytes: 680_000,    estimated_keys: 1540 },
+            { name: 'publisher_index',  estimated_bytes: 374_592,    estimated_keys: 198 },
+          ],
+        };
+
       case 'noble_getStorageConfig':
         return this.#storageConfig || {
           data_dir: '~/.noble/data',

@@ -1064,7 +1064,7 @@ fn generate_validator_key(
 }
 
 /// Calculate the total size of a directory recursively.
-fn dir_size(path: &std::path::Path) -> u64 {
+pub(crate) fn dir_size(path: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -1082,7 +1082,7 @@ fn dir_size(path: &std::path::Path) -> u64 {
 }
 
 /// Get the total capacity of the disk containing the given path.
-fn disk_capacity(path: &std::path::Path) -> u64 {
+pub(crate) fn disk_capacity(path: &std::path::Path) -> u64 {
     // Use sysinfo-like statvfs on unix, or a large default.
     #[cfg(unix)]
     {
@@ -1102,7 +1102,7 @@ fn disk_capacity(path: &std::path::Path) -> u64 {
 }
 
 /// Get the available (free) disk space at the given path.
-fn disk_available(path: &std::path::Path) -> u64 {
+pub(crate) fn disk_available(path: &std::path::Path) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

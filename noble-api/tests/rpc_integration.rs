@@ -24,6 +24,7 @@ use noble_api::methods::document::DocumentApiServer;
 use noble_api::methods::mempool::MempoolApiServer;
 use noble_api::methods::network::NetworkApiServer;
 use noble_api::methods::node::NodeApiServer;
+use noble_api::methods::storage::StorageApiServer;
 use noble_api::methods::transaction::TransactionApiServer;
 use noble_api::methods::wallet::WalletApiServer;
 use noble_api::{ApiState, NetworkStats, NodeIdentityData};
@@ -152,6 +153,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         chain_meta: [0x42u8; 32],
         seeds: parking_lot::RwLock::new(Vec::new()),
         announce_trigger: tokio::sync::mpsc::channel(4).0,
+        cache_size_mb: 64,
+        compression_enabled: true,
     });
 
     (state, dir)
@@ -194,6 +197,9 @@ async fn start_test_server(
         .unwrap();
     module
         .merge(NodeApiServer::into_rpc(state.clone()))
+        .unwrap();
+    module
+        .merge(StorageApiServer::into_rpc(state.clone()))
         .unwrap();
 
     let handle = server.start(module);
@@ -778,4 +784,22 @@ async fn validate_address_testnet_rejected() {
         .unwrap();
 
     assert_eq!(result["valid"], false);
+}
+
+#[tokio::test]
+async fn get_storage_stats_returns_valid_response() {
+    let (state, _dir) = make_test_state();
+    let (url, _handle) = start_test_server(state).await;
+    let client = WsClientBuilder::default().build(&url).await.unwrap();
+
+    let resp: serde_json::Value = client
+        .request("noble_getStorageStats", rpc_params![])
+        .await
+        .unwrap();
+
+    // MemoryStorage returns empty CF list (default trait impl)
+    assert!(resp["column_families"].is_array());
+    assert_eq!(resp["total_db_bytes"], 0);
+    assert_eq!(resp["cache_size_bytes"], 64 * 1024 * 1024);
+    assert_eq!(resp["compression_enabled"], true);
 }

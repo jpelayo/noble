@@ -13,6 +13,20 @@ use crate::error::StorageError;
 /// Pending key rotation record: `(old_key_wire, new_key_wire, rotation_cycle)`.
 pub type KeyRotationRecord = (Vec<u8>, Vec<u8>, u64);
 
+/// Per-column-family size and key count estimates.
+#[derive(Debug, Clone, Default)]
+pub struct CfStats {
+    pub name: String,
+    pub estimated_bytes: u64,
+    pub estimated_keys: u64,
+}
+
+/// Aggregated storage statistics across all column families.
+#[derive(Debug, Clone, Default)]
+pub struct StorageStats {
+    pub column_families: Vec<CfStats>,
+}
+
 /// Chain tip metadata persisted in the `chain_state` column family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainTip {
@@ -198,6 +212,14 @@ pub trait StorageEngine {
     /// Set the "pruned up to" marker after a pruning pass.
     fn set_pruning_marker(&self, _height: u64) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// Return per-column-family size and key count estimates.
+    ///
+    /// The default implementation returns empty stats (for backends that don't
+    /// support introspection, e.g. `MemoryStorage`).
+    fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
+        Ok(StorageStats::default())
     }
 
     /// Close the database (for graceful shutdown). Subsequent calls should

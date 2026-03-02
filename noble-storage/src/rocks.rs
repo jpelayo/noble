@@ -53,7 +53,7 @@ use noble_core::{Block, BlockHeader, NobleAddress, PeerRecord, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
-use crate::traits::{ChainTip, KeyRotationRecord, StorageEngine};
+use crate::traits::{CfStats, ChainTip, KeyRotationRecord, StorageEngine, StorageStats};
 use crate::MAX_CHECKSUM_REGISTRATIONS;
 
 // --- Column family names ---
@@ -70,6 +70,14 @@ const CF_BANS: &str = "bans";
 const CF_PEER_MEMORY: &str = "peer_memory";
 const CF_VERSION_CHAIN: &str = "version_chain";
 const CF_PUBLISHER_INDEX: &str = "publisher_index";
+
+/// All 12 column family names, for introspection (storage stats).
+const ALL_CF_NAMES: &[&str] = &[
+    CF_BLOCKS, CF_BLOCK_HASHES, CF_TX_INDEX, CF_CHECKSUM_INDEX,
+    CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_ADDRESS_BALANCES,
+    CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY, CF_VERSION_CHAIN,
+    CF_PUBLISHER_INDEX,
+];
 
 // --- Chain state keys ---
 
@@ -315,6 +323,33 @@ impl RocksDbStorage {
                 })
             }
         }
+    }
+
+    /// Query per-CF size and key count estimates from RocksDB properties.
+    fn query_cf_stats(&self) -> Vec<CfStats> {
+        ALL_CF_NAMES
+            .iter()
+            .filter_map(|&name| {
+                let cf = self.db.cf_handle(name)?;
+                let estimated_bytes = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                let estimated_keys = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.estimate-num-keys")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                Some(CfStats {
+                    name: name.to_string(),
+                    estimated_bytes,
+                    estimated_keys,
+                })
+            })
+            .collect()
     }
 
     /// Read the running total supply in O(1) from `chain_state` CF (AUD2-M2).
@@ -1257,6 +1292,13 @@ impl StorageEngine for RocksDbStorage {
             None => Ok(vec![]),
             Some(bytes) => parse_checksum_index_value(&bytes),
         }
+    }
+
+    fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
+        self.check_open()?;
+        Ok(StorageStats {
+            column_families: self.query_cf_stats(),
+        })
     }
 
     fn close(&mut self) -> Result<(), StorageError> {
@@ -3001,5 +3043,29 @@ mod tests {
         let results = db.lookup_by_publisher(&wire).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], tx_id1);
+    }
+
+    // --- Storage stats tests ---
+
+    #[test]
+    fn rocks_get_storage_stats_returns_all_12_cfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDbStorage::open(dir.path()).unwrap();
+        let stats = db.get_storage_stats().unwrap();
+        assert_eq!(stats.column_families.len(), 12);
+        // Verify all CF names are present
+        let names: Vec<&str> = stats.column_families.iter().map(|cf| cf.name.as_str()).collect();
+        assert!(names.contains(&"blocks"));
+        assert!(names.contains(&"block_hashes"));
+        assert!(names.contains(&"tx_index"));
+        assert!(names.contains(&"checksum_index"));
+        assert!(names.contains(&"chain_state"));
+        assert!(names.contains(&"validator_state"));
+        assert!(names.contains(&"address_balances"));
+        assert!(names.contains(&"address_history"));
+        assert!(names.contains(&"bans"));
+        assert!(names.contains(&"peer_memory"));
+        assert!(names.contains(&"version_chain"));
+        assert!(names.contains(&"publisher_index"));
     }
 }

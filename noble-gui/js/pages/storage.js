@@ -1,9 +1,24 @@
 /**
  * NOBLE Dashboard — Storage Management Page
- * Chain pruning status, storage info, pruning controls
+ * Chain pruning status, storage info, disk usage, column family breakdown
  */
 
 import { formatNumber, formatBytes } from '../utils.js';
+
+/** Color for a CF name — blocks/indexes/state/misc grouping. */
+function cfColor(name) {
+  if (name === 'blocks') return '#10b981';
+  if (['block_hashes', 'tx_index', 'checksum_index', 'version_chain', 'publisher_index'].includes(name)) return '#3b82f6';
+  if (['chain_state', 'validator_state', 'address_balances', 'address_history'].includes(name)) return '#8b5cf6';
+  return '#6b7280';
+}
+
+/** Disk usage bar fill color based on percent used. */
+function usageColor(pct) {
+  if (pct >= 90) return 'var(--error)';
+  if (pct >= 70) return 'var(--warning)';
+  return 'var(--success)';
+}
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -29,12 +44,36 @@ export function init(root, ctx) {
         <div class="kpi-value" id="st-mode">--</div>
       </div>
       <div class="kpi-card">
+        <div class="kpi-label">DB Size</div>
+        <div class="kpi-value" id="st-dbsize">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Disk Free</div>
+        <div class="kpi-value" id="st-diskfree">--</div>
+      </div>
+      <div class="kpi-card">
         <div class="kpi-label">Pruned Up To</div>
         <div class="kpi-value" id="st-pruned">--</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Lowest Full Block</div>
         <div class="kpi-value" id="st-lowest">--</div>
+      </div>
+    </div>
+
+    <!-- Data Directory Panel -->
+    <div class="panel" id="st-datadir-panel" style="margin-bottom:1rem">
+      <div class="panel-header">Data Directory</div>
+      <div class="panel-body" id="st-datadir-body">
+        <div style="color:var(--text-muted);font-size:var(--font-size-sm)">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Column Families Panel -->
+    <div class="panel" id="st-cf-panel" style="margin-bottom:1rem">
+      <div class="panel-header">Column Families</div>
+      <div class="panel-body" id="st-cf-body">
+        <div style="color:var(--text-muted);font-size:var(--font-size-sm)">Loading...</div>
       </div>
     </div>
 
@@ -152,10 +191,14 @@ export function init(root, ctx) {
 
   const stHeight = root.querySelector('#st-height');
   const stMode = root.querySelector('#st-mode');
+  const stDbSize = root.querySelector('#st-dbsize');
+  const stDiskFree = root.querySelector('#st-diskfree');
   const stPruned = root.querySelector('#st-pruned');
   const stLowest = root.querySelector('#st-lowest');
   const infoGrid = root.querySelector('#st-info-grid');
   const pruningGrid = root.querySelector('#st-pruning-grid');
+  const dataDirBody = root.querySelector('#st-datadir-body');
+  const cfBody = root.querySelector('#st-cf-body');
   let retentionChart = null;
 
   // ── Storage config modal logic ──
@@ -300,6 +343,19 @@ export function init(root, ctx) {
     }
   });
 
+  // ── Copy button handler (delegated) ──
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-copy');
+    if (!btn) return;
+    const text = btn.dataset.copy;
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }).catch(() => {});
+  });
+
   function _esc(s) {
     if (!s) return '';
     const d = document.createElement('div');
@@ -307,11 +363,87 @@ export function init(root, ctx) {
     return d.innerHTML;
   }
 
+  // ── Render data directory panel ──
+  function renderDataDir(stats) {
+    const dir = stats.data_dir || 'N/A';
+    const used = stats.total_db_bytes || 0;
+    const avail = stats.available_bytes || 0;
+    const total = stats.total_volume_bytes || 0;
+    const pctUsed = total > 0 ? ((total - avail) / total * 100) : 0;
+    const cacheMb = (stats.cache_size_bytes || 0) / (1024 * 1024);
+    const compress = stats.compression_enabled;
+
+    const summaryText = total > 0
+      ? `${formatBytes(used)} used of ${formatBytes(total)} (${pctUsed.toFixed(2)}%) \u2014 ${formatBytes(avail)} free`
+      : `${formatBytes(used)} used`;
+
+    dataDirBody.innerHTML = `
+      <div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
+        <code style="font-size:var(--font-size-sm);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_esc(dir)}</code>
+        <button class="btn btn-secondary btn-sm btn-copy" data-copy="${_esc(dir)}"
+          style="padding:2px 10px;font-size:var(--font-size-xs);white-space:nowrap">Copy</button>
+      </div>
+      <div style="background:var(--bg-tertiary);border-radius:var(--radius-sm);height:20px;overflow:hidden;margin-bottom:var(--gap-sm)">
+        <div style="height:100%;width:${Math.min(pctUsed, 100).toFixed(1)}%;background:${usageColor(pctUsed)};border-radius:var(--radius-sm);transition:width 0.3s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--gap-sm)">
+        <span style="font-size:var(--font-size-xs);color:var(--text-secondary)">${summaryText}</span>
+        <span style="display:flex;gap:var(--gap-sm)">
+          <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)">Cache: ${cacheMb.toFixed(0)} MB</span>
+          <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${compress ? 'var(--success)' : 'var(--text-muted)'}">${compress ? 'Zstd On' : 'No Compression'}</span>
+        </span>
+      </div>
+    `;
+  }
+
+  // ── Render column families table ──
+  function renderCfTable(stats) {
+    const cfs = (stats.column_families || []).slice().sort((a, b) => b.estimated_bytes - a.estimated_bytes);
+    if (cfs.length === 0) {
+      cfBody.innerHTML = '<div style="color:var(--text-muted);font-size:var(--font-size-sm);text-align:center;padding:1rem">No column family data available</div>';
+      return;
+    }
+
+    const maxBytes = Math.max(...cfs.map(c => c.estimated_bytes), 1);
+
+    let rows = '';
+    for (const cf of cfs) {
+      const pct = (cf.estimated_bytes / maxBytes) * 100;
+      const color = cfColor(cf.name);
+      rows += `
+        <tr>
+          <td style="font-family:var(--font-mono);font-size:var(--font-size-xs);white-space:nowrap">${_esc(cf.name)}</td>
+          <td style="font-size:var(--font-size-xs);text-align:right;white-space:nowrap">${formatBytes(cf.estimated_bytes)}</td>
+          <td style="font-size:var(--font-size-xs);text-align:right;white-space:nowrap">${formatNumber(cf.estimated_keys)}</td>
+          <td style="width:40%;padding-left:var(--gap-sm)">
+            <div style="background:var(--bg-tertiary);border-radius:2px;height:14px;overflow:hidden">
+              <div style="height:100%;width:${pct.toFixed(1)}%;background:${color};border-radius:2px;transition:width 0.3s"></div>
+            </div>
+          </td>
+        </tr>`;
+    }
+
+    cfBody.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border)">
+            <th style="text-align:left;font-size:var(--font-size-xs);font-weight:600;padding:4px 0;color:var(--text-secondary)">Column Family</th>
+            <th style="text-align:right;font-size:var(--font-size-xs);font-weight:600;padding:4px 0;color:var(--text-secondary)">Est. Size</th>
+            <th style="text-align:right;font-size:var(--font-size-xs);font-weight:600;padding:4px 0;color:var(--text-secondary)">Est. Keys</th>
+            <th style="text-align:left;font-size:var(--font-size-xs);font-weight:600;padding:4px 0;padding-left:var(--gap-sm);color:var(--text-secondary)">Distribution</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
   async function loadStorage() {
     try {
-      const [storageInfo, pruningStatus] = await Promise.all([
+      const [storageInfo, pruningStatus, storageStats] = await Promise.all([
         rpc.call('noble_getStorageInfo'),
         rpc.call('noble_getPruningStatus'),
+        rpc.call('noble_getStorageStats'),
       ]);
 
       // KPI cards
@@ -319,6 +451,9 @@ export function init(root, ctx) {
       stMode.textContent = storageInfo.pruning_mode;
       stMode.style.color = storageInfo.pruning_mode === 'archive'
         ? 'var(--success)' : 'var(--warning)';
+      stDbSize.textContent = formatBytes(storageStats.total_db_bytes || 0);
+      stDiskFree.textContent = storageStats.available_bytes
+        ? formatBytes(storageStats.available_bytes) : 'N/A';
       stPruned.textContent = storageInfo.pruned_up_to > 0
         ? formatNumber(storageInfo.pruned_up_to) : 'None';
       stLowest.textContent = formatNumber(storageInfo.lowest_full_height);
@@ -340,6 +475,12 @@ export function init(root, ctx) {
         <dt>Lowest Full Height</dt><dd>${formatNumber(pruningStatus.lowest_full_height)}</dd>
         <dt>More Remaining</dt><dd>${pruningStatus.more_remaining ? 'Yes' : 'No'}</dd>
       `;
+
+      // Data directory panel
+      renderDataDir(storageStats);
+
+      // Column families table
+      renderCfTable(storageStats);
 
       // Retention chart
       if (typeof echarts !== 'undefined') {

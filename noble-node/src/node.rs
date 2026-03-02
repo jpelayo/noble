@@ -989,6 +989,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             chain_meta: self.chain_meta,
             seeds: parking_lot::RwLock::new(config.network.seeds.clone()),
             announce_trigger: announce_trigger_tx,
+            cache_size_mb: config.storage.cache_size_mb,
+            compression_enabled: config.storage.compression,
         });
 
         // --- Determine RPC bind address ---
