@@ -65,11 +65,11 @@ export function init(root, ctx) {
           <thead>
             <tr>
               <th>Peer ID</th>
+              <th>Name</th>
+              <th>Address</th>
+              <th>Country</th>
               <th>Direction</th>
               <th>Ban Score</th>
-              <th>Ban Reason</th>
-              <th>Chain Tip</th>
-              <th>Latency</th>
             </tr>
           </thead>
           <tbody id="net-peers"></tbody>
@@ -157,19 +157,24 @@ export function init(root, ctx) {
     peersTbody.innerHTML = '';
     for (const peer of peers) {
       const tr = document.createElement('tr');
-      const tipHeight = peer.chain_tip ? peer.chain_tip[0] : '?';
       const dirClass = peer.direction === 'Inbound' ? 'inbound' : 'outbound';
-      const banReason = peer.last_ban_reason
-        ? `<span title="${peer.last_ban_reason.subject || ''}" style="cursor:help">${peer.last_ban_reason.category}</span>`
+      const name = peer.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
+      const addr = peer.addr
+        ? `<span class="mono" style="font-size:var(--font-size-xs)">${peer.addr}</span>`
         : '<span style="color:var(--text-muted)">&mdash;</span>';
-      const banScoreColor = (peer.ban_score || 0) > 50 ? 'var(--error)' : (peer.ban_score || 0) > 0 ? 'var(--warning)' : 'var(--text-muted)';
+      const country = peer.country_code || '<span style="color:var(--text-muted)">&mdash;</span>';
+      const banScore = peer.ban_score || 0;
+      const banScoreColor = banScore > 50 ? 'var(--error)' : banScore > 0 ? 'var(--warning)' : 'var(--text-muted)';
+      const banTitle = peer.last_ban_reason
+        ? ` title="${peer.last_ban_reason.category}: ${peer.last_ban_reason.subject || ''}"`
+        : '';
       tr.innerHTML = `
         <td class="mono">${truncateHash(peer.peer_id, 8)}</td>
+        <td>${name}</td>
+        <td>${addr}</td>
+        <td>${country}</td>
         <td><span class="badge ${dirClass}">${peer.direction}</span></td>
-        <td style="color:${banScoreColor};font-weight:600">${peer.ban_score || 0}</td>
-        <td style="font-size:var(--font-size-xs)">${banReason}</td>
-        <td>${formatNumber(tipHeight)}</td>
-        <td>${peer.latency_ms}ms</td>
+        <td style="color:${banScoreColor};font-weight:600"${banTitle}>${banScore}</td>
       `;
       peersTbody.appendChild(tr);
     }
@@ -200,13 +205,13 @@ export function init(root, ctx) {
   }
 
   // WS: peer updates
-  ws.subscribe('peerUpdate', async () => {
+  ws.subscribe('peerUpdates', async () => {
     try {
       const peers = await rpc.call('noble_getPeerInfo');
       renderPeerTable(peers);
     } catch { /* ignore */ }
   });
-  unsubs.push(() => ws.unsubscribe('peerUpdate'));
+  unsubs.push(() => ws.unsubscribe('peerUpdates'));
 
   loadNetwork();
 

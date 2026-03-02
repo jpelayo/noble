@@ -78,15 +78,43 @@ pub trait NetworkApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState<S>> {
     async fn get_peer_info(&self) -> Result<Vec<PeerInfoResponse>, ErrorObjectOwned> {
+        // Lock order: Storage(2) before PeerInfo(6).
+        // Read peer records first, then drop storage lock before acquiring peer_info.
+        let records = {
+            let storage = self.storage.read();
+            storage.list_peer_records().unwrap_or_default()
+        };
+
+        // Build lookup: hex(peer_id_bytes) → PeerRecord for name/country enrichment.
+        let record_map: std::collections::HashMap<String, &noble_core::PeerRecord> = records
+            .iter()
+            .map(|r| (hex::encode(&r.peer_id_bytes), r))
+            .collect();
+
         let info = self.peer_info.read();
         let peers: Vec<PeerInfoResponse> = info
             .values()
-            .map(|entry| PeerInfoResponse {
-                peer_id: entry.peer_id.clone(),
-                direction: entry.direction.clone(),
-                connected_at: entry.connected_at,
-                ban_score: entry.ban_score,
-                last_ban_reason: None,
+            .map(|entry| {
+                let announce = record_map
+                    .get(&entry.peer_id)
+                    .and_then(|r| r.last_announce.as_ref());
+
+                let addr = if entry.addr.is_empty() {
+                    announce.and_then(|a| a.host_address.clone())
+                } else {
+                    Some(entry.addr.clone())
+                };
+
+                PeerInfoResponse {
+                    peer_id: entry.peer_id.clone(),
+                    direction: entry.direction.clone(),
+                    addr,
+                    node_name: announce.map(|a| a.node_name.clone()),
+                    country_code: announce.and_then(|a| a.country_code.clone()),
+                    connected_at: entry.connected_at,
+                    ban_score: entry.ban_score,
+                    last_ban_reason: None,
+                }
             })
             .collect();
         Ok(peers)

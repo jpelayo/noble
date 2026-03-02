@@ -33,7 +33,9 @@ import * as settingsPage from './pages/settings.js';
 import * as setupPage from './pages/setup.js';
 
 // ── Status change handler ──
+// status: 'connecting' | 'connected' | 'disconnected'
 function onStatusChange(status) {
+  store.state.connectionStatus = status;
   store.state.connected = status === 'connected';
 }
 
@@ -84,6 +86,7 @@ const { state, subscribe, getState } = createStore({
   mempoolSize: 0,
   cyclePhase: '--',
   connected: false,
+  connectionStatus: 'disconnected',
 });
 
 const store = { state, subscribe, getState };
@@ -113,11 +116,13 @@ subscribe('cyclePhase', (val) => {
   kpiPhase.textContent = val;
 });
 
-subscribe('connected', (val) => {
+subscribe('connectionStatus', (status) => {
   const dot = statusIndicator.querySelector('.status-dot') || document.createElement('span');
-  dot.className = `status-dot ${val ? 'connected' : 'disconnected'}`;
+  const labels = { connecting: 'Connecting', connected: 'Connected', disconnected: 'Disconnected' };
+  const classes = { connecting: 'syncing', connected: 'connected', disconnected: 'disconnected' };
+  dot.className = `status-dot ${classes[status] || 'disconnected'}`;
   if (!dot.parentElement) statusIndicator.prepend(dot);
-  statusIndicator.lastChild.textContent = val ? ' Connected' : ' Disconnected';
+  statusIndicator.lastChild.textContent = ` ${labels[status] || 'Offline'}`;
 });
 
 // ── Theme toggle ──

@@ -288,6 +288,9 @@ pub struct MempoolInfoResponse {
 pub struct PeerInfoResponse {
     pub peer_id: String,
     pub direction: String,
+    pub addr: Option<String>,
+    pub node_name: Option<String>,
+    pub country_code: Option<String>,
     pub connected_at: u64,
     pub ban_score: u32,
     pub last_ban_reason: Option<BanReasonResponse>,

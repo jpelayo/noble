@@ -262,6 +262,21 @@ const PEER_IDS = Array.from({ length: 23 }, (_, i) =>
   `12D3KooW${randomHex(16).slice(0, 20)}${i.toString().padStart(2, '0')}`
 );
 
+const MOCK_NODE_NAMES = [
+  'noble-eu-west-1', 'noble-us-east-2', 'berlin-validator', 'tokyo-relay',
+  'noble-ap-south', 'zurich-node', 'paris-witness', 'sydney-full',
+  null, null, null, 'london-archive', 'noble-ca-central', null,
+  'singapore-relay', 'mumbai-validator', null, null,
+  'sao-paulo-node', null, null, 'nyc-testnet', 'oslo-watcher',
+];
+
+const MOCK_COUNTRIES = [
+  'DEU', 'USA', 'DEU', 'JPN', 'IND', 'CHE', 'FRA', 'AUS',
+  'GBR', 'CAN', null, 'GBR', 'CAN', null,
+  'SGP', 'IND', null, 'BRA',
+  'BRA', null, null, 'USA', 'NOR',
+];
+
 function makePeers(chainHeight) {
   const BAN_REASONS = [
     { category: 'InvalidTransaction', subject: 'failed T8: metadata key too long (128 chars max)' },
@@ -269,13 +284,16 @@ function makePeers(chainHeight) {
   ];
   return PEER_IDS.map((peerId, i) => {
     const banScore = i === 22 ? 15 : i === 21 ? 5 : 0;
+    const octet = 10 + i;
     return {
       peer_id: peerId,
       direction: i < 8 ? 'Outbound' : 'Inbound',
+      addr: `/ip4/203.0.113.${octet}/tcp/8780`,
+      node_name: MOCK_NODE_NAMES[i] || null,
+      country_code: MOCK_COUNTRIES[i] || null,
+      connected_at: Math.floor(Date.now() / 1000) - (3600 + i * 120),
       ban_score: banScore,
       last_ban_reason: banScore > 0 ? BAN_REASONS[i % BAN_REASONS.length] : null,
-      chain_tip: [chainHeight - (i % 3), deterministicHash(chainHeight - (i % 3))],
-      latency_ms: 20 + Math.floor(Math.random() * 180),
     };
   });
 }
@@ -1660,13 +1678,17 @@ export class MockRpcClient {
         if (!addr.startsWith('/')) addr = `/ip4/${addr}/tcp/8780`;
         if (!/^\/ip[46]\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
         // Simulate adding a synthetic peer entry
-        const dialPeerId = 'dial' + Math.random().toString(36).slice(2, 10);
+        const dialPeerId = '12D3KooW' + randomHex(16).slice(0, 20) + 'XX';
         if (!this.#peers) this.#peers = [];
         this.#peers.push({
           peer_id: dialPeerId,
-          direction: 'outbound',
+          direction: 'Outbound',
+          addr,
+          node_name: null,
+          country_code: null,
           connected_at: Math.floor(Date.now() / 1000),
           ban_score: 0,
+          last_ban_reason: null,
         });
         return { success: true, message: `Connected to ${addr}` };
       }
@@ -1876,6 +1898,7 @@ export class MockWsManager {
 
   connect() {
     // Simulate connection
+    this.#onStatusChange?.('connecting');
     setTimeout(() => this.#onStatusChange?.('connected'), 200);
 
     // Produce a new block every 30 seconds

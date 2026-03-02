@@ -57,6 +57,8 @@ export class WsManager {
   #doConnect() {
     if (!this.#shouldConnect) return;
 
+    this.#onStatusChange?.('connecting');
+
     // F3: append ?token=<hash> when TOTP auth is active.
     // The browser WebSocket API cannot set custom headers, so the auth token
     // is passed as a query parameter and validated by the auth middleware.
@@ -67,6 +69,7 @@ export class WsManager {
     try {
       this.#ws = new WebSocket(connectUrl);
     } catch {
+      this.#onStatusChange?.('disconnected');
       this.#scheduleReconnect();
       return;
     }
