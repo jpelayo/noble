@@ -1162,6 +1162,46 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "tx_id": hex::encode(tx_id),
                 }));
             }
+            NetworkEvent::NodeAnnounceReceived { peer_id, announce } => {
+                // Persist the announce to storage so getPeerMemory (and thus
+                // the candidates list) can see it.
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let identity_wire = announce.identity_key.to_wire_bytes();
+                let host_addr = announce.host_address.clone();
+
+                // Lock order: Storage(2) only.
+                let storage = self.storage.read();
+                let mut record = storage
+                    .get_peer_record(&identity_wire)
+                    .unwrap_or_else(|_| noble_core::PeerRecord {
+                        identity_key: identity_wire.clone(),
+                        first_seen: now_ts,
+                        last_seen: now_ts,
+                        connection_count: 1,
+                        last_announce: None,
+                        peer_id_bytes: peer_id.clone(),
+                        last_addr: host_addr.clone(),
+                    });
+                record.update_announce(*announce.clone(), now_ts);
+                record.peer_id_bytes = peer_id.clone();
+                if let Some(ref addr) = host_addr {
+                    record.last_addr = Some(addr.clone());
+                }
+                if let Err(e) = storage.store_peer_record(&record) {
+                    tracing::warn!(task = "peer_tracking", "Failed to persist peer record: {e}");
+                }
+                drop(storage);
+
+                tracing::debug!(
+                    task = "peer_tracking",
+                    "Stored announce from {} ({})",
+                    announce.node_name,
+                    hex::encode(&identity_wire),
+                );
+            }
             _ => {
                 // Route to consensus engine
                 if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {

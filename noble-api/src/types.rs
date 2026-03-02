@@ -326,6 +326,8 @@ pub struct PeerRecordResponse {
     pub node_name: Option<String>,
     pub org_type: Option<String>,
     pub node_role: Option<String>,
+    pub host_address: Option<String>,
+    pub country_code: Option<String>,
     pub wants_to_validate: bool,
     pub wants_to_vote: bool,
 }

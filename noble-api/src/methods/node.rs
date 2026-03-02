@@ -880,7 +880,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             for url in &services {
                 match ureq::get(url)
                     .set("Accept", "text/plain")
-                    .set("User-Agent", "noble-node/0.6")
+                    .set("User-Agent", "noble-node/0.7")
                     .timeout(std::time::Duration::from_secs(5))
                     .call()
                 {

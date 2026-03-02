@@ -419,6 +419,7 @@ export class MockRpcClient {
   #allowedIps = [];
   #mockFirstRun = true;
   #storageConfig = null;
+  #peerMemory = null;
   #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
   constructor({ latencyMin = 50, latencyMax = 150, firstRun = false } = {}) {
@@ -959,7 +960,7 @@ export class MockRpcClient {
         const selfKeyBytes = selfVal ? (selfVal.public_key.Ed25519 || selfVal.public_key.Secp256k1 || []) : [];
         const selfKeyHex = selfKeyBytes.map(b => b.toString(16).padStart(2, '0')).join('') || null;
         return {
-          version: '0.6.0',
+          version: '0.7.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
           network: 'mainnet',
@@ -1322,87 +1323,90 @@ export class MockRpcClient {
         ];
 
       case 'noble_getPeerMemory': {
-        const now = Math.floor(Date.now() / 1000);
-        return [
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 10,
-            last_seen: now - 120,
-            connection_count: 47,
-            peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
-            last_addr: '/ip4/18.4.86.10/tcp/8780',
-            node_name: 'MIT Blockchain Lab',
-            org_type: 'PrivateAcademic',
-            node_role: 'ArchiveNode',
-            wants_to_validate: false,
-            wants_to_vote: true,
-          },
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 30,
-            last_seen: now - 300,
-            connection_count: 120,
-            peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
-            last_addr: '/ip4/52.1.100.50/tcp/8780',
-            node_name: 'Treasury Node Alpha',
-            org_type: 'PublicNational',
-            node_role: 'Validator',
-            wants_to_validate: true,
-            wants_to_vote: true,
-          },
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 5,
-            last_seen: now - 60,
-            connection_count: 12,
-            peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
-            last_addr: '/ip4/203.0.113.42/tcp/8780',
-            node_name: 'Acme Corp Node',
-            org_type: 'PrivateCorporation',
-            node_role: 'FullNode',
-            wants_to_validate: false,
-            wants_to_vote: false,
-          },
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 60,
-            last_seen: now - 86400 * 8,
-            connection_count: 3,
-            peer_id: '12D3KooWG7h8i9j0k1l2m3n4o5p6',
-            last_addr: '/ip4/10.0.0.1/tcp/8780',
-            node_name: 'Stale Observer',
-            org_type: 'Individual',
-            node_role: 'LightClient',
-            wants_to_validate: false,
-            wants_to_vote: false,
-          },
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 15,
-            last_seen: now - 45,
-            connection_count: 34,
-            peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
-            last_addr: '/ip4/198.51.100.7/tcp/8780',
-            node_name: 'OpenNoble Community',
-            org_type: 'PrivateNonProfit',
-            node_role: 'FullNode',
-            wants_to_validate: true,
-            wants_to_vote: false,
-          },
-          {
-            identity_key: randomHex(32),
-            first_seen: now - 86400 * 20,
-            last_seen: now - 180,
-            connection_count: 67,
-            peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
-            last_addr: '/ip4/85.91.200.12/tcp/8780',
-            node_name: 'City of Barcelona',
-            org_type: 'PublicRegional',
-            node_role: 'Validator',
-            wants_to_validate: true,
-            wants_to_vote: true,
-          },
-        ];
+        if (!this.#peerMemory) {
+          const now = Math.floor(Date.now() / 1000);
+          this.#peerMemory = [
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 10,
+              last_seen: now - 120,
+              connection_count: 47,
+              peer_id: '12D3KooWA1b2c3d4e5f6g7h8i9j0',
+              last_addr: '/ip4/18.4.86.10/tcp/8780',
+              node_name: 'MIT Blockchain Lab',
+              org_type: 'PrivateAcademic',
+              node_role: 'ArchiveNode',
+              wants_to_validate: false,
+              wants_to_vote: true,
+            },
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 30,
+              last_seen: now - 300,
+              connection_count: 120,
+              peer_id: '12D3KooWB2c3d4e5f6g7h8i9j0k1',
+              last_addr: '/ip4/52.1.100.50/tcp/8780',
+              node_name: 'Treasury Node Alpha',
+              org_type: 'PublicNational',
+              node_role: 'Validator',
+              wants_to_validate: true,
+              wants_to_vote: true,
+            },
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 5,
+              last_seen: now - 60,
+              connection_count: 12,
+              peer_id: '12D3KooWC3d4e5f6g7h8i9j0k1l2',
+              last_addr: '/ip4/203.0.113.42/tcp/8780',
+              node_name: 'Acme Corp Node',
+              org_type: 'PrivateCorporation',
+              node_role: 'FullNode',
+              wants_to_validate: false,
+              wants_to_vote: false,
+            },
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 60,
+              last_seen: now - 86400 * 8,
+              connection_count: 3,
+              peer_id: '12D3KooWG7h8i9j0k1l2m3n4o5p6',
+              last_addr: '/ip4/10.0.0.1/tcp/8780',
+              node_name: 'Stale Observer',
+              org_type: 'Individual',
+              node_role: 'LightClient',
+              wants_to_validate: false,
+              wants_to_vote: false,
+            },
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 15,
+              last_seen: now - 45,
+              connection_count: 34,
+              peer_id: '12D3KooWD4e5f6g7h8i9j0k1l2m3',
+              last_addr: '/ip4/198.51.100.7/tcp/8780',
+              node_name: 'OpenNoble Community',
+              org_type: 'PrivateNonProfit',
+              node_role: 'FullNode',
+              wants_to_validate: true,
+              wants_to_vote: false,
+            },
+            {
+              identity_key: randomHex(32),
+              first_seen: now - 86400 * 20,
+              last_seen: now - 180,
+              connection_count: 67,
+              peer_id: '12D3KooWE5f6g7h8i9j0k1l2m3n4',
+              last_addr: '/ip4/85.91.200.12/tcp/8780',
+              node_name: 'City of Barcelona',
+              org_type: 'PublicRegional',
+              node_role: 'Validator',
+              wants_to_validate: true,
+              wants_to_vote: true,
+            },
+          ];
+        }
+        return this.#peerMemory;
       }
 
       case 'noble_removePeerRecord':
@@ -1679,6 +1683,7 @@ export class MockRpcClient {
         if (!/^\/ip[46]\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
         // Simulate adding a synthetic peer entry
         const dialPeerId = '12D3KooW' + randomHex(16).slice(0, 20) + 'XX';
+        const dialNow = Math.floor(Date.now() / 1000);
         if (!this.#peers) this.#peers = [];
         this.#peers.push({
           peer_id: dialPeerId,
@@ -1686,9 +1691,24 @@ export class MockRpcClient {
           addr,
           node_name: null,
           country_code: null,
-          connected_at: Math.floor(Date.now() / 1000),
+          connected_at: dialNow,
           ban_score: 0,
           last_ban_reason: null,
+        });
+        // Also add to peer memory so they appear in candidates after announce
+        if (!this.#peerMemory) this.#peerMemory = [];
+        this.#peerMemory.push({
+          identity_key: randomHex(32),
+          first_seen: dialNow,
+          last_seen: dialNow,
+          connection_count: 1,
+          peer_id: dialPeerId,
+          last_addr: addr,
+          node_name: null,
+          org_type: null,
+          node_role: 'FullNode',
+          wants_to_validate: true,
+          wants_to_vote: false,
         });
         return { success: true, message: `Connected to ${addr}` };
       }

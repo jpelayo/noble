@@ -171,6 +171,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     node_name: announce.map(|a| a.node_name.clone()),
                     org_type: announce.map(|a| format!("{:?}", a.org_type)),
                     node_role: announce.map(|a| format!("{:?}", a.node_role)),
+                    host_address: announce.and_then(|a| a.host_address.clone()),
+                    country_code: announce.and_then(|a| a.country_code.clone()),
                     wants_to_validate: announce.is_some_and(|a| a.wants_to_validate),
                     wants_to_vote: announce.is_some_and(|a| a.wants_to_vote),
                 }
