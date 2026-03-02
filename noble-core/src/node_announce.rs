@@ -44,6 +44,43 @@ pub enum OrgType {
     PublicInstitution,
 }
 
+impl std::str::FromStr for OrgType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Individual" => Ok(Self::Individual),
+            "PrivateNonProfit" => Ok(Self::PrivateNonProfit),
+            "PrivateCorporation" => Ok(Self::PrivateCorporation),
+            "PrivateStartup" => Ok(Self::PrivateStartup),
+            "PrivateAcademic" => Ok(Self::PrivateAcademic),
+            "PrivateInstitution" => Ok(Self::PrivateInstitution),
+            "PublicNational" => Ok(Self::PublicNational),
+            "PublicRegional" => Ok(Self::PublicRegional),
+            "PublicSupranational" => Ok(Self::PublicSupranational),
+            "PublicCorporation" => Ok(Self::PublicCorporation),
+            "PublicAcademic" => Ok(Self::PublicAcademic),
+            "PublicInstitution" => Ok(Self::PublicInstitution),
+            other => Err(format!("unknown OrgType: {other}")),
+        }
+    }
+}
+
+impl std::str::FromStr for NodeRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "FullNode" => Ok(Self::FullNode),
+            "Validator" => Ok(Self::Validator),
+            "ArchiveNode" => Ok(Self::ArchiveNode),
+            "LightClient" => Ok(Self::LightClient),
+            "Gateway" => Ok(Self::Gateway),
+            other => Err(format!("unknown NodeRole: {other}")),
+        }
+    }
+}
+
 impl OrgType {
     /// Returns the funding category for transparency.
     pub fn governance_class(&self) -> &'static str {
@@ -880,5 +917,39 @@ mod tests {
         let msg1 = a1.compute_signing_message().unwrap();
         let msg2 = a2.compute_signing_message().unwrap();
         assert_ne!(msg1, msg2);
+    }
+
+    // ── FromStr Tests ──
+
+    #[test]
+    fn org_type_from_str_roundtrip() {
+        for org in OrgType::all() {
+            let name = format!("{:?}", org);
+            let parsed: OrgType = name.parse().unwrap();
+            assert_eq!(*org, parsed);
+        }
+    }
+
+    #[test]
+    fn org_type_from_str_unknown() {
+        let result: Result<OrgType, _> = "Bogus".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown OrgType"));
+    }
+
+    #[test]
+    fn node_role_from_str_roundtrip() {
+        for role in NodeRole::all() {
+            let name = format!("{:?}", role);
+            let parsed: NodeRole = name.parse().unwrap();
+            assert_eq!(*role, parsed);
+        }
+    }
+
+    #[test]
+    fn node_role_from_str_unknown() {
+        let result: Result<NodeRole, _> = "Bogus".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown NodeRole"));
     }
 }

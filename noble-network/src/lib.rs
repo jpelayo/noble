@@ -48,3 +48,6 @@ pub use peer_manager::{BanCategory, BanReason, Direction, PeerManager};
 pub use service::{start_network, NetworkHandle};
 pub use sync_manager::{SyncAction, SyncManager, SyncState};
 pub use traits::{BlockProvider, TxProvider};
+
+// Re-export libp2p Multiaddr so dependents don't need a direct libp2p dependency.
+pub use libp2p::Multiaddr;

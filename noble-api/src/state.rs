@@ -260,4 +260,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Live seed node list. Initialized from `[network] seeds` in noble.toml.
     pub seeds: RwLock<Vec<String>>,
+
+    /// Trigger channel to re-publish NodeAnnounce (e.g. after identity update).
+    pub announce_trigger: mpsc::Sender<()>,
 }

@@ -151,6 +151,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         config_path: None,
         chain_meta: [0x42u8; 32],
         seeds: parking_lot::RwLock::new(Vec::new()),
+        announce_trigger: tokio::sync::mpsc::channel(4).0,
     });
 
     (state, dir)

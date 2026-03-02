@@ -97,6 +97,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub ca_store: Option<CaStore>,
     /// Per-installation entropy for at-rest file encryption (`.chain_meta`).
     pub chain_meta: [u8; 32],
+    /// Keypair for signing NodeAnnounce messages (cloned from validator key before CycleEngine consumes it).
+    pub announce_keypair: Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
 }
 
 impl Node<MemoryStorage> {
@@ -238,6 +240,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
+        // Copy the validator keypair before CycleEngine takes ownership —
+        // we need it for signing NodeAnnounce broadcasts.
+        // NoblePrivateKey intentionally doesn't implement Clone (zeroize safety),
+        // but clone_for_test() provides an explicit copy when ownership must be shared.
+        let announce_keypair = validator_key
+            .as_ref()
+            .map(|(sk, pk)| (sk.clone_for_test(), pk.clone()));
+
         let mut engine = CycleEngine::new(
             consensus_config,
             validator_list,
@@ -278,6 +288,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             pki_attestation,
             ca_store,
             chain_meta,
+            announce_keypair,
         })
     }
 
@@ -346,6 +357,96 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         Ok(tip)
     }
 
+    /// Build a signed NodeAnnounce from the current identity data.
+    /// Returns `None` if the node has no announce keypair (observer mode).
+    fn build_node_announce(
+        &self,
+        identity: &NodeIdentityData,
+    ) -> Option<Box<noble_core::NodeAnnounce>> {
+        let (ref sk, ref pk) = self.announce_keypair.as_ref()?;
+
+        let org_type: noble_core::OrgType = identity
+            .org_type
+            .parse()
+            .unwrap_or(noble_core::OrgType::Individual);
+        let node_role: noble_core::NodeRole = identity
+            .node_role
+            .parse()
+            .unwrap_or(noble_core::NodeRole::FullNode);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let host_addr = if identity.host_address.is_empty() {
+            None
+        } else {
+            Some(identity.host_address.clone())
+        };
+        let country_code = if identity.country_code.is_empty() {
+            None
+        } else {
+            Some(identity.country_code.clone())
+        };
+
+        let announce = noble_core::NodeAnnounce::sign_with_attestation(
+            pk.clone(),
+            identity.node_name.clone(),
+            org_type,
+            if identity.org_name.is_empty() {
+                None
+            } else {
+                Some(identity.org_name.clone())
+            },
+            node_role,
+            if identity.contact_email.is_empty() {
+                None
+            } else {
+                Some(identity.contact_email.clone())
+            },
+            if identity.website.is_empty() {
+                None
+            } else {
+                Some(identity.website.clone())
+            },
+            host_addr,
+            country_code,
+            identity.wants_to_validate,
+            identity.wants_to_vote,
+            now,
+            sk,
+            self.pki_attestation.clone(),
+        );
+
+        match announce {
+            Ok(a) => Some(Box::new(a)),
+            Err(e) => {
+                tracing::warn!(task = "announce", "Failed to sign NodeAnnounce: {e}");
+                None
+            }
+        }
+    }
+
+    /// Build and publish a NodeAnnounce to the network.
+    fn publish_node_announce(
+        &self,
+        identity: &Arc<RwLock<NodeIdentityData>>,
+        cmd: &mpsc::Sender<NetworkCommand>,
+    ) {
+        let id = identity.read().clone();
+        if let Some(announce) = self.build_node_announce(&id) {
+            tracing::info!(
+                task = "announce",
+                "Publishing NodeAnnounce for '{}'",
+                id.node_name,
+            );
+            if let Err(e) = cmd.try_send(NetworkCommand::PublishNodeAnnounce(announce)) {
+                tracing::warn!(task = "announce", "Failed to send PublishNodeAnnounce: {e}");
+            }
+        }
+    }
+
     /// Run the node event loop.
     ///
     /// Starts the P2P network, JSON-RPC server, and runs `tokio::select!`
@@ -399,6 +500,38 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             task = "node_startup",
             "P2P network started on port {p2p_port} (peer_id: {peer_id_str})"
         );
+
+        // --- Dial recently-seen peers for faster reconnection ---
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let storage = self.storage.read();
+            let mut records: Vec<_> = storage
+                .list_peer_records()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| !r.is_stale(now, 86_400) && r.last_addr.is_some())
+                .collect();
+            drop(storage);
+            records.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+            records.truncate(50);
+            for record in &records {
+                if let Some(ref addr_str) = record.last_addr {
+                    if let Ok(addr) = addr_str.parse::<noble_network::Multiaddr>() {
+                        let _ = network_cmd.try_send(NetworkCommand::DialPeer(addr, None));
+                    }
+                }
+            }
+            if !records.is_empty() {
+                tracing::info!(
+                    task = "node_startup",
+                    "Dialing {} cached peers from peer memory",
+                    records.len()
+                );
+            }
+        }
 
         // --- Derive validator key info for ApiState ---
         let (validator_pubkey_str, validator_scheme_str, validator_key_path_str) =
@@ -780,6 +913,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Resolve gateway key ---
         let gateway_key = resolve_gateway_key(config, &self.wallet_keystore);
 
+        // --- Announce trigger channel (identity update → re-publish NodeAnnounce) ---
+        let (announce_trigger_tx, mut announce_trigger_rx) = mpsc::channel::<()>(4);
+
+        // Share node identity as Arc<RwLock> for announce publishing.
+        let shared_identity = Arc::new(RwLock::new(node_identity));
+
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
             storage: self.storage.clone(),
@@ -816,7 +955,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             ip_filter: ip_filter.clone(),
             validator_list_path: Some(config.consensus.validator_list_path.clone()),
             peer_info: self.peer_info.clone(),
-            node_identity: Arc::new(RwLock::new(node_identity)),
+            node_identity: shared_identity.clone(),
             identity_path: Some(identity_path),
             tls_fingerprint: parking_lot::RwLock::new(tls_fingerprint),
             tls_expires_at: parking_lot::RwLock::new(tls_expires_at),
@@ -849,6 +988,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             config_path,
             chain_meta: self.chain_meta,
             seeds: parking_lot::RwLock::new(config.network.seeds.clone()),
+            announce_trigger: announce_trigger_tx,
         });
 
         // --- Determine RPC bind address ---
@@ -973,6 +1113,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tokio::time::interval(std::time::Duration::from_secs(60));
         rate_limit_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // --- NodeAnnounce periodic broadcast (every 30 min) ---
+        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+        announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut initial_announce_sent = false;
+
         tracing::info!(
             task = "node_startup",
             "Node event loop started — chain height: {}",
@@ -1028,6 +1173,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             }
                         }
                     }
+
+                    // Send initial NodeAnnounce once we have at least one peer.
+                    if !initial_announce_sent && self.network_stats.read().peer_count > 0 {
+                        self.publish_node_announce(&shared_identity, &network_cmd);
+                        initial_announce_sent = true;
+                    }
                 }
 
                 // Mempool expiry sweep
@@ -1059,6 +1210,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
 
+                // Periodic NodeAnnounce re-broadcast (every 30 min)
+                _ = announce_interval.tick() => {
+                    if initial_announce_sent {
+                        self.publish_node_announce(&shared_identity, &network_cmd);
+                    }
+                }
+
+                // On-demand NodeAnnounce re-broadcast (triggered by identity update RPC)
+                Some(()) = announce_trigger_rx.recv() => {
+                    self.publish_node_announce(&shared_identity, &network_cmd);
+                    initial_announce_sent = true;
+                }
+
                 // Graceful shutdown on CTRL+C
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!(task = "node_shutdown", "Received shutdown signal");
@@ -1069,6 +1233,44 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Graceful shutdown ---
         tracing::info!(task = "node_shutdown", "Shutting down...");
+
+        // Snapshot connected peers for faster reconnection on next startup.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let peers = self.peer_info.read().clone();
+            let storage = self.storage.read();
+            let mut snapshot_count = 0u32;
+            for entry in peers.values() {
+                let peer_id_bytes = hex::decode(&entry.peer_id).unwrap_or_default();
+                if peer_id_bytes.is_empty() {
+                    continue;
+                }
+                // Find the peer record by scanning — O(n) but only runs once at shutdown.
+                if let Ok(records) = storage.list_peer_records() {
+                    if let Some(mut record) = records
+                        .into_iter()
+                        .find(|r| r.peer_id_bytes == peer_id_bytes)
+                    {
+                        record.last_seen = now;
+                        if !entry.addr.is_empty() {
+                            record.last_addr = Some(entry.addr.clone());
+                        }
+                        let _ = storage.store_peer_record(&record);
+                        snapshot_count += 1;
+                    }
+                }
+            }
+            if snapshot_count > 0 {
+                tracing::info!(
+                    task = "node_shutdown",
+                    "Snapshotted {snapshot_count} peer records for faster reconnection"
+                );
+            }
+        }
+
         let _ = network_cmd.try_send(NetworkCommand::Shutdown);
         rpc_handle
             .stop()
@@ -1200,6 +1402,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "Stored announce from {} ({})",
                     announce.node_name,
                     hex::encode(&identity_wire),
+                );
+            }
+            NetworkEvent::EvidenceReceived {
+                evidence,
+                peer_id,
+            } => {
+                tracing::warn!(
+                    task = "evidence",
+                    "Double-proposal evidence received from {}",
+                    hex::encode(peer_id),
+                );
+                // TODO(year2): Slash/ban the misbehaving validator
+                let _ = evidence; // Acknowledge receipt; slashing not yet implemented.
+            }
+            NetworkEvent::BlockAnnounced {
+                peer_id,
+                height,
+                hash,
+            } => {
+                tracing::debug!(
+                    task = "sync",
+                    "Block announced by {}: height={height}, hash={}",
+                    hex::encode(peer_id),
+                    hex::encode(hash),
+                );
+                // TODO: Trigger block request if we're behind
+            }
+            NetworkEvent::SyncComplete { new_height } => {
+                tracing::info!(
+                    task = "sync",
+                    "Sync complete up to height {new_height}"
                 );
             }
             _ => {

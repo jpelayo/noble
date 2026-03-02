@@ -572,6 +572,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             *id = new_identity;
         }
 
+        // Trigger NodeAnnounce re-broadcast so peers see updated identity.
+        let _ = self.announce_trigger.try_send(());
+
         // A1: When the node is configured for validation, ensure a validator key exists.
         let validator_pubkey = if wants_to_validate {
             if let Some(ref identity_path) = self.identity_path {
@@ -880,7 +883,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             for url in &services {
                 match ureq::get(url)
                     .set("Accept", "text/plain")
-                    .set("User-Agent", "noble-node/0.7")
+                    .set("User-Agent", "noble-node/0.8")
                     .timeout(std::time::Duration::from_secs(5))
                     .call()
                 {
