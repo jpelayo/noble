@@ -18,7 +18,7 @@ pub struct ConsensusConfig {
     pub max_reorg_depth: u64,
     /// Divisor for plurality floor: leader needs ≥ total/divisor votes (default: 3 → 33%).
     pub plurality_floor_divisor: u64,
-    /// Minimum connected peers required for consensus participation (GAP-C6, default: 1).
+    /// Minimum connected peers required for consensus participation (GAP-C6, default: 3).
     pub min_peers_for_consensus: usize,
     /// Voting strategy for Round 1 (Reflection phase). Default: FirstValid.
     pub voting_strategy: VotingStrategy,
@@ -33,7 +33,7 @@ impl Default for ConsensusConfig {
             max_block_size: MAX_BLOCK_SIZE,
             max_reorg_depth: MAX_REORG_DEPTH,
             plurality_floor_divisor: 3,
-            min_peers_for_consensus: 1,
+            min_peers_for_consensus: 3,
             voting_strategy: VotingStrategy::FirstValid,
             confirmation_strategy: VotingStrategy::FollowMajority,
         }
@@ -52,6 +52,6 @@ mod tests {
         assert_eq!(cfg.max_reorg_depth, MAX_REORG_DEPTH);
         assert_eq!(cfg.max_reorg_depth, 144); // AUD2-H4: matches noble-core constant
         assert_eq!(cfg.plurality_floor_divisor, 3);
-        assert_eq!(cfg.min_peers_for_consensus, 1);
+        assert_eq!(cfg.min_peers_for_consensus, 3);
     }
 }

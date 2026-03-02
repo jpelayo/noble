@@ -849,10 +849,10 @@ mod tests {
         )
         .unwrap();
 
-        // Set a newer version
-        announce.software_version = "0.2.0".to_string();
+        // Use a version that is always higher than SOFTWARE_VERSION.
+        announce.software_version = "99.0.0".to_string();
         pm.update_announce(&p, announce);
-        assert_eq!(pm.max_software_version_seen(), "0.2.0");
+        assert_eq!(pm.max_software_version_seen(), "99.0.0");
     }
 
     #[test]
@@ -869,7 +869,7 @@ mod tests {
         let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
         let pk = sk.public_key();
 
-        // First announce with newer version
+        // First announce with a version always higher than SOFTWARE_VERSION.
         let mut a1 = NodeAnnounce::sign(
             pk.clone(),
             "n1".to_string(),
@@ -886,10 +886,10 @@ mod tests {
             &sk,
         )
         .unwrap();
-        a1.software_version = "0.3.0".to_string();
+        a1.software_version = "99.0.0".to_string();
         pm.update_announce(&p1, a1);
 
-        // Second announce with older version — should not downgrade
+        // Second announce with an older version — should not downgrade the max.
         let mut a2 = NodeAnnounce::sign(
             pk,
             "n2".to_string(),
@@ -906,10 +906,10 @@ mod tests {
             &sk,
         )
         .unwrap();
-        a2.software_version = "0.1.0".to_string();
+        a2.software_version = noble_core::SOFTWARE_VERSION.to_string();
         pm.update_announce(&p2, a2);
 
-        assert_eq!(pm.max_software_version_seen(), "0.3.0");
+        assert_eq!(pm.max_software_version_seen(), "99.0.0");
     }
 
     #[test]

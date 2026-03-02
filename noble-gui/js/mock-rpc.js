@@ -960,7 +960,7 @@ export class MockRpcClient {
         const selfKeyBytes = selfVal ? (selfVal.public_key.Ed25519 || selfVal.public_key.Secp256k1 || []) : [];
         const selfKeyHex = selfKeyBytes.map(b => b.toString(16).padStart(2, '0')).join('') || null;
         return {
-          version: '0.8.0',
+          version: window.NOBLE_VERSION || '0.0.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
           network: 'mainnet',

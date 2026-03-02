@@ -257,8 +257,9 @@ pub async fn start_gui_server(
             match tokio::fs::read_to_string(&index_path).await {
                 Ok(html) => {
                     let mut script = format!(
-                        "<script>window.NOBLE_RPC_PORT={};</script>",
-                        rpc_port
+                        "<script>window.NOBLE_RPC_PORT={};window.NOBLE_VERSION='{}';</script>",
+                        rpc_port,
+                        noble_core::SOFTWARE_VERSION
                     );
                     // Issue 8: inject setup mode flag synchronously so app.js can
                     // redirect to #/setup before router.start() — no async RPC needed.

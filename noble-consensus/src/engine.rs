@@ -815,10 +815,6 @@ impl CycleEngine {
         self.reputation = engine;
     }
 
-    /// Return the consensus cycle duration in seconds.
-    pub fn cycle_duration_secs(&self) -> u64 {
-        self.config.cycle_duration_secs
-    }
 }
 
 impl ConsensusStateMachine for CycleEngine {

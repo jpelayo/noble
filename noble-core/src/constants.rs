@@ -109,8 +109,8 @@ pub const MERKLE_LEAF_PREFIX: u8 = 0x00;
 /// Merkle internal node hash domain-separation prefix.
 pub const MERKLE_INTERNAL_PREFIX: u8 = 0x01;
 
-/// Human-readable software version string.
-pub const SOFTWARE_VERSION: &str = "0.1.0";
+/// Human-readable software version string — sourced from the workspace Cargo.toml.
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Current NodeAnnounce message version.
 pub const NODE_ANNOUNCE_VERSION: u16 = 1;

@@ -383,9 +383,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // Sub-phase = engine_phase_duration / 2.
         // Validation → [Proposal, Voting], Reflection → [Confirmation, Finalization].
         // engine_phase_remaining counts down from engine_phase_duration to 0.
-        let cycle_dur = consensus.cycle_duration_secs();
-        let half_phase = cycle_dur / 4;
-        let engine_phase_duration = cycle_dur / 2;
+        let half_phase = noble_core::CYCLE_DURATION_SECS / 4;
+        let engine_phase_duration = noble_core::CYCLE_DURATION_SECS / 2;
         let elapsed_in_phase = engine_phase_duration.saturating_sub(engine_phase_remaining);
 
         let (projected_phase, projected_index, phase_remaining) = match engine_phase {

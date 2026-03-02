@@ -79,6 +79,10 @@ if (rpcUrl) {
   console.info('[app] Using mock RPC layer');
 }
 
+// ── Version footer — populated from window.NOBLE_VERSION injected by the server ──
+const versionEl = document.getElementById('noble-version-footer');
+if (versionEl && window.NOBLE_VERSION) versionEl.textContent = 'v' + window.NOBLE_VERSION;
+
 // ── Reactive state store ──
 const { state, subscribe, getState } = createStore({
   blockHeight: 0,
