@@ -18,6 +18,7 @@ noble-core.workspace = true
 noble-codec.workspace = true
 noble-crypto.workspace = true
 noble-storage.workspace = true
+noble-wallet.workspace = true
 clap = { workspace = true }
 hex.workspace = true
 serde_json.workspace = true

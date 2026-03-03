@@ -97,6 +97,25 @@ impl KeyStore {
         Ok(())
     }
 
+    /// Returns `true` if the keystore already contains a key with the given scheme.
+    pub fn has_scheme(&self, scheme_id: u8) -> Result<bool, WalletError> {
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(hex_str) = name_str.strip_suffix(".json") {
+                if let Ok(wire_bytes) = hex::decode(hex_str) {
+                    if let Some(&first) = wire_bytes.first() {
+                        if first == scheme_id {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Generate a new key for the given scheme, encrypt it, and store to disk.
     /// If the keystore is currently unlocked, the new key is also added to the
     /// in-memory map so it can be used immediately without re-unlock.
@@ -108,6 +127,12 @@ impl KeyStore {
         passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
         Self::validate_passphrase(passphrase)?;
+
+        if self.has_scheme(scheme_id)? {
+            return Err(WalletError::DuplicateKey(format!(
+                "a key with scheme {scheme_id:#04x} already exists"
+            )));
+        }
 
         let (secret_key, priv_key) = match scheme_id {
             SCHEME_ED25519 => {
@@ -238,6 +263,12 @@ impl KeyStore {
             return Err(WalletError::Crypto(format!(
                 "word_count must be 12 or 24, got {word_count}"
             )));
+        }
+
+        if self.has_scheme(SCHEME_SECP256K1)? {
+            return Err(WalletError::DuplicateKey(
+                "a secp256k1 key already exists".into(),
+            ));
         }
 
         // Generate mnemonic
@@ -438,6 +469,12 @@ impl KeyStore {
         key_input: &str,
         passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
+
+        if self.has_scheme(SCHEME_SECP256K1)? {
+            return Err(WalletError::DuplicateKey(
+                "a secp256k1 key already exists".into(),
+            ));
+        }
 
         let mut secret_bytes = if key_input.len() == 64
             && key_input.chars().all(|c| c.is_ascii_hexdigit())
@@ -700,15 +737,25 @@ mod tests {
     }
 
     #[test]
-    fn multiple_keys() {
+    fn multiple_keys_different_schemes() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         let _pk1 = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
-        let _pk2 = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
-        let _pk3 = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
+        let _pk2 = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         let keys = ks.list_keys().unwrap();
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_scheme_rejected_at_keystore_level() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
+        let result = ks.create_key(SCHEME_SECP256K1, "passphrase-ok");
+        assert!(matches!(result, Err(WalletError::DuplicateKey(_))));
+        // Different scheme still works
+        ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
     }
 
     #[test]

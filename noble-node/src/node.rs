@@ -508,28 +508,70 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 .unwrap_or_default()
                 .as_secs();
             let storage = self.storage.read();
-            let mut records: Vec<_> = storage
-                .list_peer_records()
-                .unwrap_or_default()
-                .into_iter()
+            let all_records = storage.list_peer_records().unwrap_or_default();
+            drop(storage);
+
+            // Primary: recent peers with known multiaddr (existing behavior)
+            let mut records: Vec<_> = all_records
+                .iter()
                 .filter(|r| !r.is_stale(now, 86_400) && r.last_addr.is_some())
                 .collect();
-            drop(storage);
             records.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
             records.truncate(50);
-            for record in &records {
-                if let Some(ref addr_str) = record.last_addr {
-                    if let Ok(addr) = addr_str.parse::<noble_network::Multiaddr>() {
-                        let _ = network_cmd.try_send(NetworkCommand::DialPeer(addr, None));
+
+            if !records.is_empty() {
+                for record in &records {
+                    if let Some(ref addr_str) = record.last_addr {
+                        if let Ok(addr) = addr_str.parse::<noble_network::Multiaddr>() {
+                            let _ = network_cmd.try_send(NetworkCommand::DialPeer(addr, None));
+                        }
                     }
                 }
-            }
-            if !records.is_empty() {
                 tracing::info!(
                     task = "node_startup",
                     "Dialing {} cached peers from peer memory",
                     records.len()
                 );
+            } else {
+                // Fallback: scan ALL peer records for announce host_address
+                let self_pk_wire = self
+                    .announce_keypair
+                    .as_ref()
+                    .map(|(_, pk)| pk.to_wire_bytes());
+                let mut dialed = 0u32;
+                for rec in &all_records {
+                    // Skip SELF
+                    if let Some(ref self_wire) = self_pk_wire {
+                        if rec.identity_key == *self_wire {
+                            continue;
+                        }
+                    }
+                    let addr_str = rec
+                        .last_addr
+                        .as_deref()
+                        .or_else(|| {
+                            rec.last_announce
+                                .as_ref()
+                                .and_then(|a| a.host_address.as_deref())
+                        });
+                    if let Some(addr) = addr_str {
+                        let normalized = if addr.starts_with('/') {
+                            addr.to_string()
+                        } else {
+                            format!("/ip4/{}/tcp/8780", addr)
+                        };
+                        if let Ok(maddr) = normalized.parse::<noble_network::Multiaddr>() {
+                            let _ = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None));
+                            dialed += 1;
+                        }
+                    }
+                }
+                if dialed > 0 {
+                    tracing::info!(
+                        task = "node_startup",
+                        "No cached peers; dialing {dialed} peers from announce records"
+                    );
+                }
             }
         }
 

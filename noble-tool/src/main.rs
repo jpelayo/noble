@@ -172,16 +172,31 @@ enum WalletCommand {
         json: bool,
     },
 
-    /// Delete a wallet key from the keystore on a running node (requires passphrase).
+    /// Delete a wallet key from the keystore.
+    /// Works offline with --keystore-path, or via RPC with --rpc-url.
     Delete {
         /// Public key hex (wire format) to delete.
         pubkey_hex: String,
         /// Passphrase to verify key ownership.
         #[arg(long)]
         passphrase: String,
-        /// JSON-RPC URL of the running node.
+        /// Path to the keystore directory (offline mode — node does not need to be running).
+        #[arg(long)]
+        keystore_path: Option<String>,
+        /// JSON-RPC URL of the running node (online mode). Ignored if --keystore-path is set.
         #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc_url: String,
+    },
+
+    /// List all public keys in the wallet keystore (offline — reads key files directly).
+    List {
+        /// Path to the keystore directory.
+        #[arg(long, default_value = "keystore")]
+        keystore_path: String,
+
+        /// Output machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -631,24 +646,100 @@ fn cmd_wallet(action: WalletCommand) {
         WalletCommand::Delete {
             pubkey_hex,
             passphrase,
+            keystore_path,
             rpc_url,
         } => {
-            let params = serde_json::json!({
-                "pubkey_hex": pubkey_hex,
-                "passphrase": passphrase,
-            });
-            match rpc_call(&rpc_url, "noble_deleteAddress", params) {
-                Ok(result) => {
-                    let msg = result
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("Key deleted.");
-                    println!("{msg}");
+            if let Some(ks_path) = keystore_path {
+                // Offline mode — delete directly from keystore
+                let mut ks = noble_wallet::KeyStore::new(&ks_path)
+                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                let wire = hex::decode(&pubkey_hex)
+                    .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
+                let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
+                    .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); });
+                ks.delete_key(&pk, &passphrase)
+                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                let short_start = &pubkey_hex[..pubkey_hex.len().min(8)];
+                let short_end = &pubkey_hex[pubkey_hex.len().saturating_sub(8)..];
+                println!("Key deleted: {short_start}...{short_end}");
+            } else {
+                // Online mode — existing RPC behavior
+                let params = serde_json::json!({
+                    "pubkey_hex": pubkey_hex,
+                    "passphrase": passphrase,
+                });
+                match rpc_call(&rpc_url, "noble_deleteAddress", params) {
+                    Ok(result) => {
+                        let msg = result
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Key deleted.");
+                        println!("{msg}");
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
+            }
+        }
+        WalletCommand::List {
+            keystore_path,
+            json,
+        } => {
+            let ks = noble_wallet::KeyStore::new(&keystore_path)
+                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+            let keys = ks.list_keys()
+                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+
+            if json {
+                use noble_crypto::SCHEME_SECP256K1;
+                let entries: Vec<serde_json::Value> = keys.iter().map(|pk| {
+                    let wire = pk.to_wire_bytes();
+                    let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+                    let mut obj = serde_json::json!({
+                        "pubkey_hex": hex::encode(&wire),
+                        "scheme": scheme,
+                    });
+                    if pk.scheme_id() == SCHEME_SECP256K1 {
+                        let kb = pk.key_bytes();
+                        if kb.len() == 33 {
+                            let mut compressed = [0u8; 33];
+                            compressed.copy_from_slice(kb);
+                            obj["p2pkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
+                            obj["p2wpkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
+                            obj["p2tr"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
+                        }
+                    }
+                    obj
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "keys": entries })).unwrap());
+            } else {
+                use noble_crypto::SCHEME_SECP256K1;
+                if keys.is_empty() {
+                    println!("No keys found in {keystore_path}");
+                    return;
                 }
+                println!("=== Wallet Keys ({}) ===", keys.len());
+                println!();
+                for pk in &keys {
+                    let wire = pk.to_wire_bytes();
+                    let wire_hex = hex::encode(&wire);
+                    let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+                    println!("[{scheme}] {wire_hex}");
+                    if pk.scheme_id() == SCHEME_SECP256K1 {
+                        let kb = pk.key_bytes();
+                        if kb.len() == 33 {
+                            let mut compressed = [0u8; 33];
+                            compressed.copy_from_slice(kb);
+                            println!("  P2PKH  (1...):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
+                            println!("  P2WPKH (bc1q):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
+                            println!("  P2TR   (bc1p):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
+                        }
+                    }
+                    println!();
+                }
+                println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass> --keystore-path <path>");
             }
         }
     }
