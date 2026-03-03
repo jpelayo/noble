@@ -769,6 +769,7 @@ async fn handle_swarm_event(
                     tip_hash,
                     chain_id,
                     protocol_version,
+                    ..
                 } => {
                     // GAP-H4: Verify chain_id and protocol_version.
                     if chain_id != config.chain_id || protocol_version != config.protocol_version {
@@ -805,6 +806,11 @@ async fn handle_swarm_event(
                         }
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
+                        let _ = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
+                            peer_id: peer.to_bytes().to_vec(),
+                            height,
+                            tip_hash,
+                        });
                     }
                 }
                 _ => {}
@@ -1165,6 +1171,8 @@ fn handle_sync_request(
                 tip_hash,
                 chain_id: config.chain_id,
                 protocol_version: config.protocol_version,
+                total_transactions: block_provider.total_transactions(),
+                avg_votes_per_block: block_provider.avg_votes_per_block(),
             }
         }
     }

@@ -122,6 +122,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     ban_score: entry.ban_score,
                     last_ban_reason: None,
                     status: "connected".to_string(),
+                    chain_tip_height: entry.chain_tip_height,
+                    chain_tip_hash: entry.chain_tip_hash.clone(),
                 }
             })
             .collect();
@@ -148,6 +150,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                 ban_score: 0,
                 last_ban_reason: None,
                 status: "disconnected".to_string(),
+                chain_tip_height: None,
+                chain_tip_hash: None,
             });
         }
 

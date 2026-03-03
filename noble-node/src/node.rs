@@ -1227,6 +1227,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut initial_announce_sent = false;
 
+        // --- Peer status polling (every 60s) — populates chain_tip for fork detection ---
+        let mut peer_status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        peer_status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         tracing::info!(
             task = "node_startup",
             "Node event loop started — chain height: {}",
@@ -1324,6 +1328,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if initial_announce_sent {
                         self.publish_node_announce(&shared_identity, &network_cmd);
                     }
+                }
+
+                // Peer status polling — request chain tips from all peers (fork detection)
+                _ = peer_status_interval.tick() => {
+                    let _ = network_cmd.try_send(NetworkCommand::RequestSync);
                 }
 
                 // On-demand NodeAnnounce re-broadcast (triggered by identity update RPC)
@@ -1439,6 +1448,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             addr: addr.clone(),
                             connected_at: now_ts,
                             ban_score: 0,
+                            chain_tip_height: None,
+                            chain_tip_hash: None,
                         },
                     );
                 }
@@ -1565,6 +1576,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     task = "sync",
                     "Sync complete up to height {new_height}"
                 );
+            }
+            NetworkEvent::PeerChainTipUpdated {
+                peer_id,
+                height,
+                tip_hash,
+            } => {
+                let hex_pid = hex::encode(peer_id);
+                let mut info = self.peer_info.write();
+                if let Some(entry) = info.get_mut(&hex_pid) {
+                    entry.chain_tip_height = Some(*height);
+                    entry.chain_tip_hash = Some(hex::encode(tip_hash));
+                }
             }
             _ => {
                 // Route to consensus engine

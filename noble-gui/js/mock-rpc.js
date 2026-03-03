@@ -1713,6 +1713,19 @@ export class MockRpcClient {
         };
       }
 
+      case 'noble_getDetectedForks':
+        return {
+          local_height: 42,
+          local_tip: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+          forks: [
+            { tip_hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890', height: 42, peers: 3, is_local: true },
+            { tip_hash: '9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba', height: 58, peers: 2, is_local: false },
+          ],
+        };
+
+      case 'noble_resetChain':
+        return { reset: true, previous_height: 42 };
+
       case 'noble_detectExternalIp':
         return { ip: '203.0.113.42', multiaddr: '/ip4/203.0.113.42/tcp/8780', source: 'https://ipinfo.io/ip' };
 

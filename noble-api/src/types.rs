@@ -296,6 +296,12 @@ pub struct PeerInfoResponse {
     pub last_ban_reason: Option<BanReasonResponse>,
     /// Connection status: "connected" or "disconnected".
     pub status: String,
+    /// Peer's chain tip height (from last status exchange).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_tip_height: Option<u64>,
+    /// Peer's chain tip hash (from last status exchange).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_tip_hash: Option<String>,
 }
 
 /// Response for `noble_getNetworkInfo`.
@@ -1069,6 +1075,39 @@ pub struct SetEncryptionModeResponse {
     pub restart_required: bool,
     /// Human-readable status message.
     pub message: String,
+}
+
+/// Response for `noble_getDetectedForks`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectedForksResponse {
+    /// Local chain height.
+    pub local_height: u64,
+    /// Local chain tip hash (hex).
+    pub local_tip: String,
+    /// Detected fork groups from connected peers.
+    pub forks: Vec<ForkEntry>,
+}
+
+/// A single fork group detected from connected peers.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForkEntry {
+    /// Tip hash shared by peers in this group (hex).
+    pub tip_hash: String,
+    /// Chain height at this tip.
+    pub height: u64,
+    /// Number of peers on this fork.
+    pub peers: usize,
+    /// Whether this matches the local chain's tip.
+    pub is_local: bool,
+}
+
+/// Response for `noble_resetChain`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResetChainResponse {
+    /// Whether the reset succeeded.
+    pub reset: bool,
+    /// Chain height before the reset.
+    pub previous_height: u64,
 }
 
 #[cfg(test)]

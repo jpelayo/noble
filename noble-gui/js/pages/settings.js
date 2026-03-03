@@ -268,6 +268,34 @@ export function init(root, ctx) {
         </div>
       </div>
     </div>
+
+    <!-- Chain Management -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Chain Management</span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-chain-info">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+        </dl>
+
+        <div style="margin-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Detected Forks</p>
+          <div id="s-fork-table-wrap" style="overflow-x:auto">
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">Loading...</p>
+          </div>
+        </div>
+
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-xs);color:var(--warning)">Reset to Genesis</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Wipes local chain and re-syncs from peers. Use when this node is on a shorter/wrong fork.
+          </p>
+          <button id="s-chain-reset-btn" class="btn-sm" style="padding:6px 14px;background:var(--error);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset &amp; Re-sync</button>
+          <span id="s-chain-reset-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+        </div>
+      </div>
+    </div>
   `;
 
   // DOM refs
@@ -1182,7 +1210,71 @@ export function init(root, ctx) {
 
   loadSettings();
 
+  // --- Chain Management ---
+  const chainInfoEl = root.querySelector('#s-chain-info');
+  const forkWrap = root.querySelector('#s-fork-table-wrap');
+  const resetBtn = root.querySelector('#s-chain-reset-btn');
+  const resetMsg = root.querySelector('#s-chain-reset-msg');
+
+  async function loadForks() {
+    try {
+      const data = await rpc.call('noble_getDetectedForks');
+      // Render chain info
+      const tipShort = data.local_tip ? (data.local_tip.slice(0, 10) + '…' + data.local_tip.slice(-8)) : '—';
+      chainInfoEl.innerHTML = `
+        <dt>Height</dt><dd>${data.local_height}</dd>
+        <dt>Tip</dt><dd style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${tipShort}</dd>
+      `;
+
+      // Render fork table
+      if (!data.forks || data.forks.length <= 1) {
+        forkWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">No forks detected — all peers on same chain</p>';
+        return;
+      }
+
+      let rows = data.forks.map(f => {
+        const hashShort = f.tip_hash.slice(0, 10) + '…' + f.tip_hash.slice(-8);
+        const label = f.is_local
+          ? '<span style="color:var(--success)">● Our chain</span>'
+          : (f.height > data.local_height ? '<span style="color:var(--warning)">⚠ Longer fork</span>' : 'Alternative');
+        return `<tr style="${f.is_local ? 'background:rgba(var(--success-rgb,52,211,153),0.08)' : ''}">
+          <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${hashShort}</td>
+          <td>${f.height}</td>
+          <td>${f.peers}</td>
+          <td>${label}</td>
+        </tr>`;
+      }).join('');
+
+      forkWrap.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+        <thead><tr><th>Tip Hash</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    } catch (e) {
+      forkWrap.innerHTML = `<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Fork detection unavailable</p>`;
+    }
+  }
+
+  loadForks();
+  const forkTimer = setInterval(loadForks, 30000);
+
+  resetBtn.addEventListener('click', async () => {
+    if (!confirm('This will erase all blocks above genesis and re-sync from network peers. This cannot be undone. Continue?')) return;
+    resetMsg.textContent = 'Resetting...';
+    resetMsg.style.color = 'var(--text-muted)';
+    try {
+      const result = await rpc.call('noble_resetChain');
+      resetMsg.style.color = 'var(--success)';
+      resetMsg.textContent = `Reset complete (was height ${result.previous_height}). Re-syncing from peers...`;
+      setTimeout(() => loadForks(), 2000);
+    } catch (e) {
+      resetMsg.style.color = 'var(--error)';
+      resetMsg.textContent = e.message || 'Reset failed';
+    }
+  });
+
   return {
-    destroy() {},
+    destroy() {
+      clearInterval(forkTimer);
+    },
   };
 }

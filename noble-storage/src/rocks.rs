@@ -1054,6 +1054,102 @@ impl StorageEngine for RocksDbStorage {
         })
     }
 
+    fn force_reset_to_genesis(&self, chain_id: u32) -> Result<ChainTip, StorageError> {
+        self.check_open()?;
+        let tip = self
+            .get_chain_tip()?
+            .ok_or_else(|| StorageError::Database("no chain tip".into()))?;
+
+        if tip.height == 0 {
+            return Ok(tip);
+        }
+
+        tracing::warn!(
+            "force_reset_to_genesis: wiping {} blocks (bypasses MAX_REORG_DEPTH)",
+            tip.height
+        );
+
+        // Reuse rollback logic for height 0, but bypass MAX_REORG_DEPTH check.
+        let mut batch = WriteBatch::default();
+        let cf_blocks = self.cf(CF_BLOCKS)?;
+        let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
+        let cf_tx = self.cf(CF_TX_INDEX)?;
+
+        for h in 1..=tip.height {
+            let height_be = h.to_be_bytes();
+            if let Some(block_bytes) = self
+                .db
+                .get_cf(cf_blocks, height_be)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+            {
+                if let Ok(block) = Block::from_cbor(&block_bytes) {
+                    for tx in &block.transactions {
+                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
+                            batch.delete_cf(cf_tx, tx_id.as_bytes());
+                        }
+                    }
+                    if let Ok(block_hash) = block.header.compute_block_hash() {
+                        batch.delete_cf(cf_hashes, block_hash.as_bytes());
+                    }
+                }
+            }
+            batch.delete_cf(cf_blocks, height_be);
+        }
+
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        // Clear balances, history, checksum, version_chain, publisher_index
+        let mut clear_batch = WriteBatch::default();
+        for cf_name in [
+            CF_ADDRESS_BALANCES,
+            CF_ADDRESS_HISTORY,
+            CF_CHECKSUM_INDEX,
+            CF_VERSION_CHAIN,
+            CF_PUBLISHER_INDEX,
+        ] {
+            let cf = self.cf(cf_name)?;
+            let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+            for item in iter {
+                let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+                clear_batch.delete_cf(cf, &key);
+            }
+        }
+
+        // Update chain tip to genesis
+        let cf_state = self.cf(CF_CHAIN_STATE)?;
+        let genesis_hash = self.get_block_hash_by_height(0)?;
+        clear_batch.put_cf(cf_state, KEY_TIP_HASH, genesis_hash.as_bytes());
+        clear_batch.put_cf(cf_state, KEY_TIP_HEIGHT, 0u64.to_be_bytes());
+
+        self.db
+            .write(clear_batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        // Replay genesis block (height 0) for balances
+        let block = self.get_block(&genesis_hash)?;
+        let mut replay_batch = WriteBatch::default();
+        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
+        let subsidy = subsidy_at_height(0);
+        let validator_key = Self::pubkey_key(&block.header.validator_id);
+        if subsidy > 0 {
+            replay_batch.put_cf(cf_balances, &validator_key, subsidy.to_be_bytes());
+        }
+
+        let cf_state = self.cf(CF_CHAIN_STATE)?;
+        replay_batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, subsidy.to_be_bytes());
+
+        self.db
+            .write(replay_batch)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        Ok(ChainTip {
+            block_hash: genesis_hash,
+            height: 0,
+        })
+    }
+
     fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
         self.check_open()?;
         let tip = match self.get_chain_tip()? {

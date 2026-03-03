@@ -56,6 +56,29 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
             .map(|tip| (tip.height, *tip.block_hash.as_bytes()))
             .unwrap_or((0, [0; 32]))
     }
+
+    fn total_transactions(&self) -> u64 {
+        let storage = self.storage.read();
+        let tip = match storage.get_chain_tip().ok().flatten() {
+            Some(t) => t,
+            None => return 0,
+        };
+        let mut total: u64 = 0;
+        for h in 0..=tip.height {
+            if let Ok(hash) = storage.get_block_hash_by_height(h) {
+                if let Ok(header) = storage.get_block_header(&hash) {
+                    total += header.tx_count as u64;
+                }
+            }
+        }
+        total
+    }
+
+    fn avg_votes_per_block(&self) -> f32 {
+        // Approximate: read last 100 blocks' vote counts from cycle history.
+        // For now, return 0.0 — enriched once cycle history tracking is wired.
+        0.0
+    }
 }
 
 /// Implements [`TxProvider`] using an `Arc<RwLock<S>>` storage backend.

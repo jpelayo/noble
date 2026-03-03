@@ -139,6 +139,23 @@ impl CycleEngine {
         self.tip_hash = block_hash;
     }
 
+    /// Reset the chain tip to a new height/hash and clear all in-flight state.
+    ///
+    /// Used after `force_reset_to_genesis()` for fork recovery. Clears the
+    /// vote manager, candidate tracker, and cycle history.
+    pub fn reset_tip(&mut self, height: u64, block_hash: Hash256) {
+        self.tip_height = height;
+        self.tip_hash = block_hash;
+        self.tip_timestamp = 0;
+        self.tip_header = None;
+        self.vote_mgr = VoteManager::new();
+        self.candidate_tracker = CandidateTracker::new();
+        self.last_cycle_history = None;
+        self.manual_vote = None;
+        self.r2_vote_cast = false;
+        tracing::warn!("consensus engine reset to height {height}");
+    }
+
     /// Update the chain tip with timestamp for full parent validation (AUD2-C2).
     pub fn update_tip_with_timestamp(&mut self, height: u64, block_hash: Hash256, timestamp: u64) {
         self.tip_height = height;
@@ -329,8 +346,11 @@ impl CycleEngine {
             })
             .collect();
 
-        // C-004: Use validator set size as denominator (not peer count).
-        let voter_count = self.validator_list.len();
+        // Network-level voter count: connected peers + self (if we are a validator).
+        // Ensures consensus denominator reflects actual network participants,
+        // not the local validator registry (which may be incomplete).
+        let self_vote = if self.our_validator_key.is_some() { 1 } else { 0 };
+        let voter_count = self.total_peers + self_vote;
         let result = self.vote_mgr.compute_majority(voter_count, &self.config);
 
         match result {
@@ -1512,6 +1532,73 @@ mod tests {
             "valid validator's vote should be accepted"
         );
         assert_eq!(engine.vote_mgr.total_votes(), 1);
+    }
+
+    // --- S45-A2: Network-level voter count ---
+
+    #[test]
+    fn network_voter_count_validator_plus_one_peer_commits() {
+        // With 1 connected peer and self as validator, voter_count = 1 + 1 = 2,
+        // which meets min_peers_for_consensus = 2.
+        // We need separate keys for the engine (validator) and the proposer (peer).
+        let (our_priv, our_pub) = make_validator();
+        let (peer_priv, peer_pub) = make_validator();
+        let mut engine = make_engine(
+            Some((our_priv, our_pub.clone())),
+            &[our_pub, peer_pub.clone()],
+            1, // 1 connected peer
+        );
+
+        // Propose a block from the peer
+        engine.tracked_phase = CyclePhase::Validation;
+        let (block, hash) = make_valid_block(&peer_priv, &peer_pub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"p1".to_vec(),
+        });
+
+        // Vote from the peer (1 out of voter_count=2 → 50% → Strong majority)
+        engine.tracked_phase = CyclePhase::Reflection;
+        let vote = PorVote::sign(0, hash, &peer_priv, peer_pub).unwrap();
+        engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"p1".to_vec(),
+        });
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(
+            has_commit(&outputs),
+            "validator + 1 peer should reach consensus (voter_count=2)"
+        );
+        assert_eq!(engine.tip_height, 1);
+    }
+
+    #[test]
+    fn network_voter_count_observer_not_counted() {
+        // Observer (no validator key) with 1 peer: voter_count = 1 + 0 = 1,
+        // which is below min_peers_for_consensus = 2 → Indeterminate.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 1);
+
+        engine.tracked_phase = CyclePhase::Validation;
+        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"p1".to_vec(),
+        });
+
+        engine.tracked_phase = CyclePhase::Reflection;
+        let vote = PorVote::sign(0, hash, &vp, vpub).unwrap();
+        engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"p1".to_vec(),
+        });
+
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(
+            !has_commit(&outputs),
+            "observer + 1 peer = voter_count 1 → insufficient"
+        );
     }
 
     // --- P0-3: Self-proposed block validation ---

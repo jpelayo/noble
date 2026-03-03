@@ -21,6 +21,16 @@ pub trait BlockProvider: Send + Sync {
 
     /// Returns `(height, tip_hash)` of the current chain tip.
     fn chain_tip(&self) -> (u64, [u8; 32]);
+
+    /// Cumulative transaction count across all blocks (fork KPI).
+    fn total_transactions(&self) -> u64 {
+        0
+    }
+
+    /// Mean vote count in winning blocks (fork KPI).
+    fn avg_votes_per_block(&self) -> f32 {
+        0.0
+    }
 }
 
 /// Provides transaction data for serving tx requests.

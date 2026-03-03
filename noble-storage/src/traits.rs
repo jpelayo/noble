@@ -122,6 +122,11 @@ pub trait StorageEngine {
         chain_id: u32,
     ) -> Result<ChainTip, StorageError>;
 
+    /// Reset chain to genesis (height 0), removing all blocks above genesis.
+    /// Unlike `rollback_to_height`, this bypasses the MAX_REORG_DEPTH safety limit.
+    /// Used for fork recovery ("blockchain hop") when the node needs to re-sync.
+    fn force_reset_to_genesis(&self, chain_id: u32) -> Result<ChainTip, StorageError>;
+
     /// Store a pending key rotation.
     ///
     /// Key: old_key wire bytes, Value: CBOR(new_key_wire, rotation_cycle).

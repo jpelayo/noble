@@ -50,6 +50,12 @@ pub enum SyncResponse {
         tip_hash: [u8; 32],
         chain_id: u32,
         protocol_version: u16,
+        /// Cumulative transaction count across all blocks (fork KPI).
+        #[serde(default)]
+        total_transactions: u64,
+        /// Mean vote count in winning blocks (fork KPI).
+        #[serde(default)]
+        avg_votes_per_block: f32,
     },
     /// An error message from the remote peer.
     Error(String),
@@ -222,6 +228,12 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         evidence: Box<DoubleProposalEvidence>,
     },
+    /// A peer's chain tip was updated (from status exchange).
+    PeerChainTipUpdated {
+        peer_id: Vec<u8>,
+        height: u64,
+        tip_hash: [u8; 32],
+    },
 }
 
 #[cfg(test)]
@@ -281,6 +293,8 @@ mod tests {
             tip_hash: [0xBB; 32],
             chain_id: 0x4E4F_424C,
             protocol_version: 1,
+            total_transactions: 128,
+            avg_votes_per_block: 2.5,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();

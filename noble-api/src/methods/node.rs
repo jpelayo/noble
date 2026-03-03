@@ -8,6 +8,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
+use noble_consensus::ConsensusStateMachine;
 use noble_core::{PROTOCOL_VERSION, SOFTWARE_VERSION};
 use noble_storage::StorageEngine;
 
@@ -217,6 +218,20 @@ pub trait NodeApi {
         current_password: Option<String>,
         new_password: Option<String>,
     ) -> Result<SetEncryptionModeResponse, ErrorObjectOwned>;
+
+    /// Detect chain forks by grouping connected peers by their chain tip.
+    ///
+    /// Returns the local chain info and a list of detected forks, each with
+    /// population count and KPIs for fork comparison.
+    #[method(name = "getDetectedForks")]
+    async fn get_detected_forks(&self) -> Result<DetectedForksResponse, ErrorObjectOwned>;
+
+    /// Reset the chain to genesis and trigger re-sync from peers.
+    ///
+    /// This is a destructive operation used for fork recovery ("blockchain hop").
+    /// Requires TOTP authentication (scope: All).
+    #[method(name = "resetChain")]
+    async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1042,6 +1057,116 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             success: true,
             restart_required: true,
             message,
+        })
+    }
+
+    async fn get_detected_forks(&self) -> Result<DetectedForksResponse, ErrorObjectOwned> {
+        let (local_height, local_tip_bytes) = {
+            let consensus = self.consensus.read();
+            consensus.chain_tip()
+        };
+        let local_tip = hex::encode(local_tip_bytes);
+
+        // Aggregate peer chain tips by tip_hash.
+        let peer_tips: Vec<(String, u64, String)> = {
+            let info = self.peer_info.read();
+            info.values()
+                .filter_map(|entry| {
+                    let h = entry.chain_tip_height?;
+                    let hash = entry.chain_tip_hash.clone()?;
+                    Some((entry.peer_id.clone(), h, hash))
+                })
+                .collect()
+        };
+
+        // Group by tip_hash.
+        let mut groups: std::collections::HashMap<String, (u64, usize)> =
+            std::collections::HashMap::new();
+        for (_peer_id, height, tip_hash) in &peer_tips {
+            let entry = groups.entry(tip_hash.clone()).or_insert((*height, 0));
+            entry.1 += 1;
+            // Use the max height among peers reporting this tip.
+            if *height > entry.0 {
+                entry.0 = *height;
+            }
+        }
+
+        // Always include local chain as a fork entry.
+        let local_entry = groups.entry(local_tip.clone()).or_insert((local_height, 0));
+        // Ensure height reflects local tip.
+        if local_height > local_entry.0 {
+            local_entry.0 = local_height;
+        }
+
+        let mut forks: Vec<ForkEntry> = groups
+            .into_iter()
+            .map(|(tip_hash, (height, peers))| ForkEntry {
+                is_local: tip_hash == local_tip,
+                tip_hash,
+                height,
+                peers,
+            })
+            .collect();
+
+        // Sort by height descending (tallest fork first).
+        forks.sort_by(|a, b| b.height.cmp(&a.height));
+
+        Ok(DetectedForksResponse {
+            local_height,
+            local_tip,
+            forks,
+        })
+    }
+
+    async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned> {
+        // TOTP auth required (scope: All). Check via request extensions.
+        // The TOTP middleware handles this at the RPC layer.
+
+        let previous_height = {
+            let consensus = self.consensus.read();
+            consensus.chain_tip().0
+        };
+
+        if previous_height == 0 {
+            return Ok(ResetChainResponse {
+                reset: true,
+                previous_height: 0,
+            });
+        }
+
+        // Reset storage to genesis.
+        {
+            let storage = self.storage.read();
+            storage
+                .force_reset_to_genesis(self.chain_id)
+                .map_err(|e| ApiError::Internal(format!("reset chain: {e}")))?;
+        }
+
+        // Reset consensus engine.
+        {
+            let storage = self.storage.read();
+            let tip = storage
+                .get_chain_tip()
+                .map_err(|e| ApiError::Internal(format!("read tip after reset: {e}")))?
+                .unwrap_or(noble_storage::ChainTip {
+                    block_hash: noble_crypto::Hash256::ZERO,
+                    height: 0,
+                });
+            let mut engine = self.consensus.write();
+            engine.reset_tip(tip.height, tip.block_hash);
+        }
+
+        // Trigger re-sync from peers.
+        let _ = self.network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+
+        tracing::warn!(
+            task = "chain_reset",
+            "Chain reset to genesis (previous height: {previous_height})"
+        );
+
+        Ok(ResetChainResponse {
+            reset: true,
+            previous_height,
         })
     }
 }

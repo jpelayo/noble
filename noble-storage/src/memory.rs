@@ -564,6 +564,71 @@ impl StorageEngine for MemoryStorage {
         Ok(new_tip)
     }
 
+    fn force_reset_to_genesis(&self, chain_id: u32) -> Result<ChainTip, StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+
+        let tip = inner
+            .chain_tip
+            .as_ref()
+            .ok_or_else(|| StorageError::Database("no chain tip".into()))?;
+
+        if tip.height == 0 {
+            return Ok(tip.clone());
+        }
+
+        tracing::warn!(
+            "force_reset_to_genesis: wiping {} blocks (bypasses MAX_REORG_DEPTH)",
+            tip.height
+        );
+
+        let tip_h = tip.height;
+        for h in 1..=tip_h {
+            if let Some(hash) = inner.block_heights.remove(&h) {
+                if let Some(block) = inner.blocks.remove(&hash) {
+                    for tx in &block.transactions {
+                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
+                            inner.transactions.remove(&tx_id);
+                            inner.tx_locations.remove(&tx_id);
+                            if let Some(entries) = inner.checksum_index.get_mut(&tx.checksum) {
+                                entries.retain(|id| *id != tx_id);
+                                if entries.is_empty() {
+                                    inner.checksum_index.remove(&tx.checksum);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clear derived state
+        inner.balances.clear();
+        inner.address_history.clear();
+        inner.version_chain.clear();
+        inner.publisher_index.clear();
+
+        // Replay genesis (height 0) for balances
+        if let Some(&genesis_hash) = inner.block_heights.get(&0) {
+            if let Some(block) = inner.blocks.get(&genesis_hash) {
+                let validator_addr = NobleAddress::Noble(block.header.validator_id.clone());
+                let subsidy = subsidy_at_height(0);
+                if subsidy > 0 {
+                    inner.balances.insert(validator_addr, subsidy);
+                }
+            }
+            inner.chain_tip = Some(ChainTip {
+                block_hash: genesis_hash,
+                height: 0,
+            });
+            Ok(inner.chain_tip.clone().unwrap())
+        } else {
+            Err(StorageError::Database(
+                "missing genesis block at height 0".into(),
+            ))
+        }
+    }
+
     fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
