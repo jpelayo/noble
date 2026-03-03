@@ -340,6 +340,13 @@ impl KeyStore {
         encryption_passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
 
+        // Guard: reject if a secp256k1 key already exists (one key per scheme)
+        if self.has_scheme(SCHEME_SECP256K1)? {
+            return Err(WalletError::DuplicateKey(
+                "a secp256k1 key already exists; delete it first to import a different mnemonic".into(),
+            ));
+        }
+
         // Parse and validate mnemonic
         let mnemonic: bip39::Mnemonic = mnemonic_words
             .parse()
