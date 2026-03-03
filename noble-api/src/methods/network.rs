@@ -92,9 +92,16 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             .collect();
 
         let info = self.peer_info.read();
-        let peers: Vec<PeerInfoResponse> = info
+
+        // Track which peer_ids we've already added (from live connections).
+        let mut seen_peer_ids = std::collections::HashSet::new();
+
+        // 1. Live connected peers (enriched with announce data).
+        let mut peers: Vec<PeerInfoResponse> = info
             .values()
             .map(|entry| {
+                seen_peer_ids.insert(entry.peer_id.clone());
+
                 let announce = record_map
                     .get(&entry.peer_id)
                     .and_then(|r| r.last_announce.as_ref());
@@ -114,9 +121,46 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     connected_at: entry.connected_at,
                     ban_score: entry.ban_score,
                     last_ban_reason: None,
+                    status: "connected".to_string(),
                 }
             })
             .collect();
+
+        // 2. Known validators/peers from peer_records that are NOT currently connected.
+        for rec in &records {
+            let hex_pid = hex::encode(&rec.peer_id_bytes);
+            if seen_peer_ids.contains(&hex_pid) {
+                continue;
+            }
+            let announce = rec.last_announce.as_ref();
+            let addr = rec
+                .last_addr
+                .clone()
+                .or_else(|| announce.and_then(|a| a.host_address.clone()));
+
+            peers.push(PeerInfoResponse {
+                peer_id: hex_pid,
+                direction: "none".to_string(),
+                addr,
+                node_name: announce.map(|a| a.node_name.clone()),
+                country_code: announce.and_then(|a| a.country_code.clone()),
+                connected_at: 0,
+                ban_score: 0,
+                last_ban_reason: None,
+                status: "disconnected".to_string(),
+            });
+        }
+
+        // Sort: connected first, then disconnected; within each group sort by peer_id.
+        peers.sort_by(|a, b| {
+            let ord = a.status.cmp(&b.status); // "connected" < "disconnected"
+            if ord == std::cmp::Ordering::Equal {
+                a.peer_id.cmp(&b.peer_id)
+            } else {
+                ord
+            }
+        });
+
         Ok(peers)
     }
 

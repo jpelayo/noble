@@ -294,6 +294,8 @@ pub struct PeerInfoResponse {
     pub connected_at: u64,
     pub ban_score: u32,
     pub last_ban_reason: Option<BanReasonResponse>,
+    /// Connection status: "connected" or "disconnected".
+    pub status: String,
 }
 
 /// Response for `noble_getNetworkInfo`.

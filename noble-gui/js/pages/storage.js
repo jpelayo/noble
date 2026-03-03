@@ -379,7 +379,25 @@ export function init(root, ctx) {
       </div>`;
   }
 
-  // ── Render data directory panel ──
+  // ── Render a usage bar that can exceed 100% (for overcommit warnings) ──
+  function usageBarUncapped(label, filled, capacity, fillColor, warnColor) {
+    const pct = capacity > 0 ? (filled / capacity * 100) : 0;
+    const pctStr = pct < 0.01 && filled > 0 ? '<0.01' : pct.toFixed(2);
+    const barWidth = Math.min(pct, 100);
+    const color = pct > 100 ? (warnColor || '#ef4444') : fillColor;
+    return `
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:var(--font-size-xs);color:var(--text-secondary);margin-bottom:3px">
+          <span>${label}${pct > 100 ? ' <span style="color:#ef4444;font-weight:600">(overcommitted)</span>' : ''}</span>
+          <span>${formatBytes(filled)} / ${formatBytes(capacity)} (${pctStr}%)</span>
+        </div>
+        <div style="background:var(--bg-tertiary);border-radius:var(--radius-sm);height:16px;overflow:hidden">
+          <div style="height:100%;width:${Math.max(barWidth, barWidth > 0 ? 0.5 : 0).toFixed(2)}%;background:${color};border-radius:var(--radius-sm);transition:width 0.3s"></div>
+        </div>
+      </div>`;
+  }
+
+  // ── Render data directory panel — 4 bars ──
   function renderDataDir(stats) {
     const dir = stats.data_dir || 'N/A';
     const db = stats.total_db_bytes || 0;
@@ -391,20 +409,24 @@ export function init(root, ctx) {
     const compress = stats.compression_enabled;
     const maxDbBytes = stats.max_db_size_bytes || 0;
     const maxDbGb = maxDbBytes / (1024 * 1024 * 1024);
+    const hasAllocated = maxDbBytes > 0;
 
-    // Bar 1: Disk usage vs total disk space (how full is the volume)
+    // Bar 1: Disk Usage — diskUsed / total_volume_bytes
     const diskPct = total > 0 ? (diskUsed / total * 100) : 0;
     const diskColor = usageColor(diskPct);
 
-    // Bar 2: Noble DB vs Allocated (purple) when limit set, otherwise Noble DB vs Free Disk (blue)
-    const hasAllocated = maxDbBytes > 0;
-    const bar2Label = hasAllocated ? 'Noble DB vs Allocated' : 'Noble DB vs Free Disk';
-    const bar2Filled = db;
-    const bar2Capacity = hasAllocated ? maxDbBytes : avail;
-    const bar2Color = hasAllocated ? '#8b5cf6' : '#3b82f6';
-
     // Allocated badge text
-    const allocBadge = hasAllocated ? `Allocated: ${maxDbGb.toFixed(0)} GB` : 'Unlimited';
+    const allocBadge = hasAllocated ? `Allocated: ${maxDbGb.toFixed(1)} GB` : 'Unlimited';
+
+    let bars = '';
+    // Bar 1: always shown when total > 0
+    if (total > 0) bars += usageBar('Disk Usage', diskUsed, total, diskColor);
+    // Bar 2: Noble DB vs Allocated (purple) — only when max_db_size_bytes > 0
+    if (hasAllocated) bars += usageBar('Noble DB vs Allocated', db, maxDbBytes, '#8b5cf6');
+    // Bar 3: Noble DB vs Free Disk (blue) — always shown
+    if (avail > 0) bars += usageBar('Noble DB vs Free Disk', db, avail, '#3b82f6');
+    // Bar 4: Allocated vs Free Disk (orange) — only when max_db_size_bytes > 0, can exceed 100%
+    if (hasAllocated) bars += usageBarUncapped('Allocated vs Free Disk', maxDbBytes, avail, '#f59e0b', '#ef4444');
 
     dataDirBody.innerHTML = `
       <div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap)">
@@ -412,8 +434,7 @@ export function init(root, ctx) {
         <button class="btn btn-secondary btn-sm btn-copy" data-copy="${_esc(dir)}"
           style="padding:2px 10px;font-size:var(--font-size-xs);white-space:nowrap">Copy</button>
       </div>
-      ${total > 0 ? usageBar('Disk Usage', diskUsed, total, diskColor) : ''}
-      ${bar2Capacity > 0 ? usageBar(bar2Label, bar2Filled, bar2Capacity, bar2Color) : ''}
+      ${bars}
       <div style="display:flex;justify-content:flex-end;gap:var(--gap-sm);margin-top:4px">
         <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)">Cache: ${cacheMb.toFixed(0)} MB</span>
         <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${compress ? 'var(--success)' : 'var(--text-muted)'}">${compress ? 'Zstd On' : 'No Compression'}</span>

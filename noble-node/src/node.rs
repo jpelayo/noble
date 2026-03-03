@@ -1375,11 +1375,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         metrics: &Option<NobleMetrics>,
     ) {
         match event {
-            NetworkEvent::PeerConnected { peer_id, addr, .. } => {
+            NetworkEvent::PeerConnected {
+                peer_id,
+                addr,
+                direction,
+                ..
+            } => {
+                let is_inbound = direction == "inbound";
                 let new_count = {
                     let mut stats = self.network_stats.write();
                     stats.peer_count += 1;
-                    stats.inbound_count += 1; // simplified; real impl tracks direction
+                    if is_inbound {
+                        stats.inbound_count += 1;
+                    } else {
+                        stats.outbound_count += 1;
+                    }
                     stats.peer_count
                 };
                 // AUD2-C1: Wire peer count to consensus engine so compute_majority works
@@ -1399,7 +1409,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         hex_pid.clone(),
                         noble_api::state::PeerInfoEntry {
                             peer_id: hex_pid.clone(),
-                            direction: "inbound".to_string(),
+                            direction: direction.clone(),
                             addr: addr.clone(),
                             connected_at: now_ts,
                             ban_score: 0,
@@ -1411,12 +1421,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                 }));
-                tracing::debug!(task = "peer_tracking", "Peer connected: {addr}");
+                tracing::debug!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
             NetworkEvent::PeerDisconnected { peer_id } => {
+                // Look up direction before removing so we can decrement the right counter.
+                let hex_pid = hex::encode(peer_id);
+                let was_inbound = {
+                    let info = self.peer_info.read();
+                    info.get(&hex_pid)
+                        .map(|e| e.direction == "inbound")
+                        .unwrap_or(true)
+                };
                 let new_count = {
                     let mut stats = self.network_stats.write();
                     stats.peer_count = stats.peer_count.saturating_sub(1);
+                    if was_inbound {
+                        stats.inbound_count = stats.inbound_count.saturating_sub(1);
+                    } else {
+                        stats.outbound_count = stats.outbound_count.saturating_sub(1);
+                    }
                     stats.peer_count
                 };
                 // AUD2-C1: Update consensus engine peer count on disconnect too
@@ -1425,7 +1448,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     engine.set_peer_count(new_count);
                 }
                 // H-004: Remove from live peer info.
-                let hex_pid = hex::encode(peer_id);
                 {
                     let mut info = self.peer_info.write();
                     info.remove(&hex_pid);
@@ -2564,6 +2586,7 @@ mod tests {
         let connect_event = NetworkEvent::PeerConnected {
             peer_id: vec![1, 2, 3],
             addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
+            direction: "inbound".to_string(),
             chain_tip: None,
         };
         node.handle_network_event(
@@ -2575,9 +2598,29 @@ mod tests {
             &cycle_tx,
             &None,
         );
-        assert_eq!(node.network_stats.read().peer_count, 1);
+        {
+            let stats = node.network_stats.read();
+            assert_eq!(stats.peer_count, 1);
+            assert_eq!(stats.inbound_count, 1);
+            assert_eq!(stats.outbound_count, 0);
+        }
 
-        // Peer disconnect should decrement
+        // Connect an outbound peer
+        let connect_out = NetworkEvent::PeerConnected {
+            peer_id: vec![4, 5, 6],
+            addr: "/ip4/5.6.7.8/tcp/8780".to_string(),
+            direction: "outbound".to_string(),
+            chain_tip: None,
+        };
+        node.handle_network_event(&connect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None);
+        {
+            let stats = node.network_stats.read();
+            assert_eq!(stats.peer_count, 2);
+            assert_eq!(stats.inbound_count, 1);
+            assert_eq!(stats.outbound_count, 1);
+        }
+
+        // Disconnect the inbound peer — should decrement inbound_count
         let disconnect_event = NetworkEvent::PeerDisconnected {
             peer_id: vec![1, 2, 3],
         };
@@ -2590,7 +2633,24 @@ mod tests {
             &cycle_tx,
             &None,
         );
-        assert_eq!(node.network_stats.read().peer_count, 0);
+        {
+            let stats = node.network_stats.read();
+            assert_eq!(stats.peer_count, 1);
+            assert_eq!(stats.inbound_count, 0);
+            assert_eq!(stats.outbound_count, 1);
+        }
+
+        // Disconnect the outbound peer
+        let disconnect_out = NetworkEvent::PeerDisconnected {
+            peer_id: vec![4, 5, 6],
+        };
+        node.handle_network_event(&disconnect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None);
+        {
+            let stats = node.network_stats.read();
+            assert_eq!(stats.peer_count, 0);
+            assert_eq!(stats.inbound_count, 0);
+            assert_eq!(stats.outbound_count, 0);
+        }
     }
 
     #[test]
@@ -2657,6 +2717,7 @@ mod tests {
         let connect_event = NetworkEvent::PeerConnected {
             peer_id: vec![1, 2, 3],
             addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
+            direction: "outbound".to_string(),
             chain_tip: None,
         };
         node.handle_network_event(

@@ -68,6 +68,7 @@ export function init(root, ctx) {
               <th>Name</th>
               <th>Address</th>
               <th>Country</th>
+              <th>Status</th>
               <th>Direction</th>
               <th>Ban Score</th>
             </tr>
@@ -155,9 +156,15 @@ export function init(root, ctx) {
 
   function renderPeerTable(peers) {
     peersTbody.innerHTML = '';
-    for (const peer of peers) {
+    // Sort: connected first, then disconnected
+    const sorted = [...peers].sort((a, b) => {
+      if (a.status === b.status) return 0;
+      return a.status === 'connected' ? -1 : 1;
+    });
+    for (const peer of sorted) {
       const tr = document.createElement('tr');
-      const dirClass = peer.direction === 'Inbound' ? 'inbound' : 'outbound';
+      const dir = peer.direction || 'none';
+      const dirClass = dir === 'inbound' ? 'inbound' : dir === 'outbound' ? 'outbound' : '';
       const name = peer.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
       const addr = peer.addr
         ? `<span class="mono" style="font-size:var(--font-size-xs)">${peer.addr}</span>`
@@ -168,14 +175,20 @@ export function init(root, ctx) {
       const banTitle = peer.last_ban_reason
         ? ` title="${peer.last_ban_reason.category}: ${peer.last_ban_reason.subject || ''}"`
         : '';
+      const isConnected = peer.status === 'connected';
+      const statusBadge = isConnected
+        ? '<span style="display:inline-block;padding:2px 8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);font-weight:600;background:rgba(16,185,129,0.15);color:var(--success)">Connected</span>'
+        : '<span style="display:inline-block;padding:2px 8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);font-weight:600;background:var(--bg-tertiary);color:var(--text-muted)">Disconnected</span>';
       tr.innerHTML = `
         <td class="mono">${truncateHash(peer.peer_id, 8)} <button class="btn-copy" data-copy="${peer.peer_id}" title="Copy peer ID">&#128203;</button></td>
         <td>${name}</td>
         <td>${addr}</td>
         <td>${country}</td>
-        <td><span class="badge ${dirClass}">${peer.direction}</span></td>
+        <td>${statusBadge}</td>
+        <td><span class="badge ${dirClass}">${dir}</span></td>
         <td style="color:${banScoreColor};font-weight:600"${banTitle}>${banScore}</td>
       `;
+      if (!isConnected) tr.style.opacity = '0.6';
       peersTbody.appendChild(tr);
     }
   }

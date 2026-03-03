@@ -204,6 +204,8 @@ pub enum NetworkEvent {
     PeerConnected {
         peer_id: Vec<u8>,
         addr: String,
+        /// Connection direction: "inbound" or "outbound".
+        direction: String,
         chain_tip: Option<(u64, [u8; 32])>,
     },
     /// A peer disconnected.

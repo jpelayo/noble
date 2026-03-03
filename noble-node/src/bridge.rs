@@ -269,6 +269,7 @@ mod tests {
         let event = NetworkEvent::PeerConnected {
             peer_id: vec![1],
             addr: "/ip4/1.2.3.4/tcp/8780".to_string(),
+            direction: "inbound".to_string(),
             chain_tip: None,
         };
         assert!(network_event_to_cycle_event(&event).is_none());

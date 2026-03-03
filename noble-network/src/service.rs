@@ -526,10 +526,15 @@ async fn handle_swarm_event(
                     }
                 }
 
+                let dir_str = match direction {
+                    Direction::Inbound => "inbound",
+                    Direction::Outbound => "outbound",
+                };
                 if event_tx
                     .try_send(NetworkEvent::PeerConnected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr,
+                        direction: dir_str.to_string(),
                         chain_tip: None,
                     })
                     .is_err()
