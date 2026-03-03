@@ -635,6 +635,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             compression,
             pruning_mode: pruning_mode.clone(),
             keep_blocks,
+            max_db_size_gb: 0,
         },
         security: SecurityConfig {
             encryption_mode: encryption_mode.clone(),

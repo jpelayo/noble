@@ -97,6 +97,12 @@ enum Commands {
         action: AllowIpsCommand,
     },
 
+    /// View and manage storage configuration on a running node.
+    Storage {
+        #[command(subcommand)]
+        action: StorageCommand,
+    },
+
     /// Delete blockchain data (RocksDB) while preserving keys and identity.
     ResetChain {
         /// Path to the data directory.
@@ -264,6 +270,35 @@ enum PeerCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// Show storage stats (DB size, disk usage, column families).
+    Info {
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+    /// Show current storage configuration.
+    Config {
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update a storage config value (writes to noble.toml, restart required).
+    Set {
+        /// Config key (data_dir, cache_size_mb, compression, pruning_mode, keep_blocks, max_db_size_gb).
+        key: String,
+        /// New value.
+        value: String,
+        /// JSON-RPC URL of the running node.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
+    },
+}
+
 #[derive(Clone, ValueEnum)]
 enum Network {
     Mainnet,
@@ -297,6 +332,7 @@ fn main() {
         Commands::Security { action } => cmd_security(action),
         Commands::Peer { action } => cmd_peer(action),
         Commands::AllowIps { action } => cmd_allow_ips(action),
+        Commands::Storage { action } => cmd_storage(action),
         Commands::ResetChain {
             data_dir,
             confirm,
@@ -737,8 +773,13 @@ fn cmd_wallet(action: WalletCommand) {
                             .unwrap_or("Key deleted.");
                         println!("{msg}");
                     }
-                    Err(_rpc_err) => {
-                        // RPC failed — fall back to offline auto-discovery
+                    Err(rpc_err) if rpc_err.starts_with("RPC error:") => {
+                        // Node is reachable but returned an error — show it
+                        eprintln!("Error: {rpc_err}");
+                        std::process::exit(1);
+                    }
+                    Err(_conn_err) => {
+                        // Connection failed — fall back to offline auto-discovery
                         if let Some((data_dir, ks_path)) = resolve_wallet_paths(None) {
                             let passphrase = derive_wallet_passphrase(&data_dir);
                             let mut ks = noble_wallet::KeyStore::new(&ks_path)
@@ -780,8 +821,12 @@ fn cmd_wallet(action: WalletCommand) {
                 // Try online (RPC) first
                 match rpc_call(&rpc_url, "noble_listAddresses", serde_json::json!({})) {
                     Ok(result) => print_key_list_online(&result, json),
-                    Err(_rpc_err) => {
-                        // Fall back to offline auto-discovery
+                    Err(rpc_err) if rpc_err.starts_with("RPC error:") => {
+                        eprintln!("Error: {rpc_err}");
+                        std::process::exit(1);
+                    }
+                    Err(_conn_err) => {
+                        // Connection failed — fall back to offline auto-discovery
                         if let Some((_data_dir, ks_path)) = resolve_wallet_paths(None) {
                             let ks_path_str = ks_path.display().to_string();
                             let ks = noble_wallet::KeyStore::new(&ks_path)
@@ -1328,6 +1373,133 @@ fn print_allow_list(rpc_url: &str) {
                 println!("No allowed CIDRs configured (localhost-only).");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// storage
+// ---------------------------------------------------------------------------
+
+fn cmd_storage(action: StorageCommand) {
+    match action {
+        StorageCommand::Info { rpc_url } => {
+            match rpc_call(&rpc_url, "noble_getStorageStats", serde_json::json!({})) {
+                Ok(result) => {
+                    let data_dir = result.get("data_dir").and_then(|v| v.as_str()).unwrap_or("N/A");
+                    let db_bytes = result.get("total_db_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let avail = result.get("available_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let total_vol = result.get("total_volume_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let cache = result.get("cache_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let compress = result.get("compression_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let max_db = result.get("max_db_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    println!("=== Storage Stats ===");
+                    println!("{:<20} {}", "Data Directory:", data_dir);
+                    println!("{:<20} {}", "DB Size:", format_bytes(db_bytes));
+                    println!("{:<20} {}", "Disk Free:", format_bytes(avail));
+                    println!("{:<20} {}", "Disk Total:", format_bytes(total_vol));
+                    println!("{:<20} {} MB", "Cache:", cache / (1024 * 1024));
+                    println!("{:<20} {}", "Compression:", if compress { "Zstd" } else { "None" });
+                    if max_db > 0 {
+                        println!("{:<20} {} GB", "Max DB Size:", max_db / (1024 * 1024 * 1024));
+                    } else {
+                        println!("{:<20} Unlimited", "Max DB Size:");
+                    }
+
+                    // Column families
+                    if let Some(cfs) = result.get("column_families").and_then(|v| v.as_array()) {
+                        if !cfs.is_empty() {
+                            println!();
+                            println!("Column Families:");
+                            println!("  {:<24} {:>12} {:>12}", "Name", "Est. Size", "Est. Keys");
+                            println!("  {}", "-".repeat(50));
+                            for cf in cfs {
+                                let name = cf.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                let bytes = cf.get("estimated_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let keys = cf.get("estimated_keys").and_then(|v| v.as_u64()).unwrap_or(0);
+                                println!("  {:<24} {:>12} {:>12}", name, format_bytes(bytes), keys);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        StorageCommand::Config { rpc_url, json } => {
+            match rpc_call(&rpc_url, "noble_getStorageConfig", serde_json::json!({})) {
+                Ok(result) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                    } else {
+                        let data_dir = result.get("data_dir").and_then(|v| v.as_str()).unwrap_or("N/A");
+                        let cache = result.get("cache_size_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let compress = result.get("compression").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let pruning = result.get("pruning_mode").and_then(|v| v.as_str()).unwrap_or("N/A");
+                        let keep = result.get("keep_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let max_gb = result.get("max_db_size_gb").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                        println!("=== Storage Configuration ===");
+                        println!("{:<20} {}", "Data Directory:", data_dir);
+                        println!("{:<20} {} MB", "Cache Size:", cache);
+                        println!("{:<20} {}", "Compression:", if compress { "enabled" } else { "disabled" });
+                        println!("{:<20} {}", "Pruning Mode:", pruning);
+                        println!("{:<20} {}", "Keep Blocks:", if keep == 0 { "all (archive)".to_string() } else { keep.to_string() });
+                        println!("{:<20} {}", "Max DB Size:", if max_gb == 0 { "unlimited".to_string() } else { format!("{max_gb} GB") });
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        StorageCommand::Set { key, value, rpc_url } => {
+            let valid_keys = ["data_dir", "cache_size_mb", "compression", "pruning_mode", "keep_blocks", "max_db_size_gb"];
+            if !valid_keys.contains(&key.as_str()) {
+                eprintln!("Error: unknown storage config key '{key}'");
+                eprintln!("Valid keys: {}", valid_keys.join(", "));
+                std::process::exit(1);
+            }
+            let params = serde_json::json!({
+                "section": "storage",
+                "key": key,
+                "value": value,
+            });
+            match rpc_call(&rpc_url, "noble_setConfigValue", params) {
+                Ok(result) => {
+                    let restart = result.get("restart_required").and_then(|v| v.as_bool()).unwrap_or(true);
+                    println!("Updated storage.{key} = {value}");
+                    if restart {
+                        println!("Restart the node for the change to take effect.");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut val = bytes as f64;
+    let mut idx = 0;
+    while val >= 1024.0 && idx < units.len() - 1 {
+        val /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{val:.2} {}", units[idx])
     }
 }
 

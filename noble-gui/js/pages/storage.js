@@ -389,16 +389,22 @@ export function init(root, ctx) {
     const cache = stats.cache_size_bytes || 0;
     const cacheMb = cache / (1024 * 1024);
     const compress = stats.compression_enabled;
+    const maxDbBytes = stats.max_db_size_bytes || 0;
+    const maxDbGb = maxDbBytes / (1024 * 1024 * 1024);
 
     // Bar 1: Disk usage vs total disk space (how full is the volume)
     const diskPct = total > 0 ? (diskUsed / total * 100) : 0;
     const diskColor = usageColor(diskPct);
 
-    // Bar 2: Noble DB vs free disk (how much of the remaining free space Noble occupies)
-    const nobleVsFreeColor = '#3b82f6'; // blue
+    // Bar 2: Noble DB vs Allocated (purple) when limit set, otherwise Noble DB vs Free Disk (blue)
+    const hasAllocated = maxDbBytes > 0;
+    const bar2Label = hasAllocated ? 'Noble DB vs Allocated' : 'Noble DB vs Free Disk';
+    const bar2Filled = db;
+    const bar2Capacity = hasAllocated ? maxDbBytes : avail;
+    const bar2Color = hasAllocated ? '#8b5cf6' : '#3b82f6';
 
-    // Bar 3: Noble DB vs allocated cache
-    const nobleVsCacheColor = '#8b5cf6'; // purple
+    // Allocated badge text
+    const allocBadge = hasAllocated ? `Allocated: ${maxDbGb.toFixed(0)} GB` : 'Unlimited';
 
     dataDirBody.innerHTML = `
       <div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap)">
@@ -407,11 +413,11 @@ export function init(root, ctx) {
           style="padding:2px 10px;font-size:var(--font-size-xs);white-space:nowrap">Copy</button>
       </div>
       ${total > 0 ? usageBar('Disk Usage', diskUsed, total, diskColor) : ''}
-      ${avail > 0 ? usageBar('Noble DB vs Free Disk', db, avail, nobleVsFreeColor) : ''}
-      ${cache > 0 ? usageBar('Noble DB vs Cache', db, cache, nobleVsCacheColor) : ''}
+      ${bar2Capacity > 0 ? usageBar(bar2Label, bar2Filled, bar2Capacity, bar2Color) : ''}
       <div style="display:flex;justify-content:flex-end;gap:var(--gap-sm);margin-top:4px">
         <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)">Cache: ${cacheMb.toFixed(0)} MB</span>
         <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${compress ? 'var(--success)' : 'var(--text-muted)'}">${compress ? 'Zstd On' : 'No Compression'}</span>
+        <span style="font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:var(--bg-tertiary);color:${hasAllocated ? '#8b5cf6' : 'var(--text-muted)'}">${allocBadge}</span>
       </div>
     `;
   }

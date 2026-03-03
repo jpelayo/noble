@@ -112,6 +112,9 @@ pub struct StorageConfig {
     /// Number of blocks to keep when pruning. 0 = archive (keep all).
     #[serde(default = "default_keep_blocks")]
     pub keep_blocks: u64,
+    /// Maximum database size in GB. 0 = unlimited.
+    #[serde(default)]
+    pub max_db_size_gb: u64,
 }
 
 fn default_pruning_mode() -> String {
@@ -495,6 +498,7 @@ impl Default for StorageConfig {
             compression: true,
             pruning_mode: default_pruning_mode(),
             keep_blocks: default_keep_blocks(),
+            max_db_size_gb: 0,
         }
     }
 }

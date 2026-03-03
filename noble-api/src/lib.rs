@@ -26,7 +26,7 @@ pub use state::{ApiState, NetworkStats, NodeIdentityData};
 pub const API_VERSION: &str = "1.0";
 
 /// Number of registered RPC methods (excluding subscriptions).
-pub const API_METHOD_COUNT: u32 = 61;
+pub const API_METHOD_COUNT: u32 = 63;
 
 #[cfg(test)]
 mod tests {
@@ -44,6 +44,6 @@ mod tests {
     #[test]
     fn api_method_count_is_reasonable() {
         // We have 60 RPC methods registered; guard against accidental reset.
-        assert!(API_METHOD_COUNT >= 61, "expected at least 61 RPC methods");
+        assert!(API_METHOD_COUNT >= 63, "expected at least 63 RPC methods");
     }
 }

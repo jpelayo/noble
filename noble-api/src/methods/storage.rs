@@ -27,6 +27,22 @@ pub trait StorageApi {
     /// Get detailed storage statistics: disk usage, column family breakdown, config.
     #[method(name = "getStorageStats")]
     async fn get_storage_stats(&self) -> Result<StorageStatsResponse, ErrorObjectOwned>;
+
+    /// Get the current storage configuration values.
+    #[method(name = "getStorageConfig")]
+    async fn get_storage_config(&self) -> Result<StorageConfigResponse, ErrorObjectOwned>;
+
+    /// Update storage configuration (writes to noble.toml, restart required).
+    #[method(name = "setStorageConfig")]
+    async fn set_storage_config(
+        &self,
+        data_dir: String,
+        cache_size_mb: u32,
+        compression: bool,
+        pruning_mode: String,
+        keep_blocks: u64,
+        max_db_size_gb: u64,
+    ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -108,6 +124,58 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
             cache_size_bytes: u64::from(self.cache_size_mb) * 1024 * 1024,
             compression_enabled: self.compression_enabled,
             column_families,
+            max_db_size_bytes: self.max_db_size_gb * 1024 * 1024 * 1024,
+        })
+    }
+
+    async fn get_storage_config(&self) -> Result<StorageConfigResponse, ErrorObjectOwned> {
+        let data_dir = self
+            .data_dir
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+
+        Ok(StorageConfigResponse {
+            data_dir,
+            cache_size_mb: self.cache_size_mb,
+            compression: self.compression_enabled,
+            pruning_mode: self.pruning_mode.clone(),
+            keep_blocks: self.keep_blocks,
+            max_db_size_gb: self.max_db_size_gb,
+        })
+    }
+
+    async fn set_storage_config(
+        &self,
+        data_dir: String,
+        cache_size_mb: u32,
+        compression: bool,
+        pruning_mode: String,
+        keep_blocks: u64,
+        max_db_size_gb: u64,
+    ) -> Result<SetConfigValueResponse, ErrorObjectOwned> {
+        let set_fn = self
+            .set_config_value
+            .as_ref()
+            .ok_or_else(|| ApiError::Internal("config updates not available".into()))?;
+
+        let fields: &[(&str, String)] = &[
+            ("data_dir", data_dir),
+            ("cache_size_mb", cache_size_mb.to_string()),
+            ("compression", compression.to_string()),
+            ("pruning_mode", pruning_mode),
+            ("keep_blocks", keep_blocks.to_string()),
+            ("max_db_size_gb", max_db_size_gb.to_string()),
+        ];
+
+        for (key, value) in fields {
+            set_fn("storage", key, value)
+                .map_err(|e| ApiError::Internal(format!("failed to set storage.{key}: {e}")))?;
+        }
+
+        Ok(SetConfigValueResponse {
+            success: true,
+            restart_required: true,
         })
     }
 }

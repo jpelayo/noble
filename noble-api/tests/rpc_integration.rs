@@ -155,6 +155,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         announce_trigger: tokio::sync::mpsc::channel(4).0,
         cache_size_mb: 64,
         compression_enabled: true,
+        max_db_size_gb: 0,
     });
 
     (state, dir)

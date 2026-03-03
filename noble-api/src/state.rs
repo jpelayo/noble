@@ -269,4 +269,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Whether Zstd compression is enabled on the blocks CF (from `[storage] compression`).
     pub compression_enabled: bool,
+
+    /// Maximum database size in GB (from `[storage] max_db_size_gb`). 0 = unlimited.
+    pub max_db_size_gb: u64,
 }

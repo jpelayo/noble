@@ -842,6 +842,19 @@ pub struct StorageStatsResponse {
     pub cache_size_bytes: u64,
     pub compression_enabled: bool,
     pub column_families: Vec<CfStatsEntry>,
+    /// Maximum database size in bytes. 0 = unlimited.
+    pub max_db_size_bytes: u64,
+}
+
+/// Response for `noble_getStorageConfig`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageConfigResponse {
+    pub data_dir: String,
+    pub cache_size_mb: u32,
+    pub compression: bool,
+    pub pruning_mode: String,
+    pub keep_blocks: u64,
+    pub max_db_size_gb: u64,
 }
 
 /// Response for `noble_getSetupStatus`.

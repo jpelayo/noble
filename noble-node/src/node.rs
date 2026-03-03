@@ -1071,6 +1071,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_trigger: announce_trigger_tx,
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
+            max_db_size_gb: config.storage.max_db_size_gb,
         });
 
         // --- Determine RPC bind address ---
