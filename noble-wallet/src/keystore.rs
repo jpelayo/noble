@@ -215,7 +215,7 @@ impl KeyStore {
     pub fn delete_key(
         &mut self,
         pubkey: &NoblePublicKey,
-        passphrase: &str,
+        _passphrase: &str,
     ) -> Result<(), WalletError> {
         let file_path = self.key_file_path(pubkey);
         if !file_path.exists() {
@@ -224,12 +224,8 @@ impl KeyStore {
             )));
         }
 
-        // Verify passphrase by attempting to decrypt.
-        let json = fs::read_to_string(&file_path)?;
-        let encrypted: EncryptedKeyFile = serde_json::from_str(&json)?;
-        let _secret = decrypt_key(&encrypted, passphrase)?;
-
-        // Remove file.
+        // Remove file (no passphrase verification — deletion is protected
+        // by TOTP auth and the gateway-key guard upstream).
         fs::remove_file(&file_path)?;
 
         // Remove from unlocked keys if present.
