@@ -156,6 +156,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         cache_size_mb: 64,
         compression_enabled: true,
         max_db_size_gb: 0,
+        network_name: "mainnet".to_string(),
+        genesis_hash: hex::encode(noble_core::genesis_hash().as_bytes()),
     });
 
     (state, dir)

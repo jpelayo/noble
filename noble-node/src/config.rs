@@ -78,6 +78,24 @@ impl NetworkId {
             Self::Regtest => noble_core::regtest_genesis_block(),
         }
     }
+
+    /// Compute the genesis block hash for this network.
+    pub fn genesis_hash(self) -> noble_crypto::Hash256 {
+        match self {
+            Self::Mainnet => noble_core::genesis_hash(),
+            Self::Testnet => noble_core::testnet_genesis_hash(),
+            Self::Regtest => noble_core::regtest_genesis_hash(),
+        }
+    }
+
+    /// Return the network name as a lowercase string.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Regtest => "regtest",
+        }
+    }
 }
 
 /// `[node]` section — operational mode and network selection.
@@ -144,6 +162,12 @@ pub struct ConsensusConfig {
     /// For subset_rotation strategy: hex pubkeys of preferred validators.
     #[serde(default)]
     pub voting_subset: Vec<String>,
+    /// Minimum validators required for consensus participation (default: 2).
+    #[serde(default = "default_min_peers_for_consensus")]
+    pub min_peers_for_consensus: usize,
+    /// Consensus cycle duration in seconds (default: 1800 = 30 min).
+    #[serde(default = "default_cycle_duration_secs")]
+    pub cycle_duration_secs: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -152,6 +176,14 @@ fn default_voting_strategy() -> String {
 
 fn default_confirmation_strategy() -> String {
     "follow_majority".to_string()
+}
+
+fn default_min_peers_for_consensus() -> usize {
+    2
+}
+
+fn default_cycle_duration_secs() -> u64 {
+    noble_core::CYCLE_DURATION_SECS
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -512,6 +544,8 @@ impl Default for ConsensusConfig {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
+            min_peers_for_consensus: default_min_peers_for_consensus(),
+            cycle_duration_secs: default_cycle_duration_secs(),
         }
     }
 }
@@ -597,6 +631,8 @@ mod tests {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
+            min_peers_for_consensus: default_min_peers_for_consensus(),
+            cycle_duration_secs: default_cycle_duration_secs(),
         };
         let debug_str = format!("{config:?}");
         assert!(

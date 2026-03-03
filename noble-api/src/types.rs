@@ -434,6 +434,10 @@ pub struct NodeInfoResponse {
     pub software_version: String,
     pub protocol_version: u16,
     pub chain_id: u32,
+    /// Network name: "mainnet", "testnet", or "regtest".
+    pub network_name: String,
+    /// Hex-encoded genesis block hash for chain identity.
+    pub genesis_hash: String,
     pub uptime_secs: u64,
     pub rpc_port: u16,
     pub ws_port: u16,

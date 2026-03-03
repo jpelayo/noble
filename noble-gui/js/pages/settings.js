@@ -57,6 +57,8 @@ export function init(root, ctx) {
           <dt>Auth Mode</dt>
           <dd id="s-auth-mode">--</dd>
         </dl>
+        <!-- Enable TOTP (shown only when TOTP is NOT active) -->
+        <div id="s-totp-enable-section" style="display:none;margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)"></div>
         <!-- TOTP Rotation (shown only when TOTP is active) -->
         <div id="s-totp-rotate-section" style="display:none;margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
           <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Rotate TOTP Secret</p>
@@ -119,13 +121,14 @@ export function init(root, ctx) {
       </div>
       <div class="panel-body">
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
-          Keys stored in the wallet keystore. Deleting a key requires your wallet passphrase.
+          Keys stored in the wallet keystore. Back up your mnemonic before replacing a key.
         </p>
         <div id="s-wk-list" style="margin-bottom:var(--gap)"></div>
         <div id="s-wk-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
         <div id="s-wk-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:none"></div>
       </div>
     </div>
+    <div id="s-wk-modal"></div>
 
     <!-- Seed Nodes -->
     <div class="panel">
@@ -317,6 +320,7 @@ export function init(root, ctx) {
   const wkListEl = root.querySelector('#s-wk-list');
   const wkError = root.querySelector('#s-wk-error');
   const wkMsg = root.querySelector('#s-wk-msg');
+  const wkModal = root.querySelector('#s-wk-modal');
 
   // Seed node refs
   const seedBadge = root.querySelector('#s-seed-badge');
@@ -845,6 +849,136 @@ export function init(root, ctx) {
     }
   }
 
+  function showKeyManageModal(pubkey, scheme) {
+    const short = pubkey.slice(0, 8) + '...' + pubkey.slice(-8);
+    wkModal.innerHTML = `
+      <div class="modal-overlay" id="s-wk-overlay" style="position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center">
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:520px;width:92%;max-height:85vh;overflow-y:auto">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--gap);border-bottom:1px solid var(--border)">
+            <span style="font-weight:700">Manage Wallet Key</span>
+            <button id="s-wk-modal-close" style="background:none;border:none;cursor:pointer;font-size:1.2em;color:var(--text-muted)">&times;</button>
+          </div>
+          <div style="padding:var(--gap)">
+            <div style="margin-bottom:var(--gap);padding:8px 12px;background:var(--bg-tertiary);border-radius:var(--radius-sm)">
+              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Current Key</div>
+              <code style="font-size:var(--font-size-sm)">${short}</code>
+              <span class="badge" style="font-size:10px;padding:1px 6px;margin-left:6px">${scheme}</span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:var(--gap)">
+              <!-- Regenerate -->
+              <div style="padding:var(--gap);border:1px solid var(--border);border-radius:var(--radius-sm)">
+                <div style="font-weight:600;margin-bottom:var(--gap-xs)">Regenerate Key</div>
+                <p style="font-size:var(--font-size-xs);color:var(--text-secondary);margin:0 0 var(--gap-sm)">
+                  Generate a new random key, replacing the current one. The old key is permanently deleted.
+                  <strong style="color:var(--error)">Any balance on the old address will become inaccessible.</strong>
+                </p>
+                <button id="s-wk-regenerate" class="btn btn-sm" style="background:var(--warning);color:#000;border:none">Regenerate New Key</button>
+              </div>
+
+              <!-- Replace via mnemonic -->
+              <div style="padding:var(--gap);border:1px solid var(--border);border-radius:var(--radius-sm)">
+                <div style="font-weight:600;margin-bottom:var(--gap-xs)">Replace from Mnemonic</div>
+                <p style="font-size:var(--font-size-xs);color:var(--text-secondary);margin:0 0 var(--gap-sm)">
+                  Import a mnemonic seed phrase (BIP-39) to replace the current key. Use this to restore a backup.
+                </p>
+                <div style="margin-bottom:var(--gap-sm)">
+                  <textarea id="s-wk-mnemonic" rows="2" placeholder="Enter 12 or 24 mnemonic words separated by spaces"
+                    style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-xs);resize:vertical"
+                    spellcheck="false" autocomplete="off"></textarea>
+                </div>
+                <button id="s-wk-import" class="btn btn-sm">Replace with Mnemonic</button>
+              </div>
+            </div>
+
+            <div id="s-wk-modal-msg" style="margin-top:var(--gap);font-size:var(--font-size-xs);display:none"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const overlay = wkModal.querySelector('#s-wk-overlay');
+    const modalMsg = wkModal.querySelector('#s-wk-modal-msg');
+    function closeModal() { wkModal.innerHTML = ''; }
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+    wkModal.querySelector('#s-wk-modal-close').addEventListener('click', closeModal);
+
+    function showMsg(text, color) {
+      modalMsg.textContent = text;
+      modalMsg.style.color = color;
+      modalMsg.style.display = 'block';
+    }
+
+    // Regenerate: delete old key, generate new one
+    wkModal.querySelector('#s-wk-regenerate').addEventListener('click', async () => {
+      const btn = wkModal.querySelector('#s-wk-regenerate');
+      if (!btn.dataset.confirmed) {
+        btn.textContent = 'Are you sure? Click again to confirm';
+        btn.style.background = 'var(--error)';
+        btn.style.color = '#fff';
+        btn.dataset.confirmed = '1';
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Regenerating...';
+      try {
+        // Delete old key first
+        await rpc.call('noble_deleteAddress', { pubkey_hex: pubkey });
+        // Generate new mnemonic key
+        const result = await rpc.call('noble_generateMnemonic', { scheme: 'secp256k1' });
+        showMsg('New key generated. SAVE YOUR MNEMONIC: ' + result.mnemonic, 'var(--success)');
+        // Keep modal open so user can copy the mnemonic
+        btn.textContent = 'Done';
+        loadWalletKeys();
+      } catch (e) {
+        showMsg('Error: ' + (e.message || e), 'var(--error)');
+        btn.disabled = false;
+        btn.textContent = 'Regenerate New Key';
+        delete btn.dataset.confirmed;
+        btn.style.background = 'var(--warning)';
+        btn.style.color = '#000';
+      }
+    });
+
+    // Import mnemonic: delete old key, import from mnemonic
+    wkModal.querySelector('#s-wk-import').addEventListener('click', async () => {
+      const btn = wkModal.querySelector('#s-wk-import');
+      const mnemonic = wkModal.querySelector('#s-wk-mnemonic').value.trim();
+      if (!mnemonic) {
+        showMsg('Enter a mnemonic phrase.', 'var(--error)');
+        return;
+      }
+      const words = mnemonic.split(/\s+/);
+      if (words.length !== 12 && words.length !== 24) {
+        showMsg('Mnemonic must be 12 or 24 words.', 'var(--error)');
+        return;
+      }
+      if (!btn.dataset.confirmed) {
+        btn.textContent = 'This will replace the current key. Click again.';
+        btn.style.background = 'var(--warning)';
+        btn.style.color = '#000';
+        btn.dataset.confirmed = '1';
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Replacing...';
+      try {
+        await rpc.call('noble_deleteAddress', { pubkey_hex: pubkey });
+        const result = await rpc.call('noble_importMnemonic', { mnemonic, scheme: 'secp256k1' });
+        showMsg('Key replaced successfully. New address: ' + result.address, 'var(--success)');
+        btn.textContent = 'Done';
+        loadWalletKeys();
+      } catch (e) {
+        showMsg('Error: ' + (e.message || e), 'var(--error)');
+        btn.disabled = false;
+        btn.textContent = 'Replace with Mnemonic';
+        delete btn.dataset.confirmed;
+        btn.style.background = '';
+        btn.style.color = '';
+      }
+    });
+  }
+
   // Load data
   async function loadWalletKeys() {
     try {
@@ -871,31 +1005,15 @@ export function init(root, ctx) {
               <code style="font-size:var(--font-size-xs)" title="${k.pubkey_hex}">${short}</code>
               ${btcAddr ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${btcAddr.address}</div>` : ''}
             </div>
-            <button class="wk-delete" data-pubkey="${k.pubkey_hex}" style="background:none;border:1px solid var(--error);color:var(--error);cursor:pointer;font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);white-space:nowrap" title="Delete key">Delete</button>
+            <button class="wk-manage" data-pubkey="${k.pubkey_hex}" data-scheme="${k.scheme}" style="background:none;border:1px solid var(--border);color:var(--text-primary);cursor:pointer;font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);white-space:nowrap" title="Manage key">Manage</button>
           </div>`;
       }).join('');
 
-      wkListEl.querySelectorAll('.wk-delete').forEach(btn => {
-        btn.addEventListener('click', async () => {
+      wkListEl.querySelectorAll('.wk-manage').forEach(btn => {
+        btn.addEventListener('click', () => {
           const pubkey = btn.dataset.pubkey;
-          const pw = prompt('Enter wallet passphrase to confirm deletion:');
-          if (!pw) return;
-          btn.disabled = true;
-          btn.textContent = '...';
-          wkError.style.display = 'none';
-          try {
-            const resp = await rpc.call('noble_deleteAddress', { pubkey_hex: pubkey, passphrase: pw });
-            wkMsg.textContent = resp.message || 'Key deleted.';
-            wkMsg.style.color = 'var(--success)';
-            wkMsg.style.display = 'block';
-            setTimeout(() => { wkMsg.style.display = 'none'; }, 4000);
-            loadWalletKeys();
-          } catch (e) {
-            wkError.textContent = e.message || 'Delete failed';
-            wkError.style.display = 'block';
-            btn.disabled = false;
-            btn.textContent = 'Delete';
-          }
+          const scheme = btn.dataset.scheme;
+          showKeyManageModal(pubkey, scheme);
         });
       });
     } catch (e) {
@@ -930,46 +1048,45 @@ export function init(root, ctx) {
         totpStatus.textContent = totpInfo.enabled ? 'Enabled' : 'Not configured';
         totpStatus.style.color = totpInfo.enabled ? 'var(--success)' : 'var(--text-muted)';
         authMode.textContent = totpInfo.enabled ? `TOTP (scope: ${totpInfo.scope})` : 'None';
+        const totpEnableSection = root.querySelector('#s-totp-enable-section');
         if (totpInfo.enabled) {
           totpRotateSection.style.display = 'block';
+          totpEnableSection.style.display = 'none';
+          totpEnableSection.innerHTML = '';
         } else {
-          // Show Enable TOTP button
-          const authGrid = root.querySelector('#s-auth-info');
-          if (authGrid) {
-            const enableDiv = document.createElement('div');
-            enableDiv.style.cssText = 'grid-column:1/-1;margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)';
-            enableDiv.innerHTML = `
-              <button id="s-enable-totp-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Enable TOTP</button>
-              <span id="s-enable-totp-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
-              <div id="s-enable-totp-result" style="display:none;margin-top:var(--gap-sm);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)"></div>
-            `;
-            authGrid.after(enableDiv);
-            enableDiv.querySelector('#s-enable-totp-btn').addEventListener('click', async function() {
-              this.disabled = true;
-              const msg = enableDiv.querySelector('#s-enable-totp-msg');
-              const result = enableDiv.querySelector('#s-enable-totp-result');
-              msg.textContent = 'Enabling...';
-              try {
-                const resp = await rpc.call('noble_enableTotp');
-                result.style.display = 'block';
-                result.style.color = 'var(--success)';
-                result.innerHTML = `
-                  <p style="margin:0 0 var(--gap-xs);font-weight:600">TOTP Enabled — save this secret now:</p>
-                  <p style="margin:0 0 var(--gap-xs)"><strong>Base32:</strong> <code>${resp.secret_base32}</code></p>
-                  <p style="margin:0;word-break:break-all"><strong>otpauth:</strong> <code style="font-size:10px">${resp.otpauth_uri}</code></p>
-                `;
-                msg.textContent = '';
-                this.style.display = 'none';
-                totpStatus.textContent = 'Enabled';
-                totpStatus.style.color = 'var(--success)';
-                authMode.textContent = 'TOTP (scope: all)';
-              } catch (e) {
-                msg.textContent = e.message || 'Failed';
-                msg.style.color = 'var(--error)';
-                this.disabled = false;
-              }
-            });
-          }
+          totpRotateSection.style.display = 'none';
+          // Populate the stable enable container (cleared first to avoid duplicates)
+          totpEnableSection.innerHTML = `
+            <button id="s-enable-totp-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Enable TOTP</button>
+            <span id="s-enable-totp-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+            <div id="s-enable-totp-result" style="display:none;margin-top:var(--gap-sm);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)"></div>
+          `;
+          totpEnableSection.style.display = 'block';
+          totpEnableSection.querySelector('#s-enable-totp-btn').addEventListener('click', async function() {
+            this.disabled = true;
+            const msg = totpEnableSection.querySelector('#s-enable-totp-msg');
+            const result = totpEnableSection.querySelector('#s-enable-totp-result');
+            msg.textContent = 'Enabling...';
+            try {
+              const resp = await rpc.call('noble_enableTotp');
+              result.style.display = 'block';
+              result.style.color = 'var(--success)';
+              result.innerHTML = `
+                <p style="margin:0 0 var(--gap-xs);font-weight:600">TOTP Enabled — save this secret now:</p>
+                <p style="margin:0 0 var(--gap-xs)"><strong>Base32:</strong> <code>${resp.secret_base32}</code></p>
+                <p style="margin:0;word-break:break-all"><strong>otpauth:</strong> <code style="font-size:10px">${resp.otpauth_uri}</code></p>
+              `;
+              msg.textContent = '';
+              this.style.display = 'none';
+              totpStatus.textContent = 'Enabled';
+              totpStatus.style.color = 'var(--success)';
+              authMode.textContent = 'TOTP (scope: all)';
+            } catch (e) {
+              msg.textContent = e.message || 'Failed';
+              msg.style.color = 'var(--error)';
+              this.disabled = false;
+            }
+          });
         }
       } catch {
         const hasAuth = rpc.hasAuthToken ? rpc.hasAuthToken() : false;

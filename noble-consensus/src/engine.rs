@@ -103,7 +103,7 @@ impl CycleEngine {
             tip_timestamp: 0,
             tip_header: None,
             tracked_cycle: 0,
-            tracked_phase: CyclePhase::Validation,
+            tracked_phase: CyclePhase::Reflection,
             chain_id,
             our_validator_key: validator_key,
             total_peers: 0,
@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     fn cycle_boundary_insufficient_peers_indeterminate() {
         let (vp, vpub) = make_validator();
-        let mut engine = make_engine(None, &[vpub.clone()], 2); // < 3 min_peers
+        let mut engine = make_engine(None, &[vpub.clone()], 1); // < 2 min_peers
 
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.tracked_phase = CyclePhase::Validation;

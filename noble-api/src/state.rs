@@ -272,4 +272,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Maximum database size in GB (from `[storage] max_db_size_gb`). 0 = unlimited.
     pub max_db_size_gb: u64,
+
+    /// Network name: "mainnet", "testnet", or "regtest".
+    pub network_name: String,
+
+    /// Hex-encoded genesis block hash for chain identity.
+    pub genesis_hash: String,
 }

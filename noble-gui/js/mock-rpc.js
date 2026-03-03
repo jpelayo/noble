@@ -961,9 +961,11 @@ export class MockRpcClient {
         const selfKeyHex = selfKeyBytes.map(b => b.toString(16).padStart(2, '0')).join('') || null;
         return {
           version: window.NOBLE_VERSION || '0.0.0',
+          software_version: window.NOBLE_VERSION || '0.0.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
-          network: 'mainnet',
+          network_name: 'mainnet',
+          genesis_hash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
           uptime_secs: 86400 * 3 + 7200 + 1800,
           storage_bytes: 256 * 1024 * 1024,
           storage_capacity_bytes: 1024 * 1024 * 1024,

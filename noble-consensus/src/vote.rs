@@ -497,8 +497,8 @@ mod tests {
 
     #[test]
     fn gap_c6_single_validator_default_config_cannot_commit() {
-        // With default min_peers_for_consensus=3, a sole validator cannot finalize blocks.
-        // 1 connected peer < 3 required → Indeterminate.
+        // With default min_peers_for_consensus=2, a sole validator cannot finalize blocks.
+        // 1 connected peer < 2 required → Indeterminate.
         let mut mgr = VoteManager::new();
         let candidate = hash_n(1);
         let (vote, _) = make_vote(0, candidate);
@@ -506,7 +506,26 @@ mod tests {
         let result = mgr.compute_majority(1, &default_config());
         assert!(
             matches!(result, MigrationResult::Indeterminate),
-            "1 validator should NOT commit with default config (requires 3 peers), got {result:?}"
+            "1 validator should NOT commit with default config (requires 2 peers), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn two_validators_can_commit() {
+        // With default min_peers_for_consensus=2, two validators with 1 vote can commit.
+        // 2 >= 2 min_peers, plurality floor ceil(2/3)=1, 1 vote >= 1 → Adopt(Plurality).
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (vote, _) = make_vote(0, candidate);
+        mgr.record_vote(b"peer1", &vote).unwrap();
+        let result = mgr.compute_majority(2, &default_config());
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: candidate,
+                strength: ConsensusStrength::Plurality,
+            },
+            "2 validators with 1 vote should commit (ceil(2/3)=1, 1>=1)"
         );
     }
 

@@ -246,6 +246,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             software_version: SOFTWARE_VERSION.to_string(),
             protocol_version: PROTOCOL_VERSION,
             chain_id: self.chain_id,
+            network_name: self.network_name.clone(),
+            genesis_hash: self.genesis_hash.clone(),
             uptime_secs: uptime,
             rpc_port: self.rpc_port,
             ws_port: self.ws_port,

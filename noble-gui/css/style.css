@@ -59,6 +59,44 @@ body {
   display: block;
 }
 
+/* Chain identity bar — below logo, above nav links */
+.chain-id-bar {
+  padding: 6px var(--gap);
+  margin-bottom: var(--gap);
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.chain-net-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #fff;
+}
+
+.chain-net-badge.net-mainnet { background: #22a663; }
+.chain-net-badge.net-testnet { background: #e08a1e; }
+.chain-net-badge.net-regtest { background: #d14040; }
+
+.chain-id-details {
+  margin-top: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+.chain-id-hex { opacity: 0.7; }
+.chain-genesis-hash { opacity: 0.5; cursor: help; }
+
 #sidebar ul {
   list-style: none;
   flex: 1;
@@ -705,6 +743,7 @@ body {
   }
 
   .nav-label { display: none; }
+  .chain-id-bar { display: none !important; }
   #theme-toggle { font-size: 0; padding: var(--gap-sm); margin: var(--gap-xs); }
   #theme-toggle::before { content: "T"; font-size: var(--font-size-base); }
   .sidebar-footer { text-align: center; padding: var(--gap-xs); }
@@ -735,6 +774,7 @@ body {
   }
 
   .logo { display: none; }
+  .chain-id-bar { display: none !important; }
 
   #sidebar ul {
     display: flex;

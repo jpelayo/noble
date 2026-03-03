@@ -319,20 +319,50 @@ function showAuthPrompt() {
   input.focus();
 }
 
+// ── Chain identity bar ──
+function populateChainIdentity(nodeInfo) {
+  const bar = document.getElementById('chain-id-bar');
+  if (!bar || !nodeInfo.network_name) return;
+
+  const badge = document.getElementById('chain-net-badge');
+  const idHex = document.getElementById('chain-id-hex');
+  const genesisEl = document.getElementById('chain-genesis-hash');
+
+  const net = nodeInfo.network_name.toLowerCase();
+  badge.textContent = net;
+  badge.className = 'chain-net-badge net-' + net;
+
+  const chainId = nodeInfo.chain_id;
+  idHex.textContent = '0x' + chainId.toString(16).toUpperCase().padStart(8, '0');
+
+  const gh = nodeInfo.genesis_hash || '';
+  if (gh.length > 16) {
+    genesisEl.textContent = gh.slice(0, 8) + '\u2026' + gh.slice(-8);
+    genesisEl.title = gh;
+  } else {
+    genesisEl.textContent = gh;
+  }
+
+  bar.style.display = '';
+}
+
 // ── Fetch initial data ──
 async function bootstrap() {
   try {
-    const [blockCount, mempoolInfo, networkInfo, cycleStatus] = await Promise.all([
+    const [blockCount, mempoolInfo, networkInfo, cycleStatus, nodeInfo] = await Promise.all([
       rpc.call('noble_getBlockCount'),
       rpc.call('noble_getMempoolInfo'),
       rpc.call('noble_getNetworkInfo'),
       rpc.call('noble_getCycleStatus'),
+      rpc.call('noble_getNodeInfo'),
     ]);
 
     state.blockHeight = blockCount.height;
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
     state.cyclePhase = cycleStatus.phase;
+
+    populateChainIdentity(nodeInfo);
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();

@@ -164,7 +164,7 @@ export function init(root, ctx) {
           </div>
         </div>
         <div style="margin-top:var(--gap);display:flex;align-items:center;gap:var(--gap-sm)">
-          <button class="btn btn-sm" id="cs-save-strategy">Save Strategy</button>
+          <button class="btn btn-sm" id="cs-save-strategy">Save Strategies</button>
           <span id="cs-strategy-status" style="font-size:var(--font-size-xs);color:var(--success)"></span>
         </div>
       </div>

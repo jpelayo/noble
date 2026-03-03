@@ -1056,13 +1056,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             data_dir: Some(config.storage.data_dir.clone()),
             pruning_mode: config.storage.pruning_mode.clone(),
             keep_blocks: config.storage.keep_blocks,
-            reward_address: parking_lot::RwLock::new(
-                if config.rewards.reward_address.is_empty() {
-                    None
-                } else {
+            reward_address: parking_lot::RwLock::new({
+                if !config.rewards.reward_address.is_empty() {
                     Some(config.rewards.reward_address.clone())
-                },
-            ),
+                } else {
+                    // Auto-derive from first wallet secp256k1 key's Bitcoin address.
+                    let ks = self.wallet_keystore.lock();
+                    let auto = ks.list_keys().ok().and_then(|keys| {
+                        for pk in keys {
+                            if let noble_crypto::NoblePublicKey::Secp256k1(ref _k) = pk {
+                                let bytes = pk.key_bytes();
+                                if bytes.len() == 33 {
+                                    let compressed: &[u8; 33] = bytes.try_into().unwrap();
+                                    let addr = noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(
+                                        compressed, true,
+                                    );
+                                    return Some(addr);
+                                }
+                            }
+                        }
+                        None
+                    });
+                    if auto.is_some() {
+                        tracing::info!(
+                            task = "config_load",
+                            "Reward address auto-derived from wallet secp256k1 key: {}",
+                            auto.as_deref().unwrap_or(""),
+                        );
+                    }
+                    auto
+                }
+            }),
             enable_totp: enable_totp_closure,
             set_config_value: set_config_value_closure,
             config_path,
@@ -1072,6 +1096,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
             max_db_size_gb: config.storage.max_db_size_gb,
+            network_name: config.node.network.name().to_string(),
+            genesis_hash: hex::encode(config.node.network.genesis_hash().as_bytes()),
         });
 
         // --- Determine RPC bind address ---
@@ -1996,6 +2022,8 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
     CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
+        min_peers_for_consensus: config.consensus.min_peers_for_consensus,
+        cycle_duration_secs: config.consensus.cycle_duration_secs,
         ..CConsensusConfig::default()
     }
 }
