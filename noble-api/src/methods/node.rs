@@ -459,6 +459,14 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             *self.rpc_origins.write() = rpc;
         }
 
+        // Persist to noble.toml via set_config_value.
+        if let Some(ref set_config) = self.set_config_value {
+            let value = allowed_ips.join(",");
+            if let Err(e) = set_config("api", "allowed_ips", &value) {
+                tracing::warn!(task = "ip_filter", %e, "Failed to persist allowed_ips to noble.toml");
+            }
+        }
+
         // Warn if the bind address mode changed (requires restart).
         let message = if was_remote != is_remote {
             format!(
@@ -833,12 +841,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("network", "seeds"),
             ("api", "rpc_port"),
             ("api", "gui_port"),
+            ("api", "allowed_ips"),
+            ("api", "tls_san"),
             ("storage", "data_dir"),
             ("storage", "cache_size_mb"),
             ("storage", "compression"),
             ("storage", "pruning_mode"),
             ("storage", "keep_blocks"),
             ("security", "encryption_mode"),
+            ("rewards", "reward_address"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {

@@ -860,8 +860,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .entry(section)
                         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
                     if let toml::Value::Table(ref mut t) = table {
-                        // Infer the correct TOML type: try integer, then boolean, then string.
-                        let toml_value = if let Ok(n) = value.parse::<i64>() {
+                        // If the existing value is an array, write the new value as a TOML
+                        // array (comma-separated items, or empty string → empty array).
+                        let existing_is_array = t.get(key)
+                            .map(|v| v.is_array())
+                            .unwrap_or(false);
+                        // Known array fields (for first-time writes when the key doesn't exist yet).
+                        let known_array = matches!(
+                            (section, key),
+                            ("network", "seeds") | ("api", "allowed_ips") | ("api", "tls_san")
+                        );
+                        let toml_value = if existing_is_array || known_array {
+                            if value.is_empty() {
+                                toml::Value::Array(Vec::new())
+                            } else {
+                                toml::Value::Array(
+                                    value.split(',')
+                                        .map(|s| toml::Value::String(s.trim().to_string()))
+                                        .collect()
+                                )
+                            }
+                        } else if let Ok(n) = value.parse::<i64>() {
                             toml::Value::Integer(n)
                         } else if value == "true" || value == "false" {
                             toml::Value::Boolean(value == "true")

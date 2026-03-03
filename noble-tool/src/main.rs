@@ -188,11 +188,16 @@ enum WalletCommand {
         rpc_url: String,
     },
 
-    /// List all public keys in the wallet keystore (offline — reads key files directly).
+    /// List all public keys in the wallet.
+    /// Works online via RPC (default) or offline with --keystore-path.
     List {
-        /// Path to the keystore directory.
-        #[arg(long, default_value = "keystore")]
-        keystore_path: String,
+        /// Path to the keystore directory (offline mode — node does not need to be running).
+        #[arg(long)]
+        keystore_path: Option<String>,
+
+        /// JSON-RPC URL of the running node (online mode). Ignored if --keystore-path is set.
+        #[arg(long, default_value = "https://127.0.0.1:8783")]
+        rpc_url: String,
 
         /// Output machine-readable JSON instead of human-readable text.
         #[arg(long)]
@@ -685,61 +690,117 @@ fn cmd_wallet(action: WalletCommand) {
         }
         WalletCommand::List {
             keystore_path,
+            rpc_url,
             json,
         } => {
-            let ks = noble_wallet::KeyStore::new(&keystore_path)
-                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
-            let keys = ks.list_keys()
-                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
-
-            if json {
-                use noble_crypto::SCHEME_SECP256K1;
-                let entries: Vec<serde_json::Value> = keys.iter().map(|pk| {
-                    let wire = pk.to_wire_bytes();
-                    let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
-                    let mut obj = serde_json::json!({
-                        "pubkey_hex": hex::encode(&wire),
-                        "scheme": scheme,
-                    });
-                    if pk.scheme_id() == SCHEME_SECP256K1 {
-                        let kb = pk.key_bytes();
-                        if kb.len() == 33 {
-                            let mut compressed = [0u8; 33];
-                            compressed.copy_from_slice(kb);
-                            obj["p2pkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
-                            obj["p2wpkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
-                            obj["p2tr"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
-                        }
-                    }
-                    obj
-                }).collect();
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "keys": entries })).unwrap());
+            if let Some(ks_path) = keystore_path {
+                // Offline mode — read keystore directly
+                let ks = noble_wallet::KeyStore::new(&ks_path)
+                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                let keys = ks.list_keys()
+                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                print_key_list_offline(&keys, &ks_path, json);
             } else {
-                use noble_crypto::SCHEME_SECP256K1;
-                if keys.is_empty() {
-                    println!("No keys found in {keystore_path}");
-                    return;
+                // Online mode — query running node via RPC
+                match rpc_call(&rpc_url, "noble_listAddresses", serde_json::json!({})) {
+                    Ok(result) => print_key_list_online(&result, json),
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        eprintln!("Hint: use --keystore-path for offline mode when node is not running.");
+                        std::process::exit(1);
+                    }
                 }
-                println!("=== Wallet Keys ({}) ===", keys.len());
+            }
+        }
+    }
+}
+
+/// Print key list from offline keystore read.
+fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, json: bool) {
+    use noble_crypto::SCHEME_SECP256K1;
+    if json {
+        let entries: Vec<serde_json::Value> = keys.iter().map(|pk| {
+            let wire = pk.to_wire_bytes();
+            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+            let mut obj = serde_json::json!({
+                "pubkey_hex": hex::encode(&wire),
+                "scheme": scheme,
+            });
+            if pk.scheme_id() == SCHEME_SECP256K1 {
+                let kb = pk.key_bytes();
+                if kb.len() == 33 {
+                    let mut compressed = [0u8; 33];
+                    compressed.copy_from_slice(kb);
+                    obj["p2pkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
+                    obj["p2wpkh"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
+                    obj["p2tr"] = serde_json::json!(noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
+                }
+            }
+            obj
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "keys": entries })).unwrap());
+    } else {
+        if keys.is_empty() {
+            println!("No keys found in {ks_path}");
+            return;
+        }
+        println!("=== Wallet Keys ({}) ===", keys.len());
+        println!();
+        for pk in keys {
+            let wire_hex = hex::encode(pk.to_wire_bytes());
+            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+            println!("[{scheme}] {wire_hex}");
+            if pk.scheme_id() == SCHEME_SECP256K1 {
+                let kb = pk.key_bytes();
+                if kb.len() == 33 {
+                    let mut compressed = [0u8; 33];
+                    compressed.copy_from_slice(kb);
+                    println!("  P2PKH  (1...):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
+                    println!("  P2WPKH (bc1q):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
+                    println!("  P2TR   (bc1p):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
+                }
+            }
+            println!();
+        }
+        println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass> --keystore-path {ks_path}");
+    }
+}
+
+/// Print key list from online RPC response (noble_listAddresses).
+fn print_key_list_online(result: &serde_json::Value, json: bool) {
+    if json {
+        // Pass through the RPC JSON directly
+        println!("{}", serde_json::to_string_pretty(result).unwrap());
+    } else {
+        let keys = result.get("keys").and_then(|v| v.as_array());
+        match keys {
+            Some(list) if !list.is_empty() => {
+                println!("=== Wallet Keys ({}) ===", list.len());
                 println!();
-                for pk in &keys {
-                    let wire = pk.to_wire_bytes();
-                    let wire_hex = hex::encode(&wire);
-                    let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
-                    println!("[{scheme}] {wire_hex}");
-                    if pk.scheme_id() == SCHEME_SECP256K1 {
-                        let kb = pk.key_bytes();
-                        if kb.len() == 33 {
-                            let mut compressed = [0u8; 33];
-                            compressed.copy_from_slice(kb);
-                            println!("  P2PKH  (1...):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2pkh(&compressed, true));
-                            println!("  P2WPKH (bc1q):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(&compressed, true));
-                            println!("  P2TR   (bc1p):  {}", noble_crypto::bitcoin_addr::pubkey_to_p2tr(&compressed, true));
+                for entry in list {
+                    let scheme = entry.get("scheme").and_then(|v| v.as_str()).unwrap_or("?");
+                    let hex = entry.get("pubkey_hex").and_then(|v| v.as_str()).unwrap_or("?");
+                    println!("[{scheme}] {hex}");
+                    if let Some(addrs) = entry.get("bitcoin_addresses").and_then(|v| v.as_array()) {
+                        for addr in addrs {
+                            if let Some(s) = addr.as_str() {
+                                let label = if s.starts_with("bc1p") {
+                                    "P2TR   (bc1p)"
+                                } else if s.starts_with("bc1q") {
+                                    "P2WPKH (bc1q)"
+                                } else {
+                                    "P2PKH  (1...)"
+                                };
+                                println!("  {label}:  {s}");
+                            }
                         }
                     }
                     println!();
                 }
-                println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass> --keystore-path <path>");
+                println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass>");
+            }
+            _ => {
+                println!("No keys found.");
             }
         }
     }
