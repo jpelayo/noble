@@ -30,8 +30,8 @@ pub const TESTNET_CHAIN_ID: u32 = 0x5453_544E;
 /// Regression test network chain identifier ("RGST" in ASCII, big-endian).
 pub const REGTEST_CHAIN_ID: u32 = 0x5247_5354;
 
-/// Minimum transaction fee in atomic units (0.001 NOBLE = 1000 units).
-pub const MIN_TX_FEE: u64 = 1_000;
+/// Minimum transaction fee in atomic units (1 atomic unit — the market decides the rest).
+pub const MIN_TX_FEE: u64 = 1;
 
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -194,7 +194,7 @@ pub const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;
 
 /// AUD-H4: Compute the dynamic minimum fee based on mempool utilization.
 ///
-/// - `< 50%` → `MIN_TX_FEE` (1,000)
+/// - `< 50%` → `MIN_TX_FEE` (1)
 /// - `50-75%` → `MIN_TX_FEE * 2`
 /// - `75-90%` → `MIN_TX_FEE * 5`
 /// - `> 90%` → `MIN_TX_FEE * 10`
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn min_fee_is_0001_noble() {
         // 0.001 NOBLE with 6 decimal places = 1000 atomic units
-        assert_eq!(MIN_TX_FEE, 1_000);
+        assert_eq!(MIN_TX_FEE, 1);
     }
 
     #[test]
