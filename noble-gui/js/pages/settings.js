@@ -100,32 +100,37 @@ export function init(root, ctx) {
       </div>
     </div>
 
-    <!-- Gateway Key -->
+    <!-- Wallet -->
     <div class="panel">
       <div class="panel-header">
-        <span>Gateway Key</span>
-        <span id="s-gw-badge" class="badge"></span>
-      </div>
-      <div class="panel-body">
-        <dl class="detail-grid" id="s-gw-details">
-          <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
-        </dl>
-      </div>
-    </div>
-
-    <!-- Wallet Keys -->
-    <div class="panel">
-      <div class="panel-header">
-        <span>Wallet Keys</span>
+        <span>Wallet</span>
         <span id="s-wk-badge" class="badge"></span>
       </div>
       <div class="panel-body">
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
-          Keys stored in the wallet keystore. Back up your mnemonic before replacing a key.
+          Your wallet key is used as the gateway key and derives the reward address. Back up your mnemonic before replacing it.
         </p>
+
+        <!-- Key info -->
         <div id="s-wk-list" style="margin-bottom:var(--gap)"></div>
         <div id="s-wk-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
         <div id="s-wk-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:none"></div>
+
+        <!-- Reward address -->
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Reward Address</p>
+          <dl class="detail-grid" id="s-reward-info">
+            <dt style="grid-column:1/-1;color:var(--text-muted)">Loading...</dt>
+          </dl>
+          <div style="margin-top:var(--gap-sm)">
+            <div style="display:flex;gap:var(--gap-sm);align-items:center">
+              <input id="s-reward-input" type="text" placeholder="bc1q..., 1..., bc1p..., or hex public key"
+                style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+              <button id="s-reward-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+            </div>
+            <span id="s-reward-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
+          </div>
+        </div>
       </div>
     </div>
     <div id="s-wk-modal"></div>
@@ -287,9 +292,6 @@ export function init(root, ctx) {
   const vkeyDetails = root.querySelector('#s-vkey-details');
   // P2P identity refs
   const p2pDetails = root.querySelector('#s-p2p-details');
-  // Gateway key refs
-  const gwBadge = root.querySelector('#s-gw-badge');
-  const gwDetails = root.querySelector('#s-gw-details');
   // TLS cert refs
   const tlsBadge = root.querySelector('#s-tls-badge');
   const tlsDetails = root.querySelector('#s-tls-details');
@@ -314,6 +316,12 @@ export function init(root, ctx) {
   const encSwitchBtn = root.querySelector('#s-enc-switch-btn');
   const encSwitchMsg = root.querySelector('#s-enc-switch-msg');
   const encError = root.querySelector('#s-enc-error');
+
+  // Reward address refs
+  const rewardInfo = root.querySelector('#s-reward-info');
+  const rewardInput = root.querySelector('#s-reward-input');
+  const rewardSave = root.querySelector('#s-reward-save');
+  const rewardMsg = root.querySelector('#s-reward-msg');
 
   // Wallet key refs
   const wkBadge = root.querySelector('#s-wk-badge');
@@ -657,37 +665,6 @@ export function init(root, ctx) {
     });
   }
 
-  // --- Gateway Key card ---
-  function renderGatewayKey(info) {
-    if (!info || !info.enabled) {
-      gwBadge.textContent = 'Disabled';
-      gwBadge.className = 'badge';
-      gwBadge.style.background = 'var(--text-muted)';
-      gwDetails.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">Gateway fee split is not configured.</dt>';
-      return;
-    }
-    gwBadge.textContent = 'Enabled';
-    gwBadge.className = 'badge inbound';
-    gwBadge.style.background = '';
-
-    const gk = info.gateway_key || '';
-    const gkDisplay = gk.length > 16 ? gk.slice(0, 8) + '…' + gk.slice(-8) : gk;
-    const sourceLabel = info.key_source === 'config_file' ? 'key file' : 'wallet-derived';
-
-    gwDetails.innerHTML = `
-      <dt>Gateway Key</dt>
-      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
-        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${gkDisplay}</code>
-        ${gk ? `<button class="btn-copy-gk btn-sm" data-gk="${gk}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
-      </dd>
-      <dt>Source</dt><dd>${sourceLabel}</dd>
-    `;
-    gwDetails.querySelector('.btn-copy-gk')?.addEventListener('click', (e) => {
-      navigator.clipboard?.writeText(e.currentTarget.dataset.gk).catch(() => {});
-      e.currentTarget.textContent = 'Copied!';
-      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
-    });
-  }
 
   // --- Encryption helpers ---
   function updateEncPasswordFields() {
@@ -1022,19 +999,72 @@ export function init(root, ctx) {
     }
   }
 
+  // ── Reward address ──
+  async function loadRewardAddress() {
+    try {
+      const res = await rpc.call('noble_getRewardAddress');
+      if (res.configured) {
+        rewardInfo.innerHTML = `
+          <dt>Address</dt><dd class="mono">${res.address}</dd>
+          <dt>Type</dt><dd>${res.address_type || 'Unknown'}</dd>
+        `;
+        rewardInput.value = res.address;
+      } else {
+        rewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">No reward address configured.</dt>`;
+        rewardInput.value = '';
+        // Auto-suggest wallet key
+        try {
+          const walletKeys = await rpc.call('noble_listAddresses');
+          const secpKey = (walletKeys.keys || []).find(k => k.scheme === 'secp256k1' && k.bitcoin_addresses && k.bitcoin_addresses.length > 0);
+          if (secpKey) {
+            const p2wpkh = secpKey.bitcoin_addresses.find(a => a.address_type === 'p2wpkh');
+            if (p2wpkh) rewardInput.value = p2wpkh.address;
+          }
+        } catch (_) { /* wallet may be locked */ }
+      }
+    } catch (e) {
+      console.error('[settings] load reward address:', e);
+      rewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">Could not load reward address.</dt>`;
+    }
+  }
+
+  rewardSave.addEventListener('click', async () => {
+    const addr = rewardInput.value.trim();
+    if (!addr) {
+      rewardMsg.style.color = 'var(--error)';
+      rewardMsg.textContent = 'Please enter an address.';
+      return;
+    }
+    rewardSave.disabled = true;
+    rewardSave.textContent = 'Saving...';
+    rewardMsg.textContent = '';
+    try {
+      const res = await rpc.call('noble_setRewardAddress', { address: addr });
+      rewardMsg.style.color = 'var(--success)';
+      rewardMsg.textContent = `Saved: ${res.address_type} address (${res.display_address})`;
+      await loadRewardAddress();
+    } catch (e) {
+      rewardMsg.style.color = 'var(--error)';
+      rewardMsg.textContent = 'Error: ' + (e.message || e);
+    } finally {
+      rewardSave.disabled = false;
+      rewardSave.textContent = 'Save';
+    }
+  });
+
   async function loadSettings() {
-    // Load TLS cert, encryption status, seeds, and wallet keys in parallel (independent from other calls).
+    // Load TLS cert, encryption status, seeds, wallet keys, and reward address in parallel.
     loadTlsCert();
     loadEncryptionStatus();
     loadSeeds();
     loadWalletKeys();
+    loadRewardAddress();
 
     try {
-      const [ipResult, nodeInfo, vkeyInfo, gwInfo] = await Promise.all([
+      const [ipResult, nodeInfo, vkeyInfo] = await Promise.all([
         rpc.call('noble_getAllowedIps'),
         rpc.call('noble_getNodeInfo'),
         rpc.call('noble_getValidatorKeyInfo').catch(() => null),
-        rpc.call('noble_getGatewayInfo').catch(() => null),
       ]);
 
       // IP Access Control
@@ -1145,7 +1175,6 @@ export function init(root, ctx) {
       // New key/identity cards
       renderValidatorKey(vkeyInfo);
       renderP2pIdentity(nodeInfo);
-      renderGatewayKey(gwInfo);
     } catch (e) {
       console.error('[settings] load:', e);
     }
