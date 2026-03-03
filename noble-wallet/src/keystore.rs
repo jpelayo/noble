@@ -516,6 +516,56 @@ impl KeyStore {
         Ok(pub_key)
     }
 
+    /// Re-encrypt every key file from `old_passphrase` to `new_passphrase`.
+    ///
+    /// For each `.json` key file the method decrypts with `old`, re-encrypts
+    /// with `new`, and performs an atomic write (tmp + rename).  Returns the
+    /// number of migrated key files.
+    ///
+    /// The keystore must be **locked** when calling this (in-memory keys are
+    /// not touched).
+    pub fn migrate_passphrase(
+        &mut self,
+        old_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<usize, WalletError> {
+        let mut migrated = 0usize;
+
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.ends_with(".json") {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let json = fs::read_to_string(&file_path)?;
+            let encrypted: EncryptedKeyFile = serde_json::from_str(&json)?;
+
+            // Decrypt with old passphrase
+            let secret = decrypt_key(&encrypted, old_passphrase)?;
+
+            // Re-encrypt with new passphrase
+            let new_encrypted = encrypt_key(&secret, encrypted.scheme_id, new_passphrase)?;
+            let new_json = serde_json::to_string_pretty(&new_encrypted)?;
+
+            // Atomic write: write to .tmp, then rename
+            let tmp_path = file_path.with_extension("json.tmp");
+            fs::write(&tmp_path, &new_json)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+            }
+            fs::rename(&tmp_path, &file_path)?;
+
+            migrated += 1;
+        }
+
+        Ok(migrated)
+    }
+
     /// Compute the file path for a given public key.
     fn key_file_path(&self, pubkey: &NoblePublicKey) -> PathBuf {
         self.path
@@ -950,6 +1000,42 @@ mod tests {
         let mut ks2 = KeyStore::new(dir2.path().join("keys")).unwrap();
         let pk2 = ks2.recover_from_mnemonic(&mnemonic, "").unwrap();
         assert_eq!(pk.to_wire_bytes(), pk2.to_wire_bytes());
+    }
+
+    #[test]
+    fn migrate_passphrase_empty_to_strong() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+
+        // Create a mnemonic key with empty passphrase (mnemonic path allows empty)
+        let (_, pk1) = ks.create_key_from_mnemonic(24, "").unwrap();
+
+        // Verify empty passphrase unlocks
+        ks.unlock("").unwrap();
+        let msg = sha256(b"migrate test");
+        assert!(ks.sign(&pk1, msg.as_bytes()).is_ok());
+        ks.lock();
+
+        // Migrate to a strong passphrase
+        let new_pass = "a]3Kf9$mLpQ2x!Rv7WnBhYs0+dT6UeJi";
+        let count = ks.migrate_passphrase("", new_pass).unwrap();
+        assert_eq!(count, 1, "should migrate 1 key file");
+
+        // Old passphrase no longer works
+        let result = ks.unlock("");
+        assert!(result.is_err(), "empty passphrase must fail after migration");
+
+        // New passphrase works
+        ks.unlock(new_pass).unwrap();
+        assert!(ks.sign(&pk1, msg.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn migrate_passphrase_empty_keystore() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let count = ks.migrate_passphrase("old-pass-ok!!", "new-pass-ok!!").unwrap();
+        assert_eq!(count, 0, "empty keystore migrates 0 keys");
     }
 
     #[test]

@@ -159,6 +159,23 @@ fn derive_file_key(chain_meta: &[u8; 32]) -> [u8; 32] {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Derive a 32-byte wallet encryption key from the per-installation
+/// `.chain_meta` entropy.
+///
+/// Uses HKDF-SHA256 with a wallet-specific info string for domain
+/// separation from file encryption keys.  The result is hex-encoded by
+/// the caller to produce a 64-char passphrase (well above the keystore's
+/// 12-char minimum).
+pub fn derive_wallet_key(chain_meta: &[u8; 32]) -> [u8; 32] {
+    let mut ikm = deobfuscate_ikm();
+    let hk = Hkdf::<Sha256>::new(Some(chain_meta), &ikm);
+    ikm.zeroize();
+    let mut key = [0u8; 32];
+    hk.expand(b"noble-wallet-enc-v1", &mut key)
+        .expect("HKDF-SHA256 expand to 32 bytes cannot fail");
+    key
+}
+
 /// Returns `true` if `data` starts with the Noble envelope magic header.
 pub fn is_noble_envelope(data: &[u8]) -> bool {
     data.len() >= HEADER_LEN && data[..4] == MAGIC
@@ -560,6 +577,26 @@ mod tests {
 
     fn test_chain_meta() -> [u8; 32] {
         [0x42u8; 32]
+    }
+
+    #[test]
+    fn derive_wallet_key_deterministic_and_distinct() {
+        let meta = test_chain_meta();
+        let k1 = derive_wallet_key(&meta);
+        let k2 = derive_wallet_key(&meta);
+        assert_eq!(k1, k2, "same chain_meta must produce same wallet key");
+
+        // Wallet key must differ from file-encryption key (domain separation)
+        let file_key = derive_file_key(&meta);
+        assert_ne!(k1, file_key, "wallet key must differ from file key");
+
+        // Different chain_meta produces different wallet key
+        let other_meta = [0x99u8; 32];
+        let k3 = derive_wallet_key(&other_meta);
+        assert_ne!(k1, k3, "different chain_meta must produce different wallet key");
+
+        // hex-encoded length is 64 chars (well above 12-char minimum)
+        assert_eq!(hex::encode(k1).len(), 64);
     }
 
     #[test]

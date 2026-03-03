@@ -258,9 +258,9 @@ export function init(root, ctx) {
     }
   });
 
-  /** True if `ip` looks like a private/LAN address (RFC 1918, link-local, loopback). */
+  /** True if `ip` looks like a private/LAN address (RFC 1918, CGNAT/Tailscale, link-local, loopback). */
   function isLanIp(ip) {
-    return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.)/.test(ip);
+    return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.)/.test(ip);
   }
 
   /** Build the host_address multiaddr from the current mode + inputs. */

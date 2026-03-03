@@ -146,8 +146,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn create_address(
         &self,
         scheme_id: u8,
-        passphrase: String,
+        _passphrase: String,
     ) -> Result<CreateAddressResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
 
         // Guard: reject if a key of the same scheme already exists
@@ -183,9 +184,10 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
     async fn wallet_unlock(
         &self,
-        passphrase: String,
+        _passphrase: String,
         timeout_secs: u64,
     ) -> Result<WalletUnlockResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         {
             let mut keystore = self.wallet_keystore.lock();
             keystore.unlock(&passphrase).map_err(|e| match e {
@@ -382,8 +384,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn generate_mnemonic(
         &self,
         word_count: Option<u32>,
-        passphrase: String,
+        _passphrase: String,
     ) -> Result<GenerateMnemonicResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let wc = word_count.unwrap_or(24) as usize;
         if wc != 12 && wc != 24 {
             return Err(ApiError::InvalidParam("word_count must be 12 or 24".into()).into());
@@ -432,8 +435,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn import_secp256k1_key(
         &self,
         key_input: String,
-        passphrase: String,
+        _passphrase: String,
     ) -> Result<ImportKeyResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
 
         // Guard: if a secp256k1 key already exists, return it (idempotent import)
@@ -520,8 +524,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn import_mnemonic(
         &self,
         mnemonic: String,
-        passphrase: String,
+        _passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
 
         // Check if key already exists by trying to recover
@@ -561,8 +566,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn delete_address(
         &self,
         pubkey_hex: String,
-        passphrase: String,
+        _passphrase: String,
     ) -> Result<DeleteAddressResponse, ErrorObjectOwned> {
+        let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         // Parse the public key
         let pubkey = parse_pubkey(&pubkey_hex)?;
 

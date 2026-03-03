@@ -261,8 +261,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
         let consensus = Arc::new(RwLock::new(engine));
 
-        // Create wallet keystore.
-        let keystore = KeyStore::new(&config.wallet.keystore_path)?;
+        // Create wallet keystore + auto-unlock with chain_meta-derived passphrase.
+        let mut keystore = KeyStore::new(&config.wallet.keystore_path)?;
+        let wallet_passphrase = hex::encode(
+            noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
+        );
+        if keystore.unlock(&wallet_passphrase).is_err() {
+            // Existing keys may use the old empty passphrase — try migration
+            if keystore.unlock("").is_ok() {
+                match keystore.migrate_passphrase("", &wallet_passphrase) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(task = "wallet_key", "migrated {n} wallet key(s) to chain_meta encryption");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(task = "wallet_key", "wallet key migration failed: {e}");
+                    }
+                }
+                keystore.lock();
+                let _ = keystore.unlock(&wallet_passphrase);
+            }
+        }
         let wallet_keystore = Arc::new(Mutex::new(keystore));
         let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
 
@@ -2335,8 +2354,8 @@ mod tests {
         assert_eq!(tip_height, 0);
         assert_ne!(tip_hash, Hash256::ZERO);
 
-        // Wallet keystore should be created (locked).
-        assert!(!node.wallet_keystore.lock().is_unlocked());
+        // Wallet keystore should be auto-unlocked with chain_meta-derived passphrase.
+        assert!(node.wallet_keystore.lock().is_unlocked());
 
         // Network stats should be zeroed.
         let stats = node.network_stats.read();

@@ -173,29 +173,26 @@ enum WalletCommand {
     },
 
     /// Delete a wallet key from the keystore.
-    /// Works offline with --keystore-path, or via RPC with --rpc-url.
+    /// Auto-discovers noble.toml for offline mode, or uses RPC if node is running.
     Delete {
         /// Public key hex (wire format) to delete.
         pubkey_hex: String,
-        /// Passphrase to verify key ownership.
+        /// Override config file path (default: auto-detect noble.toml).
         #[arg(long)]
-        passphrase: String,
-        /// Path to the keystore directory (offline mode — node does not need to be running).
-        #[arg(long)]
-        keystore_path: Option<String>,
-        /// JSON-RPC URL of the running node (online mode). Ignored if --keystore-path is set.
+        config: Option<String>,
+        /// JSON-RPC URL of the running node (online mode).
         #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc_url: String,
     },
 
     /// List all public keys in the wallet.
-    /// Works online via RPC (default) or offline with --keystore-path.
+    /// Auto-discovers noble.toml for offline mode, or uses RPC if node is running.
     List {
-        /// Path to the keystore directory (offline mode — node does not need to be running).
+        /// Override config file path (default: auto-detect noble.toml).
         #[arg(long)]
-        keystore_path: Option<String>,
+        config: Option<String>,
 
-        /// JSON-RPC URL of the running node (online mode). Ignored if --keystore-path is set.
+        /// JSON-RPC URL of the running node (online mode).
         #[arg(long, default_value = "https://127.0.0.1:8783")]
         rpc_url: String,
 
@@ -609,6 +606,61 @@ fn derive_wallet_info(mnemonic: &bip39::Mnemonic, passphrase: &str) -> WalletInf
     info
 }
 
+// ---------------------------------------------------------------------------
+// wallet auto-discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Minimal TOML structs for extracting paths from noble.toml.
+#[derive(serde::Deserialize)]
+struct MinimalConfig {
+    #[serde(default)]
+    storage: MinimalStorage,
+    #[serde(default)]
+    wallet: MinimalWallet,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MinimalStorage {
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MinimalWallet {
+    #[serde(default)]
+    keystore_path: Option<PathBuf>,
+}
+
+/// Read noble.toml and extract `storage.data_dir` + `wallet.keystore_path`.
+/// Returns `(data_dir, keystore_path)` or `None` if the config file is missing.
+fn resolve_wallet_paths(config_override: Option<&str>) -> Option<(PathBuf, PathBuf)> {
+    let config_path = config_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| noble_core::paths::platform_config_path());
+
+    let text = std::fs::read_to_string(&config_path).ok()?;
+    let cfg: MinimalConfig = toml::from_str(&text).ok()?;
+
+    let data_dir = cfg.storage.data_dir
+        .unwrap_or_else(noble_core::paths::platform_data_dir);
+    let keystore_path = cfg.wallet.keystore_path
+        .unwrap_or_else(|| data_dir.join("keystore"));
+
+    Some((data_dir, keystore_path))
+}
+
+/// Load .chain_meta from data_dir and derive the 64-char hex wallet passphrase.
+fn derive_wallet_passphrase(data_dir: &std::path::Path) -> String {
+    let chain_meta = noble_crypto::file_encrypt::load_or_create_chain_meta(
+        data_dir, "automatic", None,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error loading .chain_meta: {e}");
+        std::process::exit(1);
+    });
+    hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta))
+}
+
 fn cmd_wallet(action: WalletCommand) {
     match action {
         WalletCommand::Generate {
@@ -650,12 +702,16 @@ fn cmd_wallet(action: WalletCommand) {
         }
         WalletCommand::Delete {
             pubkey_hex,
-            passphrase,
-            keystore_path,
+            config,
             rpc_url,
         } => {
-            if let Some(ks_path) = keystore_path {
-                // Offline mode — delete directly from keystore
+            // If --config is set, go straight to offline mode.
+            // Otherwise try RPC first, then fall back to auto-discovered config.
+            if config.is_some() {
+                // Offline mode with explicit config
+                let (data_dir, ks_path) = resolve_wallet_paths(config.as_deref())
+                    .unwrap_or_else(|| { eprintln!("Error: could not read noble.toml"); std::process::exit(1); });
+                let passphrase = derive_wallet_passphrase(&data_dir);
                 let mut ks = noble_wallet::KeyStore::new(&ks_path)
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                 let wire = hex::decode(&pubkey_hex)
@@ -668,10 +724,10 @@ fn cmd_wallet(action: WalletCommand) {
                 let short_end = &pubkey_hex[pubkey_hex.len().saturating_sub(8)..];
                 println!("Key deleted: {short_start}...{short_end}");
             } else {
-                // Online mode — existing RPC behavior
+                // Try online (RPC) first — passphrase is ignored server-side
                 let params = serde_json::json!({
                     "pubkey_hex": pubkey_hex,
-                    "passphrase": passphrase,
+                    "passphrase": "",
                 });
                 match rpc_call(&rpc_url, "noble_deleteAddress", params) {
                     Ok(result) => {
@@ -681,33 +737,63 @@ fn cmd_wallet(action: WalletCommand) {
                             .unwrap_or("Key deleted.");
                         println!("{msg}");
                     }
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
+                    Err(_rpc_err) => {
+                        // RPC failed — fall back to offline auto-discovery
+                        if let Some((data_dir, ks_path)) = resolve_wallet_paths(None) {
+                            let passphrase = derive_wallet_passphrase(&data_dir);
+                            let mut ks = noble_wallet::KeyStore::new(&ks_path)
+                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            let wire = hex::decode(&pubkey_hex)
+                                .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
+                            let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
+                                .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); });
+                            ks.delete_key(&pk, &passphrase)
+                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            let short_start = &pubkey_hex[..pubkey_hex.len().min(8)];
+                            let short_end = &pubkey_hex[pubkey_hex.len().saturating_sub(8)..];
+                            println!("Key deleted: {short_start}...{short_end}");
+                        } else {
+                            eprintln!("Error: node not reachable and no noble.toml found.");
+                            eprintln!("Hint: use --config /path/to/noble.toml for offline mode.");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
         }
         WalletCommand::List {
-            keystore_path,
+            config,
             rpc_url,
             json,
         } => {
-            if let Some(ks_path) = keystore_path {
-                // Offline mode — read keystore directly
+            if config.is_some() {
+                // Offline mode with explicit config
+                let (_data_dir, ks_path) = resolve_wallet_paths(config.as_deref())
+                    .unwrap_or_else(|| { eprintln!("Error: could not read noble.toml"); std::process::exit(1); });
+                let ks_path_str = ks_path.display().to_string();
                 let ks = noble_wallet::KeyStore::new(&ks_path)
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                 let keys = ks.list_keys()
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
-                print_key_list_offline(&keys, &ks_path, json);
+                print_key_list_offline(&keys, &ks_path_str, json);
             } else {
-                // Online mode — query running node via RPC
+                // Try online (RPC) first
                 match rpc_call(&rpc_url, "noble_listAddresses", serde_json::json!({})) {
                     Ok(result) => print_key_list_online(&result, json),
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        eprintln!("Hint: use --keystore-path for offline mode when node is not running.");
-                        std::process::exit(1);
+                    Err(_rpc_err) => {
+                        // Fall back to offline auto-discovery
+                        if let Some((_data_dir, ks_path)) = resolve_wallet_paths(None) {
+                            let ks_path_str = ks_path.display().to_string();
+                            let ks = noble_wallet::KeyStore::new(&ks_path)
+                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            let keys = ks.list_keys()
+                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            print_key_list_offline(&keys, &ks_path_str, json);
+                        } else {
+                            eprintln!("Error: node not reachable and no noble.toml found.");
+                            eprintln!("Hint: use --config /path/to/noble.toml for offline mode.");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -762,7 +848,7 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
             }
             println!();
         }
-        println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass> --keystore-path {ks_path}");
+        println!("To delete: noble-tool wallet delete <pubkey_hex>");
     }
 }
 
@@ -797,7 +883,7 @@ fn print_key_list_online(result: &serde_json::Value, json: bool) {
                     }
                     println!();
                 }
-                println!("To delete: noble-tool wallet delete <pubkey_hex> --passphrase <pass>");
+                println!("To delete: noble-tool wallet delete <pubkey_hex>");
             }
             _ => {
                 println!("No keys found.");
