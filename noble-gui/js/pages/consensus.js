@@ -48,28 +48,10 @@ export function init(root, ctx) {
         <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)">Last 3 cycles</span>
       </div>
       <div class="panel-body">
-        <!-- Live status row -->
-        <div style="display:flex;align-items:center;gap:var(--gap-lg);margin-bottom:var(--gap-lg);flex-wrap:wrap">
-          <div>
-            <div class="kpi-label">CURRENT PHASE</div>
-            <div class="badge phase" id="cs-phase">--</div>
-          </div>
-          <div>
-            <div class="kpi-label">COUNTDOWN</div>
-            <div class="countdown" id="cs-countdown" style="font-size:var(--font-size-xl)">--:--</div>
-          </div>
-          <div>
-            <div class="kpi-label">CYCLE</div>
-            <div id="cs-cycle-info" style="font-weight:700;font-size:var(--font-size-lg)">--</div>
-          </div>
-          <div style="margin-left:auto">
-            <div class="kpi-label">LEGEND</div>
-            <div style="display:flex;gap:var(--gap-sm);flex-wrap:wrap">
-              ${Object.entries(PHASE_COLORS).map(([name, c]) =>
-                `<span style="display:inline-flex;align-items:center;gap:3px;font-size:var(--font-size-xs)"><span style="width:10px;height:10px;border-radius:2px;background:${c.bg}"></span>${name}</span>`
-              ).join('')}
-            </div>
-          </div>
+        <!-- Phase pipeline -->
+        <div style="display:flex;align-items:center;gap:0;margin-bottom:var(--gap-lg);flex-wrap:wrap">
+          <div style="font-weight:700;font-size:var(--font-size-sm);color:var(--text-muted);margin-right:var(--gap-sm)">CYCLE <span id="cs-cycle-info">#--</span></div>
+          <div id="cs-phase-pipeline" style="display:flex;align-items:center;gap:0;flex:1;min-width:0;flex-wrap:wrap"></div>
         </div>
 
         <!-- Timeline rows (filled by JS) -->
@@ -258,8 +240,7 @@ export function init(root, ctx) {
   `;
 
   // ── DOM refs ──
-  const csPhase = root.querySelector('#cs-phase');
-  const csCountdown = root.querySelector('#cs-countdown');
+  const csPipeline = root.querySelector('#cs-phase-pipeline');
   const csCycleInfo = root.querySelector('#cs-cycle-info');
   const csCycleNum = root.querySelector('#cs-cycle-num');
   const csPhaseName = root.querySelector('#cs-phase-name');
@@ -631,8 +612,29 @@ export function init(root, ctx) {
   // CYCLE STATUS (countdown, phase progression)
   // ══════════════════════════════════════════════
 
+  const PHASE_DURATION = 450; // 7:30 per sub-phase
+
+  function renderPipeline(activeIdx, remaining) {
+    const arrow = '<span style="color:var(--text-muted);font-size:var(--font-size-sm);margin:0 2px">\u2192</span>';
+    return PHASES.map((p, i) => {
+      const color = PHASE_COLORS[p];
+      const done = i < activeIdx;
+      const active = i === activeIdx;
+      const pending = i > activeIdx;
+      const time = active ? formatCountdown(remaining) : done ? '0:00' : formatCountdown(PHASE_DURATION);
+      const opacity = pending ? '0.4' : '1';
+      const border = active ? `2px solid ${color.bg}` : '2px solid transparent';
+      const bg = active ? color.bg + '22' : 'transparent';
+      return (i > 0 ? arrow : '') +
+        `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:var(--radius-sm);border:${border};background:${bg};opacity:${opacity};white-space:nowrap">` +
+          `<span style="width:8px;height:8px;border-radius:2px;background:${color.bg};flex-shrink:0"></span>` +
+          `<span style="font-size:var(--font-size-xs);font-weight:${active ? '700' : '400'};color:${active ? color.bg : done ? 'var(--text-muted)' : 'var(--text-secondary)'}">${p}</span>` +
+          `<span id="cs-phase-time-${i}" style="font-family:var(--font-mono);font-size:var(--font-size-sm);font-weight:700;color:${active ? color.bg : done ? 'var(--text-muted)' : 'var(--text-secondary)'}">${time}</span>` +
+        '</span>';
+    }).join('');
+  }
+
   function updateCycleDisplay(status) {
-    csPhase.textContent = status.phase;
     csCycleNum.textContent = formatNumber(status.cycle_number);
     csPhaseName.textContent = status.phase;
     csCycleInfo.textContent = `#${formatNumber(status.cycle_number)}`;
@@ -642,31 +644,39 @@ export function init(root, ctx) {
       csValidator.textContent = truncateHash(bytesToHex(key), 12);
     }
 
-    // Phase progression dots
+    const activeIdx = status.phase_index;
+
+    // Phase progression sidebar
     csPhases.innerHTML = PHASES.map((p, i) => {
-      const active = i === status.phase_index;
-      const done = i < status.phase_index;
+      const active = i === activeIdx;
+      const done = i < activeIdx;
+      const color = PHASE_COLORS[p];
       const cls = active ? 'accent' : done ? 'success' : 'text-muted';
+      const time = active ? formatCountdown(status.phase_remaining_secs) : done ? '0:00' : formatCountdown(PHASE_DURATION);
       return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-        <span style="width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:700;background:${active ? 'var(--accent)' : done ? 'var(--success)' : 'var(--bg-tertiary)'};color:${active || done ? '#fff' : 'var(--text-muted)'}">${i + 1}</span>
+        <span style="width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:700;background:${active ? color.bg : done ? 'var(--success)' : 'var(--bg-tertiary)'};color:${active || done ? '#fff' : 'var(--text-muted)'}">${i + 1}</span>
         <span style="font-weight:${active ? '700' : '400'};color:var(--${cls})">${p}</span>
-        ${active ? '<span style="margin-left:auto;color:var(--text-secondary);font-size:var(--font-size-xs)">' + formatCountdown(status.phase_remaining_secs) + '</span>' : ''}
+        <span style="margin-left:auto;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary)">${time}</span>
       </div>`;
     }).join('');
 
-    // Countdown
+    // Pipeline header
+    csPipeline.innerHTML = renderPipeline(activeIdx, status.phase_remaining_secs);
+
+    // Countdown ticker
     let remaining = status.phase_remaining_secs;
     let cycleRemaining = status.cycle_remaining_secs;
     clearInterval(countdownInterval);
     countdownInterval = setInterval(() => {
       remaining = Math.max(0, remaining - 1);
       cycleRemaining = Math.max(0, cycleRemaining - 1);
-      csCountdown.textContent = formatCountdown(remaining);
       csPhaseRemaining.textContent = formatCountdown(remaining);
       csCycleRemaining.textContent = formatCountdown(cycleRemaining);
+      // Update active timer in pipeline
+      const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
+      if (activeTimer) activeTimer.textContent = formatCountdown(remaining);
       if (remaining <= 0) { loadCycle(); loadTimeline(); }
     }, 1000);
-    csCountdown.textContent = formatCountdown(remaining);
     csPhaseRemaining.textContent = formatCountdown(remaining);
     csCycleRemaining.textContent = formatCountdown(cycleRemaining);
   }

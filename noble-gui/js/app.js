@@ -49,7 +49,8 @@ let wsUrl = params.get('ws');
 // so the browser never directly connects to port 8783.  This avoids the
 // cross-port TLS cert trust issue where the user would need to manually accept
 // the self-signed cert for port 8783 separately from port 8785.
-if (!rpcUrl && window.location.protocol.startsWith('http')) {
+// Pass ?mock to force mock mode over HTTP (for development).
+if (!rpcUrl && window.location.protocol.startsWith('http') && !params.has('mock')) {
   rpcUrl = '/rpc';
 }
 
