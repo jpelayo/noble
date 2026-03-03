@@ -996,10 +996,14 @@ export function init(root, ctx) {
       const p2pPortDd = root.querySelector('#s-p2p-port-dd');
       if (p2pEditBtn) {
         p2pEditBtn.addEventListener('click', () => {
-          const currentPort = p2pPortVal.textContent;
+          const currentPort = p2pPortVal.textContent.trim();
           p2pPortDd.innerHTML = `
-            <input id="s-p2p-port-input" type="number" min="1024" max="65535" value="${currentPort}"
-              style="width:80px;padding:4px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            <select id="s-p2p-port-input"
+              style="padding:4px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+              <option value="8780"${currentPort === '8780' ? ' selected' : ''}>8780</option>
+              <option value="8781"${currentPort === '8781' ? ' selected' : ''}>8781</option>
+              <option value="8782"${currentPort === '8782' ? ' selected' : ''}>8782</option>
+            </select>
             <button id="s-p2p-save" class="btn-sm" style="margin-left:var(--gap-sm);padding:4px 10px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Save</button>
             <button id="s-p2p-cancel" class="btn-sm" style="margin-left:var(--gap-xs);padding:4px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Cancel</button>
             <span id="s-p2p-save-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>

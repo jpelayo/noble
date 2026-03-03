@@ -57,6 +57,11 @@ pub enum VotingStrategy {
     /// Do not auto-vote. Wait for operator input via RPC (`noble_castVote`).
     /// If no manual vote is cast before the phase ends, no vote is broadcast.
     Manual,
+
+    /// Weighted probability selection following operator-defined list order.
+    /// Position `i` gets weight `N - i` (position 0 = N, last = 1).
+    /// Total weight = `N*(N+1)/2`. Deterministic via `cycle % total_weight`.
+    WeightedProbability,
 }
 
 impl VotingStrategy {
@@ -71,6 +76,7 @@ impl VotingStrategy {
             Self::WeightedReputation => "weighted_reputation",
             Self::FollowMajority => "follow_majority",
             Self::Manual => "manual",
+            Self::WeightedProbability => "weighted_probability",
         }
     }
 }
@@ -109,7 +115,7 @@ pub fn select_candidate(
         }
 
         VotingStrategy::RoundRobin => {
-            let validators = validator_list.sorted_validator_keys();
+            let validators = validator_list.ordered_validator_keys();
             if validators.is_empty() {
                 return first_valid(&all);
             }
@@ -173,6 +179,33 @@ pub fn select_candidate(
                 }
             }
             // No tallies available — fall back to FirstValid.
+            first_valid(&all)
+        }
+
+        VotingStrategy::WeightedProbability => {
+            let validators = validator_list.ordered_validator_keys();
+            if validators.is_empty() {
+                return first_valid(&all);
+            }
+            let n = validators.len();
+            let total_weight = n * (n + 1) / 2;
+            let pick = (current_cycle as usize) % total_weight;
+            let mut cumulative = 0;
+            let mut chosen_idx = 0;
+            for i in 0..n {
+                cumulative += n - i;
+                if pick < cumulative {
+                    chosen_idx = i;
+                    break;
+                }
+            }
+            let preferred = &validators[chosen_idx];
+            for entry in &all {
+                let val_wire = entry.block.header.validator_id.to_wire_bytes();
+                if val_wire == *preferred {
+                    return Some(entry.block_hash);
+                }
+            }
             first_valid(&all)
         }
 
@@ -365,5 +398,99 @@ mod tests {
         assert!(r0.is_some());
         assert!(r1.is_some());
         assert!(r2.is_some());
+    }
+
+    #[test]
+    fn round_robin_uses_manual_order() {
+        let (tracker, infos) = setup_tracker_3();
+        let mut vl = ValidatorList::new();
+        for (pub_key, _) in &infos {
+            vl.add_validator(pub_key.clone(), 1, 0);
+        }
+        // Reverse the order: infos[2], infos[1], infos[0]
+        let reversed: Vec<Vec<u8>> = infos.iter().rev().map(|(pk, _)| pk.to_wire_bytes()).collect();
+        vl.set_priority_order(reversed).unwrap();
+
+        // Cycle 0 should pick infos[2] (first in reversed order)
+        let r0 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 0, None, None);
+        assert_eq!(r0, Some(infos[2].1));
+
+        // Cycle 1 should pick infos[1]
+        let r1 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 1, None, None);
+        assert_eq!(r1, Some(infos[1].1));
+
+        // Cycle 2 should pick infos[0]
+        let r2 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 2, None, None);
+        assert_eq!(r2, Some(infos[0].1));
+    }
+
+    #[test]
+    fn weighted_probability_favors_first() {
+        let (tracker, infos) = setup_tracker_3();
+        let mut vl = ValidatorList::new();
+        for (pub_key, _) in &infos {
+            vl.add_validator(pub_key.clone(), 1, 0);
+        }
+        // With 3 validators, weights [3,2,1], total=6.
+        // Cycles 0,1,2 → position 0; cycles 3,4 → position 1; cycle 5 → position 2
+        let mut counts = [0usize; 3];
+        let ordered = vl.ordered_validator_keys();
+        for cycle in 0..6 {
+            let result = select_candidate(
+                &VotingStrategy::WeightedProbability,
+                &tracker,
+                &vl,
+                cycle,
+                None,
+                None,
+            );
+            if let Some(hash) = result {
+                for (i, (pk, _)) in infos.iter().enumerate() {
+                    if ordered.iter().position(|k| k == &pk.to_wire_bytes()) == Some(0) && hash == infos[i].1 {
+                        // Find which ordered position was selected
+                    }
+                }
+                // Find which position was chosen
+                for (idx, key) in ordered.iter().enumerate() {
+                    let expected_hash = infos.iter().find(|(pk, _)| pk.to_wire_bytes() == *key).map(|(_, h)| *h);
+                    if expected_hash == Some(hash) {
+                        counts[idx] += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        // Position 0 should be selected 3 times, position 1 twice, position 2 once
+        assert_eq!(counts[0], 3);
+        assert_eq!(counts[1], 2);
+        assert_eq!(counts[2], 1);
+    }
+
+    #[test]
+    fn weighted_probability_deterministic() {
+        let (tracker, infos) = setup_tracker_3();
+        let mut vl = ValidatorList::new();
+        for (pub_key, _) in &infos {
+            vl.add_validator(pub_key.clone(), 1, 0);
+        }
+        let r1 = select_candidate(&VotingStrategy::WeightedProbability, &tracker, &vl, 42, None, None);
+        let r2 = select_candidate(&VotingStrategy::WeightedProbability, &tracker, &vl, 42, None, None);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn weighted_probability_fallback_empty() {
+        let (tracker, infos) = setup_tracker_3();
+        let vl = ValidatorList::new(); // empty validator list
+        let result = select_candidate(
+            &VotingStrategy::WeightedProbability,
+            &tracker,
+            &vl,
+            0,
+            None,
+            None,
+        );
+        // Falls back to FirstValid
+        assert_eq!(result, Some(infos[0].1));
     }
 }

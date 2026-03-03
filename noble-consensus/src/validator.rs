@@ -95,6 +95,10 @@ pub struct ValidatorList {
     entries: HashMap<Vec<u8>, ValidatorEntry>,
     /// Pending key rotations: old_key_wire → PendingRotation
     pending_rotations: HashMap<Vec<u8>, PendingRotation>,
+    /// Operator-defined priority order (wire key bytes).
+    /// Used by RoundRobin and WeightedProbability strategies.
+    #[serde(default)]
+    priority_order: Vec<Vec<u8>>,
 }
 
 impl ValidatorList {
@@ -103,6 +107,7 @@ impl ValidatorList {
         Self {
             entries: HashMap::new(),
             pending_rotations: HashMap::new(),
+            priority_order: Vec::new(),
         }
     }
 
@@ -117,8 +122,9 @@ impl ValidatorList {
     pub fn add_validator(&mut self, pubkey: NoblePublicKey, weight: u64, now: u64) {
         debug!("validator added: {:?}", pubkey);
         let wire = pubkey.to_wire_bytes();
+        let is_new = !self.entries.contains_key(&wire);
         self.entries.insert(
-            wire,
+            wire.clone(),
             ValidatorEntry {
                 pubkey,
                 weight,
@@ -127,6 +133,10 @@ impl ValidatorList {
                 friendly_name: None,
             },
         );
+        // Append new validators to priority_order tail
+        if is_new && !self.priority_order.contains(&wire) {
+            self.priority_order.push(wire);
+        }
     }
 
     /// Update the `last_seen` timestamp for a validator (from peer memory).
@@ -176,8 +186,10 @@ impl ValidatorList {
 
     /// Remove a validator. Returns `true` if it was present.
     pub fn remove_validator(&mut self, pubkey: &NoblePublicKey) -> bool {
-        let removed = self.entries.remove(&pubkey.to_wire_bytes()).is_some();
+        let wire = pubkey.to_wire_bytes();
+        let removed = self.entries.remove(&wire).is_some();
         if removed {
+            self.priority_order.retain(|k| k != &wire);
             debug!("validator removed: {:?}", pubkey);
         }
         removed
@@ -219,6 +231,51 @@ impl ValidatorList {
         let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
         keys.sort();
         keys
+    }
+
+    /// Return validator wire-key bytes in operator-defined priority order.
+    ///
+    /// Keys in `priority_order` that still exist in `entries` come first,
+    /// followed by any validators NOT in the order list in lexicographic order.
+    pub fn ordered_validator_keys(&self) -> Vec<Vec<u8>> {
+        let mut result: Vec<Vec<u8>> = self
+            .priority_order
+            .iter()
+            .filter(|k| self.entries.contains_key(*k))
+            .cloned()
+            .collect();
+        // Append any validators not in priority_order, in lex order
+        let mut remaining: Vec<Vec<u8>> = self
+            .entries
+            .keys()
+            .filter(|k| !self.priority_order.contains(k))
+            .cloned()
+            .collect();
+        remaining.sort();
+        result.extend(remaining);
+        result
+    }
+
+    /// Get the operator-defined priority order (wire key bytes).
+    pub fn priority_order(&self) -> &[Vec<u8>] {
+        &self.priority_order
+    }
+
+    /// Set the operator-defined priority order.
+    ///
+    /// All keys must exist in the validator list. Returns `Err` if any key
+    /// is not a current validator.
+    pub fn set_priority_order(&mut self, order: Vec<Vec<u8>>) -> Result<(), String> {
+        for key in &order {
+            if !self.entries.contains_key(key) {
+                return Err(format!(
+                    "key {} is not in the validator list",
+                    hex::encode(key)
+                ));
+            }
+        }
+        self.priority_order = order;
+        Ok(())
     }
 
     /// Look up the weight of a validator by its wire-format key bytes.
@@ -322,7 +379,7 @@ impl ValidatorList {
                 let friendly_name = old_entry.and_then(|e| e.friendly_name);
                 let new_wire = rotation.new_key.to_wire_bytes();
                 self.entries.insert(
-                    new_wire,
+                    new_wire.clone(),
                     ValidatorEntry {
                         pubkey: rotation.new_key.clone(),
                         weight,
@@ -331,6 +388,10 @@ impl ValidatorList {
                         friendly_name,
                     },
                 );
+                // Replace old key position in priority_order with new key
+                if let Some(pos) = self.priority_order.iter().position(|k| k == &old_wire) {
+                    self.priority_order[pos] = new_wire;
+                }
                 finalized.push(rotation);
             }
         }
@@ -601,5 +662,120 @@ mod tests {
         assert_eq!(*liveness, ValidatorLiveness::Alive);
         assert!(added_at.is_some());
         assert_eq!(name.as_deref(), Some("test-validator"));
+    }
+
+    // ── Priority Order Tests ──
+
+    #[test]
+    fn priority_order_on_add_remove() {
+        let mut list = ValidatorList::new();
+        let pk1 = make_pubkey();
+        let pk2 = make_pubkey();
+        let pk3 = make_pubkey();
+        list.add_validator(pk1.clone(), 100, 1_700_000_000);
+        list.add_validator(pk2.clone(), 100, 1_700_000_000);
+        list.add_validator(pk3.clone(), 100, 1_700_000_000);
+
+        let order = list.priority_order();
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[0], pk1.to_wire_bytes());
+        assert_eq!(order[1], pk2.to_wire_bytes());
+        assert_eq!(order[2], pk3.to_wire_bytes());
+
+        // Remove pk2 — order should be [pk1, pk3]
+        list.remove_validator(&pk2);
+        let order = list.priority_order();
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0], pk1.to_wire_bytes());
+        assert_eq!(order[1], pk3.to_wire_bytes());
+    }
+
+    #[test]
+    fn set_priority_order_validates() {
+        let mut list = ValidatorList::new();
+        let pk1 = make_pubkey();
+        let pk2 = make_pubkey();
+        let unknown = make_pubkey();
+        list.add_validator(pk1.clone(), 100, 1_700_000_000);
+        list.add_validator(pk2.clone(), 100, 1_700_000_000);
+
+        // Valid reorder
+        let new_order = vec![pk2.to_wire_bytes(), pk1.to_wire_bytes()];
+        assert!(list.set_priority_order(new_order).is_ok());
+        assert_eq!(list.priority_order()[0], pk2.to_wire_bytes());
+
+        // Invalid: unknown key
+        let bad_order = vec![pk1.to_wire_bytes(), unknown.to_wire_bytes()];
+        assert!(list.set_priority_order(bad_order).is_err());
+    }
+
+    #[test]
+    fn ordered_keys_appends_unlisted() {
+        let mut list = ValidatorList::new();
+        let pk1 = make_pubkey();
+        let pk2 = make_pubkey();
+        let pk3 = make_pubkey();
+        list.add_validator(pk1.clone(), 100, 1_700_000_000);
+        list.add_validator(pk2.clone(), 100, 1_700_000_000);
+        list.add_validator(pk3.clone(), 100, 1_700_000_000);
+
+        // Only put pk3 in priority_order
+        list.set_priority_order(vec![pk3.to_wire_bytes()]).unwrap();
+
+        let ordered = list.ordered_validator_keys();
+        assert_eq!(ordered.len(), 3);
+        // pk3 first (from priority_order), then pk1 and pk2 in lex order
+        assert_eq!(ordered[0], pk3.to_wire_bytes());
+        // Remaining two are in lex order
+        let remaining = &ordered[1..];
+        assert!(remaining[0] < remaining[1], "remaining should be lex sorted");
+    }
+
+    #[test]
+    fn cbor_roundtrip_with_priority_order() {
+        use noble_codec::NobleCbor;
+
+        let mut list = ValidatorList::new();
+        let pk1 = make_pubkey();
+        let pk2 = make_pubkey();
+        list.add_validator(pk1.clone(), 100, 1_700_000_000);
+        list.add_validator(pk2.clone(), 50, 1_700_000_000);
+        list.set_priority_order(vec![pk2.to_wire_bytes(), pk1.to_wire_bytes()])
+            .unwrap();
+
+        let bytes = list.to_cbor().unwrap();
+        let decoded = ValidatorList::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.priority_order().len(), 2);
+        assert_eq!(decoded.priority_order()[0], pk2.to_wire_bytes());
+        assert_eq!(decoded.priority_order()[1], pk1.to_wire_bytes());
+    }
+
+    #[test]
+    fn finalize_rotation_preserves_priority_order_position() {
+        let mut list = ValidatorList::new();
+        let old_key = make_pubkey();
+        let other = make_pubkey();
+        let new_key = make_pubkey();
+        list.add_validator(old_key.clone(), 100, 1_700_000_000);
+        list.add_validator(other.clone(), 100, 1_700_000_000);
+        // priority_order: [old_key, other]
+        assert_eq!(list.priority_order()[0], old_key.to_wire_bytes());
+
+        list.apply_rotation(&old_key, new_key.clone(), 10).unwrap();
+        list.finalize_rotations(58, 48);
+
+        // New key should be at position 0 (replacing old_key)
+        assert_eq!(list.priority_order()[0], new_key.to_wire_bytes());
+        assert_eq!(list.priority_order()[1], other.to_wire_bytes());
+    }
+
+    #[test]
+    fn add_validator_twice_does_not_duplicate_priority_order() {
+        let mut list = ValidatorList::new();
+        let pk = make_pubkey();
+        list.add_validator(pk.clone(), 100, 1_700_000_000);
+        list.add_validator(pk.clone(), 200, 1_700_000_000); // update weight
+        assert_eq!(list.priority_order().len(), 1);
     }
 }

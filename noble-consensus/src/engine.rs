@@ -1192,19 +1192,20 @@ mod tests {
     fn tick_detects_phase_and_cycle_changes() {
         let (_vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
+        let g = noble_core::GENESIS_TIMESTAMP;
 
-        // Tick at t=0: cycle 0, Validation
-        let outputs = engine.step(CycleEvent::Tick { now: 0 });
+        // Tick at genesis: cycle 0, Validation
+        let outputs = engine.step(CycleEvent::Tick { now: g });
         assert!(has_set_timer(&outputs));
         assert_eq!(engine.current_phase(), CyclePhase::Validation);
         assert_eq!(engine.current_cycle(), 0);
 
-        // Tick at t=900: should transition to Reflection
-        let _outputs = engine.step(CycleEvent::Tick { now: 900 });
+        // Tick at g+900: should transition to Reflection
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 900 });
         assert_eq!(engine.current_phase(), CyclePhase::Reflection);
 
-        // Tick at t=1800: should transition to new cycle
-        let _outputs = engine.step(CycleEvent::Tick { now: 1800 });
+        // Tick at g+1800: should transition to new cycle
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 1800 });
         assert_eq!(engine.current_cycle(), 1);
         assert_eq!(engine.current_phase(), CyclePhase::Validation);
     }
@@ -1369,6 +1370,7 @@ mod tests {
     fn r2_vote_cast_at_reflection_midpoint() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+        let g = noble_core::GENESIS_TIMESTAMP;
 
         // Move to Reflection phase
         engine.tracked_phase = CyclePhase::Reflection;
@@ -1378,7 +1380,7 @@ mod tests {
         // Simulate tick at Reflection midpoint
         // cycle_duration=1800, phase_duration=900, midpoint=450s into Reflection
         // Reflection starts at 900s in cycle, midpoint at 1350s
-        let now = 1800 + 900 + 450; // cycle 1 start + validation + midpoint
+        let now = g + 1800 + 900 + 450; // cycle 1 start + validation + midpoint
         let _outputs = engine.step(CycleEvent::Tick { now });
 
         // R2 should have been broadcast (even though no candidates exist,

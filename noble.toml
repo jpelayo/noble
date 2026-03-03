@@ -51,8 +51,8 @@ validator_list_path = "validators.txt"
 
 # Voting strategy for Round 1 (Reflection phase).
 # Options: first_valid, fixed_validator, round_robin, subset_rotation,
-#          random, weighted_reputation, follow_majority, manual
-voting_strategy = "first_valid"
+#          random, weighted_reputation, weighted_probability, follow_majority, manual
+voting_strategy = "weighted_probability"
 
 # Voting strategy for Round 2 (Confirmation phase).
 confirmation_strategy = "follow_majority"

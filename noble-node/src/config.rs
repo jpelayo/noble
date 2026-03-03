@@ -132,7 +132,7 @@ pub struct ConsensusConfig {
     pub validator_list_path: PathBuf,
     /// Voting strategy for Round 1 (Reflection phase).
     /// Values: first_valid, fixed_validator, round_robin, subset_rotation,
-    ///         random, weighted_reputation, follow_majority, manual
+    ///         random, weighted_reputation, weighted_probability, follow_majority, manual
     #[serde(default = "default_voting_strategy")]
     pub voting_strategy: String,
     /// Voting strategy for Round 2 (Confirmation phase).
@@ -147,7 +147,7 @@ pub struct ConsensusConfig {
 }
 
 fn default_voting_strategy() -> String {
-    "first_valid".to_string()
+    "weighted_probability".to_string()
 }
 
 fn default_confirmation_strategy() -> String {

@@ -29,7 +29,7 @@ pub use error::ValidationError;
 pub use evidence::{DoubleProposalEvidence, EvidenceError};
 pub use genesis::{
     genesis_block, genesis_hash, regtest_genesis_block, regtest_genesis_hash,
-    testnet_genesis_block, testnet_genesis_hash,
+    testnet_genesis_block, testnet_genesis_hash, GENESIS_TIMESTAMP,
 };
 pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};

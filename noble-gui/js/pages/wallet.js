@@ -191,8 +191,45 @@ export function init(root, ctx) {
       } else {
         wRewardBadge.textContent = 'Not Configured';
         wRewardBadge.className = 'badge outbound';
-        wRewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">No reward address set. Paste a Bitcoin address below.</dt>`;
-        wRewardInput.value = '';
+        // Check if wallet has a secp256k1 key we can suggest
+        let suggestion = '';
+        try {
+          const walletKeys = await rpc.call('noble_listAddresses');
+          const secpKey = (walletKeys.keys || []).find(k => k.scheme === 'secp256k1' && k.bitcoin_addresses && k.bitcoin_addresses.length > 0);
+          if (secpKey) {
+            const p2wpkh = secpKey.bitcoin_addresses.find(a => a.address_type === 'p2wpkh');
+            if (p2wpkh) suggestion = p2wpkh.address;
+          }
+        } catch (_) { /* wallet may be locked */ }
+
+        if (suggestion) {
+          wRewardInfo.innerHTML = `
+            <dt style="grid-column:1/-1;color:var(--text-muted)">No reward address set.</dt>
+            <dt style="grid-column:1/-1">
+              <button id="w-reward-use-wallet" class="btn btn-sm" style="margin-top:var(--gap-xs)">Use wallet key: <span class="mono" style="font-size:var(--font-size-xs)">${suggestion}</span></button>
+            </dt>
+          `;
+          wRewardInput.value = '';
+          const useBtn = root.querySelector('#w-reward-use-wallet');
+          if (useBtn) {
+            useBtn.addEventListener('click', async () => {
+              useBtn.disabled = true;
+              useBtn.textContent = 'Saving...';
+              try {
+                await rpc.call('noble_setRewardAddress', { address: suggestion });
+                await loadRewardAddress();
+              } catch (e) {
+                wRewardMsg.style.color = 'var(--error)';
+                wRewardMsg.textContent = 'Error: ' + (e.message || e);
+                useBtn.disabled = false;
+                useBtn.textContent = 'Retry';
+              }
+            });
+          }
+        } else {
+          wRewardInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-muted)">No reward address set. Paste a Bitcoin address below.</dt>`;
+          wRewardInput.value = '';
+        }
       }
     } catch (e) {
       console.error('[wallet] load reward address:', e);

@@ -40,6 +40,7 @@ fn parse_strategy(
         "weighted_reputation" => Ok(VotingStrategy::WeightedReputation),
         "follow_majority" => Ok(VotingStrategy::FollowMajority),
         "manual" => Ok(VotingStrategy::Manual),
+        "weighted_probability" => Ok(VotingStrategy::WeightedProbability),
         "fixed_validator" => {
             let key = params
                 .and_then(|p| p.get("validator_key"))
@@ -73,7 +74,7 @@ fn parse_strategy(
         }
         other => Err(ApiError::InvalidParam(format!(
             "unknown strategy: {other}. Valid: first_valid, fixed_validator, round_robin, \
-             subset_rotation, random, weighted_reputation, follow_majority, manual"
+             subset_rotation, random, weighted_reputation, weighted_probability, follow_majority, manual"
         ))),
     }
 }
@@ -157,6 +158,13 @@ pub trait ConsensusApi {
         &self,
         count: Option<usize>,
     ) -> Result<CycleHistoryResponse, ErrorObjectOwned>;
+
+    /// Set the validator priority order (drag handles in GUI).
+    #[method(name = "setValidatorOrder")]
+    async fn set_validator_order(
+        &self,
+        order: Vec<String>,
+    ) -> Result<bool, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -300,10 +308,18 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             })
             .collect();
 
+        let priority_order: Vec<String> = consensus
+            .validator_list()
+            .priority_order()
+            .iter()
+            .map(hex::encode)
+            .collect();
+
         Ok(ValidatorListResponse {
             selection_policy: "weighted_random".to_string(),
             validators: entries,
             count,
+            priority_order,
         })
     }
 
@@ -582,5 +598,31 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
         let count = entries.len();
         Ok(CycleHistoryResponse { entries, count })
+    }
+
+    async fn set_validator_order(
+        &self,
+        order: Vec<String>,
+    ) -> Result<bool, ErrorObjectOwned> {
+        // Convert hex strings to wire bytes
+        let wire_order: Vec<Vec<u8>> = order
+            .iter()
+            .map(|hex_str| {
+                hex::decode(hex_str)
+                    .map_err(|_| ApiError::InvalidAddress(format!("invalid hex: {hex_str}")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ErrorObjectOwned::from)?;
+
+        let mut consensus = self.consensus.write();
+        consensus
+            .validator_list_mut()
+            .set_priority_order(wire_order)
+            .map_err(|e| ApiError::InvalidParam(e))?;
+
+        // Persist validator list
+        persist_validator_list(self, &consensus)?;
+
+        Ok(true)
     }
 }

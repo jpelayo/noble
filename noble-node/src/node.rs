@@ -2014,6 +2014,7 @@ fn parse_voting_strategy(
         "weighted_reputation" => VotingStrategy::WeightedReputation,
         "follow_majority" => VotingStrategy::FollowMajority,
         "manual" => VotingStrategy::Manual,
+        "weighted_probability" => VotingStrategy::WeightedProbability,
         "fixed_validator" => VotingStrategy::FixedValidator {
             validator_key: preferred_validator.to_string(),
         },

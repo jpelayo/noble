@@ -117,6 +117,7 @@ export function init(root, ctx) {
               <option value="subset_rotation">Subset Rotation</option>
               <option value="random">Random</option>
               <option value="weighted_reputation">Weighted Reputation</option>
+              <option value="weighted_probability">Weighted Probability</option>
               <option value="follow_majority">Follow Majority</option>
               <option value="manual">Manual</option>
             </select>
@@ -143,6 +144,7 @@ export function init(root, ctx) {
               <option value="subset_rotation">Subset Rotation</option>
               <option value="random">Random</option>
               <option value="weighted_reputation">Weighted Reputation</option>
+              <option value="weighted_probability">Weighted Probability</option>
               <option value="follow_majority">Follow Majority</option>
               <option value="manual">Manual</option>
             </select>
@@ -222,7 +224,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
+          <thead><tr><th style="width:28px"></th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
       </div>
@@ -294,10 +296,11 @@ export function init(root, ctx) {
   const STRATEGY_DESCRIPTIONS = {
     first_valid: 'Vote for the first valid block received. Fast but biased toward low-latency validators.',
     fixed_validator: 'Always vote for a specific validator. Falls back to first valid if they don\'t propose.',
-    round_robin: 'Rotate through validators in sorted order each cycle.',
+    round_robin: 'Rotate through validators in your list order each cycle.',
     subset_rotation: 'Rotate through a user-defined subset of preferred validators.',
     random: 'Randomly select among valid candidates (deterministic per cycle).',
     weighted_reputation: 'Vote for the candidate from the highest-weight validator.',
+    weighted_probability: 'Randomized vote with decreasing probability following your validator list order.',
     follow_majority: 'Wait for tallies, then vote for the leading candidate.',
     manual: 'Do not auto-vote. Requires manual vote via RPC or GUI each cycle.',
   };
@@ -681,6 +684,9 @@ export function init(root, ctx) {
   // VALIDATOR REGISTRY
   // ══════════════════════════════════════════════
 
+  // Track current display order for drag-and-drop
+  let currentDisplayOrder = [];
+
   async function loadValidators() {
     try {
       const [result, nodeInfo] = await Promise.all([
@@ -689,19 +695,34 @@ export function init(root, ctx) {
       ]);
       const selfKey = nodeInfo.validator_pubkey || null;
       const validators = result.validators;
+      const priorityOrder = result.priority_order || [];
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
       const online = validators.filter(v => v.status === 'alive').length;
       const offline = validators.length - online;
-      const avgRep = validators.reduce((s, v) => s + v.reputation_score, 0) / validators.length;
+      const avgRep = validators.length > 0
+        ? validators.reduce((s, v) => s + v.reputation_score, 0) / validators.length
+        : 0;
       csValTotal.textContent = validators.length;
       csValOnline.textContent = online;
       csValOffline.textContent = offline;
       csValAvgRep.textContent = avgRep.toFixed(3);
 
-      const sorted = [...validators].sort((a, b) => b.reputation_score - a.reputation_score);
+      // Order by priority_order from server, unlisted validators appended
+      const byKey = new Map(validators.map(v => [valKeyHex(v.public_key), v]));
+      const ordered = [];
+      for (const key of priorityOrder) {
+        if (byKey.has(key)) ordered.push(byKey.get(key));
+      }
+      for (const v of validators) {
+        if (!priorityOrder.includes(valKeyHex(v.public_key))) ordered.push(v);
+      }
+      currentDisplayOrder = ordered.map(v => valKeyHex(v.public_key));
+
       validatorsTbody.innerHTML = '';
-      sorted.forEach((v, i) => {
+      let dragSrcIdx = null;
+
+      ordered.forEach((v, i) => {
         const keyHex = valKeyHex(v.public_key);
         const br = v.reputation_breakdown;
         const statusClass = v.status === 'alive' ? 'inbound' : 'pending';
@@ -712,7 +733,11 @@ export function init(root, ctx) {
         const removeCell = `<td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>`;
         const tr = document.createElement('tr');
         tr.className = 'clickable';
+        tr.draggable = true;
+        tr.dataset.idx = i;
+        tr.dataset.key = keyHex;
         tr.innerHTML = `
+          <td style="cursor:grab;color:var(--text-muted);font-size:1.1em;text-align:center;user-select:none" class="cs-drag-handle" title="Drag to reorder">&#8942;</td>
           <td>${i + 1}</td>
           <td>
             <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
@@ -737,8 +762,41 @@ export function init(root, ctx) {
           <td style="font-size:var(--font-size-xs)">${v.last_active ? (v.status === 'alive' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)) : '--'}</td>
           ${removeCell}
         `;
+
+        // Drag-and-drop handlers
+        tr.addEventListener('dragstart', (e) => {
+          dragSrcIdx = i;
+          e.dataTransfer.effectAllowed = 'move';
+          tr.style.opacity = '0.5';
+        });
+        tr.addEventListener('dragend', () => { tr.style.opacity = ''; });
+        tr.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          tr.style.background = 'var(--bg-tertiary)';
+        });
+        tr.addEventListener('dragleave', () => { tr.style.background = ''; });
+        tr.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          tr.style.background = '';
+          const destIdx = parseInt(tr.dataset.idx, 10);
+          if (dragSrcIdx === null || dragSrcIdx === destIdx) return;
+          // Reorder currentDisplayOrder
+          const newOrder = [...currentDisplayOrder];
+          const [moved] = newOrder.splice(dragSrcIdx, 1);
+          newOrder.splice(destIdx, 0, moved);
+          currentDisplayOrder = newOrder;
+          try {
+            await rpc.call('noble_setValidatorOrder', { order: newOrder });
+            loadValidators();
+          } catch (err) {
+            console.error('[consensus] set validator order:', err);
+            loadValidators(); // refresh to revert visual
+          }
+        });
+
         tr.addEventListener('click', (e) => {
-          if (e.target.closest('.cs-remove-btn')) return;
+          if (e.target.closest('.cs-remove-btn') || e.target.closest('.cs-drag-handle')) return;
           showValidatorDetail(v);
         });
         validatorsTbody.appendChild(tr);
@@ -749,7 +807,7 @@ export function init(root, ctx) {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           const pubkey = btn.dataset.pubkey;
-          const name = sorted.find(v => valKeyHex(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
+          const name = ordered.find(v => valKeyHex(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
           showRemoveConfirmation(pubkey, name);
         });
       });

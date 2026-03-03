@@ -372,6 +372,8 @@ pub struct ValidatorListResponse {
     pub selection_policy: String,
     pub validators: Vec<ValidatorEntry>,
     pub count: usize,
+    /// Operator-defined priority order (hex-encoded wire key bytes).
+    pub priority_order: Vec<String>,
 }
 
 /// Response for `noble_getCycleStatus`.

@@ -16,10 +16,16 @@ pub enum CyclePhase {
 }
 
 /// Manages cycle and phase computations using only wall-clock timestamps.
+///
+/// Cycle numbers are relative to the genesis timestamp so that cycle 0
+/// corresponds to the genesis block, cycle 1 to the first post-genesis
+/// cycle, and so on.
 #[derive(Debug, Clone)]
 pub struct CycleManager {
     /// Duration of a full cycle in seconds.
     cycle_duration: u64,
+    /// Genesis timestamp — cycles are counted from this origin.
+    genesis_timestamp: u64,
 }
 
 impl CycleManager {
@@ -28,12 +34,18 @@ impl CycleManager {
         assert!(cycle_duration_secs > 0, "cycle duration must be positive");
         Self {
             cycle_duration: cycle_duration_secs,
+            genesis_timestamp: noble_core::GENESIS_TIMESTAMP,
         }
     }
 
-    /// Return the cycle number at the given timestamp.
+    /// Elapsed seconds since genesis (saturating — returns 0 before genesis).
+    fn elapsed(&self, now: u64) -> u64 {
+        now.saturating_sub(self.genesis_timestamp)
+    }
+
+    /// Return the cycle number at the given timestamp (relative to genesis).
     pub fn current_cycle(&self, now: u64) -> u64 {
-        now / self.cycle_duration
+        self.elapsed(now) / self.cycle_duration
     }
 
     /// Return the current phase at the given timestamp.
@@ -49,7 +61,7 @@ impl CycleManager {
 
     /// Offset within the current cycle (0..cycle_duration).
     pub fn cycle_offset(&self, now: u64) -> u64 {
-        now % self.cycle_duration
+        self.elapsed(now) % self.cycle_duration
     }
 
     /// Offset within the current phase (0..cycle_duration/2).
@@ -75,63 +87,68 @@ impl CycleManager {
 mod tests {
     use super::*;
 
+    const G: u64 = noble_core::GENESIS_TIMESTAMP;
+
     fn mgr() -> CycleManager {
         CycleManager::new(1800)
     }
 
     #[test]
     fn cycle_zero_at_genesis() {
+        assert_eq!(mgr().current_cycle(G), 0);
+    }
+
+    #[test]
+    fn cycle_zero_before_genesis() {
         assert_eq!(mgr().current_cycle(0), 0);
+        assert_eq!(mgr().current_cycle(G - 1), 0);
     }
 
     #[test]
     fn cycle_increments() {
         let m = mgr();
-        assert_eq!(m.current_cycle(1799), 0);
-        assert_eq!(m.current_cycle(1800), 1);
-        assert_eq!(m.current_cycle(3599), 1);
-        assert_eq!(m.current_cycle(3600), 2);
+        assert_eq!(m.current_cycle(G + 1799), 0);
+        assert_eq!(m.current_cycle(G + 1800), 1);
+        assert_eq!(m.current_cycle(G + 3599), 1);
+        assert_eq!(m.current_cycle(G + 3600), 2);
     }
 
     #[test]
     fn phase_first_half_is_validation() {
         let m = mgr();
-        assert_eq!(m.current_phase(0), CyclePhase::Validation);
-        assert_eq!(m.current_phase(899), CyclePhase::Validation);
+        assert_eq!(m.current_phase(G), CyclePhase::Validation);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Validation);
     }
 
     #[test]
     fn phase_second_half_is_reflection() {
         let m = mgr();
-        assert_eq!(m.current_phase(900), CyclePhase::Reflection);
-        assert_eq!(m.current_phase(1799), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 1799), CyclePhase::Reflection);
     }
 
     #[test]
     fn phase_transition_at_midpoint() {
         let m = mgr();
-        // Just before midpoint → Validation
-        assert_eq!(m.current_phase(899), CyclePhase::Validation);
-        // Exactly at midpoint → Reflection
-        assert_eq!(m.current_phase(900), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Validation);
+        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
     }
 
     #[test]
     fn seconds_until_phase_change() {
         let m = mgr();
-        assert_eq!(m.seconds_until_phase_change(0), 900);
-        assert_eq!(m.seconds_until_phase_change(450), 450);
-        assert_eq!(m.seconds_until_phase_change(899), 1);
-        // At phase boundary, full half remains
-        assert_eq!(m.seconds_until_phase_change(900), 900);
+        assert_eq!(m.seconds_until_phase_change(G), 900);
+        assert_eq!(m.seconds_until_phase_change(G + 450), 450);
+        assert_eq!(m.seconds_until_phase_change(G + 899), 1);
+        assert_eq!(m.seconds_until_phase_change(G + 900), 900);
     }
 
     #[test]
     fn seconds_until_cycle_boundary() {
         let m = mgr();
-        assert_eq!(m.seconds_until_cycle_boundary(0), 1800);
-        assert_eq!(m.seconds_until_cycle_boundary(1), 1799);
-        assert_eq!(m.seconds_until_cycle_boundary(1799), 1);
-        assert_eq!(m.seconds_until_cycle_boundary(1800), 1800);
+        assert_eq!(m.seconds_until_cycle_boundary(G), 1800);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1), 1799);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1799), 1);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1800), 1800);
     }
 }
