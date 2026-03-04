@@ -1110,6 +1110,25 @@ pub struct ResetChainResponse {
     pub previous_height: u64,
 }
 
+/// Response for `noble_getWalletTransactions`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WalletTransactionsResponse {
+    pub transactions: Vec<WalletTransactionEntry>,
+}
+
+/// A single wallet transaction entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct WalletTransactionEntry {
+    pub tx_type: String,
+    pub direction: String,
+    pub amount: u64,
+    pub timestamp: u64,
+    pub description: String,
+    pub tx_id: String,
+    pub confirmations: u32,
+    pub running_balance: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

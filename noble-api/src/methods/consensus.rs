@@ -507,6 +507,30 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             consensus.set_confirmation_strategy(parsed);
         }
 
+        // Persist strategy to noble.toml so it survives restarts.
+        if let Some(ref set_fn) = self.set_config_value {
+            let key = if round == 1 { "voting_strategy" } else { "confirmation_strategy" };
+            let _ = set_fn("consensus", key, &strategy);
+            // Also persist params if applicable.
+            if strategy == "fixed_validator" {
+                if let Some(ref p) = params {
+                    if let Some(vk) = p.get("validator_key").and_then(|v| v.as_str()) {
+                        let _ = set_fn("consensus", "voting_preferred_validator", vk);
+                    }
+                }
+            } else if strategy == "subset_rotation" {
+                if let Some(ref p) = params {
+                    if let Some(arr) = p.get("validators").and_then(|v| v.as_array()) {
+                        let csv: String = arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let _ = set_fn("consensus", "voting_subset", &csv);
+                    }
+                }
+            }
+        }
+
         let (r1_name, r1_params) = strategy_to_response(consensus.voting_strategy());
         let (r2_name, r2_params) = strategy_to_response(consensus.confirmation_strategy());
         Ok(VotingStrategyResponse {

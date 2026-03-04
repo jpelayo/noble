@@ -867,6 +867,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("storage", "keep_blocks"),
             ("security", "encryption_mode"),
             ("rewards", "reward_address"),
+            ("consensus", "voting_strategy"),
+            ("consensus", "confirmation_strategy"),
+            ("consensus", "voting_preferred_validator"),
+            ("consensus", "voting_subset"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {

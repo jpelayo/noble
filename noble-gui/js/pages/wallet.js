@@ -192,30 +192,30 @@ export function init(root, ctx) {
   // ── Load wallet info ──
   async function loadWallet() {
     try {
-      const [info, txResult] = await Promise.all([
-        rpc.call('noble_getWalletInfo'),
-        rpc.call('noble_getWalletTransactions'),
-      ]);
+      const info = await rpc.call('noble_getWalletInfo');
 
       // KPI cards
       wBalance.textContent = formatNoble(info.balance);
       wBalanceAtomic.textContent = `${formatNumber(info.balance)} atomic units`;
       wAvailable.textContent = formatNoble(info.available);
       wPending.textContent = formatNoble(info.pending);
-      wEarned.textContent = formatNoble(info.total_earned);
-      wEarnedSub.textContent = `from ${formatNumber(info.blocks_validated)} blocks validated`;
+      wEarned.textContent = formatNoble(info.total_earned || 0);
+      wEarnedSub.textContent = info.blocks_validated
+        ? `from ${formatNumber(info.blocks_validated)} blocks validated`
+        : '';
 
-      // Identity
-      const keyHex = bytesToHex(info.public_key.Ed25519 || info.public_key.Secp256k1 || []);
-      const scheme = info.public_key.Ed25519 ? 'Ed25519' : 'secp256k1';
+      // Identity — show key count and balances
       wIdentity.innerHTML = `
-        <dt>Address</dt><dd class="mono">${info.address}</dd>
-        <dt>Public Key</dt><dd class="mono">${keyHex}</dd>
-        <dt>Scheme</dt><dd>${scheme}</dd>
-        <dt>Derived From</dt><dd>Node validator key (primary)</dd>
-        <dt>Blocks Validated</dt><dd>${formatNumber(info.blocks_validated)}</dd>
-        <dt>First Active</dt><dd>${formatTimestamp(info.first_active)}</dd>
+        <dt>Keys</dt><dd>${info.key_count} key${info.key_count !== 1 ? 's' : ''} in keystore</dd>
+        <dt>Status</dt><dd>${info.unlocked ? '<span style="color:var(--success)">Unlocked</span>' : '<span style="color:var(--text-muted)">Locked</span>'}</dd>
+        <dt>Balance</dt><dd class="mono">${formatNoble(info.balance)}</dd>
+        <dt>Available</dt><dd class="mono">${formatNoble(info.available)}</dd>
+        <dt>Pending</dt><dd class="mono">${formatNoble(info.pending)}</dd>
       `;
+
+      // Load transactions separately so identity panel works even if this fails
+      let txResult = { transactions: [] };
+      try { txResult = await rpc.call('noble_getWalletTransactions'); } catch {}
 
       // Income breakdown — 3 categories: subsidies, validator fees, gateway fees
       const subsidyTotal = txResult.transactions
@@ -235,6 +235,14 @@ export function init(root, ctx) {
       const subsidyPct = totalIncome > 0 ? Math.round(subsidyTotal / totalIncome * 100) : 0;
       const valFeePct = totalIncome > 0 ? Math.round(valFeeTotal / totalIncome * 100) : 0;
       const gwFeePct = Math.max(0, 100 - subsidyPct - valFeePct);
+
+      if (txResult.transactions.length === 0) {
+        wIncomeBreakdown.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">No transaction history yet. Income data will appear once the node validates blocks.</p>';
+        wRecentActivity.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">No recent activity.</p>';
+        allTransactions = [];
+        renderTransactions();
+        return;
+      }
 
       wIncomeBreakdown.innerHTML = `
         <div style="margin-bottom:var(--gap)">

@@ -887,7 +887,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         // Known array fields (for first-time writes when the key doesn't exist yet).
                         let known_array = matches!(
                             (section, key),
-                            ("network", "seeds") | ("api", "allowed_ips") | ("api", "tls_san")
+                            ("network", "seeds") | ("api", "allowed_ips") | ("api", "tls_san") | ("consensus", "voting_subset")
                         );
                         let toml_value = if existing_is_array || known_array {
                             if value.is_empty() {

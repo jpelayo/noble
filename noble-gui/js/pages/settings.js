@@ -273,6 +273,7 @@ export function init(root, ctx) {
     <div class="panel">
       <div class="panel-header">
         <span>Chain Management</span>
+        <button id="s-chain-gear" title="Chain reset options" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 8px;cursor:pointer;color:var(--text-muted);font-size:1rem;line-height:1">&#9881;</button>
       </div>
       <div class="panel-body">
         <dl class="detail-grid" id="s-chain-info">
@@ -285,15 +286,29 @@ export function init(root, ctx) {
             <p style="font-size:var(--font-size-xs);color:var(--text-muted)">Loading...</p>
           </div>
         </div>
+      </div>
+    </div>
 
-        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
-          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-xs);color:var(--warning)">Reset to Genesis</p>
-          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
-            Wipes local chain and re-syncs from peers. Use when this node is on a shorter/wrong fork.
-          </p>
-          <button id="s-chain-reset-btn" class="btn-sm" style="padding:6px 14px;background:var(--error);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset &amp; Re-sync</button>
-          <span id="s-chain-reset-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)"></span>
+    <!-- Chain Management Modal -->
+    <div id="s-chain-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:700px;width:92%;max-height:85vh;overflow-y:auto;padding:var(--gap-lg);position:relative">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)">
+          <h3 style="margin:0">Chain Reset &amp; Re-sync</h3>
+          <button id="s-chain-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
         </div>
+        <p style="font-size:var(--font-size-sm);color:var(--text-muted);margin:0 0 var(--gap)">
+          Reset the local chain to genesis and re-sync from network peers. Use when this node is stuck on a wrong fork.
+        </p>
+        <div id="s-chain-modal-forks" style="margin-bottom:var(--gap)"></div>
+        <div id="s-chain-modal-datadir" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap);padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm)"></div>
+        <p style="font-size:var(--font-size-xs);color:var(--warning);margin:0 0 var(--gap)">
+          &#9888; This will erase all blocks above genesis. Back up your data directory manually before proceeding if needed.
+        </p>
+        <div style="display:flex;gap:var(--gap-sm);justify-content:flex-end">
+          <button id="s-chain-modal-cancel" class="btn-sm" style="padding:6px 14px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Cancel</button>
+          <button id="s-chain-modal-reset" class="btn-sm" style="padding:6px 14px;background:var(--error);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset &amp; Re-sync</button>
+        </div>
+        <div id="s-chain-modal-msg" style="font-size:var(--font-size-xs);margin-top:var(--gap-sm);text-align:right"></div>
       </div>
     </div>
   `;
@@ -1213,68 +1228,115 @@ export function init(root, ctx) {
   // --- Chain Management ---
   const chainInfoEl = root.querySelector('#s-chain-info');
   const forkWrap = root.querySelector('#s-fork-table-wrap');
-  const resetBtn = root.querySelector('#s-chain-reset-btn');
-  const resetMsg = root.querySelector('#s-chain-reset-msg');
+  const chainGear = root.querySelector('#s-chain-gear');
+  const chainModal = root.querySelector('#s-chain-modal');
+  const chainModalClose = root.querySelector('#s-chain-modal-close');
+  const chainModalCancel = root.querySelector('#s-chain-modal-cancel');
+  const chainModalReset = root.querySelector('#s-chain-modal-reset');
+  const chainModalForks = root.querySelector('#s-chain-modal-forks');
+  const chainModalDatadir = root.querySelector('#s-chain-modal-datadir');
+  const chainModalMsg = root.querySelector('#s-chain-modal-msg');
+
+  let latestForkData = null;
+
+  function renderForkTable(data, container, withRadio) {
+    if (!data.forks || data.forks.length === 0) {
+      container.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">No peer data available</p>';
+      return;
+    }
+    if (data.forks.length <= 1 && !withRadio) {
+      container.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">No forks detected — all peers on same chain</p>';
+      return;
+    }
+
+    let rows = data.forks.map((f, i) => {
+      const hashShort = f.tip_hash.slice(0, 10) + '\u2026' + f.tip_hash.slice(-8);
+      const label = f.is_local
+        ? '<span style="color:var(--success)">\u25CF Our chain</span>'
+        : (f.height > data.local_height ? '<span style="color:var(--warning)">\u26A0 Longer fork</span>' : 'Alternative');
+      const radioCol = withRadio
+        ? `<td><input type="radio" name="s-fork-select" value="${i}" ${!f.is_local ? '' : 'disabled'} style="accent-color:var(--accent)"></td>`
+        : '';
+      return `<tr style="${f.is_local ? 'background:rgba(var(--success-rgb,52,211,153),0.08)' : ''}">
+        ${radioCol}
+        <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${hashShort}</td>
+        <td>${f.height}</td>
+        <td>${f.peers}</td>
+        <td>${label}</td>
+      </tr>`;
+    }).join('');
+
+    const radioHeader = withRadio ? '<th style="width:30px"></th>' : '';
+    container.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+      <thead><tr>${radioHeader}<th>Tip Hash</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
 
   async function loadForks() {
     try {
       const data = await rpc.call('noble_getDetectedForks');
+      latestForkData = data;
       // Render chain info
-      const tipShort = data.local_tip ? (data.local_tip.slice(0, 10) + '…' + data.local_tip.slice(-8)) : '—';
+      const tipShort = data.local_tip ? (data.local_tip.slice(0, 10) + '\u2026' + data.local_tip.slice(-8)) : '\u2014';
       chainInfoEl.innerHTML = `
         <dt>Height</dt><dd>${data.local_height}</dd>
         <dt>Tip</dt><dd style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${tipShort}</dd>
       `;
-
-      // Render fork table
-      if (!data.forks || data.forks.length <= 1) {
-        forkWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">No forks detected — all peers on same chain</p>';
-        return;
-      }
-
-      let rows = data.forks.map(f => {
-        const hashShort = f.tip_hash.slice(0, 10) + '…' + f.tip_hash.slice(-8);
-        const label = f.is_local
-          ? '<span style="color:var(--success)">● Our chain</span>'
-          : (f.height > data.local_height ? '<span style="color:var(--warning)">⚠ Longer fork</span>' : 'Alternative');
-        return `<tr style="${f.is_local ? 'background:rgba(var(--success-rgb,52,211,153),0.08)' : ''}">
-          <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${hashShort}</td>
-          <td>${f.height}</td>
-          <td>${f.peers}</td>
-          <td>${label}</td>
-        </tr>`;
-      }).join('');
-
-      forkWrap.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
-        <thead><tr><th>Tip Hash</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
+      renderForkTable(data, forkWrap, false);
     } catch (e) {
-      forkWrap.innerHTML = `<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Fork detection unavailable</p>`;
+      forkWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Fork detection unavailable</p>';
     }
   }
 
   loadForks();
   const forkTimer = setInterval(loadForks, 30000);
 
-  resetBtn.addEventListener('click', async () => {
-    if (!confirm('This will erase all blocks above genesis and re-sync from network peers. This cannot be undone. Continue?')) return;
-    resetMsg.textContent = 'Resetting...';
-    resetMsg.style.color = 'var(--text-muted)';
+  // Modal open/close
+  function openChainModal() {
+    chainModalMsg.textContent = '';
+    // Refresh forks for the modal
+    if (latestForkData) {
+      renderForkTable(latestForkData, chainModalForks, true);
+    }
+    // Show data directory path
+    rpc.call('noble_getNodeInfo').then(info => {
+      chainModalDatadir.innerHTML = info.data_dir
+        ? `<strong>Data directory:</strong> <code>${info.data_dir}</code>`
+        : 'Data directory path not available.';
+    }).catch(() => {
+      chainModalDatadir.textContent = 'Data directory path not available.';
+    });
+    chainModal.style.display = 'flex';
+  }
+  function closeChainModal() { chainModal.style.display = 'none'; }
+
+  chainGear.addEventListener('click', openChainModal);
+  chainModalClose.addEventListener('click', closeChainModal);
+  chainModalCancel.addEventListener('click', closeChainModal);
+  chainModal.addEventListener('click', (e) => { if (e.target === chainModal) closeChainModal(); });
+
+  chainModalReset.addEventListener('click', async () => {
+    chainModalMsg.textContent = 'Resetting...';
+    chainModalMsg.style.color = 'var(--text-muted)';
+    chainModalReset.disabled = true;
     try {
       const result = await rpc.call('noble_resetChain');
-      resetMsg.style.color = 'var(--success)';
-      resetMsg.textContent = `Reset complete (was height ${result.previous_height}). Re-syncing from peers...`;
-      setTimeout(() => loadForks(), 2000);
+      chainModalMsg.style.color = 'var(--success)';
+      chainModalMsg.textContent = `Reset complete (was height ${result.previous_height}). Re-syncing from peers...`;
+      setTimeout(() => { loadForks(); closeChainModal(); }, 2000);
     } catch (e) {
-      resetMsg.style.color = 'var(--error)';
-      resetMsg.textContent = e.message || 'Reset failed';
+      chainModalMsg.style.color = 'var(--error)';
+      chainModalMsg.textContent = e.message || 'Reset failed';
+    } finally {
+      chainModalReset.disabled = false;
     }
   });
 
   return {
     destroy() {
       clearInterval(forkTimer);
+      closeChainModal();
     },
   };
 }

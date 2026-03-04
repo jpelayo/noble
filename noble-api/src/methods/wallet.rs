@@ -139,6 +139,10 @@ pub trait WalletApi {
         pubkey_hex: String,
         passphrase: String,
     ) -> Result<DeleteAddressResponse, ErrorObjectOwned>;
+
+    /// Get wallet transaction history (stub — returns empty list).
+    #[method(name = "getWalletTransactions")]
+    async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -599,6 +603,13 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         Ok(DeleteAddressResponse {
             success: true,
             message: format!("Key {} deleted.", &pubkey_hex[..pubkey_hex.len().min(16)]),
+        })
+    }
+
+    async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
+        // Stub: full implementation requires a chain-scanning address index.
+        Ok(WalletTransactionsResponse {
+            transactions: vec![],
         })
     }
 
