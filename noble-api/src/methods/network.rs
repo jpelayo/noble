@@ -174,6 +174,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             peer_count: stats.peer_count,
             inbound: stats.inbound_count,
             outbound: stats.outbound_count,
+            clock_offset_ms: stats.median_clock_offset_ms,
         })
     }
 

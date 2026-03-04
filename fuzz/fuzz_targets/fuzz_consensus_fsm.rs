@@ -23,6 +23,7 @@ fuzz_target!(|data: &[u8]| {
         Hash256::ZERO,
         noble_core::MAINNET_CHAIN_ID,
         None,
+        Some(0),
     );
 
     // Feed tick events at various timestamps derived from fuzz input

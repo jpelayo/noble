@@ -40,6 +40,7 @@ proptest! {
             Hash256::ZERO,
             noble_core::MAINNET_CHAIN_ID,
             None,
+            Some(0),
         );
 
         for ts in timestamps {
@@ -142,6 +143,7 @@ proptest! {
             Hash256::ZERO,
             noble_core::MAINNET_CHAIN_ID,
             None,
+            Some(0),
         );
 
         engine.step(CycleEvent::Tick { now: tick_time });
@@ -185,6 +187,7 @@ proptest! {
             Hash256::ZERO,
             noble_core::MAINNET_CHAIN_ID,
             None,
+            Some(0),
         );
         engine.step(CycleEvent::Tick { now: cycle * 1800 });
 

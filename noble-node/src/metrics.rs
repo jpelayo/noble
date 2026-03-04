@@ -39,6 +39,8 @@ pub struct NobleMetrics {
     pub storage_size_bytes: GaugeVec,
     /// Total circulating supply in atomic units.
     pub total_supply_atomic: Gauge,
+    /// Median clock drift relative to peers (seconds, signed).
+    pub clock_drift_seconds: Gauge,
 }
 
 impl Default for NobleMetrics {
@@ -119,6 +121,12 @@ impl NobleMetrics {
         ))
         .expect("metric");
 
+        let clock_drift_seconds = Gauge::with_opts(Opts::new(
+            "noble_clock_drift_seconds",
+            "Median clock drift relative to peers (seconds, signed)",
+        ))
+        .expect("metric");
+
         // Register all metrics.
         registry
             .register(Box::new(chain_height.clone()))
@@ -150,6 +158,9 @@ impl NobleMetrics {
         registry
             .register(Box::new(total_supply_atomic.clone()))
             .expect("register");
+        registry
+            .register(Box::new(clock_drift_seconds.clone()))
+            .expect("register");
 
         Self {
             registry,
@@ -163,6 +174,7 @@ impl NobleMetrics {
             rpc_request_duration,
             storage_size_bytes,
             total_supply_atomic,
+            clock_drift_seconds,
         }
     }
 
@@ -271,6 +283,10 @@ mod tests {
         assert!(
             names.contains(&"noble_total_supply_atomic"),
             "missing total_supply"
+        );
+        assert!(
+            names.contains(&"noble_clock_drift_seconds"),
+            "missing clock_drift"
         );
     }
 

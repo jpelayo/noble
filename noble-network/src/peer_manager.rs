@@ -137,6 +137,8 @@ pub struct PeerState {
     pub last_misbehavior: Option<Instant>,
     /// Last ban reason (set when ban threshold reached, surfaced via RPC/GUI).
     pub last_ban_reason: Option<BanReason>,
+    /// Clock offset in milliseconds (positive = peer ahead of us). `None` if not yet sampled.
+    pub clock_offset_ms: Option<i64>,
 }
 
 /// Maximum length of a software version string in a NodeAnnounce.
@@ -248,6 +250,7 @@ impl PeerManager {
                 misbehavior_window: VecDeque::new(),
                 last_misbehavior: None,
                 last_ban_reason: None,
+                clock_offset_ms: None,
             },
         );
         tracing::info!(task = "peer_connect", peer_id = %peer_id, "peer connected");
@@ -408,6 +411,33 @@ impl PeerManager {
     pub fn update_latency(&mut self, peer_id: &PeerId, latency: Duration) {
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.latency = Some(latency);
+        }
+    }
+
+    /// Update a peer's clock offset (milliseconds, positive = peer ahead).
+    pub fn update_clock_offset(&mut self, peer_id: &PeerId, offset_ms: i64) {
+        if let Some(state) = self.peers.get_mut(peer_id) {
+            state.clock_offset_ms = Some(offset_ms);
+        }
+    }
+
+    /// Compute the median clock offset across all peers that have data.
+    /// Returns `None` if fewer than 2 peers have clock offset samples.
+    pub fn median_clock_offset_ms(&self) -> Option<i64> {
+        let mut offsets: Vec<i64> = self
+            .peers
+            .values()
+            .filter_map(|s| s.clock_offset_ms)
+            .collect();
+        if offsets.len() < 2 {
+            return None;
+        }
+        offsets.sort_unstable();
+        let mid = offsets.len() / 2;
+        if offsets.len() % 2 == 0 {
+            Some((offsets[mid - 1] + offsets[mid]) / 2)
+        } else {
+            Some(offsets[mid])
         }
     }
 

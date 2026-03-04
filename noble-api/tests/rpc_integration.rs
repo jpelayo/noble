@@ -65,6 +65,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         block_hash,
         MAINNET_CHAIN_ID,
         None,
+        Some(noble_core::GENESIS_TIMESTAMP),
     )));
 
     let dir = tempfile::tempdir().expect("tempdir");

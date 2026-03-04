@@ -99,6 +99,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub chain_meta: [u8; 32],
     /// Keypair for signing NodeAnnounce messages (cloned from validator key before CycleEngine consumes it).
     pub announce_keypair: Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
+    /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
+    /// While true, block proposals are suppressed.
+    pub clock_drift_paused: std::sync::atomic::AtomicBool,
 }
 
 impl Node<MemoryStorage> {
@@ -161,6 +164,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             s.get_block_header(&tip.block_hash).ok()
         } else {
             None
+        };
+
+        // Read genesis block timestamp for cycle counting.
+        // Cycles are counted from the first block's timestamp, not a hardcoded constant.
+        let genesis_timestamp = {
+            let s = storage.read();
+            s.get_block_hash_by_height(1)
+                .ok()
+                .and_then(|hash| s.get_block_header(&hash).ok())
+                .map(|h| h.timestamp)
         };
 
         // --- Load per-installation encryption entropy ---
@@ -286,6 +299,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tip.block_hash,
             chain_id,
             validator_key,
+            genesis_timestamp,
         );
         if let Some(header) = tip_header {
             engine.update_tip_with_header(header);
@@ -327,6 +341,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             ca_store,
             chain_meta,
             announce_keypair,
+            clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -366,6 +381,34 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             // Cycle duration is 1800s (30 min); elapsed = total - remaining
             m.cycle_elapsed_secs
                 .set((1800u64.saturating_sub(cycle_remaining)) as f64);
+        }
+
+        // S49: Clock drift watchdog.
+        if let Some(offset_ms) = self.network_stats.read().median_clock_offset_ms {
+            m.clock_drift_seconds.set(offset_ms as f64 / 1000.0);
+            let abs_drift = offset_ms.unsigned_abs() / 1000;
+            if abs_drift > noble_core::CLOCK_DRIFT_CRITICAL_SECS {
+                tracing::error!(
+                    task = "clock_drift",
+                    drift_secs = abs_drift,
+                    "CRITICAL: Node clock drift exceeds {}s — block proposals suppressed",
+                    noble_core::CLOCK_DRIFT_CRITICAL_SECS,
+                );
+                self.clock_drift_paused
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            } else if abs_drift > noble_core::CLOCK_DRIFT_WARNING_SECS {
+                tracing::warn!(
+                    task = "clock_drift",
+                    drift_secs = abs_drift,
+                    "WARNING: Node clock drift exceeds {}s",
+                    noble_core::CLOCK_DRIFT_WARNING_SECS,
+                );
+                self.clock_drift_paused
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                self.clock_drift_paused
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -1619,12 +1662,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 peer_id,
                 height,
                 tip_hash,
+                median_clock_offset_ms,
             } => {
                 let hex_pid = hex::encode(peer_id);
                 let mut info = self.peer_info.write();
                 if let Some(entry) = info.get_mut(&hex_pid) {
                     entry.chain_tip_height = Some(*height);
                     entry.chain_tip_hash = Some(hex::encode(tip_hash));
+                }
+                // S49: Update network-level clock offset.
+                if median_clock_offset_ms.is_some() {
+                    self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 }
             }
             _ => {
@@ -1772,6 +1820,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     // Recursively process any actions from the proposal
                     self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
+                }
+                CycleIo::BroadcastBlock(ref _block)
+                    if self
+                        .clock_drift_paused
+                        .load(std::sync::atomic::Ordering::Relaxed) =>
+                {
+                    tracing::warn!(
+                        task = "clock_drift",
+                        "Block proposal suppressed — clock drift exceeds critical threshold"
+                    );
                 }
                 other => {
                     // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network

@@ -40,7 +40,14 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_TX_TIMESTAMP_SKEW: u64 = 3_600;
 
 /// Maximum allowed block timestamp skew into the future (seconds).
-pub const MAX_BLOCK_FUTURE_SKEW: u64 = 7_200;
+/// Tightened from 2h to 5min in S49 to limit median-of-11 manipulation.
+pub const MAX_BLOCK_FUTURE_SKEW: u64 = 300;
+
+/// Warn if |median peer clock offset| exceeds this threshold (seconds).
+pub const CLOCK_DRIFT_WARNING_SECS: u64 = 30;
+
+/// Critical: suppress block proposals if |median peer clock offset| exceeds this (seconds).
+pub const CLOCK_DRIFT_CRITICAL_SECS: u64 = 120;
 
 /// Maximum allowed block timestamp skew into the past (seconds).
 pub const MAX_BLOCK_PAST_SKEW: u64 = 3_600;

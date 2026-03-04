@@ -287,6 +287,7 @@ async fn invalid_block_triggers_ban() {
         Hash256::ZERO,
         MAINNET_CHAIN_ID,
         Some((sk1.clone_for_test(), pk1.clone())),
+        Some(0),
     );
     engine.set_peer_count(3);
 

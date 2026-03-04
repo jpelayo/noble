@@ -81,6 +81,9 @@ impl CycleEngine {
     ///
     /// If `validator_key` is `None`, the engine runs in observation mode
     /// (never broadcasts blocks or votes, still commits winning blocks).
+    /// `genesis_timestamp` should be `Some(ts)` where `ts` is the first block's
+    /// timestamp (from storage). Pass `None` when the chain has no blocks yet —
+    /// the engine will enter genesis-proposal mode until the first block is committed.
     pub fn new(
         config: ConsensusConfig,
         validator_list: ValidatorList,
@@ -88,8 +91,9 @@ impl CycleEngine {
         tip_hash: Hash256,
         chain_id: u32,
         validator_key: Option<(NoblePrivateKey, NoblePublicKey)>,
+        genesis_timestamp: Option<u64>,
     ) -> Self {
-        let cycle_mgr = CycleManager::new(config.cycle_duration_secs);
+        let cycle_mgr = CycleManager::new(config.cycle_duration_secs, genesis_timestamp);
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -211,10 +215,25 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
+        // No genesis block yet — can't count cycles.
+        // Validator proposes on a simple timer; observers just wait.
+        if !self.cycle_mgr.has_genesis() {
+            if self.first_tick {
+                self.first_tick = false;
+                info!("cycle engine: awaiting genesis block");
+                if self.our_validator_key.is_some() {
+                    outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+                }
+            }
+            outputs.push(CycleIo::SetTimer { duration_secs: 10 });
+            return outputs;
+        }
+
         let new_cycle = self.cycle_mgr.current_cycle(now);
         let new_phase = self.cycle_mgr.current_phase(now);
 
-        // First tick: initialize tracked state without firing a spurious boundary.
+        // First tick (or first tick after genesis committed): initialize tracked
+        // state without firing a spurious boundary.
         if self.first_tick {
             self.first_tick = false;
             self.tracked_cycle = new_cycle;
@@ -401,6 +420,15 @@ impl CycleEngine {
                     self.tip_hash = new_hash;
                     self.tip_timestamp = block.header.timestamp;
                     self.tip_header = Some(block.header.clone());
+                    // Genesis block committed — set cycle epoch and restart tick init.
+                    if new_height == 1 && !self.cycle_mgr.has_genesis() {
+                        info!(
+                            "genesis block committed — cycle epoch set to {}",
+                            block.header.timestamp
+                        );
+                        self.cycle_mgr.set_genesis_timestamp(block.header.timestamp);
+                        self.first_tick = true; // next tick will initialize cycle/phase
+                    }
                     outputs.push(CycleIo::CommitBlock(block));
                     outputs.push(CycleIo::EmitMetric {
                         name: "block_committed".to_string(),
@@ -942,6 +970,7 @@ mod tests {
             Hash256::ZERO,
             MAINNET_CHAIN_ID,
             validator_key,
+            Some(noble_core::GENESIS_TIMESTAMP),
         );
         engine.set_peer_count(peers);
         engine

@@ -310,6 +310,9 @@ pub struct NetworkInfoResponse {
     pub peer_count: usize,
     pub inbound: usize,
     pub outbound: usize,
+    /// Median clock offset across peers (ms, positive = peers ahead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_offset_ms: Option<i64>,
 }
 
 /// Response for `noble_getSyncStatus`.

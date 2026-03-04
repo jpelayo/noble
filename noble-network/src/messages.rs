@@ -56,6 +56,9 @@ pub enum SyncResponse {
         /// Mean vote count in winning blocks (fork KPI).
         #[serde(default)]
         avg_votes_per_block: f32,
+        /// Unix seconds when this status was generated (0 = old peer, no data).
+        #[serde(default)]
+        sender_timestamp: u64,
     },
     /// An error message from the remote peer.
     Error(String),
@@ -233,6 +236,8 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         height: u64,
         tip_hash: [u8; 32],
+        /// Median clock offset across all peers with data (ms, positive = peers ahead).
+        median_clock_offset_ms: Option<i64>,
     },
 }
 
@@ -295,6 +300,7 @@ mod tests {
             protocol_version: 1,
             total_transactions: 128,
             avg_votes_per_block: 2.5,
+            sender_timestamp: 1_700_000_000,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();

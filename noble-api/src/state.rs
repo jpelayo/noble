@@ -62,6 +62,8 @@ pub struct NetworkStats {
     pub inbound_count: usize,
     /// Number of outbound connections.
     pub outbound_count: usize,
+    /// Median clock offset across peers (ms, positive = peers ahead). `None` if < 2 peers sampled.
+    pub median_clock_offset_ms: Option<i64>,
 }
 
 /// Metadata about a connected peer, maintained by the node event loop.

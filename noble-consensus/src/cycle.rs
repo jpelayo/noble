@@ -29,13 +29,27 @@ pub struct CycleManager {
 }
 
 impl CycleManager {
-    /// Create a new cycle manager with the given cycle duration.
-    pub fn new(cycle_duration_secs: u64) -> Self {
+    /// Create a new cycle manager with the given cycle duration and genesis timestamp.
+    ///
+    /// `genesis_timestamp` should be the timestamp of the first block in the chain
+    /// (read from storage). If no genesis block exists yet, pass `None` — cycles
+    /// will not count until `set_genesis_timestamp()` is called.
+    pub fn new(cycle_duration_secs: u64, genesis_timestamp: Option<u64>) -> Self {
         assert!(cycle_duration_secs > 0, "cycle duration must be positive");
         Self {
             cycle_duration: cycle_duration_secs,
-            genesis_timestamp: noble_core::GENESIS_TIMESTAMP,
+            genesis_timestamp: genesis_timestamp.unwrap_or(u64::MAX),
         }
+    }
+
+    /// Update the genesis timestamp (called when the first block is committed).
+    pub fn set_genesis_timestamp(&mut self, ts: u64) {
+        self.genesis_timestamp = ts;
+    }
+
+    /// Whether a genesis timestamp has been set (i.e., the chain has blocks).
+    pub fn has_genesis(&self) -> bool {
+        self.genesis_timestamp != u64::MAX
     }
 
     /// Elapsed seconds since genesis (saturating — returns 0 before genesis).
@@ -90,7 +104,7 @@ mod tests {
     const G: u64 = noble_core::GENESIS_TIMESTAMP;
 
     fn mgr() -> CycleManager {
-        CycleManager::new(1800)
+        CycleManager::new(1800, Some(G))
     }
 
     #[test]

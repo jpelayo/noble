@@ -187,6 +187,7 @@ fn self_proposal_validates_before_broadcast() {
         Hash256::ZERO,
         MAINNET_CHAIN_ID,
         Some((priv_key, pub_key)),
+        Some(noble_core::GENESIS_TIMESTAMP),
     );
     engine.set_peer_count(5);
 

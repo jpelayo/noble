@@ -785,6 +785,7 @@ async fn handle_swarm_event(
                     tip_hash,
                     chain_id,
                     protocol_version,
+                    sender_timestamp,
                     ..
                 } => {
                     // GAP-H4: Verify chain_id and protocol_version.
@@ -822,10 +823,20 @@ async fn handle_swarm_event(
                         }
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
+                        // S49: Compute clock offset from sender_timestamp.
+                        if sender_timestamp > 0 {
+                            let local_now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let offset_ms = (sender_timestamp as i64 - local_now as i64) * 1000;
+                            peer_manager.update_clock_offset(&peer, offset_ms);
+                        }
                         let _ = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
                             peer_id: peer.to_bytes().to_vec(),
                             height,
                             tip_hash,
+                            median_clock_offset_ms: peer_manager.median_clock_offset_ms(),
                         });
                     }
                 }
@@ -1052,6 +1063,15 @@ fn handle_gossip_node_announce(
 ) -> Option<NetworkEvent> {
     match result {
         Ok(announce) => {
+            // S49: Compute clock offset from NodeAnnounce timestamp.
+            if announce.timestamp > 0 {
+                let local_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let offset_ms = (announce.timestamp as i64 - local_now as i64) * 1000;
+                peer_manager.update_clock_offset(source, offset_ms);
+            }
             peer_manager.update_announce(source, announce.clone());
             Some(NetworkEvent::NodeAnnounceReceived {
                 peer_id: peer_bytes,
@@ -1182,6 +1202,10 @@ fn handle_sync_request(
 
         SyncRequest::GetStatus => {
             let (height, tip_hash) = block_provider.chain_tip();
+            let sender_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             SyncResponse::Status {
                 height,
                 tip_hash,
@@ -1189,6 +1213,7 @@ fn handle_sync_request(
                 protocol_version: config.protocol_version,
                 total_transactions: block_provider.total_transactions(),
                 avg_votes_per_block: block_provider.avg_votes_per_block(),
+                sender_timestamp,
             }
         }
     }

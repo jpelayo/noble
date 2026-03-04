@@ -169,6 +169,7 @@ mod tests {
             misbehavior_window: std::collections::VecDeque::new(),
             last_misbehavior: None,
             last_ban_reason: None,
+            clock_offset_ms: None,
         }
     }
 
