@@ -398,6 +398,19 @@ impl VoteManager {
         keys.len()
     }
 
+    /// Count of unique validator keys that cast any vote (R1 or R2) for a specific candidate.
+    /// Used by the engine-level Dual-Witness check: the winning block must have ≥N distinct witnesses.
+    pub fn unique_voter_count_for_candidate(&self, candidate: &Hash256) -> usize {
+        let mut keys: HashSet<&Vec<u8>> = HashSet::new();
+        if let Some(voters) = self.votes.get(candidate) {
+            keys.extend(voters.iter());
+        }
+        if let Some(voters) = self.r2_votes.get(candidate) {
+            keys.extend(voters.iter());
+        }
+        keys.len()
+    }
+
     /// Return deduplicated wire-format public key bytes of all validators who cast
     /// at least one vote (R1 or R2) in the current cycle. Used by reputation scoring.
     pub fn voter_wire_keys(&self) -> Vec<Vec<u8>> {

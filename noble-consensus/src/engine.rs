@@ -388,11 +388,13 @@ impl CycleEngine {
 
             match result {
                 MigrationResult::Adopt { candidate_hash, .. } => {
-                    // Dual-Witness Rule (bootstrap): block 1 requires ≥ min_unique_voters distinct keys.
-                    if self.vote_mgr.unique_voter_count() < self.config.min_unique_voters {
+                    // Dual-Witness Rule (bootstrap): block 1 requires ≥ min_unique_voters
+                    // distinct keys voting for the WINNING candidate specifically.
+                    let witness_count = self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
+                    if witness_count < self.config.min_unique_voters {
                         debug!(
-                            "pre-genesis: majority found but only {} unique voter(s) (need {})",
-                            self.vote_mgr.unique_voter_count(),
+                            "pre-genesis: majority found but only {} unique voter(s) for candidate {} (need {})",
+                            witness_count, candidate_hash,
                             self.config.min_unique_voters
                         );
                         // Don't commit — wait for more witnesses
@@ -616,10 +618,11 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
-                // Dual-Witness Rule (bootstrap): blocks 1–2 require ≥ min_unique_voters distinct keys.
+                // Dual-Witness Rule (bootstrap): blocks 1–2 require ≥ min_unique_voters distinct keys
+                // voting for the WINNING candidate specifically (not just total unique voters).
                 // After block 2, normal plurality consensus applies even with 1 active voter.
                 let witness_ok = self.tip_height >= 2
-                    || self.vote_mgr.unique_voter_count() >= self.config.min_unique_voters;
+                    || self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash) >= self.config.min_unique_voters;
 
                 if witness_ok {
                     info!(
@@ -673,9 +676,10 @@ impl CycleEngine {
                     }
                 } else {
                     debug!(
-                        "cycle {}: Dual-Witness not met for bootstrap block {} ({} unique voter(s), need {})",
+                        "cycle {}: Dual-Witness not met for bootstrap block {} ({} unique voter(s) for winner {}, need {})",
                         completed_cycle, self.tip_height + 1,
-                        self.vote_mgr.unique_voter_count(), self.config.min_unique_voters
+                        self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash),
+                        candidate_hash, self.config.min_unique_voters
                     );
                     // Treat as indeterminate — don't commit, readmit txs
                     let all_txs: Vec<_> = self
