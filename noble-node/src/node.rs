@@ -1713,13 +1713,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 }
-                // Notify engine that we've received a peer status — pre-genesis
-                // commit waits for this before committing block 1.
-                {
-                    let mut engine = self.consensus.write();
-                    engine.set_peer_status_known();
-                }
-
                 // Sync catch-up: if the peer is ahead, request the next block
                 // we need.  The sync import path (try_sync_import) handles
                 // validation and commitment, then triggers another RequestSync
