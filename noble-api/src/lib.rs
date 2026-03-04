@@ -23,7 +23,7 @@ pub use state::{ApiState, NetworkStats, NodeIdentityData};
 
 /// API version string, included in the `X-Noble-API-Version` response header
 /// and returned by `noble_getApiVersion`.
-pub const API_VERSION: &str = "1.0";
+pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Number of registered RPC methods (excluding subscriptions).
 pub const API_METHOD_COUNT: u32 = 67;

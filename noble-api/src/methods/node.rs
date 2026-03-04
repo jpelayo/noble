@@ -1151,9 +1151,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage
                 .force_reset_to_genesis(self.chain_id)
                 .map_err(|e| ApiError::Internal(format!("reset chain: {e}")))?;
+            // Clear stale cycle history from the old chain — the new chain
+            // will produce its own history starting from block 1.
+            if let Err(e) = storage.clear_cycle_history() {
+                tracing::warn!(task = "chain_reset", "failed to clear cycle history: {e}");
+            }
         }
 
-        // Reset consensus engine.
+        // Reset consensus engine — enters pre-genesis mode (cycles = 0 until
+        // new chain's block 1 sets the epoch).
         {
             let storage = self.storage.read();
             let tip = storage

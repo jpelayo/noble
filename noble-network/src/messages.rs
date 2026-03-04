@@ -167,6 +167,8 @@ pub enum NetworkCommand {
     RequestBlock { peer_id: Vec<u8>, hash: [u8; 32] },
     /// Request a block by its hash from any connected peer.
     RequestBlockByHash { hash: [u8; 32] },
+    /// Request a block by height from a specific peer (sync catch-up).
+    RequestBlockByHeight { peer_id: Vec<u8>, height: u64 },
     /// Trigger a chain sync check.
     RequestSync,
     /// Ban a peer by their serialized PeerId bytes.

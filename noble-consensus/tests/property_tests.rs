@@ -165,14 +165,16 @@ proptest! {
     }
 }
 
-// ─── Property 5: Non-validator vote rejected ─────────────────────────────
+// ─── Property 5: Unknown validator vote accepted (open consensus) ────────
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
 
-    /// Votes from keys not in the validator list are rejected with a ban action.
+    /// Votes from keys not in the local validator list are accepted (open consensus).
+    /// The validator_list only controls who THIS node votes for, not whose votes
+    /// it accepts.  Any peer with a valid signature can cast a vote.
     #[test]
-    fn non_validator_vote_always_rejected(
+    fn unknown_validator_vote_accepted(
         cycle in 0u64..100,
     ) {
         let (_known_priv, known_pub) = arb_validator();
@@ -204,13 +206,13 @@ proptest! {
             from_peer: b"unknown_peer".to_vec(),
         });
 
-        // Should have a ban action
+        // Should NOT have a ban action — open consensus accepts any valid vote
         let has_ban = outputs.iter().any(|o| {
             matches!(o, noble_consensus::CycleIo::BanPeer { .. })
         });
         prop_assert!(
-            has_ban,
-            "non-validator vote must always produce a BanPeer action"
+            !has_ban,
+            "unknown validator vote must NOT produce a BanPeer action"
         );
     }
 }

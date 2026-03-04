@@ -805,6 +805,13 @@ impl StorageEngine for MemoryStorage {
         Ok(entries)
     }
 
+    fn clear_cycle_history(&self) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.cycle_history.clear();
+        Ok(())
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         inner.closed = true;

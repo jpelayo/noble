@@ -190,6 +190,12 @@ pub trait StorageEngine {
     /// Retrieve the most recent `count` cycle history entries (newest first).
     fn get_recent_cycle_history(&self, count: usize) -> Result<Vec<Vec<u8>>, StorageError>;
 
+    /// Remove all cycle history entries. Used during bootstrap to clear stale
+    /// data from previous runs that used a different cycle epoch.
+    fn clear_cycle_history(&self) -> Result<(), StorageError> {
+        Ok(()) // default no-op
+    }
+
     // ── Pruning Support ──
 
     /// Remove the block body (transactions) for a given block hash,

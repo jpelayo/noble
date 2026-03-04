@@ -369,6 +369,13 @@ async fn run_event_loop(
     let mut pending_dials: HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>> =
         HashMap::new();
 
+    // Pending block proposals: blocks that have been proposed/announced but not yet
+    // committed to storage.  When a peer requests a block via GetBlocks, we check
+    // this cache first, then fall back to the block_provider (storage).
+    // Keyed by block_hash bytes.  Value: (block, insertion_unix_secs).
+    // Entries older than CYCLE_DURATION_SECS are evicted during maintenance.
+    let mut pending_proposals: HashMap<[u8; 32], (noble_core::Block, u64)> = HashMap::new();
+
     loop {
         tokio::select! {
             // --- Swarm events ---
@@ -386,12 +393,13 @@ async fn run_event_loop(
                     &mut seen_votes,
                     &mut tx_rate_limiter,
                     &mut pending_dials,
+                    &mut pending_proposals,
                 ).await;
             }
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &config, &mut pending_dials).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &config, &mut pending_dials, &mut pending_proposals).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -409,6 +417,15 @@ async fn run_event_loop(
                 seen_votes.evict_expired();
                 // Cleanup stale rate limiter buckets.
                 tx_rate_limiter.cleanup(Duration::from_secs(300));
+                // Evict pending proposals older than one cycle (30 min).
+                {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let cycle_secs = noble_core::CYCLE_DURATION_SECS;
+                    pending_proposals.retain(|_, (_, ts)| now_secs.saturating_sub(*ts) < cycle_secs);
+                }
             }
 
             // --- Kademlia random walk for peer discovery ---
@@ -490,6 +507,7 @@ async fn handle_swarm_event(
     seen_votes: &mut SeenCache,
     tx_rate_limiter: &mut TxRateLimiter,
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -737,7 +755,7 @@ async fn handle_swarm_event(
                 },
             ..
         })) => {
-            let response = handle_sync_request(&request, block_provider, config);
+            let response = handle_sync_request(&request, block_provider, config, pending_proposals);
             let _ = swarm
                 .behaviour_mut()
                 .sync_rpc
@@ -1162,6 +1180,7 @@ fn handle_sync_request(
     request: &SyncRequest,
     block_provider: &Arc<dyn BlockProvider>,
     config: &NetworkConfig,
+    pending_proposals: &HashMap<[u8; 32], (noble_core::Block, u64)>,
 ) -> SyncResponse {
     match request {
         SyncRequest::GetHeaders {
@@ -1190,7 +1209,12 @@ fn handle_sync_request(
         SyncRequest::GetBlocks { hashes } => {
             let blocks: Vec<_> = hashes
                 .iter()
-                .filter_map(|h| block_provider.get_block(h))
+                .filter_map(|h| {
+                    // Check committed storage first, then pending proposals cache.
+                    block_provider
+                        .get_block(h)
+                        .or_else(|| pending_proposals.get(h).map(|(b, _)| b.clone()))
+                })
                 .collect();
             SyncResponse::Blocks(blocks)
         }
@@ -1226,6 +1250,7 @@ async fn handle_command(
     peer_manager: &mut PeerManager,
     config: &NetworkConfig,
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -1242,13 +1267,21 @@ async fn handle_command(
                 let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
                 tracing::debug!(
                     task = "gossip_publish",
-                    "publishing to topic: {}",
-                    topics::TOPIC_BLOCK_ANNOUNCE
+                    "publishing block announce (height {}) to topic: {}",
+                    block.header.height,
+                    topics::TOPIC_BLOCK_ANNOUNCE,
                 );
                 if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
                     tracing::warn!(task = "gossip_publish", err = %e, "failed to publish block announce");
                 }
             }
+            // Store the proposed block in the pending proposals cache so
+            // GetBlocks requests from peers can serve it before it's committed.
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            pending_proposals.insert(block_hash, (block.clone(), now_secs));
         }
 
         NetworkCommand::PublishTransaction(tx) => {
@@ -1387,6 +1420,13 @@ async fn handle_command(
             if let Some(pid) = peers.first() {
                 let request = SyncRequest::GetBlocks { hashes: vec![hash] };
                 swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+            }
+        }
+
+        NetworkCommand::RequestBlockByHeight { peer_id, height } => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_id) {
+                let request = SyncRequest::GetBlockByHeight { height };
+                swarm.behaviour_mut().sync_rpc.send_request(&pid, request);
             }
         }
 
@@ -1675,7 +1715,8 @@ mod tests {
             tip: (42, [0xAA; 32]),
         });
         let config = NetworkConfig::testnet();
-        let response = handle_sync_request(&SyncRequest::GetStatus, &bp, &config);
+        let pp = HashMap::new();
+        let response = handle_sync_request(&SyncRequest::GetStatus, &bp, &config, &pp);
         match response {
             SyncResponse::Status {
                 height,
@@ -1695,8 +1736,9 @@ mod tests {
     fn handle_sync_request_get_block_not_found() {
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
         let config = NetworkConfig::testnet();
+        let pp = HashMap::new();
         let response =
-            handle_sync_request(&SyncRequest::GetBlockByHeight { height: 999 }, &bp, &config);
+            handle_sync_request(&SyncRequest::GetBlockByHeight { height: 999 }, &bp, &config, &pp);
         match response {
             SyncResponse::Block(None) => {}
             _ => panic!("expected Block(None)"),
@@ -1707,12 +1749,14 @@ mod tests {
     fn handle_sync_request_get_blocks_empty() {
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
         let config = NetworkConfig::testnet();
+        let pp = HashMap::new();
         let response = handle_sync_request(
             &SyncRequest::GetBlocks {
                 hashes: vec![[0xFF; 32]],
             },
             &bp,
             &config,
+            &pp,
         );
         match response {
             SyncResponse::Blocks(blocks) => assert!(blocks.is_empty()),

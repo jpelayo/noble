@@ -1357,6 +1357,27 @@ impl StorageEngine for RocksDbStorage {
         Ok(entries)
     }
 
+    fn clear_cycle_history(&self) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        let prefix = b"cycle_history:";
+        let prefix_end = b"cycle_history;";
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(prefix, Direction::Forward));
+        let mut batch = rocksdb::WriteBatch::default();
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if !key.starts_with(prefix) || key.as_ref() >= prefix_end.as_slice() {
+                break;
+            }
+            batch.delete_cf(&cf, &key);
+        }
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
     fn lookup_version_successors(
         &self,
         prev_checksum: &Hash256,

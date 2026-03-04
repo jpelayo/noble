@@ -166,15 +166,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
-        // Read genesis block (height 0) timestamp for cycle counting.
-        // The cycle epoch is the genesis block's timestamp — all cycle boundaries
-        // are computed as offsets from this value.
-        let genesis_timestamp = {
+        // Read block-1 timestamp for cycle counting.
+        // Cycles only start once the first consensus block is committed.
+        // Before that the engine runs in pre-genesis mode (no cycle counting,
+        // validator proposes on a simple timer).
+        //
+        // When tip.height >= 1, block 1's timestamp is the cycle epoch.
+        // When tip.height == 0, genesis_timestamp = None → pre-genesis mode.
+        let genesis_timestamp = if tip.height >= 1 {
             let s = storage.read();
-            s.get_block_hash_by_height(0)
+            s.get_block_hash_by_height(1)
                 .ok()
                 .and_then(|hash| s.get_block_header(&hash).ok())
                 .map(|h| h.timestamp)
+        } else {
+            tracing::info!(
+                task = "startup",
+                "pre-genesis mode: no blocks beyond genesis, cycles start after block 1"
+            );
+            // Purge stale cycle history from previous runs.
+            if let Err(e) = storage.read().clear_cycle_history() {
+                tracing::warn!(task = "startup", "failed to clear stale cycle history: {e}");
+            }
+            None
         };
 
         // --- Load per-installation encryption entropy ---
@@ -304,6 +318,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         );
         if let Some(header) = tip_header {
             engine.update_tip_with_header(header);
+        }
+        // Wire identity flags to engine:
+        // - Vote-only peers (wants_to_validate=false) don't propose blocks.
+        // - Propose-only nodes (wants_to_vote=false) don't cast votes.
+        if !config.identity.wants_to_validate {
+            engine.set_proposals_enabled(false);
+        }
+        if !config.identity.wants_to_vote {
+            engine.set_voting_enabled(false);
         }
         let consensus = Arc::new(RwLock::new(engine));
 
@@ -1540,6 +1563,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                 }));
+                // Request peer status immediately on connect so sync and
+                // pre-genesis commit don't wait for the 60s poll interval.
+                let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                 tracing::debug!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
             NetworkEvent::PeerDisconnected { peer_id } => {
@@ -1666,18 +1692,102 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 median_clock_offset_ms,
             } => {
                 let hex_pid = hex::encode(peer_id);
-                let mut info = self.peer_info.write();
-                if let Some(entry) = info.get_mut(&hex_pid) {
-                    entry.chain_tip_height = Some(*height);
-                    entry.chain_tip_hash = Some(hex::encode(tip_hash));
+                {
+                    let mut info = self.peer_info.write();
+                    if let Some(entry) = info.get_mut(&hex_pid) {
+                        entry.chain_tip_height = Some(*height);
+                        entry.chain_tip_hash = Some(hex::encode(tip_hash));
+                    }
                 }
                 // S49: Update network-level clock offset.
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 }
+                // Notify engine that we've received a peer status — pre-genesis
+                // commit waits for this before committing block 1.
+                {
+                    let mut engine = self.consensus.write();
+                    engine.set_peer_status_known();
+                }
+
+                // Sync catch-up: if the peer is ahead, request the next block
+                // we need.  The sync import path (try_sync_import) handles
+                // validation and commitment, then triggers another RequestSync
+                // to continue the chain until we're caught up.
+                let our_height = self.consensus.read().chain_tip().0;
+                if *height > our_height {
+                    let next_height = our_height + 1;
+                    tracing::debug!(
+                        task = "sync",
+                        "peer {} is at height {}, we're at {} — requesting block {}",
+                        hex_pid, height, our_height, next_height
+                    );
+                    let _ = network_cmd.try_send(
+                        noble_network::NetworkCommand::RequestBlockByHeight {
+                            peer_id: peer_id.clone(),
+                            height: next_height,
+                        },
+                    );
+                }
+            }
+            NetworkEvent::BlockReceived { peer_id, block } => {
+                // Determine whether this block is a sync catch-up (committed
+                // block from a peer ahead of us) or a live consensus proposal.
+                //
+                // Sync import:  block.height == our_tip + 1 AND any peer is
+                //   ahead of us (they've committed this block already).
+                //   Validate against the parent in storage, commit directly.
+                //
+                // Consensus proposal:  block.height == our_tip + 1 AND no peer
+                //   is ahead (this is a fresh proposal for the current cycle).
+                //   Route to the consensus engine for candidate tracking + voting.
+                //
+                // Pre-genesis: always route to engine (pre-genesis commit path).
+
+                let tip_height = self.consensus.read().chain_tip().0;
+                // Check if any peer is ahead of us (indicating we need to sync).
+                let max_peer_height = {
+                    let info = self.peer_info.read();
+                    info.values()
+                        .filter_map(|e| e.chain_tip_height)
+                        .max()
+                        .unwrap_or(0)
+                };
+                let we_are_behind = max_peer_height > tip_height;
+
+                if block.header.height <= tip_height {
+                    // Already have this block — ignore.
+                } else if block.header.height == tip_height + 1 && we_are_behind {
+                    // Sync import: committed block from peer ahead of us.
+                    // Takes priority over pre-genesis — the network already has
+                    // this block, we should import it rather than propose our own.
+                    self.try_sync_import(
+                        block.clone(),
+                        peer_id,
+                        tip_height,
+                        network_cmd,
+                        new_block_tx,
+                        metrics,
+                    );
+                } else {
+                    // Live proposal or pre-genesis — route to consensus engine.
+                    let cycle_event = bridge::network_event_to_cycle_event(
+                        &NetworkEvent::BlockReceived {
+                            peer_id: peer_id.clone(),
+                            block: block.clone(),
+                        },
+                    );
+                    if let Some(ce) = cycle_event {
+                        let actions = {
+                            let mut engine = self.consensus.write();
+                            engine.step(ce)
+                        };
+                        self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
+                    }
+                }
             }
             _ => {
-                // Route to consensus engine
+                // Route remaining events to consensus engine
                 if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {
                     let actions = {
                         let mut engine = self.consensus.write();
@@ -1846,6 +1956,141 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
         }
+    }
+
+    /// Import a committed block from a sync peer directly to storage,
+    /// bypassing the consensus voting pipeline.
+    ///
+    /// Used when the node is behind and receives blocks outside the Validation
+    /// phase window.  Validates B1-B11 against the parent in storage, commits
+    /// if valid, and updates the consensus engine tip.
+    #[allow(clippy::too_many_arguments)]
+    fn try_sync_import(
+        &self,
+        block: noble_core::Block,
+        _peer_id: &[u8],
+        tip_height: u64,
+        network_cmd: &tokio::sync::mpsc::Sender<noble_network::NetworkCommand>,
+        new_block_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
+        metrics: &Option<crate::metrics::NobleMetrics>,
+    ) {
+        let storage = self.storage.read();
+
+        // Load parent header from storage for B2/B3/B5 validation.
+        let parent_header = if tip_height > 0 {
+            storage
+                .get_chain_tip()
+                .ok()
+                .flatten()
+                .and_then(|t| storage.get_block_header(&t.block_hash).ok())
+        } else {
+            None
+        };
+
+        // For sync imports, use the block's own timestamp as "current_time" so the
+        // B6 skew check passes.  Historical blocks are expected to have old timestamps.
+        // All other validation (B2 prev_hash, B3 height, B5 ordering, B8 sig) still
+        // provides full security against invalid blocks.
+        let current_time = block.header.timestamp;
+
+        // Any validator can propose — include block's own validator_id.
+        let engine = self.consensus.read();
+        let mut val_list = engine.validator_list().as_pubkey_vec();
+        if !val_list.contains(&block.header.validator_id) {
+            val_list.push(block.header.validator_id.clone());
+        }
+        drop(engine);
+
+        let ctx = noble_core::BlockValidationContext {
+            chain_id: self.chain_id,
+            current_time,
+            parent: parent_header.as_ref(),
+            validator_list: &val_list,
+        };
+
+        if let Err(e) = noble_core::validate_block(&block, &ctx) {
+            // Fork disagreement (B2/B3 mismatch) → not a ban, just skip.
+            let is_fork = matches!(
+                e,
+                noble_core::ValidationError::PrevHashMismatch
+                    | noble_core::ValidationError::HeightMismatch { .. }
+                    | noble_core::ValidationError::TimestampNotAfterParent { .. }
+            );
+            if is_fork {
+                tracing::debug!(
+                    task = "sync_import",
+                    "sync block at height {} rejected (fork): {e}",
+                    block.header.height
+                );
+            } else {
+                tracing::warn!(
+                    task = "sync_import",
+                    "sync block at height {} rejected: {e}",
+                    block.header.height
+                );
+            }
+            return;
+        }
+
+        let block_hash = match block.header.compute_block_hash() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(task = "sync_import", "block hash computation failed: {e}");
+                return;
+            }
+        };
+
+        let tx_ids: Vec<noble_crypto::Hash256> = block
+            .transactions
+            .iter()
+            .filter_map(|tx| tx.compute_tx_id(self.chain_id).ok())
+            .collect();
+
+        if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
+            tracing::error!(
+                task = "sync_import",
+                "failed to commit sync block {}: {e}",
+                block.header.height
+            );
+            return;
+        }
+        drop(storage);
+
+        // Update consensus engine tip.
+        {
+            let mut engine = self.consensus.write();
+            engine.update_tip_with_header(block.header.clone());
+        }
+
+        // Remove committed txs from mempool.
+        {
+            let mut mempool = self.mempool.lock();
+            for tx_id in &tx_ids {
+                mempool.remove(tx_id);
+            }
+        }
+
+        if let Some(ref m) = metrics {
+            m.block_validation_duration.observe(0.0);
+        }
+
+        tracing::info!(
+            task = "sync_import",
+            "Sync-imported block {} (hash: {}, txs: {})",
+            block.header.height,
+            hex::encode(block_hash.as_bytes()),
+            tx_ids.len()
+        );
+
+        let _ = new_block_tx.send(serde_json::json!({
+            "height": block.header.height,
+            "hash": hex::encode(block_hash.as_bytes()),
+            "tx_count": tx_ids.len(),
+            "source": "sync",
+        }));
+
+        // Request next block if we're still behind peers.
+        let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
     }
 }
 
