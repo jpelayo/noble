@@ -84,6 +84,13 @@ pub struct CycleEngine {
     /// True once we've received at least one peer chain-tip status.
     /// Pre-genesis commit waits for this to avoid racing against sync.
     peer_status_known: bool,
+    /// Unix timestamp when the first pre-genesis candidate entered the tracker.
+    /// Used to enforce a grace period so that proposals from other peers have
+    /// time to arrive before committing (prevents fork-at-genesis when both
+    /// nodes propose block 1 simultaneously).
+    first_candidate_time: Option<u64>,
+    /// Whether we've cast our pre-genesis R1 vote this session.
+    pre_genesis_voted: bool,
 }
 
 impl CycleEngine {
@@ -132,6 +139,8 @@ impl CycleEngine {
             proposals_enabled: true, // default; call set_proposals_enabled(false) for vote-only
             voting_enabled: true,   // default; call set_voting_enabled(false) for propose-only
             peer_status_known: false,
+            first_candidate_time: None,
+            pre_genesis_voted: false,
         }
     }
 
@@ -199,6 +208,8 @@ impl CycleEngine {
         self.last_cycle_history = None;
         self.manual_vote = None;
         self.r2_vote_cast = false;
+        self.first_candidate_time = None;
+        self.pre_genesis_voted = false;
         // When hopping to a new chain (height 0), clear the cycle epoch so
         // the engine re-enters pre-genesis mode.  The new chain's block 1
         // will set the epoch when committed.
@@ -281,9 +292,9 @@ impl CycleEngine {
         let mut outputs = Vec::new();
 
         // No genesis block yet — can't count cycles.
-        // Validator proposes on a simple timer; observers just wait.
-        // Once a candidate block exists in the tracker, commit it immediately
-        // (pre-genesis blocks don't go through the voting cycle).
+        // Validator proposes on a timer; observers wait.  Block 1 goes through
+        // the same R1 voting mechanism as every other block (Dual-Witness Rule):
+        // votes from ≥ min_unique_voters distinct keys are required to commit.
         if !self.cycle_mgr.has_genesis() {
             if self.first_tick {
                 self.first_tick = false;
@@ -293,40 +304,126 @@ impl CycleEngine {
                 }
             }
 
-            // Pre-genesis commit: wait for peers AND at least one peer status
-            // response so we know whether the network already has blocks.
-            // If a peer is ahead, sync will deliver block 1 — our own proposal
-            // stays in the tracker but won't be committed (sync-imported block 1
-            // will set has_genesis before the next tick).
             let ready = self.total_peers > 0 && self.peer_status_known;
             let candidates = self.candidate_tracker.all_candidates();
-            let best = if ready && !candidates.is_empty() {
-                // Deterministic tiebreaker: lowest block hash wins.
-                candidates.iter().min_by_key(|e| e.block_hash).copied()
-            } else {
-                None
-            };
-            if let Some(entry) = best {
-                let block = entry.block.clone();
-                let block_hash = entry.block_hash;
-                let new_height = block.header.height;
+
+            // Track when the first candidate arrived.
+            if !candidates.is_empty() && self.first_candidate_time.is_none() {
+                self.first_candidate_time = Some(now);
                 info!(
-                    "pre-genesis: committing block {} at height {} (first valid proposal)",
-                    block_hash, new_height
+                    "pre-genesis: first candidate received at t={}, waiting for peers",
+                    now
                 );
-                self.tip_height = new_height;
-                self.tip_hash = block_hash;
-                self.tip_timestamp = block.header.timestamp;
-                self.tip_header = Some(block.header.clone());
-                // Set cycle epoch to block 1's timestamp — all nodes converge here.
-                self.cycle_mgr.set_genesis_timestamp(block.header.timestamp);
-                self.first_tick = true; // next tick initializes cycle/phase
-                self.candidate_tracker.clear();
-                outputs.push(CycleIo::CommitBlock(block));
-                outputs.push(CycleIo::Log(format!(
-                    "pre-genesis: block 1 committed — cycle epoch set to {}",
-                    self.tip_timestamp
-                )));
+            }
+
+            // Cast R1 vote once conditions are met: candidates exist, peers are
+            // known, and we haven't voted yet.  Grace period (30s) or multiple
+            // candidates gates when we vote, giving time for all proposals.
+            let grace_elapsed = self.first_candidate_time
+                .map(|t| now.saturating_sub(t) >= 30)
+                .unwrap_or(false);
+            let multiple_candidates = candidates.len() > 1;
+
+            if ready && !candidates.is_empty()
+                && (multiple_candidates || grace_elapsed)
+                && !self.pre_genesis_voted
+                && self.voting_enabled
+            {
+                if let Some((ref priv_key, ref pub_key)) = self.our_validator_key {
+                    // Pick best candidate (lowest hash tiebreaker, or voting strategy).
+                    let best_hash = {
+                        let tallies = self.vote_mgr.current_tallies();
+                        let manual = self.manual_vote.take();
+                        crate::strategy::select_candidate(
+                            &self.config.voting_strategy,
+                            &self.candidate_tracker,
+                            &self.validator_list,
+                            0, // cycle 0 for pre-genesis
+                            manual,
+                            Some(&tallies),
+                        ).or_else(|| {
+                            // Fallback: lowest hash tiebreaker
+                            candidates.iter().min_by_key(|e| e.block_hash).map(|e| e.block_hash)
+                        })
+                    };
+                    if let Some(candidate_hash) = best_hash {
+                        match PorVote::sign(0, candidate_hash, priv_key, pub_key.clone()) {
+                            Ok(vote) => {
+                                // Self-record (gossipsub doesn't echo)
+                                let _ = self.vote_mgr.record_vote(b"self", &vote);
+                                outputs.push(CycleIo::BroadcastVote(vote));
+                                outputs.push(CycleIo::Log(format!(
+                                    "pre-genesis: broadcast R1 vote for candidate {}",
+                                    candidate_hash
+                                )));
+                            }
+                            Err(e) => {
+                                outputs.push(CycleIo::Log(format!(
+                                    "pre-genesis: failed to sign vote: {e}"
+                                )));
+                            }
+                        }
+                        self.pre_genesis_voted = true;
+                    }
+                }
+            } else if ready && !candidates.is_empty() && !grace_elapsed && !self.pre_genesis_voted {
+                debug!(
+                    "pre-genesis: {} candidate(s), waiting for grace period ({}s remaining)",
+                    candidates.len(),
+                    30u64.saturating_sub(now.saturating_sub(
+                        self.first_candidate_time.unwrap_or(now)
+                    ))
+                );
+            }
+
+            // Check if voting has reached consensus (Dual-Witness Rule).
+            // voter_count uses the same formula as post-genesis cycle boundary.
+            let self_vote = if self.our_validator_key.is_some() && self.voting_enabled {
+                1
+            } else {
+                0
+            };
+            let voter_count = self.total_peers + self_vote;
+            let result = self.vote_mgr.compute_majority(voter_count, &self.config);
+
+            match result {
+                MigrationResult::Adopt { candidate_hash, .. } => {
+                    // Dual-Witness Rule (bootstrap): block 1 requires ≥ min_unique_voters distinct keys.
+                    if self.vote_mgr.unique_voter_count() < self.config.min_unique_voters {
+                        debug!(
+                            "pre-genesis: majority found but only {} unique voter(s) (need {})",
+                            self.vote_mgr.unique_voter_count(),
+                            self.config.min_unique_voters
+                        );
+                        // Don't commit — wait for more witnesses
+                    } else if let Some(entry) = self.candidate_tracker.get(&candidate_hash) {
+                        let block = entry.block.clone();
+                        let block_hash = entry.block_hash;
+                        let new_height = block.header.height;
+                        info!(
+                            "pre-genesis: committing block {} at height {} (Dual-Witness consensus)",
+                            block_hash, new_height
+                        );
+                        self.tip_height = new_height;
+                        self.tip_hash = block_hash;
+                        self.tip_timestamp = block.header.timestamp;
+                        self.tip_header = Some(block.header.clone());
+                        // Set cycle epoch to block 1's timestamp — all nodes converge here.
+                        self.cycle_mgr.set_genesis_timestamp(block.header.timestamp);
+                        self.first_tick = true; // next tick initializes cycle/phase
+                        self.candidate_tracker.clear();
+                        self.first_candidate_time = None;
+                        self.pre_genesis_voted = false;
+                        outputs.push(CycleIo::CommitBlock(block));
+                        outputs.push(CycleIo::Log(format!(
+                            "pre-genesis: block 1 committed — cycle epoch set to {}",
+                            self.tip_timestamp
+                        )));
+                    }
+                }
+                MigrationResult::Indeterminate => {
+                    // Not enough votes yet — wait for more
+                }
             }
 
             outputs.push(CycleIo::SetTimer { duration_secs: 10 });
@@ -519,54 +616,74 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
-                info!(
-                    "vote tally complete: winner = {}, strength = {:?}",
-                    candidate_hash, strength
-                );
-                if let Some(entry) = self.candidate_tracker.get(&candidate_hash) {
-                    let block = entry.block.clone();
-                    let new_height = block.header.height;
-                    let new_hash = candidate_hash;
+                // Dual-Witness Rule (bootstrap): blocks 1–2 require ≥ min_unique_voters distinct keys.
+                // After block 2, normal plurality consensus applies even with 1 active voter.
+                let witness_ok = self.tip_height >= 2
+                    || self.vote_mgr.unique_voter_count() >= self.config.min_unique_voters;
 
-                    // Collect orphaned txs from losing candidates
-                    let orphans = self
-                        .candidate_tracker
-                        .collect_orphaned_txs(&candidate_hash, self.chain_id);
-                    if !orphans.is_empty() {
-                        outputs.push(CycleIo::ReadmitTransactions(orphans));
-                    }
+                if witness_ok {
+                    info!(
+                        "vote tally complete: winner = {}, strength = {:?}",
+                        candidate_hash, strength
+                    );
+                    if let Some(entry) = self.candidate_tracker.get(&candidate_hash) {
+                        let block = entry.block.clone();
+                        let new_height = block.header.height;
+                        let new_hash = candidate_hash;
 
-                    // Commit the winning block
-                    self.tip_height = new_height;
-                    self.tip_hash = new_hash;
-                    self.tip_timestamp = block.header.timestamp;
-                    self.tip_header = Some(block.header.clone());
-                    // Block 1 committed — (re)set cycle epoch to the block's timestamp.
-                    // This ensures all nodes converge on the same epoch after the
-                    // first real block, regardless of when they started (bootstrap
-                    // mode uses `now` which differs per node).
-                    if new_height == 1 {
-                        info!(
-                            "block 1 committed — cycle epoch set to {}",
-                            block.header.timestamp
-                        );
-                        self.cycle_mgr.set_genesis_timestamp(block.header.timestamp);
-                        self.first_tick = true; // next tick will re-initialize cycle/phase
+                        // Collect orphaned txs from losing candidates
+                        let orphans = self
+                            .candidate_tracker
+                            .collect_orphaned_txs(&candidate_hash, self.chain_id);
+                        if !orphans.is_empty() {
+                            outputs.push(CycleIo::ReadmitTransactions(orphans));
+                        }
+
+                        // Commit the winning block
+                        self.tip_height = new_height;
+                        self.tip_hash = new_hash;
+                        self.tip_timestamp = block.header.timestamp;
+                        self.tip_header = Some(block.header.clone());
+                        // Block 1 committed — (re)set cycle epoch to the block's timestamp.
+                        // This ensures all nodes converge on the same epoch after the
+                        // first real block, regardless of when they started (bootstrap
+                        // mode uses `now` which differs per node).
+                        if new_height == 1 {
+                            info!(
+                                "block 1 committed — cycle epoch set to {}",
+                                block.header.timestamp
+                            );
+                            self.cycle_mgr.set_genesis_timestamp(block.header.timestamp);
+                            self.first_tick = true; // next tick will re-initialize cycle/phase
+                        }
+                        outputs.push(CycleIo::CommitBlock(block));
+                        outputs.push(CycleIo::EmitMetric {
+                            name: "block_committed".to_string(),
+                            value: new_height as f64,
+                        });
+                        outputs.push(CycleIo::Log(format!(
+                            "cycle {completed_cycle}: committed block {} at height {} ({:?})",
+                            new_hash, new_height, strength
+                        )));
+                    } else {
+                        outputs.push(CycleIo::Log(format!(
+                            "cycle {completed_cycle}: majority voted for {} but candidate not found",
+                            candidate_hash
+                        )));
                     }
-                    outputs.push(CycleIo::CommitBlock(block));
-                    outputs.push(CycleIo::EmitMetric {
-                        name: "block_committed".to_string(),
-                        value: new_height as f64,
-                    });
-                    outputs.push(CycleIo::Log(format!(
-                        "cycle {completed_cycle}: committed block {} at height {} ({:?})",
-                        new_hash, new_height, strength
-                    )));
                 } else {
-                    outputs.push(CycleIo::Log(format!(
-                        "cycle {completed_cycle}: majority voted for {} but candidate not found",
-                        candidate_hash
-                    )));
+                    debug!(
+                        "cycle {}: Dual-Witness not met for bootstrap block {} ({} unique voter(s), need {})",
+                        completed_cycle, self.tip_height + 1,
+                        self.vote_mgr.unique_voter_count(), self.config.min_unique_voters
+                    );
+                    // Treat as indeterminate — don't commit, readmit txs
+                    let all_txs: Vec<_> = self
+                        .candidate_tracker
+                        .collect_orphaned_txs(&Hash256::ZERO, self.chain_id);
+                    if !all_txs.is_empty() {
+                        outputs.push(CycleIo::ReadmitTransactions(all_txs));
+                    }
                 }
             }
             MigrationResult::Indeterminate => {
@@ -849,8 +966,8 @@ impl CycleEngine {
             vote.candidate_hash
         );
 
-        // Only accept votes during Reflection phase
-        if self.tracked_phase != CyclePhase::Reflection {
+        // Accept votes during Reflection phase OR pre-genesis (no phases yet).
+        if self.tracked_phase != CyclePhase::Reflection && self.cycle_mgr.has_genesis() {
             outputs.push(CycleIo::Log(format!(
                 "rejected vote from peer during {:?} phase",
                 self.tracked_phase
@@ -1586,6 +1703,151 @@ mod tests {
         })
     }
 
+    // --- Dual-Witness / pre-genesis voting ---
+
+    fn make_pre_genesis_engine(
+        validator_key: Option<(NoblePrivateKey, NoblePublicKey)>,
+        validators: &[NoblePublicKey],
+        peers: usize,
+    ) -> CycleEngine {
+        let mut val_list = ValidatorList::new();
+        for v in validators {
+            val_list.add_validator(v.clone(), 100, 0);
+        }
+        let mut engine = CycleEngine::new(
+            ConsensusConfig::default(),
+            val_list,
+            0,
+            Hash256::ZERO,
+            MAINNET_CHAIN_ID,
+            validator_key,
+            None, // no genesis — pre-genesis mode
+        );
+        engine.set_peer_count(peers);
+        engine.set_peer_status_known();
+        engine
+    }
+
+    #[test]
+    fn pre_genesis_requires_two_votes() {
+        // A single voter cannot commit block 1 (Dual-Witness Rule).
+        let (our_priv, our_pub) = make_validator();
+        let (proposer_priv, proposer_pub) = make_validator();
+        let mut engine = make_pre_genesis_engine(
+            Some((our_priv, our_pub.clone())),
+            &[our_pub, proposer_pub.clone()],
+            1,
+        );
+
+        // Peer proposes block 1
+        let (block, hash) = make_valid_block(&proposer_priv, &proposer_pub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        // First tick: sets first_candidate_time
+        let t0 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        engine.step(CycleEvent::Tick { now: t0 });
+
+        // Tick after grace period → engine casts vote, but only 1 unique voter
+        let outputs = engine.step(CycleEvent::Tick { now: t0 + 31 });
+        assert!(
+            has_broadcast_vote(&outputs),
+            "engine should cast R1 vote after grace period"
+        );
+        assert!(
+            !has_commit(&outputs),
+            "single voter must not commit block 1 (Dual-Witness)"
+        );
+        assert_eq!(engine.tip_height, 0);
+
+        // Now add a vote from a second distinct validator
+        let (peer_priv, peer_pub) = make_validator();
+        let vote = PorVote::sign(0, hash, &peer_priv, peer_pub).unwrap();
+        engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"peer2".to_vec(),
+        });
+
+        // Tick again → 2 unique voters → should commit
+        let outputs = engine.step(CycleEvent::Tick { now: t0 + 32 });
+        assert!(
+            has_commit(&outputs),
+            "2 distinct voters should commit block 1"
+        );
+        assert_eq!(engine.tip_height, 1);
+    }
+
+    #[test]
+    fn pre_genesis_voting_flow() {
+        // Full flow: engine receives candidate, casts vote, receives peer vote, commits.
+        let (our_priv, our_pub) = make_validator();
+        let (peer_priv, peer_pub) = make_validator();
+        let mut engine = make_pre_genesis_engine(
+            Some((our_priv, our_pub.clone())),
+            &[our_pub.clone(), peer_pub.clone()],
+            1,
+        );
+
+        // Peer proposes block 1
+        let (block, hash) = make_valid_block(&peer_priv, &peer_pub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        // First tick: sets first_candidate_time
+        let t0 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        engine.step(CycleEvent::Tick { now: t0 });
+
+        // Tick after grace period — engine should cast R1 vote
+        let outputs = engine.step(CycleEvent::Tick { now: t0 + 31 });
+        assert!(
+            has_broadcast_vote(&outputs),
+            "engine should broadcast R1 vote for pre-genesis candidate"
+        );
+        // Only self-vote so far → no commit yet
+        assert!(!has_commit(&outputs));
+
+        // Peer vote arrives
+        let vote = PorVote::sign(0, hash, &peer_priv, peer_pub).unwrap();
+        engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        // Tick → 2 unique voters → commit
+        let outputs = engine.step(CycleEvent::Tick { now: t0 + 32 });
+        assert!(has_commit(&outputs), "should commit with 2 distinct voters");
+        assert_eq!(engine.tip_height, 1);
+    }
+
+    #[test]
+    fn pre_genesis_vote_accepted_any_phase() {
+        // Pre-genesis votes should be accepted regardless of tracked_phase.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_pre_genesis_engine(None, &[vpub.clone()], 1);
+        // tracked_phase defaults to Reflection but pre-genesis has no phases
+        assert_eq!(engine.tracked_phase, CyclePhase::Reflection);
+
+        let candidate = Hash256::from_bytes([0x42; 32]);
+        let vote = PorVote::sign(0, candidate, &vp, vpub).unwrap();
+        let outputs = engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(!has_ban(&outputs));
+        assert_eq!(engine.vote_mgr.total_votes(), 1);
+    }
+
     // --- P0.3: Block proposal emission ---
 
     #[test]
@@ -1832,8 +2094,8 @@ mod tests {
     #[test]
     fn network_voter_count_validator_plus_one_peer_commits() {
         // With 1 connected peer and self as validator, voter_count = 1 + 1 = 2,
-        // which meets min_peers_for_consensus = 2.
-        // We need separate keys for the engine (validator) and the proposer (peer).
+        // which meets min_peers_for_consensus = 2.  Dual-Witness requires ≥2
+        // distinct keys — the engine's self-vote + peer vote satisfies this.
         let (our_priv, our_pub) = make_validator();
         let (peer_priv, peer_pub) = make_validator();
         let mut engine = make_engine(
@@ -1850,8 +2112,13 @@ mod tests {
             from_peer: b"p1".to_vec(),
         });
 
-        // Vote from the peer (1 out of voter_count=2 → 50% → Strong majority)
-        engine.tracked_phase = CyclePhase::Reflection;
+        // Trigger Reflection phase transition — engine casts its own R1 vote
+        let _outputs = engine.step(CycleEvent::PhaseTransition {
+            cycle: 0,
+            new_phase: CyclePhase::Reflection,
+        });
+
+        // Vote from the peer → 2 distinct keys (self + peer)
         let vote = PorVote::sign(0, hash, &peer_priv, peer_pub).unwrap();
         engine.step(CycleEvent::VoteReceived {
             vote,
@@ -1861,7 +2128,7 @@ mod tests {
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(
             has_commit(&outputs),
-            "validator + 1 peer should reach consensus (voter_count=2)"
+            "validator + 1 peer should reach consensus (voter_count=2, 2 unique keys)"
         );
         assert_eq!(engine.tip_height, 1);
     }

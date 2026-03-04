@@ -21,6 +21,9 @@ pub struct ConsensusConfig {
     /// Minimum connected peers required for consensus participation (GAP-C6, default: 2).
     /// Set to 2 to prevent single-node "ultraforking" while allowing small testnets.
     pub min_peers_for_consensus: usize,
+    /// Minimum number of distinct validator keys that must vote for a block
+    /// before it can be committed (Dual-Witness Rule). Default: 2.
+    pub min_unique_voters: usize,
     /// Voting strategy for Round 1 (Reflection phase). Default: FirstValid.
     pub voting_strategy: VotingStrategy,
     /// Voting strategy for Round 2 (Confirmation phase). Default: FollowMajority.
@@ -35,6 +38,7 @@ impl Default for ConsensusConfig {
             max_reorg_depth: MAX_REORG_DEPTH,
             plurality_floor_divisor: 3,
             min_peers_for_consensus: 2,
+            min_unique_voters: 2,
             voting_strategy: VotingStrategy::FirstValid,
             confirmation_strategy: VotingStrategy::FollowMajority,
         }
@@ -54,5 +58,6 @@ mod tests {
         assert_eq!(cfg.max_reorg_depth, 144); // AUD2-H4: matches noble-core constant
         assert_eq!(cfg.plurality_floor_divisor, 3);
         assert_eq!(cfg.min_peers_for_consensus, 2);
+        assert_eq!(cfg.min_unique_voters, 2);
     }
 }

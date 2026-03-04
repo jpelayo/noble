@@ -381,6 +381,23 @@ impl VoteManager {
         self.voted_validators.len()
     }
 
+    /// Count of unique validator keys that cast R1 votes for a specific candidate.
+    pub fn unique_voter_count_for(&self, candidate: &Hash256) -> usize {
+        self.votes.get(candidate).map_or(0, |s| s.len())
+    }
+
+    /// Count of unique validator keys that cast any vote (R1 or R2) across all candidates.
+    pub fn unique_voter_count(&self) -> usize {
+        let mut keys: HashSet<&Vec<u8>> = HashSet::new();
+        for voters in self.votes.values() {
+            keys.extend(voters.iter());
+        }
+        for voters in self.r2_votes.values() {
+            keys.extend(voters.iter());
+        }
+        keys.len()
+    }
+
     /// Return deduplicated wire-format public key bytes of all validators who cast
     /// at least one vote (R1 or R2) in the current cycle. Used by reputation scoring.
     pub fn voter_wire_keys(&self) -> Vec<Vec<u8>> {
@@ -512,20 +529,23 @@ mod tests {
 
     #[test]
     fn two_validators_can_commit() {
-        // With default min_peers_for_consensus=2, two validators with 1 vote can commit.
-        // 2 >= 2 min_peers, plurality floor ceil(2/3)=1, 1 vote >= 1 → Adopt(Plurality).
+        // With default min_peers_for_consensus=2,
+        // two distinct validator keys voting for the same candidate can commit.
+        // 2 >= 2 min_peers, 2/2 = 100% → Strong.
         let mut mgr = VoteManager::new();
         let candidate = hash_n(1);
-        let (vote, _) = make_vote(0, candidate);
-        mgr.record_vote(b"peer1", &vote).unwrap();
+        let (vote1, _) = make_vote(0, candidate);
+        let (vote2, _) = make_vote(0, candidate);
+        mgr.record_vote(b"peer1", &vote1).unwrap();
+        mgr.record_vote(b"peer2", &vote2).unwrap();
         let result = mgr.compute_majority(2, &default_config());
         assert_eq!(
             result,
             MigrationResult::Adopt {
                 candidate_hash: candidate,
-                strength: ConsensusStrength::Plurality,
+                strength: ConsensusStrength::Strong,
             },
-            "2 validators with 1 vote should commit (ceil(2/3)=1, 1>=1)"
+            "2 validators with 2 votes should commit (Strong: 2/2 = 100%)"
         );
     }
 
@@ -706,7 +726,7 @@ mod tests {
                 candidate_hash: candidate,
                 strength: ConsensusStrength::Plurality,
             },
-            "1/3 should pass with ceil(3/3)=1 floor"
+            "1/3 should be Plurality with ceil(3/3)=1 floor"
         );
 
         // 7 voters: ceil(7/3) = 3 (43%)
@@ -807,6 +827,49 @@ mod tests {
                 strength: ConsensusStrength::Strong,
             },
             "R1 Strong should still win when R2 is weak"
+        );
+    }
+
+    // --- Dual-Witness Rule tests ---
+
+    #[test]
+    fn dual_witness_two_voters_adopts() {
+        // Two distinct validator keys voting for the same candidate should commit.
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (v1, _) = make_vote(0, candidate);
+        let (v2, _) = make_vote(0, candidate);
+        mgr.record_vote(b"p1", &v1).unwrap();
+        mgr.record_vote(b"p2", &v2).unwrap();
+
+        let result = mgr.compute_majority(3, &default_config());
+        assert_eq!(
+            result,
+            MigrationResult::Adopt {
+                candidate_hash: candidate,
+                strength: ConsensusStrength::Strong,
+            },
+            "2 distinct voters for same candidate → Adopt (Strong: 2/3 > 50%)"
+        );
+    }
+
+    #[test]
+    fn dual_witness_pre_genesis_cycle_zero() {
+        // Votes with cycle=0 should be accepted by a fresh VoteManager
+        // (pre-genesis uses cycle 0).
+        let mut mgr = VoteManager::new();
+        assert_eq!(mgr.current_cycle, 0);
+
+        let candidate = hash_n(1);
+        let (v1, _) = make_vote(0, candidate);
+        let (v2, _) = make_vote(0, candidate);
+        assert!(mgr.record_vote(b"p1", &v1).unwrap());
+        assert!(mgr.record_vote(b"p2", &v2).unwrap());
+
+        let result = mgr.compute_majority(2, &default_config());
+        assert!(
+            matches!(result, MigrationResult::Adopt { .. }),
+            "cycle-0 votes from 2 distinct keys should commit"
         );
     }
 
