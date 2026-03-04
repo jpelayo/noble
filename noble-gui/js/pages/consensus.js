@@ -474,10 +474,55 @@ export function init(root, ctx) {
   // SUPERPOSITION TIMELINE
   // ══════════════════════════════════════════════
 
+  /** Transform flat API entry into the phase-based format renderTimeline expects. */
+  function apiEntryToCycle(entry, isCurrent) {
+    // If already has phases (mock data), pass through.
+    if (entry.phases) return entry;
+    const finalized = entry.finalized_at > 0;
+    const hasWinner = !!entry.winner;
+    return {
+      cycle_number: entry.cycle_number,
+      is_current: isCurrent,
+      disambiguation: entry.disambiguation,
+      winner: entry.winner,
+      winning_hash: entry.winning_hash,
+      phases: [
+        {
+          name: 'Proposal',
+          state: 'complete',
+          proposals: entry.proposals || [],
+        },
+        {
+          name: 'Voting',
+          state: isCurrent && !hasWinner ? 'active' : 'complete',
+          votes: entry.votes || [],
+          total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count, 0),
+        },
+        {
+          name: 'Confirmation',
+          state: hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
+          winner: entry.winner,
+          winning_hash: entry.winning_hash,
+          disambiguation: entry.disambiguation,
+        },
+        {
+          name: 'Finalization',
+          state: finalized ? 'complete' : isCurrent ? 'pending' : 'complete',
+          finalized,
+          block_hash: entry.winning_hash,
+        },
+      ],
+    };
+  }
+
   async function loadTimeline() {
     try {
       const history = await rpc.call('noble_getCycleHistory');
-      renderTimeline(history.cycles);
+      const raw = history.entries || history.cycles || [];
+      const cycles = raw.map((e, i) =>
+        apiEntryToCycle(e, i === raw.length - 1 && (e.status === 'active' || !e.finalized_at))
+      );
+      renderTimeline(cycles);
     } catch (e) {
       console.error('[consensus] load timeline:', e);
       csTimeline.innerHTML = '<div class="empty-state">Failed to load cycle history</div>';

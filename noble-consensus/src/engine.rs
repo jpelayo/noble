@@ -232,9 +232,9 @@ impl CycleEngine {
         let new_cycle = self.cycle_mgr.current_cycle(now);
         let new_phase = self.cycle_mgr.current_phase(now);
 
-        // First tick (or first tick after genesis committed): initialize tracked
+        // First tick (or late genesis — sentinel still set): initialize tracked
         // state without firing a spurious boundary.
-        if self.first_tick {
+        if self.first_tick || self.tracked_cycle == u64::MAX {
             self.first_tick = false;
             self.tracked_cycle = new_cycle;
             self.tracked_phase = new_phase;
