@@ -166,11 +166,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
-        // Read genesis block timestamp for cycle counting.
-        // Cycles are counted from the first block's timestamp, not a hardcoded constant.
+        // Read genesis block (height 0) timestamp for cycle counting.
+        // The cycle epoch is the genesis block's timestamp — all cycle boundaries
+        // are computed as offsets from this value.
         let genesis_timestamp = {
             let s = storage.read();
-            s.get_block_hash_by_height(1)
+            s.get_block_hash_by_height(0)
                 .ok()
                 .and_then(|hash| s.get_block_header(&hash).ok())
                 .map(|h| h.timestamp)
