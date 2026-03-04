@@ -72,9 +72,8 @@ pub struct CycleEngine {
     r2_vote_cast: bool,
     /// S15-A: Per-validator reputation scoring engine.
     reputation: ReputationEngine,
-    /// When true, the engine stays dormant until the first block is committed.
-    /// Set by the node when the chain has no blocks yet.
-    awaiting_genesis: bool,
+    /// First tick: triggers proposal request if starting mid-Validation phase.
+    first_tick: bool,
 }
 
 impl CycleEngine {
@@ -105,7 +104,7 @@ impl CycleEngine {
             tip_hash,
             tip_timestamp: 0,
             tip_header: None,
-            tracked_cycle: 0,
+            tracked_cycle: u64::MAX, // sentinel: first tick initializes without boundary event
             tracked_phase: CyclePhase::Reflection,
             chain_id,
             our_validator_key: validator_key,
@@ -115,19 +114,13 @@ impl CycleEngine {
             manual_vote: None,
             r2_vote_cast: false,
             reputation: ReputationEngine::new(),
-            awaiting_genesis: false,
+            first_tick: true,
         }
     }
 
     /// Update the connected peer count (called by node event loop).
     pub fn set_peer_count(&mut self, count: usize) {
         self.total_peers = count;
-    }
-
-    /// Mark the engine as awaiting genesis (no blocks committed yet).
-    /// While set, `handle_tick` stays dormant and does not count cycles.
-    pub fn set_awaiting_genesis(&mut self, awaiting: bool) {
-        self.awaiting_genesis = awaiting;
     }
 
     /// Get a reference to the validator list.
@@ -218,31 +211,41 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // Don't count cycles before genesis block exists.
-        // The node sets awaiting_genesis=true when chain has no blocks.
-        if self.awaiting_genesis {
-            outputs.push(CycleIo::SetTimer { duration_secs: 5 });
-            return outputs;
-        }
-
         let new_cycle = self.cycle_mgr.current_cycle(now);
         let new_phase = self.cycle_mgr.current_phase(now);
 
-        // Detect cycle boundary
-        if new_cycle > self.tracked_cycle {
-            let completed = self.tracked_cycle;
-            info!(
-                "cycle engine: state transition cycle {} -> {}",
-                completed, new_cycle
-            );
+        // First tick: initialize tracked state without firing a spurious boundary.
+        if self.first_tick {
+            self.first_tick = false;
             self.tracked_cycle = new_cycle;
-            outputs.extend(self.handle_cycle_boundary(completed));
-        }
-
-        // Detect phase transition
-        if new_phase != self.tracked_phase {
             self.tracked_phase = new_phase;
-            outputs.extend(self.handle_phase_transition(new_cycle, new_phase));
+            self.vote_mgr.set_current_cycle(new_cycle);
+            info!(
+                "cycle engine: initialized at cycle {}, phase {:?}",
+                new_cycle, new_phase
+            );
+            // If starting mid-Validation and we're a validator, request mempool
+            // txs so we can propose in the current cycle.
+            if new_phase == CyclePhase::Validation && self.our_validator_key.is_some() {
+                outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+            }
+        } else {
+            // Detect cycle boundary
+            if new_cycle > self.tracked_cycle {
+                let completed = self.tracked_cycle;
+                info!(
+                    "cycle engine: state transition cycle {} -> {}",
+                    completed, new_cycle
+                );
+                self.tracked_cycle = new_cycle;
+                outputs.extend(self.handle_cycle_boundary(completed));
+            }
+
+            // Detect phase transition
+            if new_phase != self.tracked_phase {
+                self.tracked_phase = new_phase;
+                outputs.extend(self.handle_phase_transition(new_cycle, new_phase));
+            }
         }
 
         // P1.2: Cast R2 confirmation vote at Reflection midpoint.
@@ -398,7 +401,6 @@ impl CycleEngine {
                     self.tip_hash = new_hash;
                     self.tip_timestamp = block.header.timestamp;
                     self.tip_header = Some(block.header.clone());
-                    self.awaiting_genesis = false;
                     outputs.push(CycleIo::CommitBlock(block));
                     outputs.push(CycleIo::EmitMetric {
                         name: "block_committed".to_string(),
