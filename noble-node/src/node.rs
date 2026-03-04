@@ -1108,27 +1108,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if !config.rewards.reward_address.is_empty() {
                     Some(config.rewards.reward_address.clone())
                 } else {
-                    // Auto-derive from first wallet secp256k1 key's Bitcoin address.
+                    // Auto-derive from first wallet key's Noble hex address.
+                    // Uses the hex-encoded wire bytes (scheme_id || pubkey) so it's
+                    // clearly a Noble address, not a Bitcoin address.
                     let ks = self.wallet_keystore.lock();
                     let auto = ks.list_keys().ok().and_then(|keys| {
-                        for pk in keys {
-                            if let noble_crypto::NoblePublicKey::Secp256k1(ref _k) = pk {
-                                let bytes = pk.key_bytes();
-                                if bytes.len() == 33 {
-                                    let compressed: &[u8; 33] = bytes.try_into().unwrap();
-                                    let addr = noble_crypto::bitcoin_addr::pubkey_to_p2wpkh(
-                                        compressed, true,
-                                    );
-                                    return Some(addr);
-                                }
-                            }
-                        }
-                        None
+                        keys.into_iter().next().map(|pk| hex::encode(pk.to_wire_bytes()))
                     });
                     if auto.is_some() {
                         tracing::info!(
                             task = "config_load",
-                            "Reward address auto-derived from wallet secp256k1 key: {}",
+                            "Reward address auto-derived from wallet key: {}",
                             auto.as_deref().unwrap_or(""),
                         );
                     }
