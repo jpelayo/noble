@@ -13,6 +13,7 @@
 pub mod db;
 pub mod handlers;
 pub mod rpc_client;
+pub mod wallet;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -83,6 +84,8 @@ pub struct FaucetState {
     pub config: FaucetConfig,
     /// Detected network label (e.g. "mainnet", "testnet").
     pub network: String,
+    /// Independent faucet wallet (when present, signs locally instead of via node RPC).
+    pub wallet: Option<wallet::FaucetWallet>,
 }
 
 /// NOBLE Faucet — token dispenser for mainnet onboarding and testnet usage.
@@ -102,8 +105,21 @@ struct Cli {
     rpc_url: String,
 
     /// Faucet wallet address (hex public key on the node).
+    /// If omitted, auto-detected from `--keystore-dir`.
     #[arg(long)]
-    faucet_address: String,
+    faucet_address: Option<String>,
+
+    /// Path to faucet keystore directory (enables local signing).
+    #[arg(long, default_value = "faucet-keystore")]
+    keystore_dir: PathBuf,
+
+    /// Keystore passphrase (overrides NOBLE_FAUCET_PASSPHRASE env).
+    #[arg(long)]
+    passphrase: Option<String>,
+
+    /// Use a hardcoded passphrase for unattended operation (if --passphrase not set).
+    #[arg(long)]
+    auto_unlock: bool,
 
     /// Amount per drip in atomic units (default: 10,000,000 = 10 NOBLE).
     #[arg(long, default_value = "10000000")]
@@ -144,8 +160,43 @@ async fn main() {
     let db = FaucetDb::open(&cli.db_path).expect("Failed to open faucet database");
     let rpc = NodeRpcClient::new(&cli.rpc_url, cli.totp_code)
         .expect("Failed to create RPC client (check URL scheme)");
+
+    // Resolve passphrase: --passphrase > NOBLE_FAUCET_PASSPHRASE env > --auto-unlock
+    let passphrase = cli
+        .passphrase
+        .or_else(|| std::env::var("NOBLE_FAUCET_PASSPHRASE").ok())
+        .unwrap_or_else(|| {
+            if cli.auto_unlock {
+                "noble-faucet-auto".to_string()
+            } else {
+                String::new()
+            }
+        });
+
+    // Initialize independent faucet wallet (local signing).
+    let faucet_wallet = if !passphrase.is_empty() || cli.auto_unlock {
+        match wallet::FaucetWallet::open_or_create(&cli.keystore_dir, &passphrase) {
+            Ok(w) => {
+                tracing::info!("Faucet wallet address: {}", w.address());
+                Some(w)
+            }
+            Err(e) => {
+                tracing::warn!("Could not initialize faucet wallet: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Resolve faucet address: --faucet-address > wallet auto-detect
+    let faucet_address = cli
+        .faucet_address
+        .or_else(|| faucet_wallet.as_ref().map(|w| w.address()))
+        .expect("Must provide --faucet-address or a valid --keystore-dir with --passphrase/--auto-unlock");
+
     let config = FaucetConfig {
-        faucet_address: cli.faucet_address,
+        faucet_address,
         drip_amount: cli.drip_amount,
         ip_cooldown_secs: cli.ip_cooldown,
         address_cooldown_secs: cli.address_cooldown,
@@ -174,6 +225,7 @@ async fn main() {
         rpc,
         config,
         network,
+        wallet: faucet_wallet,
     });
 
     // CORS: allow any origin for the faucet (public service).
@@ -242,9 +294,24 @@ mod tests {
         let cli = Cli::try_parse_from(["noble-faucet", "--faucet-address", "abcd1234"]).unwrap();
         assert_eq!(cli.listen, "127.0.0.1:8786");
         assert_eq!(cli.rpc_url, "http://127.0.0.1:8783");
-        assert_eq!(cli.faucet_address, "abcd1234");
+        assert_eq!(cli.faucet_address, Some("abcd1234".to_string()));
         assert_eq!(cli.drip_amount, 10_000_000);
         assert!(cli.totp_code.is_none());
+        assert!(!cli.auto_unlock);
+    }
+
+    #[test]
+    fn cli_parse_auto_unlock() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "noble-faucet",
+            "--auto-unlock",
+            "--keystore-dir",
+            "/tmp/ks",
+        ])
+        .unwrap();
+        assert!(cli.auto_unlock);
+        assert!(cli.faucet_address.is_none());
     }
 
     #[test]

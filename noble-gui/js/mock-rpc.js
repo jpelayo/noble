@@ -1726,6 +1726,9 @@ export class MockRpcClient {
       case 'noble_resetChain':
         return { reset: true, previous_height: 42 };
 
+      case 'noble_backupChain':
+        return { path: '/tmp/noble-backup-20260304-120000.tar.gz', size_bytes: 8_347_291 };
+
       case 'noble_detectExternalIp':
         return { ip: '203.0.113.42', multiaddr: '/ip4/203.0.113.42/tcp/8780', source: 'https://ipinfo.io/ip' };
 

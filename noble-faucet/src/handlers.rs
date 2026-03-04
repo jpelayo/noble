@@ -143,16 +143,30 @@ pub async fn handle_faucet(
         return Err(error_json("Daily faucet cap reached. Try again tomorrow"));
     }
 
-    // Send transfer via node RPC.
-    let tx_id = state
-        .rpc
-        .send_transfer(
-            &state.config.faucet_address,
-            &req.address,
-            state.config.drip_amount,
-        )
-        .await
-        .map_err(|e| internal_error(&format!("Transfer failed: {e}")))?;
+    // Send transfer: local signing (preferred) or node RPC (legacy fallback).
+    let tx_id = if let Some(ref wallet) = state.wallet {
+        // Build and sign locally, then submit raw transaction.
+        let fee = noble_core::MIN_TX_FEE;
+        let tx_hex = wallet
+            .build_transfer(&req.address, state.config.drip_amount, fee)
+            .map_err(|e| internal_error(&format!("Build transfer: {e}")))?;
+        state
+            .rpc
+            .submit_raw_transaction(&tx_hex)
+            .await
+            .map_err(|e| internal_error(&format!("Submit failed: {e}")))?
+    } else {
+        // Legacy: delegate to node's walletSendTransfer RPC.
+        state
+            .rpc
+            .send_transfer(
+                &state.config.faucet_address,
+                &req.address,
+                state.config.drip_amount,
+            )
+            .await
+            .map_err(|e| internal_error(&format!("Transfer failed: {e}")))?
+    };
 
     // Record in DB.
     {

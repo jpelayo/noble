@@ -964,6 +964,7 @@ fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Er
     // Build 33-byte key file: [scheme_id || private_key_bytes].
     let key_bytes = match &private_key {
         NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
+        _ => unreachable!("generate_validator_key only produces Ed25519 or Secp256k1"),
     };
     let mut raw = Vec::with_capacity(33);
     raw.push(scheme_id);

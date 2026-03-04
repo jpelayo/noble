@@ -232,6 +232,13 @@ pub trait NodeApi {
     /// Requires TOTP authentication (scope: All).
     #[method(name = "resetChain")]
     async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned>;
+
+    /// Create a tar.gz backup of the data directory.
+    ///
+    /// Writes to `{data_dir}/../noble-backup-{YYYYMMDD-HHMMSS}.tar.gz`.
+    /// Returns the backup file path and size.
+    #[method(name = "backupChain")]
+    async fn backup_chain(&self) -> Result<BackupChainResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -1173,6 +1180,95 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             previous_height,
         })
     }
+
+    async fn backup_chain(&self) -> Result<BackupChainResponse, ErrorObjectOwned> {
+        let data_dir = self.data_dir.as_ref().ok_or_else(|| {
+            ApiError::InvalidParam("data_dir not configured".into())
+        })?;
+
+        if !data_dir.exists() {
+            return Err(ApiError::InvalidParam("data directory does not exist".into()).into());
+        }
+
+        // Build backup filename: noble-backup-YYYYMMDD-HHMMSS.tar.gz
+        let now = chrono_timestamp();
+        let parent = data_dir.parent().unwrap_or(data_dir);
+        let backup_path = parent.join(format!("noble-backup-{now}.tar.gz"));
+        let data_dir_clone = data_dir.clone();
+        let backup_clone = backup_path.clone();
+
+        // Run tar in a blocking task to avoid blocking the async runtime.
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("tar")
+                .arg("czf")
+                .arg(&backup_clone)
+                .arg("-C")
+                .arg(data_dir_clone.parent().unwrap_or(&data_dir_clone))
+                .arg(
+                    data_dir_clone
+                        .file_name()
+                        .unwrap_or_default(),
+                )
+                .output()
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("spawn tar: {e}")))?
+        .map_err(|e| ApiError::Internal(format!("tar command: {e}")))?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(ApiError::Internal(format!("tar failed: {stderr}")).into());
+        }
+
+        let size_bytes = std::fs::metadata(&backup_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        tracing::info!(
+            task = "backup",
+            "Chain backup created: {} ({} bytes)",
+            backup_path.display(),
+            size_bytes
+        );
+
+        Ok(BackupChainResponse {
+            path: backup_path.display().to_string(),
+            size_bytes,
+        })
+    }
+}
+
+/// Generate a compact timestamp string for backup filenames.
+fn chrono_timestamp() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Simple: YYYYMMDD-HHMMSS from unix timestamp
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    // Approximate date (good enough for filenames)
+    let (year, month, day) = unix_days_to_ymd(days);
+    format!("{year:04}{month:02}{day:02}-{hours:02}{minutes:02}{seconds:02}")
+}
+
+fn unix_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Civil calendar conversion (good for 2000-2099)
+    days += 719468;
+    let era = days / 146097;
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 // ---------------------------------------------------------------------------

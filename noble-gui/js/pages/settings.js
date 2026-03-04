@@ -306,6 +306,7 @@ export function init(root, ctx) {
         </p>
         <div style="display:flex;gap:var(--gap-sm);justify-content:flex-end">
           <button id="s-chain-modal-cancel" class="btn-sm" style="padding:6px 14px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Cancel</button>
+          <button id="s-chain-modal-backup" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Backup Data</button>
           <button id="s-chain-modal-reset" class="btn-sm" style="padding:6px 14px;background:var(--error);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset &amp; Re-sync</button>
         </div>
         <div id="s-chain-modal-msg" style="font-size:var(--font-size-xs);margin-top:var(--gap-sm);text-align:right"></div>
@@ -1236,6 +1237,7 @@ export function init(root, ctx) {
   const chainModalForks = root.querySelector('#s-chain-modal-forks');
   const chainModalDatadir = root.querySelector('#s-chain-modal-datadir');
   const chainModalMsg = root.querySelector('#s-chain-modal-msg');
+  const chainModalBackup = root.querySelector('#s-chain-modal-backup');
 
   let latestForkData = null;
 
@@ -1315,6 +1317,23 @@ export function init(root, ctx) {
   chainModalClose.addEventListener('click', closeChainModal);
   chainModalCancel.addEventListener('click', closeChainModal);
   chainModal.addEventListener('click', (e) => { if (e.target === chainModal) closeChainModal(); });
+
+  chainModalBackup.addEventListener('click', async () => {
+    chainModalMsg.textContent = 'Creating backup...';
+    chainModalMsg.style.color = 'var(--text-muted)';
+    chainModalBackup.disabled = true;
+    try {
+      const result = await rpc.call('noble_backupChain');
+      const sizeMb = (result.size_bytes / (1024 * 1024)).toFixed(1);
+      chainModalMsg.style.color = 'var(--success)';
+      chainModalMsg.innerHTML = `Backup saved: <code style="font-size:var(--font-size-xs)">${result.path}</code> (${sizeMb} MB)`;
+    } catch (e) {
+      chainModalMsg.style.color = 'var(--error)';
+      chainModalMsg.textContent = e.message || 'Backup failed';
+    } finally {
+      chainModalBackup.disabled = false;
+    }
+  });
 
   chainModalReset.addEventListener('click', async () => {
     chainModalMsg.textContent = 'Resetting...';

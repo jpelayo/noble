@@ -289,100 +289,22 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
     async fn wallet_send_transfer(
         &self,
-        from: String,
-        to: String,
-        amount: u64,
-        fee: Option<u64>,
-        memo: Option<String>,
-        source_address: Option<String>,
+        _from: String,
+        _to: String,
+        _amount: u64,
+        _fee: Option<u64>,
+        _memo: Option<String>,
+        _source_address: Option<String>,
     ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
-        // Ensure wallet is unlocked
-        {
-            let state = self.wallet_state.lock();
-            if !state.is_unlocked() {
-                return Err(ApiError::WalletLocked.into());
-            }
-        }
-
-        // Validate amount > 0
-        if amount == 0 {
-            return Err(ApiError::InvalidParam("transfer amount must be > 0".into()).into());
-        }
-
-        // Parse addresses
-        let sender = parse_pubkey(&from)?;
-        let recipient = parse_address(&to)?;
-
-        // Parse optional source_address
-        let src_addr = match source_address {
-            Some(ref s) if !s.is_empty() => Some(parse_address(s)?),
-            _ => None,
-        };
-
-        let fee = fee.unwrap_or(MIN_TX_FEE);
-
-        // Build and sign the transaction (inject gateway address if configured)
-        let tx = {
-            let keystore = self.wallet_keystore.lock();
-            let mut tx = TransactionBuilder::build_transfer(
-                &keystore, &sender, recipient, amount, fee, memo, src_addr,
-            )
-            .map_err(|e| match e {
-                noble_wallet::WalletError::Locked => ApiError::WalletLocked,
-                noble_wallet::WalletError::InsufficientBalance { have, need } => {
-                    ApiError::InsufficientBalance(format!("have {have}, need {need}"))
-                }
-                other => ApiError::Internal(other.to_string()),
-            })?;
-            {
-                let gw_guard = self.gateway_key.read();
-                if let Some(ref gw) = *gw_guard {
-                    TransactionBuilder::set_gateway_and_resign(
-                        &mut tx,
-                        &keystore,
-                        &sender,
-                        gw.clone(),
-                    )
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
-                }
-            }
-            tx
-        };
-
-        // Admit to mempool
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let tx_id = {
-            let storage = self.storage.read();
-            let chain_height = storage
-                .get_chain_tip()
-                .ok()
-                .flatten()
-                .map(|t| t.height)
-                .unwrap_or(0);
-            let chain_lookup = StorageChainLookup { storage: &*storage };
-            let balance_lookup = StorageBalanceLookup { storage: &*storage };
-            let mut mempool = self.mempool.lock();
-            mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
-                .map_err(|e| ApiError::TxRejected(e.to_string()))?
-        };
-
-        // Broadcast (log if channel full).
-        if let Err(e) = self
-            .network_cmd
-            .try_send(NetworkCommand::PublishTransaction(tx))
-        {
-            tracing::warn!(task = "tx_broadcast", %tx_id, "network broadcast dropped (channel full): {e}");
-        }
-
-        Ok(SubmitTxResponse {
-            tx_id: hash_to_hex(&tx_id),
-            accepted: true,
-        })
+        // DEPRECATED: The node no longer holds spending keys.
+        // Build and sign transactions locally, then submit via noble_submitTransaction.
+        Err(ApiError::InvalidParam(
+            "walletSendTransfer is deprecated. Build and sign transfers locally \
+             (using noble-tool wallet or the faucet wallet), then submit via \
+             noble_submitTransaction."
+                .into(),
+        )
+        .into())
     }
 
     async fn generate_mnemonic(
@@ -615,58 +537,18 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
     async fn submit_document_batch(
         &self,
-        signer: String,
-        checksums: Vec<String>,
-        fee_per_tx: Option<u64>,
+        _signer: String,
+        _checksums: Vec<String>,
+        _fee_per_tx: Option<u64>,
     ) -> Result<SubmitBatchResponse, ErrorObjectOwned> {
-        // Limit to 100 checksums
-        if checksums.len() > 100 {
-            return Err(ApiError::TxRejected("batch limited to 100 checksums".into()).into());
-        }
-
-        // Ensure wallet is unlocked
-        {
-            let state = self.wallet_state.lock();
-            if !state.is_unlocked() {
-                return Err(ApiError::WalletLocked.into());
-            }
-        }
-
-        // Parse signer address
-        let signer_pk = parse_pubkey(&signer)?;
-
-        let fee = fee_per_tx.unwrap_or(MIN_TX_FEE);
-        let mut results = Vec::with_capacity(checksums.len());
-        let mut accepted = 0usize;
-        let mut rejected = 0usize;
-
-        for checksum_hex in &checksums {
-            let entry = match self.process_single_notarization(&signer_pk, checksum_hex, fee) {
-                Ok((tx_id_hex, _checksum_display)) => {
-                    accepted += 1;
-                    BatchResultEntry {
-                        checksum: checksum_hex.clone(),
-                        tx_id: Some(tx_id_hex),
-                        error: None,
-                    }
-                }
-                Err(err_msg) => {
-                    rejected += 1;
-                    BatchResultEntry {
-                        checksum: checksum_hex.clone(),
-                        tx_id: None,
-                        error: Some(err_msg),
-                    }
-                }
-            };
-            results.push(entry);
-        }
-
-        Ok(SubmitBatchResponse {
-            results,
-            accepted,
-            rejected,
-        })
+        // DEPRECATED: The node no longer holds spending keys.
+        // Build and sign notarization transactions locally, then submit via noble_submitTransaction.
+        Err(ApiError::InvalidParam(
+            "submitDocumentBatch is deprecated. Build and sign notarization transactions \
+             locally (using noble-tool wallet), then submit via noble_submitTransaction."
+                .into(),
+        )
+        .into())
     }
 }
 

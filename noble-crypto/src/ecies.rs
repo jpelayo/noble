@@ -214,6 +214,31 @@ pub fn decrypt_as_recipient(
                 .expect("secp256k1 shared secret is 32 bytes");
             bytes
         }
+        NoblePrivateKey::ValidatorEd25519(sk_bytes) => {
+            let x25519_secret = ed25519_sk_to_x25519(sk_bytes)?;
+            let eph_bytes: [u8; 32] = ephemeral_pubkey.try_into().map_err(|_| {
+                CryptoError::EciesDecrypt("X25519 ephemeral key must be 32 bytes".into())
+            })?;
+            let eph_pub = x25519_dalek::PublicKey::from(eph_bytes);
+            let shared = x25519_secret.diffie_hellman(&eph_pub);
+            *shared.as_bytes()
+        }
+        NoblePrivateKey::ValidatorSecp256k1(sk_bytes) => {
+            let our_sk = k256::SecretKey::from_slice(sk_bytes)
+                .map_err(|e| CryptoError::InvalidKey(format!("secp256k1: {e}")))?;
+            let eph_pk = k256::PublicKey::from_sec1_bytes(ephemeral_pubkey)
+                .map_err(|e| CryptoError::EciesDecrypt(format!("ephemeral key: {e}")))?;
+            let shared = k256::ecdh::diffie_hellman(our_sk.to_nonzero_scalar(), eph_pk.as_affine());
+            let bytes: [u8; 32] = shared
+                .raw_secret_bytes()
+                .as_slice()
+                .try_into()
+                .expect("secp256k1 shared secret is 32 bytes");
+            bytes
+        }
+        NoblePrivateKey::P2pIdentity(_) | NoblePrivateKey::TlsKey(_) | NoblePrivateKey::TotpSecret(_) => {
+            return Err(CryptoError::EciesDecrypt("non-signing key cannot perform ECIES".into()));
+        }
     };
 
     let derived_key = hkdf_derive(&shared_bytes)?;

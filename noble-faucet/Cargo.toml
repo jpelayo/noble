@@ -28,6 +28,10 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+noble-wallet = { path = "../noble-wallet" }
+noble-crypto = { path = "../noble-crypto" }
+noble-core = { path = "../noble-core" }
+noble-codec = { path = "../noble-codec" }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }

@@ -1129,6 +1129,15 @@ pub struct WalletTransactionEntry {
     pub running_balance: u64,
 }
 
+/// Response for `noble_backupChain`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupChainResponse {
+    /// Absolute path to the backup file.
+    pub path: String,
+    /// Size of the backup file in bytes.
+    pub size_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

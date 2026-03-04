@@ -86,7 +86,10 @@ export function init(root, ctx) {
     <div class="panel">
       <div class="panel-header">
         <span>Voting Strategy</span>
-        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)">Per-round strategy configuration</span>
+        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+          <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)">Per-round strategy configuration</span>
+          <button id="cs-strategy-help" title="Strategy reference" style="background:none;border:1px solid var(--border);border-radius:50%;width:22px;height:22px;cursor:pointer;color:var(--text-muted);font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0">?</button>
+        </div>
       </div>
       <div class="panel-body">
         <div class="split-layout">
@@ -149,6 +152,34 @@ export function init(root, ctx) {
           <button class="btn btn-sm" id="cs-save-strategy">Save Strategies</button>
           <span id="cs-strategy-status" style="font-size:var(--font-size-xs);color:var(--success)"></span>
         </div>
+      </div>
+    </div>
+
+    <!-- Voting Strategy Help Modal -->
+    <div id="cs-strategy-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:720px;width:92%;max-height:85vh;overflow-y:auto;padding:var(--gap-lg);position:relative">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)">
+          <h3 style="margin:0">Voting Strategy Reference</h3>
+          <button id="cs-strategy-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
+        </div>
+        <table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+          <thead><tr><th>Strategy</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td style="white-space:nowrap;font-weight:600">First Valid</td><td>Accept the first candidate block that passes validation. Fast, no preference.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Fixed Validator</td><td>Always vote for a specific validator (pubkey). Useful for delegating trust to a known operator.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Round Robin</td><td>Rotate votes across all registered validators in order. Ensures fair block production over time.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Subset Rotation</td><td>Rotate votes across a manually-defined subset of validators. Gives control over the rotation pool.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Random</td><td>Vote for a random valid candidate each cycle. Simple, unpredictable.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Weighted Reputation</td><td>Always vote for the candidate with the highest reputation score. Rewards good behaviour.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Weighted Probability</td><td>Probabilistic voting proportional to reputation scores. Higher rep = more likely but not guaranteed.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Follow Majority</td><td>Wait for tally data and vote with the current plurality. Converges quickly, avoids splits.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Manual</td><td>No automatic vote. Use the <em>Cast Manual Vote</em> panel below to vote by hand each cycle.</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap)">
+          <strong>Round 1 (Reflection)</strong> selects the candidate block. <strong>Round 2 (Confirmation)</strong> ratifies the R1 winner —
+          if R2 disagrees, its vote overrides R1. Strategies persist to <code>noble.toml</code>.
+        </p>
       </div>
     </div>
 
@@ -271,6 +302,9 @@ export function init(root, ctx) {
   const r2Desc = root.querySelector('#cs-r2-desc');
   const saveStrategyBtn = root.querySelector('#cs-save-strategy');
   const strategyStatus = root.querySelector('#cs-strategy-status');
+  const strategyHelpBtn = root.querySelector('#cs-strategy-help');
+  const strategyModal = root.querySelector('#cs-strategy-modal');
+  const strategyModalClose = root.querySelector('#cs-strategy-modal-close');
   const tallyMeta = root.querySelector('#cs-tally-meta');
   const talliesBody = root.querySelector('#cs-tallies-body');
 
@@ -305,6 +339,11 @@ export function init(root, ctx) {
 
   r1Select.addEventListener('change', () => updateStrategyUI(r1Select, r1Params, r1Desc, 'cs-r1'));
   r2Select.addEventListener('change', () => updateStrategyUI(r2Select, r2Params, r2Desc, 'cs-r2'));
+
+  // Help modal
+  strategyHelpBtn.addEventListener('click', () => { strategyModal.style.display = 'flex'; });
+  strategyModalClose.addEventListener('click', () => { strategyModal.style.display = 'none'; });
+  strategyModal.addEventListener('click', (e) => { if (e.target === strategyModal) strategyModal.style.display = 'none'; });
 
   async function loadVotingStrategy() {
     try {

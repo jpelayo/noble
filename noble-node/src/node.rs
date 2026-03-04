@@ -248,6 +248,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             .as_ref()
             .map(|(sk, pk)| (sk.clone_for_test(), pk.clone()));
 
+        // Clone for legacy key migration (before CycleEngine consumes validator_key).
+        let migration_validator_key = validator_key
+            .as_ref()
+            .map(|(sk, pk)| (sk.clone_for_test(), pk.clone()));
+
         let mut engine = CycleEngine::new(
             consensus_config,
             validator_list,
@@ -282,6 +287,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let _ = keystore.unlock(&wallet_passphrase);
             }
         }
+
+        // --- Migrate legacy scattered key files into the unified keystore ---
+        migrate_legacy_keys_into_keystore(
+            &mut keystore,
+            &wallet_passphrase,
+            &config.storage.data_dir,
+            &chain_meta,
+            &migration_validator_key,
+        );
+
         let wallet_keystore = Arc::new(Mutex::new(keystore));
         let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
 
@@ -507,6 +522,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
         net_config.chain_meta = Some(self.chain_meta);
+
+        // Try to load P2P identity from unified keystore (migrated in Node::new)
+        {
+            let ks = self.wallet_keystore.lock();
+            if ks.is_unlocked() {
+                if let Ok(proto_bytes) = ks.get_raw(noble_crypto::SCHEME_P2P_IDENTITY) {
+                    net_config.pre_loaded_p2p_key = Some(proto_bytes);
+                }
+            }
+        }
 
         let mut network = noble_network::start_network(net_config, block_provider, tx_provider)
             .await
@@ -1902,6 +1927,211 @@ fn load_validator_key(
         hex::encode(public_key.to_wire_bytes())
     );
     Some((private_key, public_key))
+}
+
+/// Migrate legacy scattered key files (validator.key, p2p_identity.key,
+/// tls-key.pem, totp_secret.txt) into the unified keystore.
+///
+/// For each file: if it exists AND the keystore doesn't already have that
+/// scheme, read+decrypt the legacy file, store into keystore, then rename
+/// the legacy file to `*.migrated` as a safety net.
+fn migrate_legacy_keys_into_keystore(
+    keystore: &mut KeyStore,
+    passphrase: &str,
+    data_dir: &std::path::Path,
+    chain_meta: &[u8; 32],
+    validator_key: &Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
+) {
+    // 1. Validator key → SCHEME_VALIDATOR_ED25519 or SCHEME_VALIDATOR_SECP256K1
+    if let Some((sk, _pk)) = validator_key {
+        let scheme = match sk {
+            noble_crypto::NoblePrivateKey::Ed25519(_)
+            | noble_crypto::NoblePrivateKey::ValidatorEd25519(_) => {
+                noble_crypto::SCHEME_VALIDATOR_ED25519
+            }
+            _ => noble_crypto::SCHEME_VALIDATOR_SECP256K1,
+        };
+        if !keystore.has_scheme(scheme).unwrap_or(true) {
+            if let Some(raw) = sk.raw_bytes().or_else(|| {
+                // On-chain Ed25519/Secp256k1 variants: extract via clone_for_test hack
+                None
+            }) {
+                match keystore.store_raw(scheme, raw, passphrase) {
+                    Ok(_) => {
+                        rename_to_migrated(&data_dir.join("validator.key"));
+                        tracing::info!(
+                            task = "key_migration",
+                            "Migrated validator.key into unified keystore"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "key_migration", "validator key migration: {e}");
+                    }
+                }
+            } else {
+                // Signing key variant — read the 32-byte secret from the raw file
+                let key_path = data_dir.join("validator.key");
+                if key_path.exists() {
+                    if let Ok(file_bytes) = std::fs::read(&key_path) {
+                        let raw = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+                            noble_crypto::file_encrypt::decrypt_file_data_with_migration(
+                                &file_bytes,
+                                chain_meta,
+                            )
+                            .ok()
+                            .map(|(d, _)| d)
+                        } else {
+                            Some(file_bytes)
+                        };
+                        if let Some(raw) = raw {
+                            if raw.len() == 33 {
+                                match keystore.store_raw(scheme, &raw[1..], passphrase) {
+                                    Ok(_) => {
+                                        rename_to_migrated(&key_path);
+                                        tracing::info!(
+                                            task = "key_migration",
+                                            "Migrated validator.key into unified keystore"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            task = "key_migration",
+                                            "validator key migration: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. P2P identity key
+    let p2p_path = data_dir.join("p2p_identity.key");
+    if p2p_path.exists() && !keystore.has_scheme(noble_crypto::SCHEME_P2P_IDENTITY).unwrap_or(true)
+    {
+        if let Ok(file_bytes) = std::fs::read(&p2p_path) {
+            let proto_bytes = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+                noble_crypto::file_encrypt::decrypt_file_data_with_migration(
+                    &file_bytes,
+                    chain_meta,
+                )
+                .ok()
+                .map(|(d, _)| d)
+            } else {
+                Some(file_bytes)
+            };
+            if let Some(proto) = proto_bytes {
+                match keystore.store_raw(
+                    noble_crypto::SCHEME_P2P_IDENTITY,
+                    &proto,
+                    passphrase,
+                ) {
+                    Ok(_) => {
+                        rename_to_migrated(&p2p_path);
+                        tracing::info!(
+                            task = "key_migration",
+                            "Migrated p2p_identity.key into unified keystore"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "key_migration", "P2P key migration: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. TLS private key — store in keystore but keep the original file
+    // (tls-cert.pem is public and still loaded from disk; tls-key.pem is kept for
+    // backward compat with existing TLS loading code).
+    let tls_key_path = data_dir.join("tls-key.pem");
+    if tls_key_path.exists()
+        && !keystore
+            .has_scheme(noble_crypto::SCHEME_TLS_KEY)
+            .unwrap_or(true)
+    {
+        if let Ok(file_bytes) = std::fs::read(&tls_key_path) {
+            let key_bytes = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+                noble_crypto::file_encrypt::decrypt_file_data_with_migration(
+                    &file_bytes,
+                    chain_meta,
+                )
+                .ok()
+                .map(|(d, _)| d)
+            } else {
+                Some(file_bytes)
+            };
+            if let Some(raw) = key_bytes {
+                match keystore.store_raw(noble_crypto::SCHEME_TLS_KEY, &raw, passphrase) {
+                    Ok(_) => {
+                        // Don't rename — TLS loading still reads tls-key.pem
+                        tracing::info!(
+                            task = "key_migration",
+                            "Copied TLS key into unified keystore (original retained)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "key_migration", "TLS key migration: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. TOTP secret
+    let totp_path = data_dir.join("totp_secret.txt");
+    if totp_path.exists()
+        && !keystore
+            .has_scheme(noble_crypto::SCHEME_TOTP_SECRET)
+            .unwrap_or(true)
+    {
+        if let Ok(file_bytes) = std::fs::read(&totp_path) {
+            let secret_bytes = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
+                noble_crypto::file_encrypt::decrypt_file_data_with_migration(
+                    &file_bytes,
+                    chain_meta,
+                )
+                .ok()
+                .map(|(d, _)| d)
+            } else {
+                Some(file_bytes)
+            };
+            if let Some(raw) = secret_bytes {
+                match keystore.store_raw(
+                    noble_crypto::SCHEME_TOTP_SECRET,
+                    &raw,
+                    passphrase,
+                ) {
+                    Ok(_) => {
+                        rename_to_migrated(&totp_path);
+                        tracing::info!(
+                            task = "key_migration",
+                            "Migrated totp_secret.txt into unified keystore"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "key_migration", "TOTP secret migration: {e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rename a file to `*.migrated` as a safety net during key migration.
+fn rename_to_migrated(path: &std::path::Path) {
+    let mut new_path = path.as_os_str().to_owned();
+    new_path.push(".migrated");
+    if let Err(e) = std::fs::rename(path, &new_path) {
+        tracing::warn!(
+            task = "key_migration",
+            "Could not rename {} to *.migrated: {e}",
+            path.display()
+        );
+    }
 }
 
 /// Return `(pubkey_hex, scheme, key_path_str)` for the validator key without

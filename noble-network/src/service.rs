@@ -75,9 +75,25 @@ pub async fn start_network(
     tx_provider: Arc<dyn TxProvider>,
 ) -> Result<NetworkHandle, NetworkError> {
     // Load or generate the P2P identity keypair.
-    // When data_dir is set, the keypair is persisted to `p2p_identity.key` so
-    // the node retains the same PeerId across restarts.
-    let keypair = if let Some(ref data_dir) = config.data_dir {
+    // Priority: pre-loaded from unified keystore > file on disk > generate new.
+    let keypair = if let Some(ref proto_bytes) = config.pre_loaded_p2p_key {
+        match libp2p::identity::Keypair::from_protobuf_encoding(proto_bytes) {
+            Ok(kp) => {
+                tracing::info!(
+                    task = "network_startup",
+                    "Using P2P keypair from unified keystore"
+                );
+                kp
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = "network_startup",
+                    "Failed to decode pre-loaded P2P keypair ({e}), generating new one"
+                );
+                libp2p::identity::Keypair::generate_ed25519()
+            }
+        }
+    } else if let Some(ref data_dir) = config.data_dir {
         let key_path = data_dir.join("p2p_identity.key");
         if key_path.exists() {
             match std::fs::read(&key_path) {

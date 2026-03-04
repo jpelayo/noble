@@ -186,7 +186,18 @@ impl NodeRpcClient {
         })
     }
 
-    /// Send NOBLE tokens from the faucet wallet to the target address.
+    /// Submit a pre-signed transaction (hex-encoded CBOR) to the node.
+    pub async fn submit_raw_transaction(&self, tx_hex: &str) -> Result<String, FaucetError> {
+        #[derive(Serialize)]
+        struct Params<'a> {
+            tx_hex: &'a str,
+        }
+        let params = Params { tx_hex };
+        let resp: TransferResult = self.call("noble_submitTransaction", &params).await?;
+        Ok(resp.tx_id)
+    }
+
+    /// Send NOBLE tokens from the faucet wallet to the target address (legacy, delegates to node).
     pub async fn send_transfer(
         &self,
         from: &str,

@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use noble_crypto::keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
-use noble_crypto::{SCHEME_ED25519, SCHEME_SECP256K1};
+use noble_crypto::{
+    SCHEME_ED25519, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1, SCHEME_TLS_KEY, SCHEME_TOTP_SECRET,
+    SCHEME_VALIDATOR_ED25519, SCHEME_VALIDATOR_SECP256K1,
+};
 
 use crate::error::WalletError;
 
@@ -433,6 +436,11 @@ impl KeyStore {
             let priv_key = match encrypted.scheme_id {
                 SCHEME_ED25519 => NoblePrivateKey::Ed25519(secret.clone()),
                 SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(secret.clone()),
+                SCHEME_VALIDATOR_ED25519 => NoblePrivateKey::ValidatorEd25519(secret.clone()),
+                SCHEME_VALIDATOR_SECP256K1 => NoblePrivateKey::ValidatorSecp256k1(secret.clone()),
+                SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(secret.clone()),
+                SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(secret.clone()),
+                SCHEME_TOTP_SECRET => NoblePrivateKey::TotpSecret(secret.clone()),
                 other => {
                     secret.zeroize();
                     return Err(WalletError::UnsupportedScheme(other));
@@ -440,7 +448,17 @@ impl KeyStore {
             };
 
             let pub_key = priv_key.public_key();
-            keys.insert(pub_key.to_wire_bytes(), priv_key);
+            // Internal keys (0x80+) use their internal scheme_id in the map key
+            // so the in-memory representation matches the on-disk filename.
+            let map_key = if noble_crypto::is_signing_scheme(encrypted.scheme_id) {
+                pub_key.to_wire_bytes()
+            } else {
+                let mut w = Vec::with_capacity(1 + pub_key.key_bytes().len());
+                w.push(encrypted.scheme_id);
+                w.extend_from_slice(pub_key.key_bytes());
+                w
+            };
+            keys.insert(map_key, priv_key);
             secret.zeroize();
         }
 
@@ -517,6 +535,91 @@ impl KeyStore {
         }
 
         Ok(pub_key)
+    }
+
+    /// Store arbitrary raw bytes under an internal (non-signing) scheme ID.
+    ///
+    /// The bytes are encrypted with the keystore passphrase and stored on disk.
+    /// A synthetic "public key" (SHA-256 of the raw bytes) is used for the filename.
+    /// For signing-capable internal schemes (ValidatorEd25519/ValidatorSecp256k1),
+    /// the real public key is derived and used as the filename.
+    ///
+    /// The passphrase is validated only for on-chain wallet schemes; internal
+    /// schemes accept any passphrase (including derived chain_meta keys).
+    pub fn store_raw(
+        &mut self,
+        scheme_id: u8,
+        raw_bytes: &[u8],
+        passphrase: &str,
+    ) -> Result<NoblePublicKey, WalletError> {
+        if self.has_scheme(scheme_id)? {
+            return Err(WalletError::DuplicateKey(format!(
+                "a key with scheme {scheme_id:#04x} already exists"
+            )));
+        }
+
+        let priv_key = match scheme_id {
+            SCHEME_VALIDATOR_ED25519 => NoblePrivateKey::ValidatorEd25519(raw_bytes.to_vec()),
+            SCHEME_VALIDATOR_SECP256K1 => NoblePrivateKey::ValidatorSecp256k1(raw_bytes.to_vec()),
+            SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(raw_bytes.to_vec()),
+            SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(raw_bytes.to_vec()),
+            SCHEME_TOTP_SECRET => NoblePrivateKey::TotpSecret(raw_bytes.to_vec()),
+            other => return Err(WalletError::UnsupportedScheme(other)),
+        };
+
+        let pub_key = priv_key.public_key();
+
+        // For internal keys (0x80+), the filename must use the internal scheme_id
+        // rather than the public key's on-chain scheme (Ed25519/Secp256k1), so
+        // has_scheme() can find them by their actual scheme_id.
+        let wire_bytes = if noble_crypto::is_signing_scheme(scheme_id) {
+            pub_key.to_wire_bytes()
+        } else {
+            let mut w = Vec::with_capacity(1 + pub_key.key_bytes().len());
+            w.push(scheme_id);
+            w.extend_from_slice(pub_key.key_bytes());
+            w
+        };
+        let file_name = format!("{}.json", hex::encode(&wire_bytes));
+        let file_path = self.path.join(file_name);
+
+        if file_path.exists() {
+            return Err(WalletError::DuplicateKey(hex::encode(&wire_bytes)));
+        }
+
+        let encrypted = encrypt_key(raw_bytes, scheme_id, passphrase)?;
+        let json = serde_json::to_string_pretty(&encrypted)?;
+        fs::write(&file_path, &json)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        if let Some(ref mut keys) = self.unlocked_keys {
+            keys.insert(wire_bytes, priv_key);
+        }
+
+        Ok(pub_key)
+    }
+
+    /// Retrieve the raw bytes for an internal (non-signing) scheme.
+    ///
+    /// The keystore must be unlocked. Scans unlocked keys for the first
+    /// key matching the given scheme_id and returns its raw bytes.
+    pub fn get_raw(&self, scheme_id: u8) -> Result<Vec<u8>, WalletError> {
+        let keys = self.unlocked_keys.as_ref().ok_or(WalletError::Locked)?;
+        for priv_key in keys.values() {
+            if priv_key.scheme_id() == scheme_id {
+                if let Some(raw) = priv_key.raw_bytes() {
+                    return Ok(raw.to_vec());
+                }
+            }
+        }
+        Err(WalletError::KeyNotFound(format!(
+            "no key with scheme {scheme_id:#04x}"
+        )))
     }
 
     /// Re-encrypt every key file from `old_passphrase` to `new_passphrase`.
@@ -1050,5 +1153,96 @@ mod tests {
             "test-pass-long",
         );
         assert!(result.is_err(), "invalid mnemonic must be rejected");
+    }
+
+    // --- Internal scheme (store_raw / get_raw) tests ---
+
+    #[test]
+    fn store_and_get_raw_p2p_identity() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let raw = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
+        let pk = ks
+            .store_raw(SCHEME_P2P_IDENTITY, &raw, "passphrase-ok")
+            .unwrap();
+        assert_eq!(pk.scheme_id(), SCHEME_ED25519); // synthetic pubkey
+
+        // Unlock and retrieve
+        ks.unlock("passphrase-ok").unwrap();
+        let got = ks.get_raw(SCHEME_P2P_IDENTITY).unwrap();
+        assert_eq!(got, raw);
+    }
+
+    #[test]
+    fn store_raw_duplicate_rejected() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.store_raw(SCHEME_TOTP_SECRET, b"secret1", "passphrase-ok")
+            .unwrap();
+        let result = ks.store_raw(SCHEME_TOTP_SECRET, b"secret2", "passphrase-ok");
+        assert!(
+            matches!(result, Err(WalletError::DuplicateKey(_))),
+            "duplicate scheme must be rejected"
+        );
+    }
+
+    #[test]
+    fn get_raw_while_locked_fails() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        ks.store_raw(SCHEME_TLS_KEY, b"tls-key-bytes", "passphrase-ok")
+            .unwrap();
+        let result = ks.get_raw(SCHEME_TLS_KEY);
+        assert!(
+            matches!(result, Err(WalletError::Locked)),
+            "get_raw while locked must fail"
+        );
+    }
+
+    #[test]
+    fn store_raw_validator_key() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+        let (sk, _pk) = noble_crypto::ed25519::generate_keypair();
+        let pk = ks
+            .store_raw(SCHEME_VALIDATOR_ED25519, &sk, "passphrase-ok")
+            .unwrap();
+        // Validator Ed25519 derives a real Ed25519 public key
+        assert_eq!(pk.scheme_id(), SCHEME_ED25519);
+
+        // Unlock, get raw, and verify it round-trips
+        ks.unlock("passphrase-ok").unwrap();
+        let got = ks.get_raw(SCHEME_VALIDATOR_ED25519).unwrap();
+        assert_eq!(got, sk);
+    }
+
+    #[test]
+    fn mixed_signing_and_internal_keys() {
+        let dir = tempdir().unwrap();
+        let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
+
+        // Create a wallet key (on-chain signing)
+        ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+
+        // Store internal keys
+        ks.store_raw(SCHEME_P2P_IDENTITY, b"p2p-proto-bytes", "passphrase-ok")
+            .unwrap();
+        ks.store_raw(SCHEME_TOTP_SECRET, b"totp-base32", "passphrase-ok")
+            .unwrap();
+
+        // list_keys returns only on-chain signing keys (NoblePublicKey-compatible)
+        let keys = ks.list_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+        // Total files on disk includes internal keys
+        let total_files = std::fs::read_dir(dir.path().join("keys"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".json"))
+            .count();
+        assert_eq!(total_files, 3);
+
+        // Unlock loads everything
+        ks.unlock("passphrase-ok").unwrap();
+        assert!(ks.get_raw(SCHEME_P2P_IDENTITY).is_ok());
+        assert!(ks.get_raw(SCHEME_TOTP_SECRET).is_ok());
     }
 }

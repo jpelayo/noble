@@ -105,6 +105,10 @@ pub struct NetworkConfig {
     /// Per-installation entropy for at-rest encryption of `p2p_identity.key`.
     /// `None` means no encryption (for tests). Set by the node from `.chain_meta`.
     pub chain_meta: Option<[u8; 32]>,
+
+    /// Pre-loaded P2P identity keypair bytes (protobuf-encoded) from the unified keystore.
+    /// When `Some`, the service uses these bytes directly instead of reading `p2p_identity.key`.
+    pub pre_loaded_p2p_key: Option<Vec<u8>>,
 }
 
 impl Default for NetworkConfig {
@@ -129,6 +133,7 @@ impl Default for NetworkConfig {
             max_outbound_per_subnet: 2,
             peer_rotation_interval_secs: 600,
             chain_meta: None,
+            pre_loaded_p2p_key: None,
         }
     }
 }

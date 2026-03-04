@@ -61,6 +61,15 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Read-only wallet info banner -->
+    <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-bottom:var(--gap);display:flex;align-items:center;gap:var(--gap)">
+      <span style="font-size:1.3rem">&#x1F512;</span>
+      <div style="font-size:var(--font-size-sm);color:var(--text-secondary)">
+        <strong>Read-only wallet.</strong> The node does not hold spending keys.
+        Use <code style="color:var(--accent)">noble-tool wallet</code> or a separate client to send transactions.
+      </div>
+    </div>
+
     <!-- Wallet identity -->
     <div class="panel">
       <div class="panel-header">Wallet Identity</div>
@@ -413,6 +422,18 @@ export function init(root, ctx) {
 
       // Show mnemonic in secure grid
       const words = result.mnemonic.split(/\s+/);
+      // Critical ephemeral wallet warning
+      const critBox = document.createElement('div');
+      critBox.style.cssText = 'background:var(--error-bg, rgba(239,68,68,0.1));border:2px solid var(--error);border-radius:var(--radius);padding:var(--gap);margin-bottom:var(--gap)';
+      critBox.innerHTML = `
+        <strong style="color:var(--error);font-size:var(--font-size-sm)">CRITICAL: This wallet is ephemeral</strong>
+        <p style="color:var(--text-secondary);font-size:var(--font-size-xs);margin:var(--gap-sm) 0 0">
+          The node does NOT hold spending keys. Back up these 24 words now.
+          Without them, any income sent to this address is <strong>permanently lost</strong>.
+          Use <code>noble-tool wallet</code> or a separate client wallet to spend your node balance.
+        </p>`;
+      generateArea.appendChild(critBox);
+
       const header = document.createElement('div');
       header.style.cssText = 'font-weight:600;margin-bottom:var(--gap-sm);color:var(--warning)';
       header.textContent = 'Backup Your Mnemonic Phrase';
