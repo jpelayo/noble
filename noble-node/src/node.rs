@@ -171,11 +171,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         )
         .map_err(|e| format!("failed to load/create .chain_meta: {e}"))?;
 
+        // Create wallet keystore + auto-unlock with chain_meta-derived passphrase.
+        // This must happen BEFORE load_validator_key so the keystore fallback works
+        // for nodes whose validator.key was migrated into the unified keystore.
+        let mut keystore = KeyStore::new(&config.wallet.keystore_path)?;
+        let wallet_passphrase = hex::encode(
+            noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
+        );
+        if keystore.unlock(&wallet_passphrase).is_err() {
+            // Existing keys may use the old empty passphrase — try migration
+            if keystore.unlock("").is_ok() {
+                match keystore.migrate_passphrase("", &wallet_passphrase) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(task = "wallet_key", "migrated {n} wallet key(s) to chain_meta encryption");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(task = "wallet_key", "wallet key migration failed: {e}");
+                    }
+                }
+                keystore.lock();
+                let _ = keystore.unlock(&wallet_passphrase);
+            }
+        }
+
         // --- Load validator key (if configured) ---
+        // Checks validator.key file first, then falls back to unified keystore.
         let validator_key = load_validator_key(
             &config.consensus.validator_key_path,
             &config.storage.data_dir,
             &chain_meta,
+            &keystore,
         );
 
         // --- Build consensus config from TOML ---
@@ -265,28 +291,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             engine.update_tip_with_header(header);
         }
         let consensus = Arc::new(RwLock::new(engine));
-
-        // Create wallet keystore + auto-unlock with chain_meta-derived passphrase.
-        let mut keystore = KeyStore::new(&config.wallet.keystore_path)?;
-        let wallet_passphrase = hex::encode(
-            noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
-        );
-        if keystore.unlock(&wallet_passphrase).is_err() {
-            // Existing keys may use the old empty passphrase — try migration
-            if keystore.unlock("").is_ok() {
-                match keystore.migrate_passphrase("", &wallet_passphrase) {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(task = "wallet_key", "migrated {n} wallet key(s) to chain_meta encryption");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(task = "wallet_key", "wallet key migration failed: {e}");
-                    }
-                }
-                keystore.lock();
-                let _ = keystore.unlock(&wallet_passphrase);
-            }
-        }
 
         // --- Migrate legacy scattered key files into the unified keystore ---
         migrate_legacy_keys_into_keystore(
@@ -1798,15 +1802,51 @@ impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
     }
 }
 
+/// Try to load a validator key from the unified keystore.
+///
+/// Checks for SCHEME_VALIDATOR_ED25519 first, then SCHEME_VALIDATOR_SECP256K1.
+fn load_validator_from_keystore(
+    keystore: &KeyStore,
+) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
+    if !keystore.is_unlocked() {
+        return None;
+    }
+    // Try Ed25519 first
+    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519) {
+        let sk = noble_crypto::NoblePrivateKey::Ed25519(raw);
+        let pk = sk.public_key();
+        tracing::info!(
+            task = "config_load",
+            "Validator mode enabled (from unified keystore): {}",
+            hex::encode(pk.to_wire_bytes())
+        );
+        return Some((sk, pk));
+    }
+    // Then secp256k1
+    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_SECP256K1) {
+        let sk = noble_crypto::NoblePrivateKey::Secp256k1(raw);
+        let pk = sk.public_key();
+        tracing::info!(
+            task = "config_load",
+            "Validator mode enabled (from unified keystore): {}",
+            hex::encode(pk.to_wire_bytes())
+        );
+        return Some((sk, pk));
+    }
+    None
+}
+
 /// Load a validator private key from a raw key file.
 ///
 /// The file must contain exactly 33 bytes: `[scheme_id(1) || private_key(32)]`.
 /// Returns `Some((private_key, public_key))` on success, `None` if the path is
 /// empty or the file cannot be loaded.
+/// Falls back to the unified keystore if the file is not found.
 fn load_validator_key(
     path: &str,
     data_dir: &std::path::Path,
     chain_meta: &[u8; 32],
+    keystore: &KeyStore,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
     // When validator_key_path is empty, check the data_dir fallback location.
     // This covers nodes whose validator.key was auto-generated during setup.
@@ -1814,6 +1854,10 @@ fn load_validator_key(
     let key_path = if path.is_empty() {
         let fallback = data_dir.join("validator.key");
         if !fallback.exists() {
+            // Fallback: check unified keystore (validator.key may have been migrated).
+            if let Some(result) = load_validator_from_keystore(keystore) {
+                return Some(result);
+            }
             tracing::info!(
                 task = "config_load",
                 "Observer mode: no validator key configured"
@@ -1831,6 +1875,10 @@ fn load_validator_key(
         std::path::Path::new(path)
     };
     if !key_path.exists() {
+        // Fallback: check unified keystore.
+        if let Some(result) = load_validator_from_keystore(keystore) {
+            return Some(result);
+        }
         tracing::warn!(
             task = "config_load",
             "Validator key file not found: {} — running in observer mode",

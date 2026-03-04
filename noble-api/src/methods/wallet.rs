@@ -9,40 +9,12 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_core::MIN_TX_FEE;
-use noble_crypto::{sha256, Hash256, NoblePublicKey, SCHEME_ED25519 as SCHEME_ED, SCHEME_SECP256K1 as SCHEME_SEC};
-use noble_mempool::{BalanceLookup, ChainLookup};
-use noble_network::NetworkCommand;
+use noble_crypto::{NoblePublicKey, SCHEME_ED25519 as SCHEME_ED, SCHEME_SECP256K1 as SCHEME_SEC};
 use noble_storage::StorageEngine;
-use noble_wallet::TransactionBuilder;
 
 use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
-
-// ---------------------------------------------------------------------------
-// Adapter structs (same as transaction.rs — duplicated to avoid module coupling)
-// ---------------------------------------------------------------------------
-
-struct StorageChainLookup<'a, S: StorageEngine> {
-    storage: &'a S,
-}
-
-impl<S: StorageEngine> ChainLookup for StorageChainLookup<'_, S> {
-    fn is_confirmed(&self, tx_id: &Hash256) -> bool {
-        self.storage.has_transaction(tx_id).unwrap_or(false)
-    }
-}
-
-struct StorageBalanceLookup<'a, S: StorageEngine> {
-    storage: &'a S,
-}
-
-impl<S: StorageEngine> BalanceLookup for StorageBalanceLookup<'_, S> {
-    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-        self.storage.get_balance(address).unwrap_or(0)
-    }
-}
 
 #[rpc(server, namespace = "noble")]
 pub trait WalletApi {
@@ -549,89 +521,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 .into(),
         )
         .into())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Private helpers on ApiState
-// ---------------------------------------------------------------------------
-
-impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
-    /// Process a single notarization in a batch. Returns `Ok((tx_id_hex, checksum_hex))`
-    /// or `Err(error_message)`.
-    fn process_single_notarization(
-        self: &Arc<Self>,
-        signer: &NoblePublicKey,
-        checksum_hex: &str,
-        fee: u64,
-    ) -> Result<(String, String), String> {
-        // Parse checksum: if it's 64 hex chars, treat as raw hash; otherwise hash the input.
-        let checksum = if checksum_hex.len() == 64 {
-            let bytes = hex::decode(checksum_hex).map_err(|e| e.to_string())?;
-            let arr: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
-            Hash256::from_bytes(arr)
-        } else {
-            // Hash the hex string as document content identifier
-            sha256(checksum_hex.as_bytes())
-        };
-
-        // Build transaction (inject gateway address if configured)
-        let tx = {
-            let keystore = self.wallet_keystore.lock();
-            let mut tx = TransactionBuilder::build_notarization(
-                &keystore,
-                signer,
-                checksum,
-                fee,
-                vec![], // no metadata in batch mode
-            )
-            .map_err(|e| e.to_string())?;
-            {
-                let gw_guard = self.gateway_key.read();
-                if let Some(ref gw) = *gw_guard {
-                    TransactionBuilder::set_gateway_and_resign(
-                        &mut tx,
-                        &keystore,
-                        signer,
-                        gw.clone(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-            }
-            tx
-        };
-
-        // Admit to mempool
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let tx_id = {
-            let storage = self.storage.read();
-            let chain_height = storage
-                .get_chain_tip()
-                .ok()
-                .flatten()
-                .map(|t| t.height)
-                .unwrap_or(0);
-            let chain_lookup = StorageChainLookup { storage: &*storage };
-            let balance_lookup = StorageBalanceLookup { storage: &*storage };
-            let mut mempool = self.mempool.lock();
-            mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
-                .map_err(|e| e.to_string())?
-        };
-
-        // Broadcast (log if channel full).
-        if let Err(e) = self
-            .network_cmd
-            .try_send(NetworkCommand::PublishTransaction(tx))
-        {
-            tracing::warn!(task = "tx_broadcast", %tx_id, "network broadcast dropped (channel full): {e}");
-        }
-
-        Ok((hash_to_hex(&tx_id), hash_to_hex(&checksum)))
     }
 }
 
