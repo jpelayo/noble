@@ -420,7 +420,7 @@ export function init(root, ctx) {
           : '<span style="color:var(--info,#3b82f6)">ed25519</span>';
         let btcHtml = '';
         if (k.bitcoin_addresses && k.bitcoin_addresses.length > 0) {
-          btcHtml = '<div style="margin-top:8px"><strong>Bitcoin Addresses:</strong></div>' +
+          btcHtml = '<div style="margin-top:8px"><strong>Bitcoin derived addresses for wallet compatibility (use is optional):</strong></div>' +
             k.bitcoin_addresses.map(ba =>
               `<div style="display:flex;align-items:center;gap:6px;margin:4px 0 4px 12px">
                 <span style="min-width:48px;color:var(--text-secondary)">${esc((ba.address_type || '').toUpperCase())}</span>

@@ -698,7 +698,7 @@ export function init(root, ctx) {
 
     if (result.bitcoin_addresses && result.bitcoin_addresses.length > 0) {
       lines.push('');
-      lines.push('<span class="term-label">Bitcoin Addresses:</span>');
+      lines.push('<span class="term-label">Bitcoin derived addresses for wallet compatibility (use is optional):</span>');
       for (const ba of result.bitcoin_addresses) {
         const label = ba.address_type === 'p2pkh' ? 'P2PKH  (1...)' :
                       ba.address_type === 'p2wpkh' ? 'P2WPKH (bc1q)' :
