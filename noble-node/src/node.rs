@@ -506,6 +506,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let node_identity = load_identity(config);
         let identity_path = config.storage.data_dir.join("identity.json");
 
+        // --- Sync TOML config from identity.json ---
+        // identity.json is the canonical source for node role, wants_to_validate, etc.
+        // The TOML may have stale defaults (e.g. role=observer) if it was generated
+        // before the setup wizard ran. Sync the TOML so subsequent restarts and
+        // API queries reflect the identity's authoritative values.
+        if node_identity.setup_complete {
+            if let Some(ref cp) = config_path {
+                sync_toml_from_identity(cp, &node_identity);
+            }
+        }
+
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone()));
@@ -624,12 +635,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
 
         // --- Derive validator key info for ApiState ---
+        // Use the already-loaded announce_keypair (which comes from the validator key,
+        // including unified keystore fallback) instead of re-reading from disk.
+        // compute_validator_key_info would fail after migration renames validator.key.
         let (validator_pubkey_str, validator_scheme_str, validator_key_path_str) =
-            compute_validator_key_info(
-                &config.consensus.validator_key_path,
-                &config.storage.data_dir,
-                &self.chain_meta,
-            );
+            if let Some((ref _sk, ref pk)) = self.announce_keypair {
+                let pubkey_hex = hex::encode(pk.to_wire_bytes());
+                let scheme = match pk {
+                    noble_crypto::NoblePublicKey::Ed25519(_) => "ed25519",
+                    noble_crypto::NoblePublicKey::Secp256k1(_) => "secp256k1",
+                };
+                (Some(pubkey_hex), Some(scheme.to_string()), Some("unified-keystore".to_string()))
+            } else {
+                (None, None, None)
+            };
 
         // --- Initialize TOTP auth ---
         let (totp_validator, totp_secret_path) =
@@ -2182,72 +2201,76 @@ fn rename_to_migrated(path: &std::path::Path) {
     }
 }
 
-/// Return `(pubkey_hex, scheme, key_path_str)` for the validator key without
-/// loading the full key into memory.  Used only to populate `ApiState` fields
-/// for the `noble_getValidatorKeyInfo` RPC.
-fn compute_validator_key_info(
-    path: &str,
-    data_dir: &std::path::Path,
-    chain_meta: &[u8; 32],
-) -> (Option<String>, Option<String>, Option<String>) {
-    let key_path_owned;
-    let key_path = if path.is_empty() {
-        let fallback = data_dir.join("validator.key");
-        if !fallback.exists() {
-            return (None, None, None);
+/// Sync TOML config file from identity.json's authoritative values.
+///
+/// Updates `[identity]` and `[node]` sections so the persisted TOML reflects
+/// the setup wizard choices rather than stale defaults.
+fn sync_toml_from_identity(config_path: &std::path::Path, identity: &NodeIdentityData) {
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(task = "config_sync", "Cannot read TOML for identity sync: {e}");
+            return;
         }
-        key_path_owned = fallback;
-        key_path_owned.as_path()
-    } else {
-        let p = std::path::Path::new(path);
-        if !p.exists() {
-            return (None, None, None);
+    };
+    let mut doc: toml::Table = match toml::from_str(&contents) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(task = "config_sync", "Cannot parse TOML for identity sync: {e}");
+            return;
         }
-        p
     };
 
-    let file_bytes = match std::fs::read(key_path) {
-        Ok(b) => b,
-        Err(_) => return (None, None, None),
-    };
+    let mut changed = false;
 
-    // Decrypt Noble envelope (with legacy IKM fallback) or read legacy plaintext.
-    let raw = if noble_crypto::file_encrypt::is_noble_envelope(&file_bytes) {
-        match noble_crypto::file_encrypt::decrypt_file_data_with_migration(&file_bytes, chain_meta) {
-            Ok((d, migrated)) => {
-                if migrated {
-                    if let Ok(re_encrypted) = noble_crypto::file_encrypt::encrypt_file_data(&d, chain_meta) {
-                        let _ = std::fs::write(key_path, &re_encrypted);
-                    }
-                    tracing::info!(task = "key_migration", "Migrated validator.key to current encryption key");
-                }
-                d
+    // Sync [identity] section
+    if let Some(toml::Value::Table(ref mut id_table)) = doc.get_mut("identity") {
+        let fields: &[(&str, toml::Value)] = &[
+            ("node_name", toml::Value::String(identity.node_name.clone())),
+            ("node_role", toml::Value::String(identity.node_role.clone())),
+            ("wants_to_validate", toml::Value::Boolean(identity.wants_to_validate)),
+            ("wants_to_vote", toml::Value::Boolean(identity.wants_to_vote)),
+        ];
+        for (key, new_val) in fields {
+            if id_table.get(*key) != Some(new_val) {
+                id_table.insert(key.to_string(), new_val.clone());
+                changed = true;
             }
-            Err(_) => return (None, None, None),
         }
-    } else {
-        file_bytes
-    };
-
-    if raw.len() != 33 {
-        return (None, None, None);
     }
-    let scheme_id = raw[0];
-    let key_bytes = &raw[1..33];
-    let (private_key, scheme_str) = match scheme_id {
-        noble_crypto::SCHEME_ED25519 => (
-            noble_crypto::NoblePrivateKey::Ed25519(key_bytes.to_vec()),
-            "ed25519",
-        ),
-        noble_crypto::SCHEME_SECP256K1 => (
-            noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec()),
-            "secp256k1",
-        ),
-        _ => return (None, None, None),
-    };
-    let pubkey_hex = hex::encode(private_key.public_key().to_wire_bytes());
-    let path_str = key_path.to_string_lossy().into_owned();
-    (Some(pubkey_hex), Some(scheme_str.to_string()), Some(path_str))
+
+    // Sync [node] role — derive from identity flags
+    if let Some(toml::Value::Table(ref mut node_table)) = doc.get_mut("node") {
+        let role_str = if identity.wants_to_validate {
+            "validator"
+        } else {
+            "observer"
+        };
+        let current = node_table.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if current != role_str {
+            node_table.insert("role".to_string(), toml::Value::String(role_str.to_string()));
+            changed = true;
+        }
+    }
+
+    if changed {
+        match toml::to_string_pretty(&doc) {
+            Ok(new_contents) => {
+                if let Err(e) = atomic_write_file(config_path, new_contents.as_bytes()) {
+                    tracing::warn!(task = "config_sync", "Failed to write synced TOML: {e}");
+                } else {
+                    tracing::info!(
+                        task = "config_sync",
+                        "Synced TOML config from identity.json (role={}, validate={}, vote={})",
+                        identity.node_role,
+                        identity.wants_to_validate,
+                        identity.wants_to_vote,
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(task = "config_sync", "Failed to serialize synced TOML: {e}"),
+        }
+    }
 }
 
 /// Load node identity from `data_dir/identity.json`, falling back to `noble.toml` defaults.
