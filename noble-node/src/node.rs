@@ -290,6 +290,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         if let Some(header) = tip_header {
             engine.update_tip_with_header(header);
         }
+        // Don't count cycles until genesis block is committed.
+        if tip.height == 0 {
+            engine.set_awaiting_genesis(true);
+        }
         let consensus = Arc::new(RwLock::new(engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---

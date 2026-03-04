@@ -72,6 +72,9 @@ pub struct CycleEngine {
     r2_vote_cast: bool,
     /// S15-A: Per-validator reputation scoring engine.
     reputation: ReputationEngine,
+    /// When true, the engine stays dormant until the first block is committed.
+    /// Set by the node when the chain has no blocks yet.
+    awaiting_genesis: bool,
 }
 
 impl CycleEngine {
@@ -112,12 +115,19 @@ impl CycleEngine {
             manual_vote: None,
             r2_vote_cast: false,
             reputation: ReputationEngine::new(),
+            awaiting_genesis: false,
         }
     }
 
     /// Update the connected peer count (called by node event loop).
     pub fn set_peer_count(&mut self, count: usize) {
         self.total_peers = count;
+    }
+
+    /// Mark the engine as awaiting genesis (no blocks committed yet).
+    /// While set, `handle_tick` stays dormant and does not count cycles.
+    pub fn set_awaiting_genesis(&mut self, awaiting: bool) {
+        self.awaiting_genesis = awaiting;
     }
 
     /// Get a reference to the validator list.
@@ -207,6 +217,14 @@ impl CycleEngine {
 
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+
+        // Don't count cycles before genesis block exists.
+        // The node sets awaiting_genesis=true when chain has no blocks.
+        if self.awaiting_genesis {
+            outputs.push(CycleIo::SetTimer { duration_secs: 5 });
+            return outputs;
+        }
+
         let new_cycle = self.cycle_mgr.current_cycle(now);
         let new_phase = self.cycle_mgr.current_phase(now);
 
@@ -380,6 +398,7 @@ impl CycleEngine {
                     self.tip_hash = new_hash;
                     self.tip_timestamp = block.header.timestamp;
                     self.tip_header = Some(block.header.clone());
+                    self.awaiting_genesis = false;
                     outputs.push(CycleIo::CommitBlock(block));
                     outputs.push(CycleIo::EmitMetric {
                         name: "block_committed".to_string(),
