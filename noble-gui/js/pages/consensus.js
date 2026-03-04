@@ -23,6 +23,7 @@ const STATE_STYLES = {
   complete: 'opacity:1',
   active:   'opacity:1;box-shadow:0 0 0 2px var(--accent)',
   pending:  'opacity:0.3',
+  skipped:  'opacity:0.2',
 };
 
 export function init(root, ctx) {
@@ -478,11 +479,12 @@ export function init(root, ctx) {
   function apiEntryToCycle(entry, isCurrent) {
     // If already has phases (mock data), pass through.
     if (entry.phases) return entry;
-    const finalized = entry.finalized_at > 0;
     const hasWinner = !!entry.winner;
+    const indeterminate = entry.status === 'indeterminate' || (!hasWinner && !isCurrent);
     return {
       cycle_number: entry.cycle_number,
       is_current: isCurrent,
+      indeterminate,
       disambiguation: entry.disambiguation,
       winner: entry.winner,
       winning_hash: entry.winning_hash,
@@ -500,25 +502,34 @@ export function init(root, ctx) {
         },
         {
           name: 'Confirmation',
-          state: hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
+          state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
           winner: entry.winner,
           winning_hash: entry.winning_hash,
           disambiguation: entry.disambiguation,
         },
         {
           name: 'Finalization',
-          state: finalized ? 'complete' : isCurrent ? 'pending' : 'complete',
-          finalized,
+          state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
+          finalized: hasWinner,
           block_hash: entry.winning_hash,
         },
       ],
     };
   }
 
+  const TIMELINE_LIMIT = 4;
+
   async function loadTimeline() {
     try {
-      const history = await rpc.call('noble_getCycleHistory');
-      const raw = history.entries || history.cycles || [];
+      // Request more than needed so we can filter out empty indeterminate cycles.
+      const history = await rpc.call('noble_getCycleHistory', TIMELINE_LIMIT * 5);
+      const raw = (history.entries || history.cycles || [])
+        .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0))
+        .slice(0, TIMELINE_LIMIT);
+      if (raw.length === 0) {
+        csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
+        return;
+      }
       const cycles = raw.map((e, i) =>
         apiEntryToCycle(e, i === raw.length - 1 && (e.status === 'active' || !e.finalized_at))
       );
@@ -540,11 +551,14 @@ export function init(root, ctx) {
       row.style.cssText = 'margin-bottom:var(--gap-lg)';
 
       // ── Cycle header ──
-      const statusLabel = cycle.is_current ? 'ACTIVE' : 'FINALIZED';
-      const statusColor = cycle.is_current ? 'var(--accent)' : 'var(--success)';
-      const disambigBadge = cycle.disambiguation
-        ? `<span style="margin-left:var(--gap-sm);padding:1px 6px;border-radius:9999px;font-size:var(--font-size-xs);background:color-mix(in srgb, var(--warning) 15%, transparent);color:var(--warning)">disambiguation</span>`
-        : `<span style="margin-left:var(--gap-sm);padding:1px 6px;border-radius:9999px;font-size:var(--font-size-xs);background:color-mix(in srgb, var(--success) 15%, transparent);color:var(--success)">clean</span>`;
+      const statusLabel = cycle.is_current ? 'ACTIVE' : cycle.indeterminate ? 'NO CONSENSUS' : 'FINALIZED';
+      const statusColor = cycle.is_current ? 'var(--accent)' : cycle.indeterminate ? 'var(--text-muted)' : 'var(--success)';
+      let disambigBadge = '';
+      if (!cycle.indeterminate) {
+        disambigBadge = cycle.disambiguation
+          ? `<span style="margin-left:var(--gap-sm);padding:1px 6px;border-radius:9999px;font-size:var(--font-size-xs);background:color-mix(in srgb, var(--warning) 15%, transparent);color:var(--warning)">disambiguation</span>`
+          : `<span style="margin-left:var(--gap-sm);padding:1px 6px;border-radius:9999px;font-size:var(--font-size-xs);background:color-mix(in srgb, var(--success) 15%, transparent);color:var(--success)">clean</span>`;
+      }
 
       const header = document.createElement('div');
       header.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-xs)';
@@ -578,8 +592,15 @@ export function init(root, ctx) {
 
         // Phase-specific content
         if (pi === 0 && phase.proposals) {
-          const names = phase.proposals.map(p => p.validator.replace('noble-', '')).join(', ');
-          label += `<div style="font-size:0.6rem;opacity:0.85">${phase.proposals.length} proposal${phase.proposals.length > 1 ? 's' : ''}: ${names}</div>`;
+          if (phase.proposals.length === 0) {
+            label += `<div style="font-size:0.6rem;opacity:0.5">no proposals</div>`;
+          } else {
+            const names = phase.proposals.map(p => {
+              const name = p.validator.replace('noble-', '');
+              return name.length > 16 ? name.slice(0, 8) + '…' + name.slice(-4) : name;
+            }).join(', ');
+            label += `<div style="font-size:0.6rem;opacity:0.85">${phase.proposals.length} proposal${phase.proposals.length !== 1 ? 's' : ''}${names ? ': ' + names : ''}</div>`;
+          }
 
           // Track participants
           for (const p of phase.proposals) {
@@ -598,11 +619,17 @@ export function init(root, ctx) {
 
             if (!participantMap.has(phase.winner)) participantMap.set(phase.winner, { roles: [], cycles: [] });
             participantMap.get(phase.winner).roles.push('won');
-          } else {
+          } else if (phase.state === 'skipped') {
+            label += `<div style="font-size:0.6rem;opacity:0.5">—</div>`;
+          } else if (phase.state === 'pending') {
             label += `<div style="font-size:0.6rem;opacity:0.5">pending</div>`;
+          } else {
+            label += `<div style="font-size:0.6rem;opacity:0.5">&#10003; done</div>`;
           }
         } else if (pi === 3) {
-          if (phase.finalized) {
+          if (phase.state === 'skipped') {
+            label += `<div style="font-size:0.6rem;opacity:0.5">—</div>`;
+          } else if (phase.finalized) {
             label += `<div style="font-size:0.6rem;opacity:0.85">&#10003; sealed</div>`;
           } else if (phase.state === 'active') {
             label += `<div style="font-size:0.6rem;opacity:0.85">sealing...</div>`;
@@ -629,9 +656,10 @@ export function init(root, ctx) {
 
           const card = document.createElement('div');
           card.style.cssText = `flex:1;min-width:180px;padding:var(--gap-sm);border:1px solid ${borderColor};border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)`;
+          const vName = p.validator.length > 20 ? truncateHash(p.validator, 6) : p.validator;
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
-              <strong>${p.validator}</strong>
+              <strong>${vName}</strong>
               ${icon}
             </div>
             <div style="color:var(--text-muted)">
@@ -719,9 +747,11 @@ export function init(root, ctx) {
   }
 
   function updateCycleDisplay(status) {
-    csCycleNum.textContent = formatNumber(status.cycle_number);
-    csPhaseName.textContent = status.phase;
-    csCycleInfo.textContent = `#${formatNumber(status.cycle_number)}`;
+    // Guard u64::MAX sentinel (engine not yet initialized)
+    const sane = status.cycle_number < 1e15;
+    csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
+    csPhaseName.textContent = sane ? status.phase : 'Initializing';
+    csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Awaiting genesis';
 
     if (status.current_validator) {
       const key = status.current_validator.Ed25519 || status.current_validator.Secp256k1 || [];

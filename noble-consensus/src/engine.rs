@@ -502,16 +502,20 @@ impl CycleEngine {
             MigrationResult::Indeterminate => ("indeterminate".to_string(), None, None, false),
         };
 
-        self.last_cycle_history = Some(CycleHistoryEntry {
-            cycle_number: completed_cycle,
-            status,
-            proposals,
-            votes: vote_entries,
-            winner,
-            winning_hash,
-            disambiguation,
-            finalized_at: now_ts,
-        });
+        // Only persist cycles that had real activity (proposals, votes, or a winner).
+        // Empty indeterminate cycles are noise — don't waste storage on them.
+        if !proposals.is_empty() || !vote_entries.is_empty() || winner.is_some() {
+            self.last_cycle_history = Some(CycleHistoryEntry {
+                cycle_number: completed_cycle,
+                status,
+                proposals,
+                votes: vote_entries,
+                winner,
+                winning_hash,
+                disambiguation,
+                finalized_at: now_ts,
+            });
+        }
 
         // S15-A: Update reputation scores at cycle boundary.
         {
