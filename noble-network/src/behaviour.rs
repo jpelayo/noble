@@ -103,6 +103,12 @@ impl NobleBehaviour {
             .duplicate_cache_time(Duration::from_secs(60))
             .message_id_fn(message_id_fn)
             .max_transmit_size(crate::codec::MAX_GOSSIP_MESSAGE_SIZE)
+            // Allow small networks (2-node testnets) to form a gossipsub mesh.
+            // Defaults (mesh_n=6, mesh_n_low=4) require 4+ peers before publish works.
+            .mesh_n(3)
+            .mesh_n_low(1)
+            .mesh_n_high(6)
+            .mesh_outbound_min(1)
             .build()
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
 
