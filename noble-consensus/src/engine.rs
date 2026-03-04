@@ -718,13 +718,26 @@ impl CycleEngine {
 
         // Only accept block proposals during Validation phase (or pre-genesis).
         let pre_genesis = !self.cycle_mgr.has_genesis();
-        if !pre_genesis && self.tracked_phase != CyclePhase::Validation {
+
+        // Pre-genesis: only accept the next sequential block (tip_height + 1).
+        // Without this guard, a block at height N>1 could be committed as the
+        // "genesis block" when the node missed block 1's announce, causing a
+        // chain split with different epochs.
+        if pre_genesis && block.header.height != self.tip_height + 1 {
             outputs.push(CycleIo::Log(format!(
-                "rejected block proposal from peer during {:?} phase",
-                self.tracked_phase
+                "pre-genesis: ignoring block at height {} (expected {})",
+                block.header.height,
+                self.tip_height + 1
             )));
             return outputs;
         }
+
+        // Blocks are accepted during both Validation and Reflection phases.
+        // During Reflection, a block may arrive via vote-triggered RequestBlock
+        // (the node missed the original BlockAnnounce during Validation).  The
+        // block is still fully validated — allowing it into the tracker lets
+        // the node cast an informed vote for a candidate it would otherwise
+        // never see.
 
         // AUD3-D6: Construct parent header stub from tip state for B2/B3/B5 validation.
         // The validate_block B2 check verifies candidate.prev_block_hash against the
@@ -801,8 +814,17 @@ impl CycleEngine {
                         .unwrap_or_default()
                 )));
             }
+            Err(existing_hash) if existing_hash == block_hash => {
+                // Duplicate delivery of the same block (e.g., vote-triggered
+                // RequestBlock racing with BlockAnnounce fetch).  Not a double
+                // proposal — just ignore.
+                outputs.push(CycleIo::Log(format!(
+                    "duplicate block delivery {} (already tracked)",
+                    block_hash
+                )));
+            }
             Err(existing_hash) => {
-                // Double proposal — ban the peer
+                // True double proposal: same validator, different block hash.
                 outputs.push(CycleIo::BanPeer {
                     peer_id: from_peer,
                     reason: format!(
@@ -1216,7 +1238,9 @@ mod tests {
     }
 
     #[test]
-    fn block_proposal_rejected_during_reflection() {
+    fn block_proposal_accepted_during_reflection() {
+        // Blocks are accepted during Reflection so that vote-triggered
+        // RequestBlock fetches can populate the candidate tracker.
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Reflection;
@@ -1228,12 +1252,12 @@ mod tests {
             from_peer: b"peer1".to_vec(),
         });
 
+        assert!(!has_ban(&outputs), "valid block should not be banned");
         assert_eq!(
             engine.candidate_tracker.len(),
-            0,
-            "block should be rejected in Reflection"
+            1,
+            "block should be accepted in Reflection"
         );
-        assert!(has_log_containing(&outputs, "rejected"));
     }
 
     #[test]
@@ -1344,7 +1368,12 @@ mod tests {
         engine.tracked_phase = CyclePhase::Validation;
 
         let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        let (block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        // Second block must have a DIFFERENT hash to trigger the double-proposal
+        // ban.  Use a different timestamp so the signing message differs.
+        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        block2.header.timestamp += 1;
+        let msg = block2.header.compute_signing_message().unwrap();
+        block2.header.validator_sig = vp.sign(&msg).unwrap();
 
         engine.step(CycleEvent::BlockProposed {
             block: block1,
@@ -1357,6 +1386,35 @@ mod tests {
         });
 
         assert!(has_ban(&outputs), "double proposal should ban peer");
+        assert_eq!(engine.candidate_tracker.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_block_delivery_does_not_ban() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Validation;
+
+        let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let block_clone = Box::new(Block {
+            header: block.header.clone(),
+            transactions: block.transactions.clone(),
+        });
+
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"peer1".to_vec(),
+        });
+        assert_eq!(engine.candidate_tracker.len(), 1);
+
+        // Same block arriving again (e.g., vote-triggered fetch racing with
+        // BlockAnnounce fetch) should NOT ban.
+        let outputs = engine.step(CycleEvent::BlockProposed {
+            block: block_clone,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(!has_ban(&outputs), "duplicate delivery must not ban");
         assert_eq!(engine.candidate_tracker.len(), 1);
     }
 

@@ -1677,7 +1677,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     hex::encode(peer_id),
                     hex::encode(hash),
                 );
-                // TODO: Trigger block request if we're behind
+                // If the announced height is ahead of our tip, request a fresh
+                // status from peers so we learn their COMMITTED height and can
+                // trigger sync import for any blocks we're missing.
+                // We do NOT update peer_info from announces because the announce
+                // height reflects a PROPOSAL, not a committed block — using it
+                // in we_are_behind would bypass voting and cause chain splits
+                // in multi-proposer networks.
+                let our_height = self.consensus.read().chain_tip().0;
+                if *height > our_height {
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                }
             }
             NetworkEvent::SyncComplete { new_height } => {
                 tracing::info!(
