@@ -188,10 +188,9 @@ impl CycleEngine {
         self.last_cycle_history = None;
         self.manual_vote = None;
         self.r2_vote_cast = false;
-        // When hopping to a new chain (height 0), clear the cycle epoch so
-        // the engine re-enters bootstrap mode.  The next tick will set
-        // epoch=0, and the new chain's block 1 will reset it to the real
-        // timestamp when committed.
+        // When hopping to a new chain (height 0), clear the cycle epoch.
+        // Next tick sets epoch to GENESIS_TIMESTAMP; the new chain's block 1
+        // resets it to the real timestamp when committed.
         if height == 0 {
             self.cycle_mgr.set_genesis_timestamp(u64::MAX);
             self.tracked_cycle = u64::MAX;
@@ -267,13 +266,12 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // Bootstrap: no genesis block yet — set epoch=0 so the normal cycle
-        // machinery can run.  All nodes compute the same cycle/phase from
-        // epoch=0 + wall-clock time.  Block 1 will reset the epoch to the
-        // real timestamp when committed.
+        // No genesis block yet — set epoch to GENESIS_TIMESTAMP so the normal
+        // cycle machinery runs.  All nodes compute the same cycle/phase.
+        // Block 1 will reset the epoch to its actual timestamp when committed.
         if !self.cycle_mgr.has_genesis() {
-            self.cycle_mgr.set_genesis_timestamp(0);
-            info!("cycle engine: bootstrap mode — epoch=0, normal cycle machinery active");
+            self.cycle_mgr.set_genesis_timestamp(noble_core::GENESIS_TIMESTAMP);
+            info!("cycle engine: epoch set to GENESIS_TIMESTAMP (no blocks yet)");
         }
 
         let new_cycle = self.cycle_mgr.current_cycle(now);
@@ -690,12 +688,11 @@ impl CycleEngine {
             return outputs;
         }
 
-        // When tip_height == 0, parent_header is None so B2/B3 validation is
-        // skipped — explicitly reject non-sequential heights to prevent a block
-        // at height N>1 being accepted as the first block.
+        // Safety: tip_height=0 has no parent header for B2/B3 validation.
+        // Only accept block 1 (the expected next block).
         if self.tip_height == 0 && block.header.height != 1 {
             outputs.push(CycleIo::Log(format!(
-                "bootstrap: ignoring block at height {} (expected 1)",
+                "ignoring block at height {} when tip=0 (expected 1)",
                 block.header.height,
             )));
             return outputs;
@@ -1661,7 +1658,7 @@ mod tests {
 
     #[test]
     fn bootstrap_epoch_initializes_cycle_machinery() {
-        // Engine with genesis_timestamp=None → first tick sets epoch=0 → normal phases
+        // Engine with genesis_timestamp=None → first tick sets epoch=GENESIS_TIMESTAMP → normal phases
         let (vp, vpub) = make_validator();
         let val_list = ValidatorList::new();
         let mut engine = CycleEngine::new(
@@ -1683,10 +1680,11 @@ mod tests {
             has_set_timer(&outputs),
             "bootstrap should enable normal timer"
         );
-        assert_ne!(
-            engine.tracked_cycle,
-            u64::MAX,
-            "cycle should be initialized"
+        // Cycle should be based on GENESIS_TIMESTAMP, not epoch=0
+        let expected_cycle = (now - noble_core::GENESIS_TIMESTAMP) / 1800;
+        assert_eq!(
+            engine.tracked_cycle, expected_cycle,
+            "cycle should be (now - GENESIS_TIMESTAMP) / 1800"
         );
     }
 

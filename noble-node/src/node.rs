@@ -171,11 +171,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Read block-1 timestamp for cycle counting.
         // Cycles only start once the first consensus block is committed.
-        // Before that the engine runs in pre-genesis mode (no cycle counting,
-        // validator proposes on a simple timer).
+        // Before that the engine uses GENESIS_TIMESTAMP as the epoch.
         //
         // When tip.height >= 1, block 1's timestamp is the cycle epoch.
-        // When tip.height == 0, genesis_timestamp = None → pre-genesis mode.
+        // When tip.height == 0, genesis_timestamp = None → engine sets GENESIS_TIMESTAMP on first tick.
         let genesis_timestamp = if tip.height >= 1 {
             let s = storage.read();
             s.get_block_hash_by_height(1)
@@ -185,7 +184,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         } else {
             tracing::info!(
                 task = "startup",
-                "pre-genesis mode: no blocks beyond genesis, cycles start after block 1"
+                "no blocks yet — epoch will be set to GENESIS_TIMESTAMP on first tick"
             );
             // Purge stale cycle history from previous runs.
             if let Err(e) = storage.read().clear_cycle_history() {
@@ -1593,7 +1592,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "addr": addr,
                 }));
                 // Request peer status immediately on connect so sync and
-                // pre-genesis commit don't wait for the 60s poll interval.
+                // block proposal don't wait for the 60s poll interval.
                 let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                 tracing::debug!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
@@ -1800,7 +1799,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Already have this block — ignore.
                 } else if block.header.height == tip_height + 1 && we_are_behind {
                     // Sync import: committed block from peer ahead of us.
-                    // Takes priority over pre-genesis — the network already has
+                    // Takes priority over live proposals — the network already has
                     // this block, we should import it rather than propose our own.
                     self.try_sync_import(
                         block.clone(),
@@ -1811,7 +1810,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         metrics,
                     );
                 } else {
-                    // Live proposal or bootstrap — route to consensus engine.
+                    // Live proposal — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
                         &NetworkEvent::BlockReceived {
                             peer_id: peer_id.clone(),

@@ -115,6 +115,13 @@ enum Commands {
         #[arg(long)]
         keep_peers: bool,
     },
+
+    /// Show chain state from the offline database.
+    ChainInfo {
+        /// Path to the data directory.
+        #[arg(long, default_value_os_t = default_data_dir())]
+        data_dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -338,6 +345,7 @@ fn main() {
             confirm,
             keep_peers,
         } => cmd_reset_chain(data_dir, confirm, keep_peers),
+        Commands::ChainInfo { data_dir } => cmd_chain_info(data_dir),
     }
 }
 
@@ -484,7 +492,8 @@ fn run_codec_benchmarks(results: &mut Vec<(&str, std::time::Duration)>) {
 // validate-chain
 // ---------------------------------------------------------------------------
 
-fn cmd_validate_chain(data_dir: PathBuf) {
+fn cmd_validate_chain(cli_data_dir: PathBuf) {
+    let data_dir = resolve_data_dir(&cli_data_dir);
     let storage = RocksDbStorage::open(&data_dir).expect("failed to open RocksDB");
 
     let tip = match storage.get_chain_tip().expect("failed to read chain tip") {
@@ -994,7 +1003,8 @@ fn cmd_security(action: SecurityCommand) {
     use noble_crypto::file_encrypt::{chain_meta_status, load_or_create_chain_meta, switch_encryption_mode};
 
     match action {
-        SecurityCommand::Status { data_dir } => {
+        SecurityCommand::Status { data_dir: cli_data_dir } => {
+            let data_dir = resolve_data_dir(&cli_data_dir);
             let (exists, is_locked) = chain_meta_status(&data_dir);
             let mode = if is_locked { "manual" } else { "automatic" };
             println!("Data directory: {}", data_dir.display());
@@ -1006,8 +1016,9 @@ fn cmd_security(action: SecurityCommand) {
             mode,
             password,
             current_password,
-            data_dir,
+            data_dir: cli_data_dir,
         } => {
+            let data_dir = resolve_data_dir(&cli_data_dir);
             if mode != "automatic" && mode != "manual" {
                 eprintln!("Error: --mode must be 'automatic' or 'manual'.");
                 std::process::exit(1);
@@ -1504,17 +1515,135 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// resolve_data_dir — auto-discover from noble.toml
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective data directory.
+/// Priority: explicit --data-dir > noble.toml [storage] data_dir > platform default.
+fn resolve_data_dir(cli_data_dir: &std::path::Path) -> PathBuf {
+    let platform_default = noble_core::paths::platform_data_dir();
+
+    // If user explicitly passed a non-default --data-dir, use it
+    if cli_data_dir != platform_default {
+        return cli_data_dir.to_path_buf();
+    }
+
+    // Try noble.toml
+    let config_path = noble_core::paths::platform_config_path();
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(table) = content.parse::<toml::Table>() {
+                if let Some(dir) = table
+                    .get("storage")
+                    .and_then(|s| s.as_table())
+                    .and_then(|s| s.get("data_dir"))
+                    .and_then(|d| d.as_str())
+                {
+                    let path = PathBuf::from(dir);
+                    if path.exists() {
+                        eprintln!(
+                            "Data dir from {}: {}",
+                            config_path.display(),
+                            path.display()
+                        );
+                        return path;
+                    }
+                }
+            }
+        }
+    }
+
+    platform_default
+}
+
+// ---------------------------------------------------------------------------
+// chain-info
+// ---------------------------------------------------------------------------
+
+fn cmd_chain_info(cli_data_dir: PathBuf) {
+    let data_dir = resolve_data_dir(&cli_data_dir);
+
+    if !data_dir.exists() {
+        println!("No chain data found at {}", data_dir.display());
+        return;
+    }
+
+    println!("=== NOBLE Chain Info ===");
+    println!("Data directory: {}", data_dir.display());
+    println!();
+
+    let storage = match RocksDbStorage::open(&data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Could not open database: {e}");
+            return;
+        }
+    };
+
+    let tip = match storage.get_chain_tip() {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            println!("Chain is empty (no blocks committed).");
+            return;
+        }
+        Err(e) => {
+            eprintln!("Error reading chain tip: {e}");
+            return;
+        }
+    };
+
+    println!("Chain height:   {}", tip.height);
+    println!("Tip hash:       {}", tip.block_hash);
+
+    // Try to read block 1 header for age info
+    if tip.height >= 1 {
+        if let Ok(hash) = storage.get_block_hash_by_height(1) {
+            if let Ok(header) = storage.get_block_header(&hash) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let age_secs = now.saturating_sub(header.timestamp);
+                let age_str = if age_secs < 60 {
+                    format!("{age_secs}s ago")
+                } else if age_secs < 3600 {
+                    format!("{}m ago", age_secs / 60)
+                } else if age_secs < 86400 {
+                    format!("{}h ago", age_secs / 3600)
+                } else {
+                    format!("{}d ago", age_secs / 86400)
+                };
+                // Format timestamp as UTC
+                let ts = header.timestamp;
+                let secs = ts % 60;
+                let mins = (ts / 60) % 60;
+                let hours = (ts / 3600) % 24;
+                // Approximate date from unix timestamp
+                println!(
+                    "Block 1 time:   {} (epoch {}, {})",
+                    format_args!("{:02}:{:02}:{:02} UTC", hours, mins, secs),
+                    ts,
+                    age_str
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // reset-chain
 // ---------------------------------------------------------------------------
 
-fn cmd_reset_chain(data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
-    // 1. Verify data_dir exists
+fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
+    let data_dir = resolve_data_dir(&cli_data_dir);
+
+    // 1. Graceful missing dir
     if !data_dir.exists() {
-        eprintln!(
-            "Error: data directory does not exist: {}",
+        println!(
+            "No chain data at {} — nothing to reset.",
             data_dir.display()
         );
-        std::process::exit(1);
+        return;
     }
 
     // 2. Check RocksDB LOCK file — if locked, node is running
@@ -1578,7 +1707,15 @@ fn cmd_reset_chain(data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
         }
     }
 
-    // 5. Print plan
+    // 5. Show chain height before wipe (best-effort)
+    if let Ok(storage) = RocksDbStorage::open(&data_dir) {
+        if let Ok(Some(tip)) = storage.get_chain_tip() {
+            println!("Current chain: height {}, tip {}", tip.height, tip.block_hash);
+        }
+        drop(storage);
+    }
+
+    // 6. Print plan
     println!("=== NOBLE Chain Reset ===");
     println!();
     println!("Data directory: {}", data_dir.display());

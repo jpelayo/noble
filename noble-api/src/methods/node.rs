@@ -263,13 +263,21 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         let data_dir_str = self.data_dir.as_ref().map(|d| d.display().to_string());
 
+        // Genesis-block-based identification: no identity until chain exists.
+        let tip_height = self.consensus.read().chain_tip().0;
+        let (network_name, genesis_hash) = if tip_height > 0 {
+            (self.network_name.clone(), self.genesis_hash.clone())
+        } else {
+            (String::new(), String::new())
+        };
+
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
             software_version: SOFTWARE_VERSION.to_string(),
             protocol_version: PROTOCOL_VERSION,
             chain_id: self.chain_id,
-            network_name: self.network_name.clone(),
-            genesis_hash: self.genesis_hash.clone(),
+            network_name,
+            genesis_hash,
             uptime_secs: uptime,
             rpc_port: self.rpc_port,
             ws_port: self.ws_port,

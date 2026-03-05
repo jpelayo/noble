@@ -168,11 +168,11 @@ export function init(root, ctx) {
           <tbody>
             <tr><td style="white-space:nowrap;font-weight:600">First Valid</td><td>Accept the first candidate block that passes validation. Fast, no preference.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Fixed Validator</td><td>Always vote for a specific validator (pubkey). Useful for delegating trust to a known operator.</td></tr>
-            <tr><td style="white-space:nowrap;font-weight:600">Round Robin</td><td>Rotate votes across all registered validators in order. Ensures fair block production over time.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Round Robin</td><td>Rotate votes across validators in priority order (drag to reorder in the validator list). Ensures fair block production over time.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Subset Rotation</td><td>Rotate votes across a manually-defined subset of validators. Gives control over the rotation pool.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Random</td><td>Vote for a random valid candidate each cycle. Simple, unpredictable.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Weighted Reputation</td><td>Always vote for the candidate with the highest reputation score. Rewards good behaviour.</td></tr>
-            <tr><td style="white-space:nowrap;font-weight:600">Weighted Probability</td><td>Probabilistic voting proportional to reputation scores. Higher rep = more likely but not guaranteed.</td></tr>
+            <tr><td style="white-space:nowrap;font-weight:600">Weighted Probability</td><td>Probabilistic voting weighted by priority order position. Higher in the list = more likely but not guaranteed.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Follow Majority</td><td>Wait for tally data and vote with the current plurality. Converges quickly, avoids splits.</td></tr>
             <tr><td style="white-space:nowrap;font-weight:600">Manual</td><td>No automatic vote. Use the <em>Cast Manual Vote</em> panel below to vote by hand each cycle.</td></tr>
           </tbody>
@@ -238,7 +238,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th style="width:28px"></th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
+          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
       </div>
@@ -861,7 +861,9 @@ export function init(root, ctx) {
         tr.dataset.idx = i;
         tr.dataset.key = keyHex;
         tr.innerHTML = `
-          <td style="cursor:grab;color:var(--text-muted);font-size:1.1em;text-align:center;user-select:none" class="cs-drag-handle" title="Drag to reorder">&#8942;</td>
+          <td style="cursor:grab;color:var(--text-secondary);font-size:1.3em;text-align:center;user-select:none;padding:0 6px;letter-spacing:2px;opacity:0.7;transition:opacity 0.15s,color 0.15s" class="cs-drag-handle" title="Drag to set priority order"
+              onmouseenter="this.style.opacity='1';this.style.color='var(--accent)'"
+              onmouseleave="this.style.opacity='0.7';this.style.color='var(--text-secondary)'">&#8942;&#8942;</td>
           <td>${i + 1}</td>
           <td>
             <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>

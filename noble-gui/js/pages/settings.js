@@ -1279,6 +1279,12 @@ export function init(root, ctx) {
     try {
       const data = await rpc.call('noble_getDetectedForks');
       latestForkData = data;
+      // No blocks committed — show clear "waiting" state
+      if (data.local_height === 0) {
+        chainInfoEl.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">No blocks committed \u2014 waiting for genesis</dt>';
+        forkWrap.innerHTML = '';
+        return;
+      }
       // Render chain info
       const tipShort = data.local_tip ? (data.local_tip.slice(0, 10) + '\u2026' + data.local_tip.slice(-8)) : '\u2014';
       chainInfoEl.innerHTML = `
