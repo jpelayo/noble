@@ -2,38 +2,216 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Platform-aware default path resolution for NOBLE configuration and data files.
+//!
+//! Config discovery is exhaustive: it tries 12 strategies to find `noble.toml`
+//! so that `noble-tool`, `noble-node`, and any other binary in the workspace
+//! locate the same file regardless of how they were installed or invoked.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const TOML_RELATIVE: &str = "etc/noble/noble.toml";
 
 /// Determine the platform-aware default configuration file path.
 ///
-/// Search order — returns the **first path that exists**:
-/// 1. `/opt/homebrew/etc/noble/noble.toml` (macOS ARM Homebrew)
-/// 2. `/usr/local/etc/noble/noble.toml` (macOS Intel / Linux Homebrew)
-/// 3. `~/.noble/noble.toml` (user-local)
-/// 4. `/etc/noble/noble.toml` (system-wide Linux root install)
-/// 5. `noble.toml` (CWD fallback)
+/// Exhaustive search — returns the **first path that exists**:
+///
+///  1.  `NOBLE_CONFIG` env var (explicit override, any install)
+///  2.  Cellar extraction: if resolved exe path contains `/Cellar/`,
+///      split on it to derive the Homebrew prefix directly.
+///      `…/.linuxbrew/Cellar/noble/HEAD/bin/noble-tool` → `…/.linuxbrew/`
+///  3.  Walk every ancestor of the resolved binary path, checking
+///      `<ancestor>/etc/noble/noble.toml`.  Catches non-Cellar prefix
+///      installs (e.g. `/usr/local/bin/noble-tool` → `/usr/local/`).
+///  4.  `argv[0]` resolved through `$PATH` (preserves symlink, not
+///      resolved by the OS).  Check `<symlink_dir>/../etc/noble/noble.toml`.
+///  5.  `argv[0]` resolved through `$PATH`, then `read_link` one level.
+///      If the link target contains `/Cellar/`, extract prefix from that.
+///  6.  `HOMEBREW_PREFIX` env var.
+///  7.  `HOMEBREW_CELLAR` env var — parent is the prefix.
+///  8.  `HOMEBREW_REPOSITORY` env var — equals the prefix on standard installs.
+///  9.  Well-known Homebrew prefixes:
+///      `/opt/homebrew`, `/usr/local`, `/home/linuxbrew/.linuxbrew`
+/// 10.  `XDG_CONFIG_HOME/noble/noble.toml` (freedesktop)
+/// 11.  `~/.noble/noble.toml` (user-local)
+/// 12.  `/etc/noble/noble.toml` (system-wide)
+/// 13.  `noble.toml` (CWD fallback — cargo run / dev)
 ///
 /// If none exist, returns the best *creation* path for the current platform.
 pub fn platform_config_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    // 1. Explicit override — any install, any platform.
+    if let Some(p) = env_existing("NOBLE_CONFIG") {
+        return p;
+    }
 
-    let candidates = [
-        PathBuf::from("/opt/homebrew/etc/noble/noble.toml"),
-        PathBuf::from("/usr/local/etc/noble/noble.toml"),
+    // 2. Cellar extraction from resolved exe path.
+    //    current_exe() follows all symlinks.  On Homebrew the resolved path
+    //    lives under <prefix>/Cellar/<formula>/<version>/bin/<binary>.
+    //    Splitting on "/Cellar/" yields the prefix in one step.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(prefix) = extract_cellar_prefix(&exe) {
+            let c = prefix.join(TOML_RELATIVE);
+            if c.exists() {
+                return c;
+            }
+        }
+    }
+
+    // 3. Walk every ancestor of the resolved binary path.
+    //    Catches non-Cellar layouts: /usr/local/bin/noble-tool → /usr/local/
+    //    Also catches custom prefix installs without Cellar indirection.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(c) = walk_ancestors_for_config(&exe) {
+            return c;
+        }
+    }
+
+    // 4. argv[0] + PATH resolution — preserves symlink.
+    //    Shell invocation: user types `noble-tool`, PATH finds the symlink
+    //    at <prefix>/bin/noble-tool.  Parent of parent = prefix.
+    if let Some(symlink) = resolve_argv0_via_path() {
+        if let Some(c) = check_prefix_from_bin(&symlink) {
+            return c;
+        }
+
+        // 5. Follow the symlink one level.  If the link target is inside a
+        //    Cellar, extract the prefix from that target path.
+        if let Ok(target) = std::fs::read_link(&symlink) {
+            // read_link may return relative; resolve against the symlink dir.
+            let abs_target = if target.is_relative() {
+                symlink.parent().unwrap_or(Path::new(".")).join(&target)
+            } else {
+                target
+            };
+            if let Some(prefix) = extract_cellar_prefix(&abs_target) {
+                let c = prefix.join(TOML_RELATIVE);
+                if c.exists() {
+                    return c;
+                }
+            }
+            // Also walk ancestors of the link target.
+            if let Some(c) = walk_ancestors_for_config(&abs_target) {
+                return c;
+            }
+        }
+    }
+
+    // 6–8. Homebrew env vars.
+    for var in &["HOMEBREW_PREFIX", "HOMEBREW_REPOSITORY"] {
+        if let Some(c) = env_prefix_config(var) {
+            return c;
+        }
+    }
+    if let Ok(cellar) = std::env::var("HOMEBREW_CELLAR") {
+        if let Some(prefix) = Path::new(&cellar).parent() {
+            let c = prefix.join(TOML_RELATIVE);
+            if c.exists() {
+                return c;
+            }
+        }
+    }
+
+    // 9. Well-known Homebrew prefixes.
+    for prefix in &[
+        "/opt/homebrew",
+        "/usr/local",
+        "/home/linuxbrew/.linuxbrew",
+    ] {
+        let c = Path::new(prefix).join(TOML_RELATIVE);
+        if c.exists() {
+            return c;
+        }
+    }
+
+    // 10. XDG_CONFIG_HOME (freedesktop).
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let c = Path::new(&xdg).join("noble/noble.toml");
+        if c.exists() {
+            return c;
+        }
+    }
+
+    // 11–13. User-local, system-wide, CWD.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    for p in &[
         home.join(".noble").join("noble.toml"),
         PathBuf::from("/etc/noble/noble.toml"),
         PathBuf::from("noble.toml"),
-    ];
-
-    for p in &candidates {
+    ] {
         if p.exists() {
             return p.clone();
         }
     }
 
-    // None found — return the best creation path.
     creation_config_path()
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/// If `path` contains `/Cellar/`, return everything before it as the prefix.
+/// e.g. `/home/linuxbrew/.linuxbrew/Cellar/noble/HEAD/bin/x` → `/home/linuxbrew/.linuxbrew`
+fn extract_cellar_prefix(path: &Path) -> Option<PathBuf> {
+    let s = path.to_str()?;
+    let idx = s.find("/Cellar/")?;
+    Some(PathBuf::from(&s[..idx]))
+}
+
+/// Walk every ancestor of `path`, return the first `<ancestor>/etc/noble/noble.toml` that exists.
+fn walk_ancestors_for_config(path: &Path) -> Option<PathBuf> {
+    let mut dir = path;
+    while let Some(parent) = dir.parent() {
+        let c = parent.join(TOML_RELATIVE);
+        if c.exists() {
+            return Some(c);
+        }
+        dir = parent;
+    }
+    None
+}
+
+/// Given a path like `<prefix>/bin/noble-tool`, check `<prefix>/etc/noble/noble.toml`.
+fn check_prefix_from_bin(bin_path: &Path) -> Option<PathBuf> {
+    let prefix = bin_path.parent()?.parent()?;
+    let c = prefix.join(TOML_RELATIVE);
+    c.exists().then_some(c)
+}
+
+/// Resolve `argv[0]` through `$PATH` WITHOUT following symlinks.
+fn resolve_argv0_via_path() -> Option<PathBuf> {
+    let arg0 = std::env::args().next()?;
+    let p = Path::new(&arg0);
+
+    // Absolute path — use directly (don't follow symlinks).
+    if p.is_absolute() {
+        return p.exists().then(|| p.to_path_buf());
+    }
+
+    // Relative with directory component (e.g. `./noble-tool`) — resolve against CWD.
+    if arg0.contains('/') {
+        let abs = std::env::current_dir().ok()?.join(p);
+        return abs.exists().then_some(abs);
+    }
+
+    // Bare name — search PATH.
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        let candidate = Path::new(dir).join(&arg0);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Read an env var as a path; return it only if the file exists.
+fn env_existing(var: &str) -> Option<PathBuf> {
+    std::env::var(var).ok().map(PathBuf::from).filter(|p| p.exists())
+}
+
+/// Read an env var as a Homebrew-style prefix; return config path if it exists.
+fn env_prefix_config(var: &str) -> Option<PathBuf> {
+    let prefix = std::env::var(var).ok()?;
+    let c = Path::new(&prefix).join(TOML_RELATIVE);
+    c.exists().then_some(c)
 }
 
 /// Best path to *create* a new config file on this platform.
