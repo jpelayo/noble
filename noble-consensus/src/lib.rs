@@ -30,5 +30,5 @@ pub use history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
 pub use proposal::propose_block;
 pub use reputation::{ReputationData, ReputationEngine};
 pub use strategy::VotingStrategy;
-pub use validator::{PendingRotation, ValidatorList, ValidatorLiveness};
+pub use validator::{KnownPeerEntry, PendingRotation, ValidatorList, ValidatorLiveness};
 pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteError, VoteManager};

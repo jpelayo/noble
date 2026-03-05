@@ -277,7 +277,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let reputation = consensus.reputation();
         let entries: Vec<ValidatorEntry> = validators
             .into_iter()
-            .map(|(pk, weight, liveness, added_at, friendly_name)| {
+            .map(|(pk, weight, liveness, added_at, friendly_name, val_host, val_cc)| {
                 let wire = pk.to_wire_bytes();
                 let rep_data = reputation.get(&wire);
                 let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
@@ -315,10 +315,13 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     0.0
                 };
 
-                let (mut host_addr, mut country) = announce_map
+                // Priority: announce_map (freshest from peer_records) → validator entry (CBOR) → self identity.
+                let (ann_host, ann_cc) = announce_map
                     .get(&wire.to_vec())
                     .cloned()
                     .unwrap_or((None, None));
+                let mut host_addr = ann_host.or(val_host);
+                let mut country = ann_cc.or(val_cc);
 
                 // Fallback: for our own validator, use the node's identity data.
                 if host_addr.is_none() && country.is_none() {

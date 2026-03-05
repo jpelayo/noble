@@ -9,6 +9,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
+use noble_codec::NobleCbor;
 use noble_consensus::ConsensusStateMachine;
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
@@ -204,17 +205,22 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn get_peer_memory(&self) -> Result<Vec<PeerRecordResponse>, ErrorObjectOwned> {
+        // Lock order: Storage(2) before Consensus(3).
         let storage = self.storage.read();
         let records = storage
             .list_peer_records()
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        drop(storage);
 
-        Ok(records
+        let mut seen_keys = std::collections::HashSet::new();
+        let mut result: Vec<PeerRecordResponse> = records
             .into_iter()
             .map(|rec| {
+                let key = hex::encode(&rec.identity_key);
+                seen_keys.insert(key.clone());
                 let announce = rec.last_announce.as_ref();
                 PeerRecordResponse {
-                    identity_key: hex::encode(&rec.identity_key),
+                    identity_key: key,
                     first_seen: rec.first_seen,
                     last_seen: rec.last_seen,
                     connection_count: rec.connection_count,
@@ -229,7 +235,33 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     wants_to_vote: announce.is_some_and(|a| a.wants_to_vote),
                 }
             })
-            .collect())
+            .collect();
+
+        // Merge CBOR-persistent known_peers for any identity keys not in PeerRecords.
+        // This ensures candidate discovery survives chain resets (PeerRecords wiped).
+        let engine = self.consensus.read();
+        for (key_hex, peer) in engine.validator_list().known_peers() {
+            if seen_keys.contains(key_hex) {
+                continue;
+            }
+            result.push(PeerRecordResponse {
+                identity_key: key_hex.clone(),
+                first_seen: peer.first_seen,
+                last_seen: peer.last_seen,
+                connection_count: 0,
+                peer_id: peer.peer_id_hex.clone().unwrap_or_default(),
+                last_addr: peer.host_address.clone(),
+                node_name: peer.node_name.clone(),
+                org_type: peer.org_type.clone(),
+                node_role: peer.node_role.clone(),
+                host_address: peer.host_address.clone(),
+                country_code: peer.country_code.clone(),
+                wants_to_validate: peer.wants_to_validate,
+                wants_to_vote: peer.wants_to_vote,
+            });
+        }
+
+        Ok(result)
     }
 
     async fn remove_peer_record(
@@ -238,10 +270,23 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key_bytes = hex::decode(&identity_key)
             .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+        // Lock order: Storage(2) before Consensus(3).
         let storage = self.storage.read();
         storage
             .remove_peer_record(&key_bytes)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        drop(storage);
+        // Also remove from CBOR known_peers so it doesn't reappear after chain reset.
+        {
+            let mut engine = self.consensus.write();
+            engine.validator_list_mut().remove_known_peer(&identity_key);
+            // Persist CBOR.
+            if let Some(ref path) = self.validator_list_path {
+                if let Ok(bytes) = engine.validator_list().to_cbor() {
+                    let _ = std::fs::write(path, &bytes);
+                }
+            }
+        }
         Ok(serde_json::json!({ "success": true }))
     }
 

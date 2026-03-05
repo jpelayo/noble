@@ -105,6 +105,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
     /// Cleared on chain tip advancement (new cycle).
     pub last_proposed: parking_lot::Mutex<Option<(u64, [u8; 32])>>,
+    /// Path to the CBOR validator list file (for persisting network metadata).
+    pub validator_list_path: Option<std::path::PathBuf>,
 }
 
 impl Node<MemoryStorage> {
@@ -369,6 +371,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             last_proposed: parking_lot::Mutex::new(None),
+            validator_list_path: Some(config.consensus.validator_list_path.clone()),
         })
     }
 
@@ -716,6 +719,35 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     tracing::info!(
                         task = "node_startup",
                         "No cached peers; dialing {dialed} peers from announce records"
+                    );
+                }
+            }
+
+            // Tertiary fallback: CBOR-persistent IPs (survives chain resets).
+            // Includes both validator registry IPs and known peer (candidate) IPs.
+            {
+                let engine = self.consensus.read();
+                let mut addrs = engine.validator_list().validator_addresses();
+                addrs.extend(engine.validator_list().known_peer_addresses());
+                drop(engine);
+                // Dedup addresses (validators and known_peers may overlap).
+                let addrs: std::collections::HashSet<String> = addrs.into_iter().collect();
+                let mut cbor_dialed = 0u32;
+                for addr in addrs {
+                    let normalized = if addr.starts_with('/') {
+                        addr.clone()
+                    } else {
+                        format!("/ip4/{}/tcp/8780", addr)
+                    };
+                    if let Ok(maddr) = normalized.parse::<noble_network::Multiaddr>() {
+                        let _ = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None));
+                        cbor_dialed += 1;
+                    }
+                }
+                if cbor_dialed > 0 {
+                    tracing::info!(
+                        task = "node_startup",
+                        "Dialing {cbor_dialed} peers from CBOR registry metadata"
                     );
                 }
             }
@@ -1702,6 +1734,38 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         entry.identity_key = Some(identity_wire.clone());
                         if announce.proposed_height.is_some() {
                             entry.proposed_height = announce.proposed_height;
+                        }
+                    }
+                }
+
+                // Update validator registry metadata (host_address, country_code).
+                // Persisted in CBOR so it survives chain resets and enables auto-dial.
+                // Also update known_peers for candidate discovery persistence.
+                {
+                    let mut engine = self.consensus.write();
+                    engine.validator_list_mut().update_network_info(
+                        &announce.identity_key,
+                        announce.host_address.clone(),
+                        announce.country_code.clone(),
+                    );
+                    engine.validator_list_mut().update_known_peer(
+                        &hex::encode(&identity_wire),
+                        Some(announce.node_name.clone()),
+                        announce.host_address.clone(),
+                        announce.country_code.clone(),
+                        announce.wants_to_validate,
+                        announce.wants_to_vote,
+                        Some(format!("{:?}", announce.org_type)),
+                        Some(format!("{:?}", announce.node_role)),
+                        Some(hex::encode(&peer_id)),
+                        now_ts,
+                    );
+                    // Persist CBOR so metadata survives restarts and chain resets.
+                    if let Some(ref path) = self.validator_list_path {
+                        if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(engine.validator_list()) {
+                            if let Err(e) = std::fs::write(path, &bytes) {
+                                tracing::warn!(task = "peer_tracking", "Failed to persist validator list CBOR: {e}");
+                            }
                         }
                     }
                 }

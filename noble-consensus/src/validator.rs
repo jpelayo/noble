@@ -49,12 +49,14 @@ impl ValidatorLiveness {
 }
 
 /// Tuple returned by `list_validators_with_liveness()`:
-/// (pubkey, weight, liveness, added_at, friendly_name)
+/// (pubkey, weight, liveness, added_at, friendly_name, host_address, country_code)
 pub type ValidatorWithLiveness = (
     NoblePublicKey,
     u64,
     ValidatorLiveness,
     Option<u64>,
+    Option<String>,
+    Option<String>,
     Option<String>,
 );
 
@@ -72,6 +74,39 @@ pub struct ValidatorEntry {
     /// Operator-given friendly name.
     #[serde(default)]
     friendly_name: Option<String>,
+    /// Last known host address (from NodeAnnounce). Persists in CBOR.
+    #[serde(default)]
+    host_address: Option<String>,
+    /// ISO 3166-1 alpha-3 country code (from NodeAnnounce). Persists in CBOR.
+    #[serde(default)]
+    country_code: Option<String>,
+}
+
+/// A discovered network peer (not yet a validator) whose metadata persists in CBOR.
+/// Survives chain resets so the Consensus page "Network Candidates" table
+/// retains known peers even after `reset_tip(0)` wipes RocksDB PeerRecords.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownPeerEntry {
+    /// Peer's node name (from NodeAnnounce).
+    pub node_name: Option<String>,
+    /// Host address / multiaddr (from NodeAnnounce).
+    pub host_address: Option<String>,
+    /// ISO 3166-1 alpha-3 country code (from NodeAnnounce).
+    pub country_code: Option<String>,
+    /// Whether the peer wants to be a block proposer.
+    pub wants_to_validate: bool,
+    /// Whether the peer wants to vote on blocks.
+    pub wants_to_vote: bool,
+    /// Unix timestamp of last NodeAnnounce.
+    pub last_seen: u64,
+    /// Unix timestamp of first discovery.
+    pub first_seen: u64,
+    /// Organization type string (from NodeAnnounce).
+    pub org_type: Option<String>,
+    /// Node role string (from NodeAnnounce).
+    pub node_role: Option<String>,
+    /// Hex-encoded libp2p PeerId bytes (from NodeAnnounce).
+    pub peer_id_hex: Option<String>,
 }
 
 /// A pending key rotation that is within the grace period.
@@ -99,6 +134,10 @@ pub struct ValidatorList {
     /// Used by RoundRobin and WeightedProbability strategies.
     #[serde(default)]
     priority_order: Vec<Vec<u8>>,
+    /// Discovered peers (identity_key_hex → KnownPeerEntry).
+    /// Persists in CBOR so candidate discovery survives chain resets.
+    #[serde(default)]
+    known_peers: HashMap<String, KnownPeerEntry>,
 }
 
 impl ValidatorList {
@@ -108,6 +147,7 @@ impl ValidatorList {
             entries: HashMap::new(),
             pending_rotations: HashMap::new(),
             priority_order: Vec::new(),
+            known_peers: HashMap::new(),
         }
     }
 
@@ -123,6 +163,12 @@ impl ValidatorList {
         debug!("validator added: {:?}", pubkey);
         let wire = pubkey.to_wire_bytes();
         let is_new = !self.entries.contains_key(&wire);
+        // Preserve existing metadata when updating weight on re-add.
+        let (old_name, old_host, old_cc) = self
+            .entries
+            .get(&wire)
+            .map(|e| (e.friendly_name.clone(), e.host_address.clone(), e.country_code.clone()))
+            .unwrap_or_default();
         self.entries.insert(
             wire.clone(),
             ValidatorEntry {
@@ -130,7 +176,9 @@ impl ValidatorList {
                 weight,
                 last_seen: None,
                 added_at: Some(now),
-                friendly_name: None,
+                friendly_name: old_name,
+                host_address: old_host,
+                country_code: old_cc,
             },
         );
         // Append new validators to priority_order tail
@@ -144,6 +192,105 @@ impl ValidatorList {
         if let Some(entry) = self.entries.get_mut(&pubkey.to_wire_bytes()) {
             entry.last_seen = Some(last_seen);
         }
+    }
+
+    /// Update network metadata for a validator (from NodeAnnounce).
+    /// Persisted in CBOR so it survives chain resets.
+    pub fn update_network_info(
+        &mut self,
+        pubkey: &NoblePublicKey,
+        host_address: Option<String>,
+        country_code: Option<String>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(&pubkey.to_wire_bytes()) {
+            if host_address.is_some() {
+                entry.host_address = host_address;
+            }
+            if country_code.is_some() {
+                entry.country_code = country_code;
+            }
+        }
+    }
+
+    /// Get all validator host addresses (for auto-dial on startup).
+    pub fn validator_addresses(&self) -> Vec<String> {
+        self.entries
+            .values()
+            .filter_map(|e| e.host_address.clone())
+            .collect()
+    }
+
+    // --- Known peers (candidate discovery, CBOR-persistent) ---
+
+    /// Update or insert a known peer from NodeAnnounce data.
+    /// The key is hex-encoded identity_key wire bytes.
+    pub fn update_known_peer(
+        &mut self,
+        identity_key_hex: &str,
+        node_name: Option<String>,
+        host_address: Option<String>,
+        country_code: Option<String>,
+        wants_to_validate: bool,
+        wants_to_vote: bool,
+        org_type: Option<String>,
+        node_role: Option<String>,
+        peer_id_hex: Option<String>,
+        now: u64,
+    ) {
+        let entry = self
+            .known_peers
+            .entry(identity_key_hex.to_string())
+            .or_insert_with(|| KnownPeerEntry {
+                node_name: None,
+                host_address: None,
+                country_code: None,
+                wants_to_validate: false,
+                wants_to_vote: false,
+                last_seen: now,
+                first_seen: now,
+                org_type: None,
+                node_role: None,
+                peer_id_hex: None,
+            });
+        entry.last_seen = now;
+        if node_name.is_some() {
+            entry.node_name = node_name;
+        }
+        if host_address.is_some() {
+            entry.host_address = host_address;
+        }
+        if country_code.is_some() {
+            entry.country_code = country_code;
+        }
+        entry.wants_to_validate = wants_to_validate;
+        entry.wants_to_vote = wants_to_vote;
+        if org_type.is_some() {
+            entry.org_type = org_type;
+        }
+        if node_role.is_some() {
+            entry.node_role = node_role;
+        }
+        if peer_id_hex.is_some() {
+            entry.peer_id_hex = peer_id_hex;
+        }
+    }
+
+    /// Remove a known peer by identity key hex.
+    pub fn remove_known_peer(&mut self, identity_key_hex: &str) -> bool {
+        self.known_peers.remove(identity_key_hex).is_some()
+    }
+
+    /// Get all known peers (for API / GUI display).
+    pub fn known_peers(&self) -> &HashMap<String, KnownPeerEntry> {
+        &self.known_peers
+    }
+
+    /// Get all known peer host addresses (for auto-dial on startup).
+    pub fn known_peer_addresses(&self) -> Vec<String> {
+        self.known_peers
+            .values()
+            .filter_map(|e| e.host_address.clone())
+            .collect()
     }
 
     /// Set a friendly name for a validator.
@@ -175,12 +322,14 @@ impl ValidatorList {
                     liveness,
                     entry.added_at,
                     entry.friendly_name.clone(),
+                    entry.host_address.clone(),
+                    entry.country_code.clone(),
                 )
             })
             .collect();
         list.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
         list.into_iter()
-            .map(|(_, pk, w, lv, added, name)| (pk, w, lv, added, name))
+            .map(|(_, pk, w, lv, added, name, host, cc)| (pk, w, lv, added, name, host, cc))
             .collect()
     }
 
@@ -376,7 +525,9 @@ impl ValidatorList {
                 let old_entry = self.entries.remove(&old_wire);
                 let weight = old_entry.as_ref().map(|e| e.weight).unwrap_or(100);
                 let added_at = old_entry.as_ref().and_then(|e| e.added_at);
-                let friendly_name = old_entry.and_then(|e| e.friendly_name);
+                let friendly_name = old_entry.as_ref().and_then(|e| e.friendly_name.clone());
+                let host_address = old_entry.as_ref().and_then(|e| e.host_address.clone());
+                let country_code = old_entry.and_then(|e| e.country_code);
                 let new_wire = rotation.new_key.to_wire_bytes();
                 self.entries.insert(
                     new_wire.clone(),
@@ -386,6 +537,8 @@ impl ValidatorList {
                         last_seen: None,
                         added_at,
                         friendly_name,
+                        host_address,
+                        country_code,
                     },
                 );
                 // Replace old key position in priority_order with new key
@@ -657,7 +810,7 @@ mod tests {
         let now = 1_700_000_000 + 100;
         let result = list.list_validators_with_liveness(now);
         assert_eq!(result.len(), 1);
-        let (_, weight, liveness, added_at, name) = &result[0];
+        let (_, weight, liveness, added_at, name, _host, _cc) = &result[0];
         assert_eq!(*weight, 100);
         assert_eq!(*liveness, ValidatorLiveness::Alive);
         assert!(added_at.is_some());
