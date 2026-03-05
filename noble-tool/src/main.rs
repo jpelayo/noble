@@ -1637,7 +1637,11 @@ fn cmd_chain_info(cli_data_dir: PathBuf) {
 
 fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
     let data_dir = resolve_data_dir(&cli_data_dir);
+    do_reset_chain(data_dir, confirm);
+}
 
+/// Inner reset logic operating on an already-resolved data directory.
+fn do_reset_chain(data_dir: PathBuf, confirm: bool) {
     // 1. Graceful missing dir
     if !data_dir.exists() {
         println!(
@@ -2036,8 +2040,8 @@ mod tests {
         fs::write(base.join("LOCK"), b"").unwrap();
         fs::write(base.join("IDENTITY"), b"id").unwrap();
 
-        // Run reset with --confirm
-        cmd_reset_chain(base.to_path_buf(), true, false);
+        // Call inner function directly (bypasses resolve_data_dir)
+        do_reset_chain(base.to_path_buf(), true);
 
         // Preserved files should still exist
         assert!(base.join("identity.json").exists());
@@ -2065,8 +2069,8 @@ mod tests {
         fs::write(base.join("CURRENT"), b"data").unwrap();
         fs::write(base.join("000001.sst"), b"sst").unwrap();
 
-        // Dry run — nothing should be deleted
-        cmd_reset_chain(base.to_path_buf(), false, false);
+        // Dry run — nothing should be deleted (bypasses resolve_data_dir)
+        do_reset_chain(base.to_path_buf(), false);
 
         assert!(base.join("identity.json").exists());
         assert!(base.join("CURRENT").exists());

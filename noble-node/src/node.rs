@@ -1369,6 +1369,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 event = network.recv_event() => {
                     match event {
                         Some(net_event) => {
+                            let is_peer_connected = matches!(net_event, NetworkEvent::PeerConnected { .. });
                             self.handle_network_event(
                                 &net_event,
                                 &network_cmd,
@@ -1379,6 +1380,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 &metrics,
                                 &shared_identity,
                             );
+                            // Re-publish NodeAnnounce on every new peer connection.
+                            // Ensures the new peer receives our identity/chain state
+                            // even if they reset their data and have no peer records.
+                            if is_peer_connected {
+                                self.publish_node_announce(&shared_identity, &network_cmd);
+                                initial_announce_sent = true;
+                            }
                         }
                         None => {
                             tracing::warn!(task = "node_shutdown", "Network event channel closed — shutting down");
@@ -1413,11 +1421,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
 
-                    // Send initial NodeAnnounce once we have at least one peer.
-                    if !initial_announce_sent && self.network_stats.read().peer_count > 0 {
-                        self.publish_node_announce(&shared_identity, &network_cmd);
-                        initial_announce_sent = true;
-                    }
                 }
 
                 // Mempool expiry sweep

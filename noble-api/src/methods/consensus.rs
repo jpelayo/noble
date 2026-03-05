@@ -192,14 +192,28 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             }
         }
 
+        // Build set of currently-connected peer_id bytes for liveness override.
+        let connected_peer_ids: std::collections::HashSet<Vec<u8>> = {
+            let info = self.peer_info.read();
+            info.keys()
+                .filter_map(|hex_pid| hex::decode(hex_pid).ok())
+                .collect()
+        };
+
         let mut consensus = self.consensus.write();
-        // Update last_seen from peer records
+        // Update last_seen from peer records.
+        // If the peer is currently connected → force last_seen = now (alive).
         for rec in &peer_records {
             if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
                 if consensus.validator_list().is_validator(&pk) {
+                    let ts = if connected_peer_ids.contains(&rec.peer_id_bytes) {
+                        now // currently connected → alive
+                    } else {
+                        rec.last_seen
+                    };
                     consensus
                         .validator_list_mut()
-                        .update_last_seen(&pk, rec.last_seen);
+                        .update_last_seen(&pk, ts);
                 }
             }
         }
@@ -390,9 +404,22 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
     async fn get_cycle_status(&self) -> Result<CycleStatusResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read();
+        let tip_height = consensus.chain_tip().0;
         let cycle = consensus.current_cycle();
         let (_engine_phase_idx, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
         let engine_phase = consensus.current_phase();
+
+        // No genesis block → no cycle identity.  Return u64::MAX sentinel so
+        // the GUI shows "Awaiting genesis" instead of a meaningless cycle number.
+        if tip_height == 0 {
+            return Ok(CycleStatusResponse {
+                cycle_number: u64::MAX,
+                phase: "Proposal".to_string(),
+                phase_index: 0,
+                phase_remaining_secs: 0,
+                cycle_remaining_secs: 0,
+            });
+        }
 
         // H-005: Project 2 engine phases → 4 API phases.
         // Engine phase duration = cycle_duration / 2.
@@ -543,6 +570,15 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read();
+        let tip_height = consensus.chain_tip().0;
+        // No genesis → no meaningful vote tallies.
+        if tip_height == 0 {
+            return Ok(VoteTalliesResponse {
+                cycle: 0,
+                phase: String::new(),
+                tallies: vec![],
+            });
+        }
         let cycle = consensus.current_cycle();
         let phase = consensus.current_phase();
         let tallies = consensus.vote_tallies();

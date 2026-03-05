@@ -200,7 +200,8 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         Ok(ChainStatsResponse {
             height,
             total_transactions: total_tx,
-            chain_id: self.chain_id,
+            // Genesis-block-based identification: no chain_id until chain exists.
+            chain_id: if height > 0 { self.chain_id } else { 0 },
         })
     }
 }

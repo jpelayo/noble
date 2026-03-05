@@ -112,6 +112,12 @@ export function init(root, ctx) {
   async function updateCycleCountdown() {
     try {
       const cs = await rpc.call('noble_getCycleStatus');
+      // No genesis → no cycle countdown.
+      if (cs.cycle_number > 1e15) {
+        ovPhase.textContent = 'Awaiting genesis';
+        ovPhaseTimer.textContent = '';
+        return;
+      }
       let remaining = cs.phase_remaining_secs;
       ovPhaseTimer.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')} remaining`;
       clearInterval(countdownInterval);

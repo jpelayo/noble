@@ -50,13 +50,39 @@ body {
   padding: 0 var(--gap);
   margin-bottom: var(--gap-lg);
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
 
 .logo img {
   width: 144px;
   height: auto;
   display: block;
+}
+
+.logo-tagline {
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  text-align: center;
+}
+
+.logo-acronym {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+}
+
+.logo-acronym b {
+  font-weight: 700;
+  color: var(--text-primary);
 }
 
 /* Chain identity bar — below logo, above nav links */
@@ -734,6 +760,11 @@ body {
 
   .logo img {
     width: 60px;
+  }
+
+  .logo-tagline,
+  .logo-acronym {
+    display: none;
   }
 
   #sidebar li a {

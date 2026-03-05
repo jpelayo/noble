@@ -748,11 +748,21 @@ export function init(root, ctx) {
   }
 
   function updateCycleDisplay(status) {
-    // Guard u64::MAX sentinel (engine not yet initialized)
+    // Guard u64::MAX sentinel — no genesis block, no cycle identity.
     const sane = status.cycle_number < 1e15;
     csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
-    csPhaseName.textContent = sane ? status.phase : 'Initializing';
+    csPhaseName.textContent = sane ? status.phase : '—';
     csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Awaiting genesis';
+
+    if (!sane) {
+      csPhaseRemaining.textContent = '—';
+      csCycleRemaining.textContent = '—';
+      csValidator.textContent = '—';
+      csPhases.innerHTML = '<div style="color:var(--text-muted);font-size:var(--font-size-sm)">No blocks committed — waiting for genesis</div>';
+      csPipeline.innerHTML = '';
+      clearInterval(countdownInterval);
+      return;
+    }
 
     if (status.current_validator) {
       const key = status.current_validator.Ed25519 || status.current_validator.Secp256k1 || [];

@@ -361,7 +361,8 @@ async function bootstrap() {
     state.blockHeight = blockCount.height;
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
-    state.cyclePhase = cycleStatus.phase;
+    // No genesis → no cycle identity.  u64::MAX sentinel → "Awaiting genesis".
+    state.cyclePhase = cycleStatus.cycle_number > 1e15 ? 'Awaiting genesis' : cycleStatus.phase;
 
     populateChainIdentity(nodeInfo);
   } catch (e) {
