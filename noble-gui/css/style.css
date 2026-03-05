@@ -92,6 +92,10 @@ body {
   text-align: center;
   font-size: 11px;
   line-height: 1.4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .chain-net-badge {
@@ -109,19 +113,11 @@ body {
 .chain-net-badge.net-testnet { background: #e08a1e; }
 .chain-net-badge.net-regtest { background: #d14040; }
 
-.chain-id-details {
-  margin-top: 3px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+.chain-id-hex {
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
   font-size: 10px;
-  word-break: break-all;
 }
-
-.chain-id-hex { opacity: 0.7; }
-.chain-genesis-hash { opacity: 0.5; cursor: help; }
 
 #sidebar ul {
   list-style: none;

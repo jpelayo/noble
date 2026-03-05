@@ -532,8 +532,10 @@ export class MockRpcClient {
       }
 
       case 'noble_getBlockRange': {
-        const start = params.start ?? 0;
-        const end = Math.min(params.end ?? start + 49, this.chainHeight);
+        // Positional: [start_height, count]
+        const start = Array.isArray(params) ? (params[0] ?? 0) : (params.start ?? 0);
+        const count = Array.isArray(params) ? (params[1] ?? 50) : ((params.end ?? start + 49) - start + 1);
+        const end = Math.min(start + count - 1, this.chainHeight);
         return this.#chain.blocks.slice(start, end + 1).map(b => ({
           height: b.header.height,
           hash: b._hash,

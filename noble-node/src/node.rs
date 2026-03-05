@@ -1498,7 +1498,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     {
                         let mut engine = self.consensus.write();
                         if let Some(history) = engine.take_cycle_history() {
-                            if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
+                            let (tip_height, _) = engine.chain_tip();
+                            // Don't persist during bootstrap (tip=0): cycle numbers
+                            // are based on a temporary epoch and become meaningless
+                            // once the real chain's block 1 resets the epoch.
+                            // This also prevents race conditions where a chain reset
+                            // clears the DB but a concurrent tick re-inserts a stale
+                            // entry before the engine is fully reset.
+                            if tip_height == 0 {
+                                tracing::debug!(
+                                    task = "consensus",
+                                    cycle = history.cycle_number,
+                                    "skipping cycle history persist during bootstrap (tip=0)"
+                                );
+                            } else if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
                                 let storage = self.storage.read();
                                 if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
                                     tracing::warn!(task = "consensus", "Failed to persist cycle history: {e}");

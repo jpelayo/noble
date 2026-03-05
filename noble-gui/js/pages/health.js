@@ -3,7 +3,7 @@
  * Node info, storage gauge, uptime
  */
 
-import { formatNumber, formatBytes, formatDuration } from '../utils.js';
+import { formatNumber, formatBytes, formatDuration, formatChainLabel } from '../utils.js';
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -73,7 +73,7 @@ export function init(root, ctx) {
         <dt>Software</dt><dd>v${info.software_version || info.version}</dd>
         <dt>Network Latest</dt><dd>v${info.latest_network_version || '—'}</dd>
         <dt>Protocol</dt><dd>${info.protocol_version || info.version}</dd>
-        <dt>Chain ID</dt><dd>${info.chain_id ? '0x' + info.chain_id.toString(16).toUpperCase() : '\u2014'}</dd>
+        <dt>Chain</dt><dd>${info.chain_id ? formatChainLabel(info) : '\u2014'}</dd>
         <dt>Uptime</dt><dd>${formatDuration(info.uptime_secs)}</dd>
         <dt>Storage</dt><dd>${info.storage_bytes != null ? formatBytes(info.storage_bytes) : 'N/A'} / ${info.storage_capacity_bytes != null ? formatBytes(info.storage_capacity_bytes) : 'N/A'}</dd>
         <dt>Data Directory</dt><dd class="mono">${info.data_dir || 'N/A'}</dd>

@@ -3,7 +3,7 @@
  * PoR cycle superposition timeline + Accepted Validator Registry
  */
 
-import { formatNumber, formatCountdown, bytesToHex, truncateHash, timeAgo, formatTimestamp } from '../utils.js';
+import { formatNumber, formatCountdown, bytesToHex, truncateHash, timeAgo, formatTimestamp, formatChainLabel } from '../utils.js';
 
 function extractIpFromMultiaddr(ma) {
   if (!ma) return '--';
@@ -39,6 +39,15 @@ export function init(root, ctx) {
     return k.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // ── Validator name lookup map (pubkey hex → friendly name) ──
+  const validatorNameMap = new Map();
+  function getValidatorDisplayName(pubkeyHex, maxLen) {
+    if (!pubkeyHex) return '—';
+    const name = validatorNameMap.get(pubkeyHex);
+    if (name) return name;
+    return truncateHash(pubkeyHex, maxLen || 6);
+  }
+
   root.innerHTML = `
     <div class="page-header" style="display:flex;align-items:baseline;gap:var(--gap-sm)">
       <div><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
@@ -49,7 +58,8 @@ export function init(root, ctx) {
     <div class="panel">
       <div class="panel-header">
         <span>Cycle Superposition Timeline</span>
-        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)">Last 3 cycles</span>
+        <span id="cs-chain-badge" style="font-weight:500;font-size:var(--font-size-xs);padding:2px 8px;border-radius:9999px;background:var(--bg-tertiary);color:var(--text-secondary)"></span>
+        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted);margin-left:auto">Last 3 cycles</span>
       </div>
       <div class="panel-body">
         <!-- Phase pipeline -->
@@ -682,6 +692,9 @@ export function init(root, ctx) {
     if (entry.phases) return entry;
     const hasWinner = !!entry.winner;
     const indeterminate = entry.status === 'indeterminate' || (!hasWinner && !isCurrent);
+    // Sort proposals by validator key for deterministic display across nodes
+    const sortedProposals = [...(entry.proposals || [])].sort((a, b) => a.validator.localeCompare(b.validator));
+
     return {
       cycle_number: entry.cycle_number,
       is_current: isCurrent,
@@ -693,13 +706,13 @@ export function init(root, ctx) {
         {
           name: 'Block Proposal',
           state: isCurrent && !hasWinner ? 'active' : 'complete',
-          proposals: entry.proposals || [],
+          proposals: sortedProposals,
         },
         {
           name: 'Voting',
           state: isCurrent && !hasWinner ? 'active' : 'complete',
           votes: entry.votes || [],
-          total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count + (v.r2_vote_count || 0), 0),
+          total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count, 0),
         },
         {
           name: 'Reflection',
@@ -724,9 +737,30 @@ export function init(root, ctx) {
     try {
       // Request more than needed so we can filter out empty indeterminate cycles.
       const history = await rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]);
-      const raw = (history.entries || history.cycles || [])
-        .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0))
-        .slice(0, TIMELINE_LIMIT);
+      let allEntries = (history.entries || history.cycles || [])
+        .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0));
+
+      // Filter stale entries from previous chains: entries arrive newest-first.
+      // If a gap > 20 appears between consecutive entries, the older group is the
+      // current chain and the isolated high-numbered entry is from a previous chain.
+      // Keep only the largest contiguous group.
+      if (allEntries.length >= 2) {
+        for (let i = 1; i < allEntries.length; i++) {
+          const gap = allEntries[i - 1].cycle_number - allEntries[i].cycle_number;
+          if (gap > 20) {
+            // Entries [0..i-1] are isolated outliers, [i..] is the real chain
+            // unless the outlier group is larger (unlikely after reset).
+            if (i <= allEntries.length - i) {
+              allEntries = allEntries.slice(i); // drop high outliers, keep low contiguous
+            } else {
+              allEntries = allEntries.slice(0, i); // keep high group
+            }
+            break;
+          }
+        }
+      }
+
+      const raw = allEntries.slice(0, TIMELINE_LIMIT);
       if (raw.length === 0) {
         csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
         return;
@@ -767,7 +801,7 @@ export function init(root, ctx) {
         <span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span>
         <span style="font-size:var(--font-size-xs);color:${statusColor};font-weight:600">${statusLabel}</span>
         ${disambigBadge}
-        ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong>${cycle.winner}</strong></span>` : ''}
+        ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong title="${cycle.winner}">${getValidatorDisplayName(cycle.winner, 10)}</strong></span>` : ''}
       `;
       row.appendChild(header);
 
@@ -814,7 +848,7 @@ export function init(root, ctx) {
         } else if (pi === 1) {
           // Voting (R1)
           if (phase.votes && phase.votes.length > 0) {
-            label += `<div style="font-size:0.55rem;opacity:0.85">${phase.total_voters || 0} votes</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${phase.total_voters || 0} voter${(phase.total_voters || 0) !== 1 ? 's' : ''}</div>`;
           } else {
             label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           }
@@ -822,7 +856,7 @@ export function init(root, ctx) {
           // Reflection (R2 / winner)
           if (phase.winner) {
             const icon = phase.disambiguation ? '&#9878;' : '&#10003;';
-            label += `<div style="font-size:0.55rem;opacity:0.85">${icon} ${phase.winner.replace('noble-', '').slice(0, 10)}</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${icon} ${getValidatorDisplayName(phase.winner, 5)}</div>`;
 
             if (!participantMap.has(phase.winner)) participantMap.set(phase.winner, { roles: [], cycles: [] });
             participantMap.get(phase.winner).roles.push('won');
@@ -860,7 +894,7 @@ export function init(root, ctx) {
 
           const card = document.createElement('div');
           card.style.cssText = `flex:1;min-width:180px;padding:var(--gap-sm);border:1px solid ${borderColor};border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)`;
-          const vName = p.validator.length > 20 ? truncateHash(p.validator, 6) : p.validator;
+          const vName = getValidatorDisplayName(p.validator, 6);
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
               <strong>${vName}</strong>
@@ -871,19 +905,23 @@ export function init(root, ctx) {
             </div>
           `;
 
-          // Show vote count if phase 0 has vote data
-          const votingPhase = cycle.phases[0];
+          // Show vote count from voting phase (index 1)
+          const votingPhase = cycle.phases[1];
           if (votingPhase.votes && votingPhase.votes.length > 0) {
             const voteEntry = votingPhase.votes.find(v => v.block_hash === p.block_hash);
             if (voteEntry) {
-              const totalVotes = voteEntry.vote_count + (voteEntry.r2_vote_count || 0);
-              const pct = Math.round(totalVotes / votingPhase.total_voters * 100);
-              const r2Label = voteEntry.r2_vote_count ? ` <span style="color:var(--text-muted);font-weight:400">(R1:${voteEntry.vote_count} R2:${voteEntry.r2_vote_count})</span>` : '';
+              const r1 = voteEntry.vote_count;
+              const r2 = voteEntry.r2_vote_count || 0;
+              const displayVotes = r2 > 0 ? r2 : r1;
+              const pct = votingPhase.total_voters > 0 ? Math.min(100, Math.round(displayVotes / votingPhase.total_voters * 100)) : 0;
+              const roundLabel = r2 > 0
+                ? ` <span style="color:var(--text-muted);font-weight:400">(R1:${r1} R2:${r2})</span>`
+                : '';
               card.innerHTML += `
                 <div style="margin-top:4px">
                   <div style="display:flex;justify-content:space-between;margin-bottom:2px">
                     <span style="color:var(--text-secondary)">Votes</span>
-                    <span style="font-weight:600">${totalVotes}/${votingPhase.total_voters}${r2Label}</span>
+                    <span style="font-weight:600">${displayVotes}/${votingPhase.total_voters}${roundLabel}</span>
                   </div>
                   <div style="height:4px;background:var(--bg-tertiary);border-radius:2px">
                     <div style="height:100%;width:${pct}%;background:${isWinner ? 'var(--success)' : 'var(--error)'};border-radius:2px"></div>
@@ -908,14 +946,15 @@ export function init(root, ctx) {
       csActivitySummary.innerHTML = `
         <div style="font-weight:600;font-size:var(--font-size-sm);margin-bottom:var(--gap-sm)">Validator Activity (3-cycle window)</div>
         <div style="display:flex;flex-wrap:wrap;gap:var(--gap-sm)">
-          ${entries.map(([name, data]) => {
+          ${entries.map(([pubkey, data]) => {
             const won = data.roles.filter(r => r === 'won').length;
             const proposed = data.roles.filter(r => r === 'proposed').length;
             const lost = proposed - won;
             const dotColor = won > 0 ? 'var(--success)' : 'var(--warning)';
-            return `<div style="display:flex;align-items:center;gap:var(--gap-xs);padding:3px 8px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)">
+            const displayName = getValidatorDisplayName(pubkey, 8);
+            return `<div style="display:flex;align-items:center;gap:var(--gap-xs);padding:3px 8px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)" title="${pubkey}">
               <span style="width:6px;height:6px;border-radius:50%;background:${dotColor}"></span>
-              <strong>${name}</strong>
+              <strong>${displayName}</strong>
               <span style="color:var(--text-muted)">${proposed}P</span>
               ${won > 0 ? `<span style="color:var(--success)">${won}W</span>` : ''}
               ${lost > 0 ? `<span style="color:var(--error)">${lost}L</span>` : ''}
@@ -1056,6 +1095,19 @@ export function init(root, ctx) {
       const validators = result.validators;
       const priorityOrder = result.priority_order || [];
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
+
+      // Populate validator name lookup for use by timeline and other panels
+      for (const v of validators) {
+        const keyHex = valKeyHex(v.public_key);
+        const name = v.name || (selfKey && keyHex === selfKey ? 'This Node' : null);
+        if (name) validatorNameMap.set(keyHex, name);
+      }
+
+      // Display chain identity in timeline header
+      const chainBadge = root.querySelector('#cs-chain-badge');
+      if (chainBadge) {
+        chainBadge.textContent = formatChainLabel(nodeInfo);
+      }
 
       const online = validators.filter(v => v.status === 'alive').length;
       const offline = validators.length - online;
@@ -1733,9 +1785,9 @@ export function init(root, ctx) {
   });
 
   // ── Bootstrap ──
+  // Load validators first to populate name lookup, then timeline uses friendly names
+  loadValidators().then(() => loadTimeline());
   loadCycle();
-  loadTimeline();
-  loadValidators();
   loadCandidates();
   loadVotingStrategy();
   loadVoteTallies();

@@ -12,7 +12,7 @@
 
 import { createStore } from './state.js';
 import { Router } from './router.js';
-import { formatNumber } from './utils.js';
+import { formatNumber, formatChainLabel } from './utils.js';
 
 // ── Pages (lazy-ish, but static imports for file:// compat) ──
 import * as overviewPage from './pages/overview.js';
@@ -327,22 +327,12 @@ function populateChainIdentity(nodeInfo) {
 
   const badge = document.getElementById('chain-net-badge');
   const idHex = document.getElementById('chain-id-hex');
-  const genesisEl = document.getElementById('chain-genesis-hash');
 
   const net = nodeInfo.network_name.toLowerCase();
   badge.textContent = net;
   badge.className = 'chain-net-badge net-' + net;
 
-  const chainId = nodeInfo.chain_id;
-  idHex.textContent = '0x' + chainId.toString(16).toUpperCase().padStart(8, '0');
-
-  const gh = nodeInfo.genesis_hash || '';
-  if (gh.length > 16) {
-    genesisEl.textContent = gh.slice(0, 8) + '\u2026' + gh.slice(-8);
-    genesisEl.title = gh;
-  } else {
-    genesisEl.textContent = gh;
-  }
+  idHex.textContent = formatChainLabel(nodeInfo);
 
   bar.style.display = '';
 }

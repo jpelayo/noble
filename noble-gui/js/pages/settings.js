@@ -3,6 +3,8 @@
  * IP access control management and system configuration.
  */
 
+import { formatChainLabel } from '../utils.js';
+
 export function init(root, ctx) {
   const { rpc } = ctx;
 
@@ -1227,6 +1229,11 @@ export function init(root, ctx) {
   loadSettings();
 
   // --- Chain Management ---
+  let cachedNodeInfo = null;
+  // Pre-fetch nodeInfo for chain label (also fetched inside loadSettings, but we
+  // need it accessible in the chain management scope).
+  rpc.call('noble_getNodeInfo').then(ni => { cachedNodeInfo = ni; }).catch(() => {});
+
   const chainInfoEl = root.querySelector('#s-chain-info');
   const forkWrap = root.querySelector('#s-fork-table-wrap');
   const chainGear = root.querySelector('#s-chain-gear');
@@ -1251,8 +1258,9 @@ export function init(root, ctx) {
       return;
     }
 
+    const chainLabel = cachedNodeInfo ? formatChainLabel(cachedNodeInfo) : '';
+
     let rows = data.forks.map((f, i) => {
-      const hashShort = f.tip_hash.slice(0, 10) + '\u2026' + f.tip_hash.slice(-8);
       const label = f.is_local
         ? '<span style="color:var(--success)">\u25CF Our chain</span>'
         : (f.height > data.local_height ? '<span style="color:var(--warning)">\u26A0 Longer fork</span>' : 'Alternative');
@@ -1261,7 +1269,7 @@ export function init(root, ctx) {
         : '';
       return `<tr style="${f.is_local ? 'background:rgba(var(--success-rgb,52,211,153),0.08)' : ''}">
         ${radioCol}
-        <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${hashShort}</td>
+        <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${chainLabel}</td>
         <td>${f.height}</td>
         <td>${f.peers}</td>
         <td>${label}</td>
@@ -1270,7 +1278,7 @@ export function init(root, ctx) {
 
     const radioHeader = withRadio ? '<th style="width:30px"></th>' : '';
     container.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
-      <thead><tr>${radioHeader}<th>Tip Hash</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
+      <thead><tr>${radioHeader}<th>Chain</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }
@@ -1286,10 +1294,10 @@ export function init(root, ctx) {
         return;
       }
       // Render chain info
-      const tipShort = data.local_tip ? (data.local_tip.slice(0, 10) + '\u2026' + data.local_tip.slice(-8)) : '\u2014';
+      const chainLabel = cachedNodeInfo ? formatChainLabel(cachedNodeInfo) : '';
       chainInfoEl.innerHTML = `
+        <dt>Chain</dt><dd>${chainLabel || '\u2014'}</dd>
         <dt>Height</dt><dd>${data.local_height}</dd>
-        <dt>Tip</dt><dd style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${tipShort}</dd>
       `;
       renderForkTable(data, forkWrap, false);
     } catch (e) {
