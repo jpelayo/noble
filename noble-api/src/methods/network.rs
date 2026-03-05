@@ -130,6 +130,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
 
         // 2. Known validators/peers from peer_records that are NOT currently connected.
         for rec in &records {
+            if rec.peer_id_bytes.is_empty() {
+                continue; // Skip stubs with no real PeerId (safety net)
+            }
             let hex_pid = hex::encode(&rec.peer_id_bytes);
             if seen_peer_ids.contains(&hex_pid) {
                 continue;

@@ -210,32 +210,12 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             drop(info);
         }
 
-        // Backfill 2: if peer_records is still empty (no live connections either) but
-        // the validator list has entries (loaded from CBOR persistence that survives
-        // chain resets), create stub PeerRecords.  last_seen = 0 → UNREACHABLE (correct:
-        // never connected).  When peers connect, the record gets updated with real data.
-        if peer_records.is_empty() {
-            let cons = self.consensus.read();
-            let vals = cons.validator_list().list_validators();
-            drop(cons);
-            let self_ik_hex = self.validator_pubkey.as_deref().unwrap_or("");
-            for (pk, _weight) in vals {
-                let ik = pk.to_wire_bytes();
-                if hex::encode(&ik) == self_ik_hex {
-                    continue; // SELF is injected as ALIVE separately below
-                }
-                let mut rec = noble_core::PeerRecord::new(ik, vec![], 0);
-                rec.last_seen = 0;
-                rec.first_seen = 0;
-                rec.connection_count = 0;
-                let _ = storage.store_peer_record(&rec);
-                peer_records.push(rec);
-            }
-        }
         drop(storage);
 
-        // Build lookup: identity_key wire bytes → (host_address, country_code)
+        // Build lookups from peer_records: announce data + last_seen timestamps.
         let mut announce_map: std::collections::HashMap<Vec<u8>, (Option<String>, Option<String>)> =
+            std::collections::HashMap::new();
+        let mut last_seen_map: std::collections::HashMap<Vec<u8>, u64> =
             std::collections::HashMap::new();
         for rec in &peer_records {
             if let Some(ref ann) = rec.last_announce {
@@ -243,6 +223,9 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     rec.identity_key.clone(),
                     (ann.host_address.clone(), ann.country_code.clone()),
                 );
+            }
+            if rec.last_seen > 0 {
+                last_seen_map.insert(rec.identity_key.clone(), rec.last_seen);
             }
         }
 
@@ -368,7 +351,21 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     cycles_active: votes_cast + votes_missed, // cycles where validator was in set
                     cycles_reachable: uptime_cycles,
                     total_cycles,
-                    last_active: None, // populated from peer records when available
+                    last_active: {
+                        // Connected peers → now; SELF → now; else peer_record.last_seen.
+                        let w = wire.to_vec();
+                        if connected_identity_keys.contains(&w) {
+                            Some(now)
+                        } else if self
+                            .validator_pubkey
+                            .as_deref()
+                            .map_or(false, |s| hex::encode(&wire) == *s)
+                        {
+                            Some(now)
+                        } else {
+                            last_seen_map.get(&w).copied()
+                        }
+                    },
                     joined_cycle: added_at,
                     host_address: host_addr,
                     country_code: country,
