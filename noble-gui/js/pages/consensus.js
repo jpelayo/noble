@@ -313,11 +313,11 @@ export function init(root, ctx) {
   const STRATEGY_DESCRIPTIONS = {
     first_valid: 'Vote for the first valid block received. Fast but biased toward low-latency validators.',
     fixed_validator: 'Always vote for a specific validator. Falls back to first valid if they don\'t propose.',
-    round_robin: 'Rotate through validators in your list order each cycle.',
+    round_robin: 'Rotate through validators in priority order each cycle (drag rows to reorder).',
     subset_rotation: 'Rotate through a user-defined subset of preferred validators.',
     random: 'Randomly select among valid candidates (deterministic per cycle).',
     weighted_reputation: 'Vote for the candidate from the highest-weight validator.',
-    weighted_probability: 'Randomized vote with decreasing probability following your validator list order.',
+    weighted_probability: 'Probabilistic vote weighted by priority order — higher in the list = more likely.',
     follow_majority: 'Wait for tallies, then vote for the leading candidate.',
     manual: 'Do not auto-vote. Requires manual vote via RPC or GUI each cycle.',
   };
