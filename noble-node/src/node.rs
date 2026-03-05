@@ -265,9 +265,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             ValidatorList::new()
         };
 
-        // Self-register: if this node has a validator key, ensure it is in the list.
+        // Self-register: if this node has a validator key AND wants to validate, ensure it is in the list.
         if let Some((_sk, pk)) = &validator_key {
-            if !validator_list.is_validator(pk) {
+            if config.identity.wants_to_validate && !validator_list.is_validator(pk) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -276,6 +276,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 tracing::info!(
                     task = "config_load",
                     "Self-registered as validator: {}",
+                    hex::encode(pk.to_wire_bytes()),
+                );
+            } else if !config.identity.wants_to_validate && validator_list.is_validator(pk) {
+                validator_list.remove_validator(pk);
+                tracing::info!(
+                    task = "config_load",
+                    "Removed self from validator list (wants_to_validate=false): {}",
                     hex::encode(pk.to_wire_bytes()),
                 );
             }

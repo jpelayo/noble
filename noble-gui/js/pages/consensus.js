@@ -1169,7 +1169,7 @@ export function init(root, ctx) {
           e.stopPropagation();
           const pubkey = btn.dataset.pubkey;
           const name = ordered.find(v => valKeyHex(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
-          showRemoveConfirmation(pubkey, name);
+          showRemoveConfirmation(pubkey, name, selfKey);
         });
       });
     } catch (e) {
@@ -1303,25 +1303,43 @@ export function init(root, ctx) {
     keyInput.focus();
   }
 
-  function showRemoveConfirmation(pubkey, name) {
-    modalContainer.innerHTML = `
-      <div class="modal-overlay" id="cs-modal-overlay">
-        <div class="modal" style="max-width:400px">
-          <div class="modal-header">
-            <span>Remove Validator</span>
-          </div>
-          <div class="modal-body">
+  function showRemoveConfirmation(pubkey, name, selfKey) {
+    const isSelf = selfKey && pubkey === selfKey;
+    const title = isSelf ? 'Removing Your Own Node' : 'Remove Validator';
+    const bodyHtml = isSelf
+      ? `<p style="font-size:var(--font-size-sm);margin-bottom:var(--gap)">
+              You are removing this node from its own validator list.
+            </p>
             <p style="font-size:var(--font-size-sm);margin-bottom:var(--gap)">
+              On the next restart, your node will re-add itself automatically
+              unless you change your node type.
+            </p>
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">
+              To stop producing blocks permanently:<br>
+              Go to <strong>Settings &rarr; Node Identity</strong> and set
+              <strong>"Wants to Validate"</strong> to <strong>No</strong>.
+            </p>`
+      : `<p style="font-size:var(--font-size-sm);margin-bottom:var(--gap)">
               Remove <strong>${name}</strong> from your accepted validator list?
             </p>
             <p style="font-size:var(--font-size-xs);color:var(--text-muted)">
               This only affects your node's list. The validator can be re-added at any time with the same Node ID.
-            </p>
+            </p>`;
+    const confirmLabel = isSelf ? 'Remove Anyway' : 'Remove';
+
+    modalContainer.innerHTML = `
+      <div class="modal-overlay" id="cs-modal-overlay">
+        <div class="modal" style="max-width:400px">
+          <div class="modal-header">
+            <span>${isSelf ? '&#9888; ' : ''}${title}</span>
+          </div>
+          <div class="modal-body">
+            ${bodyHtml}
             <div class="form-error" id="cs-remove-error" style="margin-top:var(--gap-sm)"></div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary" id="cs-modal-cancel">Cancel</button>
-            <button class="btn btn-danger" id="cs-modal-confirm">Remove</button>
+            <button class="btn btn-danger" id="cs-modal-confirm">${confirmLabel}</button>
           </div>
         </div>
       </div>
