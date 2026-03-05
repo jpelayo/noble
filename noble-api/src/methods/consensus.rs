@@ -644,11 +644,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let mut entries: Vec<VoteTallyEntry> = tallies
             .into_iter()
             .map(|(h, c)| {
-                // Look up proposer name from candidate tracker → validator list
-                let validator = candidate_tracker
-                    .validator_of(&h)
-                    .and_then(|wire| validator_list.find_by_wire(&wire))
-                    .map(|v| v.name());
+                // Look up proposer: friendly name from validator list, else hex pubkey
+                let validator = candidate_tracker.validator_of(&h).map(|wire| {
+                    validator_list
+                        .find_by_wire(&wire)
+                        .map(|v| v.name())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| hex::encode(&wire))
+                });
                 VoteTallyEntry {
                     block_hash: hash_to_hex(&h),
                     vote_count: c,

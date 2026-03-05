@@ -820,14 +820,11 @@ impl CycleEngine {
             vote.candidate_hash
         );
 
-        // Accept votes during Reflection phase only.
-        if self.tracked_phase != CyclePhase::Reflection {
-            outputs.push(CycleIo::Log(format!(
-                "rejected vote from peer during {:?} phase",
-                self.tracked_phase
-            )));
-            return outputs;
-        }
+        // Accept votes during both phases.  With 10-second tick intervals,
+        // nodes transition Validation→Reflection at different wall-clock times.
+        // A vote broadcast by a node that transitioned first would be rejected
+        // by peers still in Validation — causing one-directional vote loss.
+        // Signature, cycle, and dedup checks remain enforced below.
 
         // Votes are accepted from any connected peer with a valid signature.
         // The local validator_list only controls who THIS node votes for,

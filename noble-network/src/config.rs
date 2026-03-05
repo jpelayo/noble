@@ -138,7 +138,7 @@ impl Default for NetworkConfig {
             peer_rotation_interval_secs: 600,
             chain_meta: None,
             pre_loaded_p2p_key: None,
-            gossipsub_heartbeat_interval_secs: 10,
+            gossipsub_heartbeat_interval_secs: 1,
         }
     }
 }

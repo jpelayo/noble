@@ -448,13 +448,13 @@ export function init(root, ctx) {
       const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
       talliesBody.innerHTML = result.tallies.map(t => {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
-        const nameTag = t.validator ? `<span style="font-weight:600;font-size:var(--font-size-xs);min-width:90px">${t.validator}</span>` : '';
+        const name = t.validator || truncateHash(t.block_hash, 8);
         return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          ${nameTag}<span class="mono" style="font-size:var(--font-size-xs);min-width:120px">${truncateHash(t.block_hash, 8)}</span>
-          <div style="flex:1;height:8px;background:var(--bg-tertiary);border-radius:4px">
+          <span style="font-weight:600;font-size:var(--font-size-xs);min-width:90px;flex-shrink:0">${name}</span>
+          <div style="flex:1;min-width:40px;height:8px;background:var(--bg-tertiary);border-radius:4px">
             <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
           </div>
-          <span style="font-weight:600;min-width:60px;text-align:right">${t.vote_count} (${pct}%)</span>
+          <span style="font-weight:600;flex-shrink:0;text-align:right">${t.vote_count} (${pct}%)</span>
         </div>`;
       }).join('');
 
@@ -756,7 +756,7 @@ export function init(root, ctx) {
 
     if (!sane) {
       // Show live bootstrapping state — the engine IS running, just no blocks yet.
-      const remaining = status.cycle_remaining_secs || 0;
+      let remaining = status.cycle_remaining_secs || 0;
       csPhaseRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
       csCycleRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
       csValidator.textContent = '—';
@@ -764,7 +764,14 @@ export function init(root, ctx) {
         <span class="pulse-dot"></span> Consensus engine active — waiting for first block commit
       </div>`;
       csPipeline.innerHTML = '';
+      // Countdown ticker for bootstrap — keeps the clock ticking
       clearInterval(countdownInterval);
+      countdownInterval = setInterval(() => {
+        remaining = Math.max(0, remaining - 1);
+        csPhaseRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
+        csCycleRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
+        if (remaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
+      }, 1000);
       return;
     }
 
