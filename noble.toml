@@ -69,10 +69,6 @@ confirmation_strategy = "follow_majority"
 # Raise this for stricter safety on large production networks.
 # min_peers_for_consensus = 2
 
-# Consensus cycle duration in seconds (default: 1800 = 30 min).
-# Reduce for testing environments (e.g. cycle_duration_secs = 60).
-# cycle_duration_secs = 1800
-
 [api]
 # JSON-RPC HTTP server bind address.
 rpc_addr = "127.0.0.1:8783"

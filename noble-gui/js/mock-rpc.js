@@ -13,7 +13,7 @@
 
 // ── Constants (from noble-core/src/constants.rs) ──
 const MAINNET_CHAIN_ID = 0x4E4F424C;
-const CYCLE_DURATION_SECS = 1800;
+const CYCLE_DURATION_SECS = 1200;
 const MIN_TX_FEE = 1000;
 const PROTOCOL_VERSION = 1;
 const GENESIS_TIMESTAMP = 1700000000;

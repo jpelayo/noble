@@ -110,7 +110,7 @@ mod tests {
     const G: u64 = noble_core::GENESIS_TIMESTAMP;
 
     fn mgr() -> CycleManager {
-        CycleManager::new(1800, Some(G))
+        CycleManager::new(1200, Some(G))
     }
 
     #[test]
@@ -127,67 +127,67 @@ mod tests {
     #[test]
     fn cycle_increments() {
         let m = mgr();
-        assert_eq!(m.current_cycle(G + 1799), 0);
-        assert_eq!(m.current_cycle(G + 1800), 1);
-        assert_eq!(m.current_cycle(G + 3599), 1);
-        assert_eq!(m.current_cycle(G + 3600), 2);
+        assert_eq!(m.current_cycle(G + 1199), 0);
+        assert_eq!(m.current_cycle(G + 1200), 1);
+        assert_eq!(m.current_cycle(G + 2399), 1);
+        assert_eq!(m.current_cycle(G + 2400), 2);
     }
 
     #[test]
     fn phase_first_quarter_is_proposal() {
         let m = mgr();
         assert_eq!(m.current_phase(G), CyclePhase::Proposal);
-        assert_eq!(m.current_phase(G + 449), CyclePhase::Proposal);
+        assert_eq!(m.current_phase(G + 299), CyclePhase::Proposal);
     }
 
     #[test]
     fn phase_second_quarter_is_voting() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 450), CyclePhase::Voting);
-        assert_eq!(m.current_phase(G + 899), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 300), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 599), CyclePhase::Voting);
     }
 
     #[test]
     fn phase_third_quarter_is_reflection() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
-        assert_eq!(m.current_phase(G + 1349), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 600), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Reflection);
     }
 
     #[test]
     fn phase_fourth_quarter_is_propagation() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 1350), CyclePhase::Propagation);
-        assert_eq!(m.current_phase(G + 1799), CyclePhase::Propagation);
+        assert_eq!(m.current_phase(G + 900), CyclePhase::Propagation);
+        assert_eq!(m.current_phase(G + 1199), CyclePhase::Propagation);
     }
 
     #[test]
     fn phase_transitions_at_quarter_boundaries() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 449), CyclePhase::Proposal);
-        assert_eq!(m.current_phase(G + 450), CyclePhase::Voting);
-        assert_eq!(m.current_phase(G + 899), CyclePhase::Voting);
-        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
-        assert_eq!(m.current_phase(G + 1349), CyclePhase::Reflection);
-        assert_eq!(m.current_phase(G + 1350), CyclePhase::Propagation);
+        assert_eq!(m.current_phase(G + 299), CyclePhase::Proposal);
+        assert_eq!(m.current_phase(G + 300), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 599), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 600), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 900), CyclePhase::Propagation);
     }
 
     #[test]
     fn seconds_until_phase_change() {
         let m = mgr();
-        assert_eq!(m.seconds_until_phase_change(G), 450);
-        assert_eq!(m.seconds_until_phase_change(G + 225), 225);
-        assert_eq!(m.seconds_until_phase_change(G + 449), 1);
-        assert_eq!(m.seconds_until_phase_change(G + 450), 450);
-        assert_eq!(m.seconds_until_phase_change(G + 900), 450);
+        assert_eq!(m.seconds_until_phase_change(G), 300);
+        assert_eq!(m.seconds_until_phase_change(G + 150), 150);
+        assert_eq!(m.seconds_until_phase_change(G + 299), 1);
+        assert_eq!(m.seconds_until_phase_change(G + 300), 300);
+        assert_eq!(m.seconds_until_phase_change(G + 600), 300);
     }
 
     #[test]
     fn seconds_until_cycle_boundary() {
         let m = mgr();
-        assert_eq!(m.seconds_until_cycle_boundary(G), 1800);
-        assert_eq!(m.seconds_until_cycle_boundary(G + 1), 1799);
-        assert_eq!(m.seconds_until_cycle_boundary(G + 1799), 1);
-        assert_eq!(m.seconds_until_cycle_boundary(G + 1800), 1800);
+        assert_eq!(m.seconds_until_cycle_boundary(G), 1200);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1), 1199);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1199), 1);
+        assert_eq!(m.seconds_until_cycle_boundary(G + 1200), 1200);
     }
 }

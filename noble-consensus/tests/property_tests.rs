@@ -191,7 +191,7 @@ proptest! {
             None,
             Some(0),
         );
-        engine.step(CycleEvent::Tick { now: cycle * 1800 });
+        engine.step(CycleEvent::Tick { now: cycle * 1200 });
 
         // Force Voting phase for vote acceptance
         engine.step(CycleEvent::PhaseTransition {

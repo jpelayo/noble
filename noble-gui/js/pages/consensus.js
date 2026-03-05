@@ -51,7 +51,7 @@ export function init(root, ctx) {
       <div class="panel-body">
         <!-- Phase pipeline -->
         <div style="display:flex;align-items:center;gap:0;margin-bottom:var(--gap-lg);flex-wrap:wrap">
-          <div style="font-weight:700;font-size:var(--font-size-sm);color:var(--text-muted);margin-right:var(--gap-sm)">CYCLE <span id="cs-cycle-info">#--</span></div>
+          <div style="font-weight:700;font-size:var(--font-size-sm);color:var(--text-muted);margin-right:var(--gap-sm)">CYCLE: <span id="cs-cycle-info">#--</span></div>
           <div id="cs-phase-pipeline" style="display:flex;align-items:center;gap:0;flex:1;min-width:0;flex-wrap:wrap"></div>
         </div>
 
@@ -471,7 +471,7 @@ export function init(root, ctx) {
   }
 
   const PHASES = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
-  const PHASE_DURATION = 450; // 7:30 per phase
+  const PHASE_DURATION = 300; // 5:00 per phase
 
   // ══════════════════════════════════════════════
   // SUPERPOSITION TIMELINE
@@ -524,7 +524,7 @@ export function init(root, ctx) {
   async function loadTimeline() {
     try {
       // Request more than needed so we can filter out empty indeterminate cycles.
-      const history = await rpc.call('noble_getCycleHistory', TIMELINE_LIMIT * 5);
+      const history = await rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]);
       const raw = (history.entries || history.cycles || [])
         .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0))
         .slice(0, TIMELINE_LIMIT);
@@ -759,7 +759,7 @@ export function init(root, ctx) {
     if (!sane) {
       // Bootstrap: the engine IS running full consensus (proposals, votes, phases).
       // Derive phase from cycle_remaining_secs so the pipeline looks alive.
-      const cycleDur = PHASE_DURATION * 4; // 1800s
+      const cycleDur = PHASE_DURATION * 4; // 1200s
       let cycleRemaining = status.cycle_remaining_secs || 0;
       const elapsed = cycleDur - cycleRemaining;
       // 4 phases of PHASE_DURATION each

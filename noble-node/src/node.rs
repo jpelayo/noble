@@ -408,9 +408,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             // phase_timing() returns (phase_index, phase_remaining_secs, cycle_remaining_secs)
             let (phase_idx, _phase_remaining, cycle_remaining) = engine.phase_timing();
             m.cycle_phase.set(phase_idx as f64);
-            // Cycle duration is 1800s (30 min); elapsed = total - remaining
+            // Cycle duration is 1200s (20 min); elapsed = total - remaining
             m.cycle_elapsed_secs
-                .set((1800u64.saturating_sub(cycle_remaining)) as f64);
+                .set((noble_core::CYCLE_DURATION_SECS.saturating_sub(cycle_remaining)) as f64);
         }
 
         // S49: Clock drift watchdog.
@@ -1379,8 +1379,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tokio::time::interval(std::time::Duration::from_secs(60));
         rate_limit_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // --- NodeAnnounce periodic broadcast (every 30 min) ---
-        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+        // --- NodeAnnounce periodic broadcast (every 20 min) ---
+        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(1200));
         announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut initial_announce_sent = false;
 
@@ -1492,7 +1492,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
 
-                // Periodic NodeAnnounce re-broadcast (every 30 min)
+                // Periodic NodeAnnounce re-broadcast (every 20 min)
                 _ = announce_interval.tick() => {
                     if initial_announce_sent {
                         self.publish_node_announce(&shared_identity, &network_cmd);
@@ -2866,7 +2866,6 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
         min_peers_for_consensus: config.consensus.min_peers_for_consensus,
-        cycle_duration_secs: config.consensus.cycle_duration_secs,
         ..CConsensusConfig::default()
     }
 }

@@ -52,8 +52,8 @@ pub const CLOCK_DRIFT_CRITICAL_SECS: u64 = 120;
 /// Maximum allowed block timestamp skew into the past (seconds).
 pub const MAX_BLOCK_PAST_SKEW: u64 = 3_600;
 
-/// Duration of a consensus cycle in seconds (30 minutes).
-pub const CYCLE_DURATION_SECS: u64 = 1_800;
+/// Duration of a consensus cycle in seconds (20 minutes).
+pub const CYCLE_DURATION_SECS: u64 = 1_200;
 
 /// Transaction type: document notarization.
 pub const TX_TYPE_NOTARIZATION: u8 = 0x00;

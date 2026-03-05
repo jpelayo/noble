@@ -165,9 +165,6 @@ pub struct ConsensusConfig {
     /// Minimum validators required for consensus participation (default: 2).
     #[serde(default = "default_min_peers_for_consensus")]
     pub min_peers_for_consensus: usize,
-    /// Consensus cycle duration in seconds (default: 1800 = 30 min).
-    #[serde(default = "default_cycle_duration_secs")]
-    pub cycle_duration_secs: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -180,10 +177,6 @@ fn default_confirmation_strategy() -> String {
 
 fn default_min_peers_for_consensus() -> usize {
     2
-}
-
-fn default_cycle_duration_secs() -> u64 {
-    noble_core::CYCLE_DURATION_SECS
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -545,7 +538,6 @@ impl Default for ConsensusConfig {
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
-            cycle_duration_secs: default_cycle_duration_secs(),
         }
     }
 }
@@ -632,7 +624,6 @@ mod tests {
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
-            cycle_duration_secs: default_cycle_duration_secs(),
         };
         let debug_str = format!("{config:?}");
         assert!(

@@ -102,7 +102,7 @@ impl CycleEngine {
         validator_key: Option<(NoblePrivateKey, NoblePublicKey)>,
         genesis_timestamp: Option<u64>,
     ) -> Self {
-        let cycle_mgr = CycleManager::new(config.cycle_duration_secs, genesis_timestamp);
+        let cycle_mgr = CycleManager::new(noble_core::CYCLE_DURATION_SECS, genesis_timestamp);
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1524,20 +1524,20 @@ mod tests {
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
         assert_eq!(engine.current_cycle(), 0);
 
-        // Tick at g+450: should transition to Voting
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 450 });
+        // Tick at g+300: should transition to Voting
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 300 });
         assert_eq!(engine.current_phase(), CyclePhase::Voting);
 
-        // Tick at g+900: should transition to Reflection
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 900 });
+        // Tick at g+600: should transition to Reflection
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 600 });
         assert_eq!(engine.current_phase(), CyclePhase::Reflection);
 
-        // Tick at g+1350: should transition to Propagation
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 1350 });
+        // Tick at g+900: should transition to Propagation
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 900 });
         assert_eq!(engine.current_phase(), CyclePhase::Propagation);
 
-        // Tick at g+1800: should transition to new cycle
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 1800 });
+        // Tick at g+1200: should transition to new cycle
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 1200 });
         assert_eq!(engine.current_cycle(), 1);
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
     }
@@ -1736,10 +1736,10 @@ mod tests {
             "bootstrap should enable normal timer"
         );
         // Cycle should be based on GENESIS_TIMESTAMP, not epoch=0
-        let expected_cycle = (now - noble_core::GENESIS_TIMESTAMP) / 1800;
+        let expected_cycle = (now - noble_core::GENESIS_TIMESTAMP) / 1200;
         assert_eq!(
             engine.tracked_cycle, expected_cycle,
-            "cycle should be (now - GENESIS_TIMESTAMP) / 1800"
+            "cycle should be (now - GENESIS_TIMESTAMP) / 1200"
         );
     }
 
@@ -1821,7 +1821,7 @@ mod tests {
         engine.tracked_cycle = 0;
         engine.tracked_phase = CyclePhase::Voting;
         engine.r1_vote_cast = false;
-        let outputs = engine.step(CycleEvent::Tick { now: g + 450 + 30 }); // Voting + 30s delay
+        let outputs = engine.step(CycleEvent::Tick { now: g + 300 + 30 }); // Voting + 30s delay
 
         let vote_broadcast = outputs
             .iter()
@@ -1848,8 +1848,8 @@ mod tests {
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
 
         // Tick into Voting phase past VOTE_CAST_DELAY (30s)
-        // Voting starts at g+450, delay fires at g+480
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 480 });
+        // Voting starts at g+300, delay fires at g+330
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 330 });
 
         assert!(
             engine.r1_vote_cast,
@@ -1870,8 +1870,8 @@ mod tests {
         engine.r2_vote_cast = false;
 
         // Tick at 30s into Reflection phase of cycle 1
-        // Reflection starts at 900s in cycle, so offset 930s from cycle start
-        let now = g + 1800 + 900 + 30; // cycle 1 start + Reflection + 30s delay
+        // Reflection starts at 600s in cycle, so offset 630s from cycle start
+        let now = g + 1200 + 600 + 30; // cycle 1 start + Reflection + 30s delay
         let _outputs = engine.step(CycleEvent::Tick { now });
 
         assert!(
