@@ -399,6 +399,11 @@ impl PeerManager {
         }
     }
 
+    /// Get a peer's last known chain tip (height, hash), if any.
+    pub fn get_chain_tip(&self, peer_id: &PeerId) -> Option<(u64, [u8; 32])> {
+        self.peers.get(peer_id).and_then(|s| s.chain_tip)
+    }
+
     /// Update a peer's reported chain tip.
     pub fn update_chain_tip(&mut self, peer_id: &PeerId, height: u64, hash: [u8; 32]) {
         if let Some(state) = self.peers.get_mut(peer_id) {

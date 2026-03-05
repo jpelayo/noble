@@ -3139,6 +3139,7 @@ name = "noble-network"
 version = "0.18.0"
 dependencies = [
  "ciborium",
+ "hex",
  "libp2p",
  "noble-codec",
  "noble-consensus",

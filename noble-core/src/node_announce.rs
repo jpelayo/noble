@@ -167,6 +167,18 @@ pub struct NodeAnnounce {
     /// Operator declares intent to cast consensus votes.
     #[serde(default)]
     pub wants_to_vote: bool,
+    /// Committed chain tip height (gossip-level peer discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tip_height: Option<u64>,
+    /// Committed chain tip hash (gossip-level peer discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tip_hash: Option<[u8; 32]>,
+    /// Height of the block this node is currently proposing (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_height: Option<u64>,
+    /// Hash of the block this node is currently proposing (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_hash: Option<[u8; 32]>,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
     /// Optional PKI identity attestation — an external signature (PKCS#7/CMS)
@@ -197,6 +209,10 @@ struct AnnounceSigningPayload<'a> {
     software_version: &'a str,
     wants_to_validate: bool,
     wants_to_vote: bool,
+    chain_tip_height: &'a Option<u64>,
+    chain_tip_hash: &'a Option<[u8; 32]>,
+    proposed_height: &'a Option<u64>,
+    proposed_hash: &'a Option<[u8; 32]>,
     timestamp: u64,
 }
 
@@ -238,6 +254,10 @@ impl NodeAnnounce {
             software_version: &self.software_version,
             wants_to_validate: self.wants_to_validate,
             wants_to_vote: self.wants_to_vote,
+            chain_tip_height: &self.chain_tip_height,
+            chain_tip_hash: &self.chain_tip_hash,
+            proposed_height: &self.proposed_height,
+            proposed_hash: &self.proposed_hash,
             timestamp: self.timestamp,
         };
         let cbor = to_canonical_cbor(&payload)?;
@@ -285,6 +305,10 @@ impl NodeAnnounce {
             country_code,
             wants_to_validate,
             wants_to_vote,
+            None,
+            None,
+            None,
+            None,
             timestamp,
             signer,
             None,
@@ -305,6 +329,10 @@ impl NodeAnnounce {
         country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
+        chain_tip_height: Option<u64>,
+        chain_tip_hash: Option<[u8; 32]>,
+        proposed_height: Option<u64>,
+        proposed_hash: Option<[u8; 32]>,
         timestamp: u64,
         signer: &impl NobleSigner,
         identity_attestation: Option<ExternalAttestation>,
@@ -325,6 +353,10 @@ impl NodeAnnounce {
             software_version: SOFTWARE_VERSION.to_string(),
             wants_to_validate,
             wants_to_vote,
+            chain_tip_height,
+            chain_tip_hash,
+            proposed_height,
+            proposed_hash,
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,
@@ -706,6 +738,10 @@ mod tests {
             None,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
             1_700_000_000,
             &sk,
             Some(att.clone()),
@@ -752,6 +788,10 @@ mod tests {
             None,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
             1_700_000_000,
             &sk,
             Some(att),
@@ -781,6 +821,10 @@ mod tests {
             None,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
             1_700_000_000,
             &sk,
             Some(att),
@@ -807,6 +851,10 @@ mod tests {
             None,
             false,
             false,
+            None,
+            None,
+            None,
+            None,
             1_700_000_000,
             &sk,
             Some(att),

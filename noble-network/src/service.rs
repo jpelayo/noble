@@ -229,6 +229,34 @@ pub async fn start_network(
         })?
     };
 
+    // Resolve the actual bound port. When tcp/0 is used (random port), the OS
+    // assigns a real port — we discover it via the NewListenAddr swarm event.
+    let bound_port = if bound_port == 0 {
+        use libp2p::futures::StreamExt;
+        let mut actual_port = 0u16;
+        // Poll swarm briefly to catch the NewListenAddr event (fires immediately).
+        while let Some(event) = swarm.next().await {
+            if let SwarmEvent::NewListenAddr { address, .. } = event {
+                for proto in address.iter() {
+                    if let libp2p::multiaddr::Protocol::Tcp(p) = proto {
+                        actual_port = p;
+                    }
+                }
+                if actual_port > 0 {
+                    tracing::info!(
+                        task = "network_startup",
+                        port = actual_port,
+                        "Resolved random P2P port"
+                    );
+                    break;
+                }
+            }
+        }
+        actual_port
+    } else {
+        bound_port
+    };
+
     // Dial bootstrap peers and add them to Kademlia routing table.
     for addr_str in &config.bootstrap_peers {
         if let Ok(addr) = addr_str.parse::<Multiaddr>() {
@@ -666,6 +694,10 @@ async fn handle_swarm_event(
                             software_version,
                             wants_to_validate,
                             wants_to_vote,
+                            chain_tip_height,
+                            chain_tip_hash,
+                            proposed_height,
+                            proposed_hash,
                             timestamp,
                             signature_scheme,
                             signature_pubkey,
@@ -688,6 +720,10 @@ async fn handle_swarm_event(
                                 &software_version,
                                 wants_to_validate,
                                 wants_to_vote,
+                                chain_tip_height,
+                                chain_tip_hash.as_deref(),
+                                proposed_height,
+                                proposed_hash.as_deref(),
                                 timestamp,
                                 signature_scheme,
                                 &signature_pubkey,
@@ -702,6 +738,7 @@ async fn handle_swarm_event(
                                 &propagation_source,
                                 peer_bytes,
                                 peer_manager,
+                                &event_tx,
                             )
                         }
                         GossipMessage::DoubleProposalEvidence { evidence_bytes } => {
@@ -1078,6 +1115,7 @@ fn handle_gossip_node_announce(
     source: &PeerId,
     peer_bytes: Vec<u8>,
     peer_manager: &mut PeerManager,
+    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
 ) -> Option<NetworkEvent> {
     match result {
         Ok(announce) => {
@@ -1090,6 +1128,28 @@ fn handle_gossip_node_announce(
                 let offset_ms = (announce.timestamp as i64 - local_now as i64) * 1000;
                 peer_manager.update_clock_offset(source, offset_ms);
             }
+
+            // S53: If the announce carries a committed chain tip, update peer
+            // state and emit PeerChainTipUpdated — same pipeline as GetStatus.
+            // Monotonic guard: only update if announced height ≥ known height.
+            if let Some(height) = announce.chain_tip_height {
+                let current = peer_manager
+                    .get_chain_tip(source)
+                    .map(|(h, _)| h)
+                    .unwrap_or(0);
+                if height >= current {
+                    let tip_hash = announce.chain_tip_hash.unwrap_or([0u8; 32]);
+                    peer_manager.update_chain_tip(source, height, tip_hash);
+                    let median = peer_manager.median_clock_offset_ms();
+                    let _ = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
+                        peer_id: peer_bytes.clone(),
+                        height,
+                        tip_hash,
+                        median_clock_offset_ms: median,
+                    });
+                }
+            }
+
             peer_manager.update_announce(source, announce.clone());
             Some(NetworkEvent::NodeAnnounceReceived {
                 peer_id: peer_bytes,
@@ -1374,6 +1434,10 @@ async fn handle_command(
                 software_version: announce.software_version.clone(),
                 wants_to_validate: announce.wants_to_validate,
                 wants_to_vote: announce.wants_to_vote,
+                chain_tip_height: announce.chain_tip_height,
+                chain_tip_hash: announce.chain_tip_hash.map(|h| hex::encode(h)),
+                proposed_height: announce.proposed_height,
+                proposed_hash: announce.proposed_hash.map(|h| hex::encode(h)),
                 timestamp: announce.timestamp,
                 signature_scheme: announce.signature.scheme_id,
                 signature_pubkey: announce.signature.public_key.clone(),
@@ -1588,6 +1652,10 @@ fn convert_and_validate_announce(
     software_version: &str,
     wants_to_validate: bool,
     wants_to_vote: bool,
+    chain_tip_height: Option<u64>,
+    chain_tip_hash_hex: Option<&str>,
+    proposed_height: Option<u64>,
+    proposed_hash_hex: Option<&str>,
     timestamp: u64,
     signature_scheme: u8,
     signature_pubkey: &[u8],
@@ -1633,6 +1701,32 @@ fn convert_and_validate_announce(
         _ => return Err("attestation fields must be all present or all absent".to_string()),
     };
 
+    // Decode hex chain tip hash (32 bytes)
+    let chain_tip_hash = if let Some(hex_str) = chain_tip_hash_hex {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("invalid chain_tip_hash hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!("chain_tip_hash must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    } else {
+        None
+    };
+
+    // Decode hex proposed hash (32 bytes)
+    let proposed_hash = if let Some(hex_str) = proposed_hash_hex {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("invalid proposed_hash hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!("proposed_hash must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    } else {
+        None
+    };
+
     let announce = noble_core::NodeAnnounce {
         version: noble_core::NODE_ANNOUNCE_VERSION,
         identity_key,
@@ -1647,6 +1741,10 @@ fn convert_and_validate_announce(
         software_version: software_version.to_string(),
         wants_to_validate,
         wants_to_vote,
+        chain_tip_height,
+        chain_tip_hash,
+        proposed_height,
+        proposed_hash,
         timestamp,
         signature: noble_crypto::SignatureEnvelope {
             scheme_id: signature_scheme,

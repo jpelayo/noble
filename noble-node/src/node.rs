@@ -102,6 +102,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
     /// While true, block proposals are suppressed.
     pub clock_drift_paused: std::sync::atomic::AtomicBool,
+    /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
+    /// Cleared on chain tip advancement (new cycle).
+    pub last_proposed: parking_lot::Mutex<Option<(u64, [u8; 32])>>,
 }
 
 impl Node<MemoryStorage> {
@@ -366,6 +369,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             chain_meta,
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
+            last_proposed: parking_lot::Mutex::new(None),
         })
     }
 
@@ -495,6 +499,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             Some(identity.country_code.clone())
         };
 
+        // S53: Include committed chain tip and active proposal in the announce.
+        let (tip_h, tip_hash) = self.consensus.read().chain_tip();
+        let chain_tip_height = if tip_h > 0 { Some(tip_h) } else { None };
+        let chain_tip_hash = if tip_h > 0 {
+            Some(*tip_hash.as_bytes())
+        } else {
+            None
+        };
+        let (proposed_height, proposed_hash) = match *self.last_proposed.lock() {
+            Some((h, hash)) => (Some(h), Some(hash)),
+            None => (None, None),
+        };
+
         let announce = noble_core::NodeAnnounce::sign_with_attestation(
             pk.clone(),
             identity.node_name.clone(),
@@ -519,6 +536,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             country_code,
             identity.wants_to_validate,
             identity.wants_to_vote,
+            chain_tip_height,
+            chain_tip_hash,
+            proposed_height,
+            proposed_hash,
             now,
             sk,
             self.pki_attestation.clone(),
@@ -1357,6 +1378,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 &peer_update_tx,
                                 &cycle_phase_tx,
                                 &metrics,
+                                &shared_identity,
                             );
                         }
                         None => {
@@ -1377,7 +1399,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let mut engine = self.consensus.write();
                         engine.step(CycleEvent::Tick { now })
                     };
-                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &metrics);
+                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &metrics, &shared_identity);
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
                     {
@@ -1513,13 +1535,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         peer_update_tx: &broadcast::Sender<serde_json::Value>,
         cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
         metrics: &Option<NobleMetrics>,
+        shared_identity: &Arc<RwLock<NodeIdentityData>>,
     ) {
         match event {
             NetworkEvent::PeerConnected {
                 peer_id,
                 addr,
                 direction,
-                ..
+                chain_tip, // S55: was `..` — now explicit
             } => {
                 let is_inbound = direction == "inbound";
                 let new_count = {
@@ -1543,6 +1566,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                // S55: Use chain_tip from PeerConnected when available.
+                let (cth, cthash) = match chain_tip {
+                    Some((h, hash)) => (Some(*h), Some(hex::encode(hash))),
+                    None => (None, None),
+                };
                 {
                     let mut info = self.peer_info.write();
                     info.insert(
@@ -1553,8 +1581,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             addr: addr.clone(),
                             connected_at: now_ts,
                             ban_score: 0,
-                            chain_tip_height: None,
-                            chain_tip_hash: None,
+                            chain_tip_height: cth,
+                            chain_tip_hash: cthash,
+                            proposed_height: None,
                         },
                     );
                 }
@@ -1646,6 +1675,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     tracing::warn!(task = "peer_tracking", "Failed to persist peer record: {e}");
                 }
                 drop(storage);
+
+                // S55: Track gossip-received proposed_height for the proposal gate.
+                if announce.proposed_height.is_some() {
+                    let hex_pid = hex::encode(&peer_id);
+                    let mut info = self.peer_info.write();
+                    if let Some(entry) = info.get_mut(&hex_pid) {
+                        entry.proposed_height = announce.proposed_height;
+                    }
+                }
 
                 tracing::debug!(
                     task = "peer_tracking",
@@ -1745,7 +1783,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 //   is ahead (this is a fresh proposal for the current cycle).
                 //   Route to the consensus engine for candidate tracking + voting.
                 //
-                // Pre-genesis: always route to engine (pre-genesis commit path).
+                // Bootstrap: route to consensus engine for candidate tracking + voting.
 
                 let tip_height = self.consensus.read().chain_tip().0;
                 // Check if any peer is ahead of us (indicating we need to sync).
@@ -1773,7 +1811,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         metrics,
                     );
                 } else {
-                    // Live proposal or pre-genesis — route to consensus engine.
+                    // Live proposal or bootstrap — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
                         &NetworkEvent::BlockReceived {
                             peer_id: peer_id.clone(),
@@ -1785,7 +1823,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             let mut engine = self.consensus.write();
                             engine.step(ce)
                         };
-                        self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
+                        self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
                     }
                 }
             }
@@ -1796,7 +1834,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let mut engine = self.consensus.write();
                         engine.step(cycle_event)
                     };
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
                 }
             }
         }
@@ -1811,6 +1849,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         network_cmd: &mpsc::Sender<NetworkCommand>,
         new_block_tx: &broadcast::Sender<serde_json::Value>,
         metrics: &Option<NobleMetrics>,
+        shared_identity: &Arc<RwLock<NodeIdentityData>>,
     ) {
         for action in actions {
             match action {
@@ -1872,11 +1911,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tx_ids.len()
                     );
 
+                    // S53: Clear active proposal — new cycle starts.
+                    *self.last_proposed.lock() = None;
+
                     let _ = new_block_tx.send(serde_json::json!({
                         "height": block.header.height,
                         "hash": hex::encode(block_hash.as_bytes()),
                         "tx_count": tx_ids.len(),
                     }));
+
+                    // S55: Re-publish announce with updated chain_tip_height after commit.
+                    self.publish_node_announce(shared_identity, network_cmd);
                 }
                 CycleIo::ReadmitTransactions(txs) => {
                     let now = std::time::SystemTime::now()
@@ -1933,7 +1978,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         engine.step(CycleEvent::MempoolTransactions(txs))
                     };
                     // Recursively process any actions from the proposal
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
                 }
                 CycleIo::BroadcastBlock(ref _block)
                     if self
@@ -1944,6 +1989,95 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         task = "clock_drift",
                         "Block proposal suppressed — clock drift exceeds critical threshold"
                     );
+                }
+                CycleIo::BroadcastBlock(ref _block) => {
+                    // Proposal gate: the single chokepoint for all block proposals
+                    // (empty or full, any code path).
+                    //
+                    // Sync suppression (any tip height):
+                    //   any peer ahead of us → suppress (actively syncing)
+                    //
+                    // Bootstrap suppression (tip == 0 only):
+                    //   0 peers              → suppress (solo, wait for peers)
+                    //   no status received   → suppress (wait for PeerChainTipUpdated)
+                    //   all peers at height 0→ allow (form new chain together)
+                    //
+                    // Normal operation (tip > 0, no peer ahead):
+                    //   allow
+                    let tip_h = self.consensus.read().chain_tip().0;
+                    let info = self.peer_info.read();
+                    let peer_count = info.len();
+                    // S55: Use the higher of committed chain_tip and gossip-implied
+                    // proposed parent (proposed_height - 1) for each peer.
+                    let known_heights: Vec<u64> = info
+                        .values()
+                        .filter_map(|e| {
+                            let committed = e.chain_tip_height;
+                            let implied = e.proposed_height.map(|h| h.saturating_sub(1));
+                            match (committed, implied) {
+                                (Some(c), Some(i)) => Some(std::cmp::max(c, i)),
+                                (Some(c), None) => Some(c),
+                                (None, Some(i)) => Some(i),
+                                (None, None) => None,
+                            }
+                        })
+                        .collect();
+                    drop(info);
+
+                    let max_known = known_heights.iter().copied().max().unwrap_or(0);
+
+                    // Suppress while syncing — any peer ahead means we should
+                    // import blocks, not propose new ones.  Applies at ALL heights
+                    // (including mid-sync after block 1 is imported).
+                    if max_known > tip_h {
+                        tracing::debug!(
+                            task = "sync",
+                            "Block proposal suppressed — syncing from peers at height {} (tip={})",
+                            max_known, tip_h
+                        );
+                        continue;
+                    }
+
+                    // Bootstrap: additional gates when no chain exists yet.
+                    if tip_h == 0 {
+                        if peer_count == 0 {
+                            tracing::debug!(
+                                task = "bootstrap",
+                                "Block proposal suppressed — no peers connected"
+                            );
+                            continue;
+                        }
+                        if known_heights.is_empty() {
+                            tracing::debug!(
+                                task = "bootstrap",
+                                "Block proposal suppressed — waiting for peer status"
+                            );
+                            continue;
+                        }
+                        // All known peers at height 0 → form new chain together
+                    }
+
+                    // Allow: caught up (or ahead), or bootstrap with all peers at 0
+
+                    // S53: Track active proposal for NodeAnnounce gossip.
+                    if let Ok(hash) = _block.header.compute_block_hash() {
+                        *self.last_proposed.lock() = Some((_block.header.height, *hash.as_bytes()));
+                    }
+
+                    let cmds = bridge::cycle_io_to_network_commands(
+                        CycleIo::BroadcastBlock(_block.clone()),
+                    );
+                    for cmd in cmds {
+                        if let Err(e) = network_cmd.try_send(cmd) {
+                            tracing::warn!(
+                                task = "consensus_broadcast",
+                                "network command dropped (channel full): {e}"
+                            );
+                        }
+                    }
+
+                    // S53: Re-publish announce with updated proposed_height/hash.
+                    self.publish_node_announce(&shared_identity, &network_cmd);
                 }
                 other => {
                     // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network
@@ -2084,6 +2218,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             hex::encode(block_hash.as_bytes()),
             tx_ids.len()
         );
+
+        // S53: Clear active proposal on tip advancement.
+        *self.last_proposed.lock() = None;
 
         let _ = new_block_tx.send(serde_json::json!({
             "height": block.header.height,
@@ -3231,6 +3368,20 @@ mod tests {
         let (tx_tx, _) = broadcast::channel(16);
         let (peer_tx, _) = broadcast::channel(16);
         let (cycle_tx, _) = broadcast::channel(16);
+        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+            node_name: String::new(),
+            org_type: String::new(),
+            org_name: String::new(),
+            node_role: String::new(),
+            contact_email: String::new(),
+            website: String::new(),
+            host_address: String::new(),
+            country_code: String::new(),
+            wants_to_validate: false,
+            wants_to_vote: false,
+            p2p_port: 8780,
+            setup_complete: false,
+        }));
 
         // Peer connect should increment count
         let connect_event = NetworkEvent::PeerConnected {
@@ -3247,6 +3398,7 @@ mod tests {
             &peer_tx,
             &cycle_tx,
             &None,
+            &test_identity,
         );
         {
             let stats = node.network_stats.read();
@@ -3262,7 +3414,7 @@ mod tests {
             direction: "outbound".to_string(),
             chain_tip: None,
         };
-        node.handle_network_event(&connect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None);
+        node.handle_network_event(&connect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None, &test_identity);
         {
             let stats = node.network_stats.read();
             assert_eq!(stats.peer_count, 2);
@@ -3282,6 +3434,7 @@ mod tests {
             &peer_tx,
             &cycle_tx,
             &None,
+            &test_identity,
         );
         {
             let stats = node.network_stats.read();
@@ -3294,7 +3447,7 @@ mod tests {
         let disconnect_out = NetworkEvent::PeerDisconnected {
             peer_id: vec![4, 5, 6],
         };
-        node.handle_network_event(&disconnect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None);
+        node.handle_network_event(&disconnect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None, &test_identity);
         {
             let stats = node.network_stats.read();
             assert_eq!(stats.peer_count, 0);
@@ -3362,6 +3515,20 @@ mod tests {
         let (tx_tx, _) = broadcast::channel(16);
         let (peer_tx, _) = broadcast::channel(16);
         let (cycle_tx, _) = broadcast::channel(16);
+        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+            node_name: String::new(),
+            org_type: String::new(),
+            org_name: String::new(),
+            node_role: String::new(),
+            contact_email: String::new(),
+            website: String::new(),
+            host_address: String::new(),
+            country_code: String::new(),
+            wants_to_validate: false,
+            wants_to_vote: false,
+            p2p_port: 8780,
+            setup_complete: false,
+        }));
 
         // Connect a peer
         let connect_event = NetworkEvent::PeerConnected {
@@ -3378,6 +3545,7 @@ mod tests {
             &peer_tx,
             &cycle_tx,
             &None,
+            &test_identity,
         );
 
         // Consensus engine should now have peer_count > 0
@@ -3422,7 +3590,21 @@ mod tests {
             },
             CycleIo::SetTimer { duration_secs: 10 },
         ];
-        node.process_cycle_actions(actions, &tx, &block_tx, &None);
+        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+            node_name: String::new(),
+            org_type: String::new(),
+            org_name: String::new(),
+            node_role: String::new(),
+            contact_email: String::new(),
+            website: String::new(),
+            host_address: String::new(),
+            country_code: String::new(),
+            wants_to_validate: false,
+            wants_to_vote: false,
+            p2p_port: 8780,
+            setup_complete: false,
+        }));
+        node.process_cycle_actions(actions, &tx, &block_tx, &None, &test_identity);
         // No assertion needed — just verifying no panics
     }
 }

@@ -98,7 +98,7 @@ impl NobleBehaviour {
         };
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(10))
+            .heartbeat_interval(Duration::from_secs(config.gossipsub_heartbeat_interval_secs))
             .validation_mode(gossipsub::ValidationMode::Strict)
             .duplicate_cache_time(Duration::from_secs(60))
             .message_id_fn(message_id_fn)

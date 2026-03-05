@@ -83,6 +83,8 @@ pub struct PeerInfoEntry {
     pub chain_tip_height: Option<u64>,
     /// Peer's chain tip hash (from last status exchange). `None` if unknown.
     pub chain_tip_hash: Option<String>,
+    /// Peer's active proposal height (from gossip NodeAnnounce). `None` if not proposing.
+    pub proposed_height: Option<u64>,
 }
 
 /// Shared state available to all RPC method handlers.

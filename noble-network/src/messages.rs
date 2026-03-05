@@ -126,6 +126,18 @@ pub enum GossipMessage {
         wants_to_validate: bool,
         #[serde(default)]
         wants_to_vote: bool,
+        /// Committed chain tip height (gossip-level peer discovery).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_tip_height: Option<u64>,
+        /// Committed chain tip hash as hex string (gossip-level peer discovery).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_tip_hash: Option<String>,
+        /// Height of the block this node is currently proposing (if any).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposed_height: Option<u64>,
+        /// Hash of the block this node is currently proposing as hex string (if any).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposed_hash: Option<String>,
         timestamp: u64,
         signature_scheme: u8,
         signature_pubkey: Vec<u8>,
@@ -388,6 +400,10 @@ mod tests {
             software_version: noble_core::SOFTWARE_VERSION.into(),
             wants_to_validate: true,
             wants_to_vote: false,
+            chain_tip_height: Some(42),
+            chain_tip_hash: Some(hex::encode([0xBB; 32])),
+            proposed_height: Some(43),
+            proposed_hash: Some(hex::encode([0xCC; 32])),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],
@@ -418,6 +434,10 @@ mod tests {
             software_version: noble_core::SOFTWARE_VERSION.into(),
             wants_to_validate: false,
             wants_to_vote: false,
+            chain_tip_height: None,
+            chain_tip_hash: None,
+            proposed_height: None,
+            proposed_hash: None,
             timestamp: 1_700_000_000,
             signature_scheme: 0x01,
             signature_pubkey: vec![1; 32],

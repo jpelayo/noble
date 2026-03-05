@@ -109,6 +109,10 @@ pub struct NetworkConfig {
     /// Pre-loaded P2P identity keypair bytes (protobuf-encoded) from the unified keystore.
     /// When `Some`, the service uses these bytes directly instead of reading `p2p_identity.key`.
     pub pre_loaded_p2p_key: Option<Vec<u8>>,
+
+    /// Gossipsub heartbeat interval in seconds (default: 10).
+    /// Lower values speed up mesh formation in tests.
+    pub gossipsub_heartbeat_interval_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -134,6 +138,7 @@ impl Default for NetworkConfig {
             peer_rotation_interval_secs: 600,
             chain_meta: None,
             pre_loaded_p2p_key: None,
+            gossipsub_heartbeat_interval_secs: 10,
         }
     }
 }
