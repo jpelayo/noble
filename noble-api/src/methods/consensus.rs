@@ -209,6 +209,29 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             }
             drop(info);
         }
+
+        // Backfill 2: if peer_records is still empty (no live connections either) but
+        // the validator list has entries (loaded from CBOR persistence that survives
+        // chain resets), create stub PeerRecords.  last_seen = 0 → UNREACHABLE (correct:
+        // never connected).  When peers connect, the record gets updated with real data.
+        if peer_records.is_empty() {
+            let cons = self.consensus.read();
+            let vals = cons.validator_list().list_validators();
+            drop(cons);
+            let self_ik_hex = self.validator_pubkey.as_deref().unwrap_or("");
+            for (pk, _weight) in vals {
+                let ik = pk.to_wire_bytes();
+                if hex::encode(&ik) == self_ik_hex {
+                    continue; // SELF is injected as ALIVE separately below
+                }
+                let mut rec = noble_core::PeerRecord::new(ik, vec![], 0);
+                rec.last_seen = 0;
+                rec.first_seen = 0;
+                rec.connection_count = 0;
+                let _ = storage.store_peer_record(&rec);
+                peer_records.push(rec);
+            }
+        }
         drop(storage);
 
         // Build lookup: identity_key wire bytes → (host_address, country_code)
