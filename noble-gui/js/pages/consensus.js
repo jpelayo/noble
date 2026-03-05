@@ -566,6 +566,17 @@ export function init(root, ctx) {
     }));
   }
 
+  // Seed activity log with already-connected peers (handshakes happen before page load)
+  rpc.call('noble_getPeers').then(peers => {
+    if (Array.isArray(peers)) {
+      for (const p of peers) {
+        if (p.status === 'alive') {
+          pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
+        }
+      }
+    }
+  }).catch(() => {});
+
   function updateManualVoteVisibility() {
     const panel = root.querySelector('#cs-manual-vote-panel');
     const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';

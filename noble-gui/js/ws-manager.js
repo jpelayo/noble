@@ -25,10 +25,11 @@ const TOPIC_METHODS = {
 export class WsManager {
   #url;
   #ws = null;
-  #handlers = new Map();          // topic → callback
+  #handlers = new Map();          // topic → Set<{id, callback}>
   #subIds = new Map();            // topic → subscription_id string
   #pending = new Map();           // rpc_id → { topic, resolve }
   #nextId = 1;
+  #nextSubEntryId = 0;
   #reconnectDelay = 1000;
   #maxDelay = 30_000;
   #shouldConnect = false;
@@ -96,8 +97,8 @@ export class WsManager {
           // Find which topic owns this sub_id.
           for (const [topic, id] of this.#subIds.entries()) {
             if (id === subId) {
-              const handler = this.#handlers.get(topic);
-              if (handler) handler(msg.params.result);
+              const set = this.#handlers.get(topic);
+              if (set) for (const entry of set) entry.callback(msg.params.result);
               break;
             }
           }
@@ -161,10 +162,23 @@ export class WsManager {
   }
 
   subscribe(topic, callback) {
-    this.#handlers.set(topic, callback);
+    if (!this.#handlers.has(topic)) this.#handlers.set(topic, new Set());
+    const entry = { id: ++this.#nextSubEntryId, callback };
+    this.#handlers.get(topic).add(entry);
     if (this.#ws?.readyState === WebSocket.OPEN && !this.#subIds.has(topic)) {
       this.#sendSubscribe(topic);
     }
+    // Return unsubscribe function
+    return () => {
+      const set = this.#handlers.get(topic);
+      if (set) {
+        set.delete(entry);
+        if (set.size === 0) {
+          this.#handlers.delete(topic);
+          this.#sendUnsubscribe(topic);
+        }
+      }
+    };
   }
 
   unsubscribe(topic) {
