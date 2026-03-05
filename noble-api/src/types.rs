@@ -373,6 +373,10 @@ pub struct ValidatorEntry {
     /// ISO 3166-1 alpha-3 country code from peer announcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
+    /// Number of alive validators in the list (trust metric).
+    pub listers_count: usize,
+    /// Whether this validator has proposed a block in the current cycle.
+    pub proposed_this_cycle: bool,
 }
 
 /// Response for `noble_getValidatorList`.
@@ -723,6 +727,9 @@ pub struct VotingStrategyResponse {
 pub struct VoteTallyEntry {
     pub block_hash: String,
     pub vote_count: usize,
+    /// Validator name (from validator list), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator: Option<String>,
 }
 
 /// Response for `noble_getVoteTallies`.

@@ -82,6 +82,13 @@ pub struct ValidatorEntry {
     country_code: Option<String>,
 }
 
+impl ValidatorEntry {
+    /// Friendly name for this validator, falling back to empty string.
+    pub fn name(&self) -> String {
+        self.friendly_name.clone().unwrap_or_default()
+    }
+}
+
 /// A discovered network peer (not yet a validator) whose metadata persists in CBOR.
 /// Survives chain resets so the Consensus page "Network Candidates" table
 /// retains known peers even after `reset_tip(0)` wipes RocksDB PeerRecords.
@@ -154,6 +161,11 @@ impl ValidatorList {
     /// Check if a public key is in the validator list.
     pub fn is_validator(&self, pubkey: &NoblePublicKey) -> bool {
         self.entries.contains_key(&pubkey.to_wire_bytes())
+    }
+
+    /// Look up a validator by wire bytes.
+    pub fn find_by_wire(&self, wire: &[u8]) -> Option<&ValidatorEntry> {
+        self.entries.get(wire)
     }
 
     /// Add a validator with the given weight.

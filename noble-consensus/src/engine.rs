@@ -163,6 +163,11 @@ impl CycleEngine {
         &mut self.validator_list
     }
 
+    /// Get a reference to the candidate tracker (for API queries).
+    pub fn candidate_tracker(&self) -> &CandidateTracker {
+        &self.candidate_tracker
+    }
+
     /// Update the chain tip (height + block hash).
     ///
     /// Used by the node when a rollback or external chain-state change occurs

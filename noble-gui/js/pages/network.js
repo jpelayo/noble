@@ -5,6 +5,12 @@
 
 import { formatNumber, truncateHash } from '../utils.js';
 
+function extractIpFromMultiaddr(ma) {
+  if (!ma) return null;
+  const m = ma.match(/\/ip[46]\/([^/]+)/);
+  return m ? m[1] : ma; // Return raw string if not a multiaddr
+}
+
 export function init(root, ctx) {
   const { rpc, ws } = ctx;
   const unsubs = [];
@@ -166,8 +172,9 @@ export function init(root, ctx) {
       const dir = peer.direction || 'none';
       const dirClass = dir === 'inbound' ? 'inbound' : dir === 'outbound' ? 'outbound' : '';
       const name = peer.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
-      const addr = peer.addr
-        ? `<span class="mono" style="font-size:var(--font-size-xs)">${peer.addr}</span>`
+      const rawIp = extractIpFromMultiaddr(peer.addr);
+      const addr = rawIp
+        ? `<span class="mono" style="font-size:var(--font-size-xs)">${rawIp} <button class="btn-copy" data-copy="${rawIp}" title="Copy IP">&#128203;</button></span>`
         : '<span style="color:var(--text-muted)">&mdash;</span>';
       const country = peer.country_code || '<span style="color:var(--text-muted)">&mdash;</span>';
       const banScore = peer.ban_score || 0;

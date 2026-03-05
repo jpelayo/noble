@@ -748,17 +748,21 @@ export function init(root, ctx) {
   }
 
   function updateCycleDisplay(status) {
-    // Guard u64::MAX sentinel — no genesis block, no cycle identity.
+    // Guard u64::MAX sentinel — no genesis block yet.
     const sane = status.cycle_number < 1e15;
     csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
-    csPhaseName.textContent = sane ? status.phase : '—';
-    csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Awaiting genesis';
+    csPhaseName.textContent = sane ? status.phase : 'Bootstrapping';
+    csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
 
     if (!sane) {
-      csPhaseRemaining.textContent = '—';
-      csCycleRemaining.textContent = '—';
+      // Show live bootstrapping state — the engine IS running, just no blocks yet.
+      const remaining = status.cycle_remaining_secs || 0;
+      csPhaseRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
+      csCycleRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
       csValidator.textContent = '—';
-      csPhases.innerHTML = '<div style="color:var(--text-muted);font-size:var(--font-size-sm)">No blocks committed — waiting for genesis</div>';
+      csPhases.innerHTML = `<div style="color:var(--accent);font-size:var(--font-size-sm);display:flex;align-items:center;gap:8px">
+        <span class="pulse-dot"></span> Consensus engine active — waiting for first block commit
+      </div>`;
       csPipeline.innerHTML = '';
       clearInterval(countdownInterval);
       return;
@@ -880,7 +884,7 @@ export function init(root, ctx) {
             <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)} <button class="btn-copy" data-copy="${keyHex}" title="Copy public key">&#128203;</button></div>
           </td>
-          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}</td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}${v.host_address ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(v.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>
           <td style="font-size:var(--font-size-xs)">${v.country_code || '--'}</td>
           <td><span class="badge ${statusClass}">${v.status}</span></td>
           <td>
@@ -1215,7 +1219,7 @@ export function init(root, ctx) {
             <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)} <button class="btn-copy" data-copy="${peer.identity_key}" title="Copy public key">&#128203;</button></div>
           </td>
-          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}</td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}${(peer.last_addr || peer.host_address) ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>
           <td style="font-size:var(--font-size-xs)">${peer.country_code || '--'}</td>
           <td style="font-size:var(--font-size-xs)">${peer.org_type || '—'}</td>
           <td>

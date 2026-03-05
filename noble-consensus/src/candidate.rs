@@ -150,6 +150,11 @@ impl CandidateTracker {
             .map(|e| e.block.header.validator_id.to_wire_bytes())
     }
 
+    /// Check if a validator (by wire bytes) has proposed this cycle.
+    pub fn has_proposed(&self, validator_wire: &[u8]) -> bool {
+        self.by_validator.contains_key(validator_wire)
+    }
+
     /// Number of candidates currently tracked.
     pub fn len(&self) -> usize {
         self.candidates.len()

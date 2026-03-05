@@ -274,7 +274,16 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .list_validators_with_liveness(now);
         let count = validators.len();
 
+        // Compute alive count for listers_count (trust metric).
+        let alive_count = validators
+            .iter()
+            .filter(|(_, _, liveness, _, _, _, _)| {
+                *liveness == noble_consensus::ValidatorLiveness::Alive
+            })
+            .count();
+
         let reputation = consensus.reputation();
+        let candidate_tracker = consensus.candidate_tracker();
         let entries: Vec<ValidatorEntry> = validators
             .into_iter()
             .map(|(pk, weight, liveness, added_at, friendly_name, val_host, val_cc)| {
@@ -372,6 +381,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     joined_cycle: added_at,
                     host_address: host_addr,
                     country_code: country,
+                    listers_count: alive_count,
+                    proposed_this_cycle: candidate_tracker.has_proposed(&wire),
                 }
             })
             .collect();
@@ -463,15 +474,15 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let (_engine_phase_idx, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
         let engine_phase = consensus.current_phase();
 
-        // No genesis block → no cycle identity.  Return u64::MAX sentinel so
-        // the GUI shows "Awaiting genesis" instead of a meaningless cycle number.
+        // No genesis block → hide cycle identity.  Return u64::MAX sentinel so
+        // the GUI shows a "bootstrapping" indicator instead of a cycle number.
         if tip_height == 0 {
             return Ok(CycleStatusResponse {
                 cycle_number: u64::MAX,
-                phase: "Proposal".to_string(),
+                phase: "Bootstrapping".to_string(),
                 phase_index: 0,
-                phase_remaining_secs: 0,
-                cycle_remaining_secs: 0,
+                phase_remaining_secs: cycle_remaining,
+                cycle_remaining_secs: cycle_remaining,
             });
         }
 
@@ -624,24 +635,25 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read();
-        let tip_height = consensus.chain_tip().0;
-        // No genesis → no meaningful vote tallies.
-        if tip_height == 0 {
-            return Ok(VoteTalliesResponse {
-                cycle: 0,
-                phase: String::new(),
-                tallies: vec![],
-            });
-        }
         let cycle = consensus.current_cycle();
         let phase = consensus.current_phase();
         let tallies = consensus.vote_tallies();
+        let candidate_tracker = consensus.candidate_tracker();
+        let validator_list = consensus.validator_list();
 
         let mut entries: Vec<VoteTallyEntry> = tallies
             .into_iter()
-            .map(|(h, c)| VoteTallyEntry {
-                block_hash: hash_to_hex(&h),
-                vote_count: c,
+            .map(|(h, c)| {
+                // Look up proposer name from candidate tracker → validator list
+                let validator = candidate_tracker
+                    .validator_of(&h)
+                    .and_then(|wire| validator_list.find_by_wire(&wire))
+                    .map(|v| v.name());
+                VoteTallyEntry {
+                    block_hash: hash_to_hex(&h),
+                    vote_count: c,
+                    validator,
+                }
             })
             .collect();
         entries.sort_by(|a, b| b.vote_count.cmp(&a.vote_count));

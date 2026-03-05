@@ -229,6 +229,13 @@ body {
 .status-dot.connected { background: var(--success); }
 .status-dot.syncing { background: var(--warning); animation: pulse 1.5s infinite; }
 .status-dot.disconnected { background: var(--error); }
+.pulse-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  animation: pulse 1.5s infinite;
+}
 
 /* ── Page header ── */
 .page-header {
