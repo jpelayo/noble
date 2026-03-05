@@ -40,7 +40,10 @@ export function init(root, ctx) {
   }
 
   root.innerHTML = `
-    <div class="page-header"><h1>Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
+    <div class="page-header" style="display:flex;align-items:baseline;gap:var(--gap-sm)">
+      <div><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
+      <button id="cs-badge-gear" title="Badge Governance" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;margin-top:4px">&#9881;</button>
+    </div>
 
     <!-- Superposition Timeline -->
     <div class="panel">
@@ -78,8 +81,13 @@ export function init(root, ctx) {
         </div>
       </div>
       <div class="panel">
-        <div class="panel-header">Phase Progression</div>
-        <div class="panel-body" id="cs-phases"></div>
+        <div class="panel-header">
+          <span>Protocol Activity</span>
+          <button id="cs-activity-clear" title="Clear log" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:2px 8px;cursor:pointer;color:var(--text-muted);font-size:var(--font-size-xs);line-height:1.4">Clear</button>
+        </div>
+        <div class="panel-body" id="cs-activity-log" style="max-height:220px;overflow-y:auto;font-family:var(--font-mono);font-size:var(--font-size-xs);line-height:1.6;padding:var(--gap-xs)">
+          <div style="color:var(--text-muted)">Waiting for events...</div>
+        </div>
       </div>
     </div>
 
@@ -270,6 +278,89 @@ export function init(root, ctx) {
 
     <div id="cs-detail-panel"></div>
     <div id="cs-modal-container"></div>
+
+    <!-- Badge Governance Modal -->
+    <div id="cs-badge-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:900px;width:95%;max-height:80vh;overflow-y:auto;padding:var(--gap-lg)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)">
+          <h2 style="margin:0;font-size:1.2rem">Badge Governance</h2>
+          <button id="badge-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
+        </div>
+        <div style="display:flex;gap:var(--gap-sm);margin-bottom:var(--gap);border-bottom:1px solid var(--border);padding-bottom:var(--gap-sm)">
+          <button class="badge-tab-btn" data-tab="holders" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--accent);color:#fff;font-size:var(--font-size-sm)">Badge Holders</button>
+          <button class="badge-tab-btn" data-tab="proposals" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">Active Proposals</button>
+          <button class="badge-tab-btn" data-tab="propose" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">Propose</button>
+          <button class="badge-tab-btn" data-tab="history" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">History</button>
+        </div>
+
+        <!-- Tab: Badge Holders -->
+        <div id="badge-tab-holders" class="badge-tab-content">
+          <table style="width:100%;border-collapse:collapse;font-size:var(--font-size-sm)">
+            <thead><tr style="border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding:6px 8px">Pubkey</th>
+              <th style="text-align:left;padding:6px 8px">Name</th>
+              <th style="text-align:left;padding:6px 8px">Status</th>
+              <th style="text-align:right;padding:6px 8px">Granted At</th>
+              <th style="text-align:right;padding:6px 8px">Last Seen</th>
+              <th style="text-align:center;padding:6px 8px">Action</th>
+            </tr></thead>
+            <tbody id="badge-holders-body"></tbody>
+          </table>
+          <div id="badge-holders-empty" style="text-align:center;color:var(--text-muted);padding:var(--gap-lg);display:none">No badge holders yet.</div>
+        </div>
+
+        <!-- Tab: Active Proposals -->
+        <div id="badge-tab-proposals" class="badge-tab-content" style="display:none">
+          <div id="badge-proposals-list"></div>
+          <div id="badge-proposals-empty" style="text-align:center;color:var(--text-muted);padding:var(--gap-lg);display:none">No active proposals.</div>
+        </div>
+
+        <!-- Tab: Propose -->
+        <div id="badge-tab-propose" class="badge-tab-content" style="display:none">
+          <div style="max-width:500px">
+            <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Target Pubkey (hex)</label>
+            <input id="badge-propose-target" type="text" placeholder="33-byte wire pubkey hex" style="width:100%;margin-bottom:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-xs)" spellcheck="false">
+
+            <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Proposal Type</label>
+            <select id="badge-propose-type" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
+              <option value="grant">Grant Badge</option>
+              <option value="revoke">Revoke Badge</option>
+            </select>
+
+            <div id="badge-propose-reason-wrap" style="display:none">
+              <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Revocation Reason</label>
+              <select id="badge-propose-reason" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
+                <option value="DuplicateProposal">Duplicate Proposal</option>
+                <option value="ProtocolAbuse">Protocol Abuse</option>
+                <option value="ExtendedAbsence">Extended Absence</option>
+                <option value="Misrepresentation">Misrepresentation</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+
+            <button id="badge-propose-submit" class="btn btn-primary" style="margin-top:var(--gap-sm)">Submit Proposal</button>
+            <div id="badge-propose-status" style="margin-top:var(--gap-sm);font-size:var(--font-size-xs)"></div>
+          </div>
+        </div>
+
+        <!-- Tab: History -->
+        <div id="badge-tab-history" class="badge-tab-content" style="display:none">
+          <table style="width:100%;border-collapse:collapse;font-size:var(--font-size-sm)">
+            <thead><tr style="border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding:6px 8px">Type</th>
+              <th style="text-align:left;padding:6px 8px">Target</th>
+              <th style="text-align:left;padding:6px 8px">Reason</th>
+              <th style="text-align:right;padding:6px 8px">Votes For</th>
+              <th style="text-align:right;padding:6px 8px">Votes Against</th>
+              <th style="text-align:left;padding:6px 8px">Result</th>
+              <th style="text-align:right;padding:6px 8px">Cycle</th>
+            </tr></thead>
+            <tbody id="badge-history-body"></tbody>
+          </table>
+          <div id="badge-history-empty" style="text-align:center;color:var(--text-muted);padding:var(--gap-lg);display:none">No proposal history.</div>
+        </div>
+      </div>
+    </div>
   `;
 
   // ── DOM refs ──
@@ -280,7 +371,8 @@ export function init(root, ctx) {
   const csPhaseRemaining = root.querySelector('#cs-phase-remaining');
   const csCycleRemaining = root.querySelector('#cs-cycle-remaining');
   const csValidator = root.querySelector('#cs-validator');
-  const csPhases = root.querySelector('#cs-phases');
+  const csActivityLog = root.querySelector('#cs-activity-log');
+  const csActivityClear = root.querySelector('#cs-activity-clear');
   const csTimeline = root.querySelector('#cs-timeline');
   const csActivitySummary = root.querySelector('#cs-activity-summary');
   const csPolicy = root.querySelector('#cs-policy');
@@ -321,6 +413,113 @@ export function init(root, ctx) {
     follow_majority: 'Wait for tallies, then vote for the leading candidate.',
     manual: 'Do not auto-vote. Requires manual vote via RPC or GUI each cycle.',
   };
+
+  // ── Protocol Activity Log ──
+  const ACTIVITY_MAX_ENTRIES = 100;
+  const activityEntries = []; // circular buffer (oldest at 0)
+
+  const ACTIVITY_ICONS = {
+    block_committed: '\u2705',  // green check
+    block_proposed:  '\u{1f4e6}',  // package
+    vote_broadcast:  '\u{1f5f3}',  // ballot box
+    peer_banned:     '\u26d4',  // no entry
+    block_requested: '\u{1f50d}',  // magnifying glass
+    consensus_log:   '\u2139',  // info
+    warning:         '\u26a0',  // warning
+    phase_change:    '\u23f1',  // stopwatch
+    peer_connected:  '\u{1f517}',  // link
+    peer_disconnected: '\u274c', // cross mark
+  };
+
+  function activityColor(evt) {
+    switch (evt) {
+      case 'block_committed': return 'var(--success, #22c55e)';
+      case 'warning':
+      case 'peer_banned': return 'var(--danger, #ef4444)';
+      case 'vote_broadcast': return 'var(--accent, #3b82f6)';
+      case 'phase_change': return '#f59e0b';
+      default: return 'var(--text-muted)';
+    }
+  }
+
+  function formatActivityMessage(data) {
+    switch (data.event) {
+      case 'block_committed':
+        return `Block #${data.height} committed (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
+      case 'block_proposed':
+        return `Proposed block #${data.height}`;
+      case 'vote_broadcast':
+        return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
+      case 'peer_banned':
+        return `Peer banned: ${truncateHash(data.peer_id || '')} \u2014 ${data.reason}`;
+      case 'block_requested':
+        return `Requested block ${truncateHash(data.hash || '')}`;
+      case 'consensus_log':
+        return data.message;
+      case 'warning':
+        return data.message;
+      case 'phase_change':
+        return `Phase \u2192 ${data.phase} (cycle #${data.cycle})`;
+      case 'peer_connected':
+        return `Peer connected: ${truncateHash(data.peer_id || '')}`;
+      case 'peer_disconnected':
+        return `Peer disconnected: ${truncateHash(data.peer_id || '')}`;
+      default:
+        return JSON.stringify(data);
+    }
+  }
+
+  function pushActivity(data) {
+    const now = new Date();
+    const ts = String(now.getHours()).padStart(2, '0') + ':' +
+               String(now.getMinutes()).padStart(2, '0') + ':' +
+               String(now.getSeconds()).padStart(2, '0');
+    activityEntries.push({ ts, data });
+    // Cap at max — drop oldest
+    if (activityEntries.length > ACTIVITY_MAX_ENTRIES) {
+      activityEntries.splice(0, activityEntries.length - ACTIVITY_MAX_ENTRIES);
+    }
+    renderActivityLog();
+  }
+
+  function renderActivityLog() {
+    if (!activityEntries.length) {
+      csActivityLog.innerHTML = '<div style="color:var(--text-muted)">Waiting for events...</div>';
+      return;
+    }
+    // Render newest first, reuse innerHTML (fast for <100 entries)
+    let html = '';
+    for (let i = activityEntries.length - 1; i >= 0; i--) {
+      const { ts, data } = activityEntries[i];
+      const icon = ACTIVITY_ICONS[data.event] || '\u2022';
+      const color = activityColor(data.event);
+      const msg = formatActivityMessage(data);
+      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${msg}</div>`;
+    }
+    csActivityLog.innerHTML = html;
+  }
+
+  // Clear button
+  csActivityClear.addEventListener('click', () => {
+    activityEntries.length = 0;
+    renderActivityLog();
+  });
+
+  // Subscribe to cyclePhaseChange WS topic for protocol events
+  if (ws && ws.subscribe) {
+    unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
+      pushActivity(data);
+      // Refresh data panels on significant events
+      if (data.event === 'block_committed') {
+        loadCycle(); loadTimeline(); loadVoteTallies();
+      }
+    }));
+    // Also subscribe to peer updates for connect/disconnect
+    unsubs.push(ws.subscribe('peerUpdates', (data) => {
+      const evt = data.event === 'connected' ? 'peer_connected' : 'peer_disconnected';
+      pushActivity({ event: evt, peer_id: data.peer_id || '' });
+    }));
+  }
 
   function updateManualVoteVisibility() {
     const panel = root.querySelector('#cs-manual-vote-panel');
@@ -500,7 +699,7 @@ export function init(root, ctx) {
           name: 'Voting',
           state: isCurrent && !hasWinner ? 'active' : 'complete',
           votes: entry.votes || [],
-          total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count, 0),
+          total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count + (v.r2_vote_count || 0), 0),
         },
         {
           name: 'Reflection',
@@ -677,12 +876,14 @@ export function init(root, ctx) {
           if (votingPhase.votes && votingPhase.votes.length > 0) {
             const voteEntry = votingPhase.votes.find(v => v.block_hash === p.block_hash);
             if (voteEntry) {
-              const pct = Math.round(voteEntry.vote_count / votingPhase.total_voters * 100);
+              const totalVotes = voteEntry.vote_count + (voteEntry.r2_vote_count || 0);
+              const pct = Math.round(totalVotes / votingPhase.total_voters * 100);
+              const r2Label = voteEntry.r2_vote_count ? ` <span style="color:var(--text-muted);font-weight:400">(R1:${voteEntry.vote_count} R2:${voteEntry.r2_vote_count})</span>` : '';
               card.innerHTML += `
                 <div style="margin-top:4px">
                   <div style="display:flex;justify-content:space-between;margin-bottom:2px">
                     <span style="color:var(--text-secondary)">Votes</span>
-                    <span style="font-weight:600">${voteEntry.vote_count}/${votingPhase.total_voters} (${pct}%)</span>
+                    <span style="font-weight:600">${totalVotes}/${votingPhase.total_voters}${r2Label}</span>
                   </div>
                   <div style="height:4px;background:var(--bg-tertiary);border-radius:2px">
                     <div style="height:100%;width:${pct}%;background:${isWinner ? 'var(--success)' : 'var(--error)'};border-radius:2px"></div>
@@ -749,12 +950,20 @@ export function init(root, ctx) {
     }).join('');
   }
 
+  let lastPhaseKey = null; // track phase changes for activity log
   function updateCycleDisplay(status) {
     // null cycle_number = bootstrapping (no genesis block yet).
     const sane = status.cycle_number != null;
     csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
     csPhaseName.textContent = sane ? status.phase : 'Bootstrapping';
     csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
+
+    // Emit phase change activity event
+    const phaseKey = `${status.cycle_number || 0}:${status.phase_index}`;
+    if (lastPhaseKey !== null && lastPhaseKey !== phaseKey) {
+      pushActivity({ event: 'phase_change', phase: status.phase || 'Bootstrapping', cycle: status.cycle_number || 0 });
+    }
+    lastPhaseKey = phaseKey;
 
     if (!sane) {
       // Bootstrap: the engine IS running full consensus (proposals, votes, phases).
@@ -772,19 +981,7 @@ export function init(root, ctx) {
       csCycleRemaining.textContent = formatCountdown(cycleRemaining);
       csValidator.textContent = '—';
 
-      // Show phase sidebar — same as normal operation
-      csPhases.innerHTML = PHASES.map((p, i) => {
-        const active = i === activeIdx;
-        const done = i < activeIdx;
-        const color = PHASE_COLORS[p];
-        const cls = active ? 'accent' : done ? 'success' : 'text-muted';
-        const time = active ? formatCountdown(phaseRemaining) : done ? '0:00' : formatCountdown(PHASE_DURATION);
-        return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          <span style="width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:700;background:${active ? color.bg : done ? 'var(--success)' : 'var(--bg-tertiary)'};color:${active || done ? '#fff' : 'var(--text-muted)'}">${i + 1}</span>
-          <span style="font-weight:${active ? '700' : '400'};color:var(--${cls})">${p}</span>
-          <span style="margin-left:auto;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary)">${time}</span>
-        </div>`;
-      }).join('');
+      // (Phase Progression replaced by Protocol Activity log panel)
 
       // Pipeline header
       csPipeline.innerHTML = renderPipeline(activeIdx, phaseRemaining);
@@ -810,19 +1007,7 @@ export function init(root, ctx) {
 
     const activeIdx = status.phase_index;
 
-    // Phase progression sidebar
-    csPhases.innerHTML = PHASES.map((p, i) => {
-      const active = i === activeIdx;
-      const done = i < activeIdx;
-      const color = PHASE_COLORS[p];
-      const cls = active ? 'accent' : done ? 'success' : 'text-muted';
-      const time = active ? formatCountdown(status.phase_remaining_secs) : done ? '0:00' : formatCountdown(PHASE_DURATION);
-      return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-        <span style="width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:700;background:${active ? color.bg : done ? 'var(--success)' : 'var(--bg-tertiary)'};color:${active || done ? '#fff' : 'var(--text-muted)'}">${i + 1}</span>
-        <span style="font-weight:${active ? '700' : '400'};color:var(--${cls})">${p}</span>
-        <span style="margin-left:auto;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary)">${time}</span>
-      </div>`;
-    }).join('');
+    // (Phase Progression replaced by Protocol Activity log panel)
 
     // Pipeline header
     csPipeline.innerHTML = renderPipeline(activeIdx, status.phase_remaining_secs);
@@ -1329,12 +1514,7 @@ export function init(root, ctx) {
   root.querySelector('#cs-add-validator').addEventListener('click', showAddValidatorModal);
 
   // ── WS subscriptions ──
-  ws.subscribe('cyclePhaseChange', (status) => {
-    updateCycleDisplay(status);
-    loadTimeline();
-    loadVoteTallies();
-  });
-  unsubs.push(() => ws.unsubscribe('cyclePhaseChange'));
+  // (cyclePhaseChange events are handled by the Protocol Activity log above)
 
   // ── Copy-to-clipboard delegation ──
   root.addEventListener('click', (e) => {
@@ -1344,6 +1524,193 @@ export function init(root, ctx) {
       navigator.clipboard?.writeText(btn.dataset.copy).catch(() => {});
       btn.textContent = '\u2713';
       setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
+    }
+  });
+
+  // ── Badge Governance Modal ──
+  const badgeGear = root.querySelector('#cs-badge-gear');
+  const badgeModal = root.querySelector('#cs-badge-modal');
+  const badgeModalClose = root.querySelector('#badge-modal-close');
+  let badgePollInterval = null;
+
+  function openBadgeModal() {
+    badgeModal.style.display = 'flex';
+    loadBadgeHolders();
+    loadActiveProposals();
+    badgePollInterval = setInterval(() => {
+      const active = root.querySelector('.badge-tab-btn[style*="background:var(--accent)"]');
+      if (active) {
+        const tab = active.dataset.tab;
+        if (tab === 'holders') loadBadgeHolders();
+        else if (tab === 'proposals') loadActiveProposals();
+      }
+    }, 10000);
+  }
+  function closeBadgeModal() {
+    badgeModal.style.display = 'none';
+    if (badgePollInterval) { clearInterval(badgePollInterval); badgePollInterval = null; }
+  }
+  badgeGear.addEventListener('click', openBadgeModal);
+  badgeModalClose.addEventListener('click', closeBadgeModal);
+  badgeModal.addEventListener('click', (e) => { if (e.target === badgeModal) closeBadgeModal(); });
+
+  // Tab switching
+  root.querySelectorAll('.badge-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      root.querySelectorAll('.badge-tab-btn').forEach(b => {
+        b.style.background = 'var(--bg-tertiary)'; b.style.color = 'var(--text)';
+      });
+      btn.style.background = 'var(--accent)'; btn.style.color = '#fff';
+      root.querySelectorAll('.badge-tab-content').forEach(c => c.style.display = 'none');
+      root.querySelector('#badge-tab-' + btn.dataset.tab).style.display = '';
+      if (btn.dataset.tab === 'holders') loadBadgeHolders();
+      else if (btn.dataset.tab === 'proposals') loadActiveProposals();
+      else if (btn.dataset.tab === 'history') loadBadgeHistory();
+    });
+  });
+
+  // Show/hide reason dropdown for revoke proposals
+  const propType = root.querySelector('#badge-propose-type');
+  const reasonWrap = root.querySelector('#badge-propose-reason-wrap');
+  propType.addEventListener('change', () => {
+    reasonWrap.style.display = propType.value === 'revoke' ? '' : 'none';
+  });
+
+  // Load badge holders
+  async function loadBadgeHolders() {
+    try {
+      const holders = await rpc.call('noble_getBadgeHolders');
+      const tbody = root.querySelector('#badge-holders-body');
+      const empty = root.querySelector('#badge-holders-empty');
+      if (!holders || holders.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = holders.map(h => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:6px 8px" class="mono">${truncateHash(h.pubkey, 10)}</td>
+        <td style="padding:6px 8px">${h.node_name || '--'}</td>
+        <td style="padding:6px 8px"><span style="padding:2px 8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);background:${h.status==='active'?'var(--success)':h.status==='suspended'?'var(--warning)':'var(--error)'};color:#fff">${h.status}</span></td>
+        <td style="padding:6px 8px;text-align:right">${formatNumber(h.granted_at_height)}</td>
+        <td style="padding:6px 8px;text-align:right">${h.last_seen ? timeAgo(h.last_seen) : '--'}</td>
+        <td style="padding:6px 8px;text-align:center">${h.status==='active'?`<button class="badge-revoke-btn" data-pubkey="${h.pubkey}" style="padding:2px 8px;border:1px solid var(--error);border-radius:var(--radius-sm);background:none;color:var(--error);cursor:pointer;font-size:var(--font-size-xs)">Propose Revoke</button>`:''}</td>
+      </tr>`).join('');
+    } catch (e) {
+      console.error('loadBadgeHolders:', e);
+    }
+  }
+
+  // Load active proposals
+  async function loadActiveProposals() {
+    try {
+      const proposals = await rpc.call('noble_getActiveProposals');
+      const list = root.querySelector('#badge-proposals-list');
+      const empty = root.querySelector('#badge-proposals-empty');
+      if (!proposals || proposals.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      list.innerHTML = proposals.map(p => `
+        <div style="border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-bottom:var(--gap-sm)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap-xs)">
+            <span style="font-weight:700;text-transform:uppercase;font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm);background:${p.proposal_type==='grant'?'var(--success)':'var(--error)'};color:#fff">${p.proposal_type}</span>
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted)">Expires cycle ${p.expires_at_cycle}</span>
+          </div>
+          <div style="font-size:var(--font-size-sm);margin-bottom:var(--gap-xs)">
+            <strong>Target:</strong> <span class="mono">${truncateHash(p.target_pubkey, 10)}</span>
+            ${p.reason ? `<br><strong>Reason:</strong> ${p.reason}` : ''}
+          </div>
+          <div style="display:flex;align-items:center;gap:var(--gap);margin-bottom:var(--gap-xs)">
+            <span style="font-size:var(--font-size-xs)">For: <strong>${p.votes_for}</strong></span>
+            <span style="font-size:var(--font-size-xs)">Against: <strong>${p.votes_against}</strong></span>
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted)">of ${p.total_eligible_voters} eligible</span>
+          </div>
+          <div style="display:flex;gap:var(--gap-sm)">
+            <button class="badge-vote-btn" data-hash="${p.proposal_hash}" data-vote="true" style="padding:4px 12px;border:1px solid var(--success);border-radius:var(--radius-sm);background:none;color:var(--success);cursor:pointer;font-size:var(--font-size-xs)">Vote For</button>
+            <button class="badge-vote-btn" data-hash="${p.proposal_hash}" data-vote="false" style="padding:4px 12px;border:1px solid var(--error);border-radius:var(--radius-sm);background:none;color:var(--error);cursor:pointer;font-size:var(--font-size-xs)">Vote Against</button>
+          </div>
+        </div>
+      `).join('');
+    } catch (e) {
+      console.error('loadActiveProposals:', e);
+    }
+  }
+
+  // Load proposal history
+  async function loadBadgeHistory() {
+    try {
+      const history = await rpc.call('noble_getProposalHistory', { limit: 50 });
+      const tbody = root.querySelector('#badge-history-body');
+      const empty = root.querySelector('#badge-history-empty');
+      if (!history || history.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = history.map(h => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:6px 8px;text-transform:uppercase;font-size:var(--font-size-xs)">${h.proposal_type}</td>
+        <td style="padding:6px 8px" class="mono">${truncateHash(h.target_pubkey, 10)}</td>
+        <td style="padding:6px 8px">${h.reason || '--'}</td>
+        <td style="padding:6px 8px;text-align:right">${h.votes_for}</td>
+        <td style="padding:6px 8px;text-align:right">${h.votes_against}</td>
+        <td style="padding:6px 8px"><span style="padding:2px 8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);background:${h.status==='passed'?'var(--success)':'var(--text-muted)'};color:#fff">${h.status}</span></td>
+        <td style="padding:6px 8px;text-align:right">${h.created_at_cycle}</td>
+      </tr>`).join('');
+    } catch (e) {
+      console.error('loadBadgeHistory:', e);
+    }
+  }
+
+  // Event delegation for vote & revoke buttons
+  root.addEventListener('click', async (e) => {
+    const voteBtn = e.target.closest('.badge-vote-btn');
+    if (voteBtn) {
+      const hash = voteBtn.dataset.hash;
+      const vote = voteBtn.dataset.vote === 'true';
+      try {
+        await rpc.call('noble_voteBadgeProposal', { proposal_hash: hash, vote });
+        loadActiveProposals();
+      } catch (err) {
+        alert('Vote failed: ' + (err.message || err));
+      }
+      return;
+    }
+    const revokeBtn = e.target.closest('.badge-revoke-btn');
+    if (revokeBtn) {
+      const pubkey = revokeBtn.dataset.pubkey;
+      root.querySelector('#badge-propose-target').value = pubkey;
+      propType.value = 'revoke';
+      reasonWrap.style.display = '';
+      // Switch to Propose tab
+      root.querySelectorAll('.badge-tab-btn').forEach(b => {
+        b.style.background = 'var(--bg-tertiary)'; b.style.color = 'var(--text)';
+      });
+      root.querySelector('.badge-tab-btn[data-tab="propose"]').style.background = 'var(--accent)';
+      root.querySelector('.badge-tab-btn[data-tab="propose"]').style.color = '#fff';
+      root.querySelectorAll('.badge-tab-content').forEach(c => c.style.display = 'none');
+      root.querySelector('#badge-tab-propose').style.display = '';
+    }
+  });
+
+  // Submit proposal
+  root.querySelector('#badge-propose-submit').addEventListener('click', async () => {
+    const target = root.querySelector('#badge-propose-target').value.trim();
+    const ptype = root.querySelector('#badge-propose-type').value;
+    const reason = ptype === 'revoke' ? root.querySelector('#badge-propose-reason').value : null;
+    const status = root.querySelector('#badge-propose-status');
+    if (!target) { status.textContent = 'Target pubkey required'; return; }
+    try {
+      const result = await rpc.call('noble_proposeBadge', {
+        target_pubkey: target, proposal_type: ptype, reason
+      });
+      status.innerHTML = `<span style="color:var(--success)">Proposal submitted: ${result.tx_hash ? truncateHash(result.tx_hash, 12) : 'ok'}</span>`;
+      root.querySelector('#badge-propose-target').value = '';
+    } catch (err) {
+      status.innerHTML = `<span style="color:var(--error)">${err.message || err}</span>`;
     }
   });
 
@@ -1358,6 +1725,7 @@ export function init(root, ctx) {
   return {
     destroy() {
       clearInterval(countdownInterval);
+      if (badgePollInterval) clearInterval(badgePollInterval);
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };

@@ -57,4 +57,15 @@ pub enum CycleIo {
     RequestMempoolTransactions { max_count: usize },
     /// Evict transactions that failed validation during self-proposal.
     EvictTransactions(Vec<Hash256>),
+    /// Persist badge state changes to storage.
+    /// Contains list of (pubkey_wire, cbor_badge_bytes) for upserts and
+    /// list of proposal (hash_hex, cbor_proposal_bytes) for upserts.
+    PersistBadgeState {
+        badges: Vec<(Vec<u8>, Vec<u8>)>,
+        proposals: Vec<(String, Vec<u8>)>,
+    },
+    /// Clear all cycle history from storage.
+    /// Emitted when block 1 commits and the cycle epoch changes, so stale
+    /// history entries from the bootstrap epoch are purged.
+    ClearCycleHistory,
 }

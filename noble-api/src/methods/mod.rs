@@ -4,6 +4,7 @@
 //! RPC method modules — each defines a `#[rpc(server)]` trait and its implementation.
 
 pub mod address;
+pub mod badge;
 pub mod block;
 pub mod consensus;
 pub mod document;

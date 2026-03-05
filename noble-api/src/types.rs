@@ -775,6 +775,7 @@ pub struct CycleHistoryVote {
     pub block_hash: String,
     pub validator: String,
     pub vote_count: usize,
+    pub r2_vote_count: usize,
 }
 
 /// Response for `noble_getCycleHistory`.
@@ -1086,6 +1087,44 @@ pub struct SetEncryptionModeResponse {
     pub restart_required: bool,
     /// Human-readable status message.
     pub message: String,
+}
+
+/// Response for `noble_listBannedPeers`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BannedPeerResponse {
+    pub peer_id: String,
+    pub ban_score: u32,
+    pub banned_until: u64,
+    pub reason_category: String,
+    pub reason_subject: String,
+    pub node_name: Option<String>,
+}
+
+/// Response for `noble_getBadgeHolders`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BadgeHolderResponse {
+    pub pubkey: String,
+    pub node_name: Option<String>,
+    pub status: String,
+    pub granted_at_height: u64,
+    pub last_seen: u64,
+}
+
+/// Response for `noble_getActiveProposals` / `noble_getProposalHistory`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BadgeProposalResponse {
+    pub proposal_hash: String,
+    pub proposal_type: String,
+    pub target_pubkey: String,
+    pub target_name: Option<String>,
+    pub proposer_pubkey: String,
+    pub reason: Option<String>,
+    pub created_at_cycle: u64,
+    pub expires_at_cycle: u64,
+    pub votes_for: u32,
+    pub votes_against: u32,
+    pub total_eligible_voters: u32,
+    pub status: String,
 }
 
 /// Response for `noble_getDetectedForks`.

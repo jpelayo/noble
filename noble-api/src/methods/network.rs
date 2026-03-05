@@ -74,6 +74,23 @@ pub trait NetworkApi {
     /// Remove a seed node from the list and persist to noble.toml.
     #[method(name = "removeSeed")]
     async fn remove_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned>;
+
+    /// List all currently banned peers.
+    #[method(name = "listBannedPeers")]
+    async fn list_banned_peers(&self) -> Result<Vec<BannedPeerResponse>, ErrorObjectOwned>;
+
+    /// Manually ban a peer by peer ID (hex-encoded).
+    #[method(name = "banPeer")]
+    async fn ban_peer(
+        &self,
+        peer_id: String,
+        reason: String,
+        duration_secs: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Unban a peer by peer ID (hex-encoded).
+    #[method(name = "unbanPeer")]
+    async fn unban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -379,6 +396,97 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
 
         let seeds = self.seeds.read().clone();
         Ok(SeedsResponse { seeds })
+    }
+
+    async fn list_banned_peers(&self) -> Result<Vec<BannedPeerResponse>, ErrorObjectOwned> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.network_cmd
+            .send(NetworkCommand::ListBannedPeers(tx))
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to send list bans command: {e}")))?;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(entries)) => {
+                // Enrich with node_name from peer records
+                let records = {
+                    let storage = self.storage.read();
+                    storage.list_peer_records().unwrap_or_default()
+                };
+                let name_map: std::collections::HashMap<String, String> = records
+                    .iter()
+                    .filter_map(|r| {
+                        r.last_announce
+                            .as_ref()
+                            .map(|a| (hex::encode(&r.peer_id_bytes), a.node_name.clone()))
+                    })
+                    .collect();
+                let result = entries
+                    .into_iter()
+                    .map(|e| {
+                        let pid_hex = hex::encode(&e.peer_id_bytes);
+                        BannedPeerResponse {
+                            peer_id: pid_hex.clone(),
+                            ban_score: e.ban_score,
+                            banned_until: e.banned_until,
+                            reason_category: e.reason_category,
+                            reason_subject: e.reason_subject,
+                            node_name: name_map.get(&pid_hex).cloned(),
+                        }
+                    })
+                    .collect();
+                Ok(result)
+            }
+            Ok(Err(_)) => Err(ApiError::Internal("list bans cancelled".into()).into()),
+            Err(_) => Err(ApiError::Internal("list bans timed out".into()).into()),
+        }
+    }
+
+    async fn ban_peer(
+        &self,
+        peer_id: String,
+        reason: String,
+        duration_secs: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer_bytes = hex::decode(&peer_id)
+            .map_err(|_| ApiError::InvalidAddress("invalid hex peer_id".into()))?;
+        let dur = duration_secs.unwrap_or(86400); // default 24h
+        self.network_cmd
+            .send(NetworkCommand::ManualBanPeer {
+                peer_id: peer_bytes.clone(),
+                reason: reason.clone(),
+                duration_secs: dur,
+            })
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to send ban command: {e}")))?;
+
+        // Persist to storage
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let banned_until = now + dur;
+        {
+            let storage = self.storage.read();
+            let _ = storage.store_ban(&peer_bytes, banned_until);
+        }
+
+        Ok(serde_json::json!({ "success": true, "banned_until": banned_until }))
+    }
+
+    async fn unban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let peer_bytes = hex::decode(&peer_id)
+            .map_err(|_| ApiError::InvalidAddress("invalid hex peer_id".into()))?;
+        self.network_cmd
+            .send(NetworkCommand::UnbanPeer(peer_bytes.clone()))
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to send unban command: {e}")))?;
+
+        // Remove from storage
+        {
+            let storage = self.storage.read();
+            let _ = storage.remove_ban(&peer_bytes);
+        }
+
+        Ok(serde_json::json!({ "success": true }))
     }
 }
 

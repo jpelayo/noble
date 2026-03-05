@@ -1524,6 +1524,28 @@ async fn handle_command(
             }
         }
 
+        NetworkCommand::ManualBanPeer { peer_id, reason, duration_secs: _ } => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_id) {
+                peer_manager.record_misbehavior(
+                    &pid,
+                    BanReason::new(BanCategory::ManualBan, reason),
+                );
+                let _ = swarm.disconnect_peer_id(pid);
+            }
+        }
+
+        NetworkCommand::UnbanPeer(peer_bytes) => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
+                peer_manager.unban(&pid);
+                tracing::info!(task = "network", %pid, "Peer unbanned via RPC");
+            }
+        }
+
+        NetworkCommand::ListBannedPeers(reply_tx) => {
+            let entries = peer_manager.list_banned_entries();
+            let _ = reply_tx.send(entries);
+        }
+
         NetworkCommand::Shutdown => {
             return true;
         }

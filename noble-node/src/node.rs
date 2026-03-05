@@ -332,6 +332,45 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         if !config.identity.wants_to_vote {
             engine.set_voting_enabled(false);
         }
+
+        // Load badge state from storage into the consensus engine.
+        {
+            let s = storage.read();
+            match s.list_badges() {
+                Ok(badges) => {
+                    for (pubkey_wire, cbor_data) in badges {
+                        if let Ok(badge) = noble_codec::NobleCbor::from_cbor(&cbor_data) {
+                            engine.badge_store_mut().set_badge(pubkey_wire, badge);
+                        }
+                    }
+                    let count = engine.badge_store().len();
+                    if count > 0 {
+                        tracing::info!(task = "init", "loaded {} badge(s) from storage", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task = "init", "failed to load badges from storage: {}", e);
+                }
+            }
+            // Load active badge proposals.
+            match s.list_badge_proposals() {
+                Ok(proposals) => {
+                    for (hash_bytes, cbor_data) in proposals {
+                        let hash_key = String::from_utf8_lossy(&hash_bytes).to_string();
+                        if let Ok(proposal) = noble_codec::NobleCbor::from_cbor(&cbor_data) {
+                            engine.badge_proposals_mut().insert(hash_key, proposal);
+                        }
+                    }
+                    let count = engine.badge_proposals().len();
+                    if count > 0 {
+                        tracing::info!(task = "init", "loaded {} badge proposal(s) from storage", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task = "init", "failed to load badge proposals from storage: {}", e);
+                }
+            }
+        }
         let consensus = Arc::new(RwLock::new(engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---
@@ -1446,7 +1485,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let mut engine = self.consensus.write();
                         engine.step(CycleEvent::Tick { now })
                     };
-                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &metrics, &shared_identity);
+                    self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
                     {
@@ -1908,7 +1947,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             let mut engine = self.consensus.write();
                             engine.step(ce)
                         };
-                        self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
+                        self.process_cycle_actions(actions, network_cmd, new_block_tx, cycle_phase_tx, metrics, shared_identity);
                     }
                 }
             }
@@ -1919,12 +1958,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let mut engine = self.consensus.write();
                         engine.step(cycle_event)
                     };
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, cycle_phase_tx, metrics, shared_identity);
                 }
             }
         }
-
-        let _ = cycle_phase_tx; // used for phase transition notifications (future)
     }
 
     /// Process actions emitted by the consensus engine.
@@ -1933,6 +1970,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         actions: Vec<CycleIo>,
         network_cmd: &mpsc::Sender<NetworkCommand>,
         new_block_tx: &broadcast::Sender<serde_json::Value>,
+        cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
         metrics: &Option<NobleMetrics>,
         shared_identity: &Arc<RwLock<NodeIdentityData>>,
     ) {
@@ -2005,6 +2043,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "tx_count": tx_ids.len(),
                     }));
 
+                    // Protocol activity: block committed
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "block_committed",
+                        "height": block.header.height,
+                        "hash": hex::encode(block_hash.as_bytes()),
+                        "tx_count": tx_ids.len(),
+                    }));
+
                     // S55: Re-publish announce with updated chain_tip_height after commit.
                     self.publish_node_announce(shared_identity, network_cmd);
                 }
@@ -2030,6 +2076,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::Log(msg) => {
                     tracing::info!(task = "consensus", "[consensus] {msg}");
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "consensus_log",
+                        "message": msg,
+                    }));
                 }
                 CycleIo::EmitMetric { name, value } => {
                     tracing::debug!(task = "consensus", "metric: {name} = {value}");
@@ -2048,6 +2098,41 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
                 }
+                CycleIo::PersistBadgeState { badges, proposals } => {
+                    let storage = self.storage.read();
+                    for (pubkey_wire, cbor_data) in &badges {
+                        if let Err(e) = storage.store_badge(pubkey_wire, cbor_data) {
+                            tracing::warn!(task = "badge", "failed to persist badge: {e}");
+                        }
+                    }
+                    for (hash_hex, cbor_data) in &proposals {
+                        if let Err(e) = storage.store_badge_proposal(hash_hex.as_bytes(), cbor_data) {
+                            tracing::warn!(task = "badge", "failed to persist badge proposal: {e}");
+                        }
+                    }
+                    if !badges.is_empty() || !proposals.is_empty() {
+                        tracing::debug!(
+                            task = "badge",
+                            "persisted {} badge(s) + {} proposal(s) to storage",
+                            badges.len(),
+                            proposals.len()
+                        );
+                    }
+                }
+                CycleIo::ClearCycleHistory => {
+                    let storage = self.storage.read();
+                    if let Err(e) = storage.clear_cycle_history() {
+                        tracing::warn!(
+                            task = "consensus",
+                            "failed to clear stale cycle history after epoch change: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            task = "consensus",
+                            "cleared stale cycle history (block 1 epoch change)"
+                        );
+                    }
+                }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
                     let txs: Vec<noble_core::Transaction> = {
@@ -2063,7 +2148,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         engine.step(CycleEvent::MempoolTransactions(txs))
                     };
                     // Recursively process any actions from the proposal
-                    self.process_cycle_actions(actions, network_cmd, new_block_tx, metrics, shared_identity);
+                    self.process_cycle_actions(actions, network_cmd, new_block_tx, cycle_phase_tx, metrics, shared_identity);
                 }
                 CycleIo::BroadcastBlock(ref _block)
                     if self
@@ -2074,6 +2159,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         task = "clock_drift",
                         "Block proposal suppressed — clock drift exceeds critical threshold"
                     );
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "warning",
+                        "message": "Block proposal suppressed — clock drift exceeds critical threshold",
+                    }));
                 }
                 CycleIo::BroadcastBlock(ref _block) => {
                     // Proposal gate: the single chokepoint for all block proposals
@@ -2161,11 +2250,41 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
 
+                    // Protocol activity: block proposed
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "block_proposed",
+                        "height": _block.header.height,
+                    }));
+
                     // S53: Re-publish announce with updated proposed_height/hash.
                     self.publish_node_announce(&shared_identity, &network_cmd);
                 }
                 other => {
-                    // BroadcastBlock, BroadcastVote, BanPeer, RequestBlock → network
+                    // Emit protocol activity events for votes and bans
+                    match &other {
+                        CycleIo::BroadcastVote(vote) => {
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "vote_broadcast",
+                                "round": vote.round,
+                                "block_hash": hex::encode(vote.candidate_hash.as_bytes()),
+                            }));
+                        }
+                        CycleIo::BanPeer { peer_id, reason } => {
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "peer_banned",
+                                "peer_id": hex::encode(peer_id),
+                                "reason": reason,
+                            }));
+                        }
+                        CycleIo::RequestBlock { block_hash, .. } => {
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "block_requested",
+                                "hash": hex::encode(block_hash.as_bytes()),
+                            }));
+                        }
+                        _ => {}
+                    }
+                    // BroadcastVote, BanPeer, RequestBlock → network
                     let cmds = bridge::cycle_io_to_network_commands(other);
                     for cmd in cmds {
                         if let Err(e) = network_cmd.try_send(cmd) {
@@ -3688,7 +3807,8 @@ mod tests {
             p2p_port: 8780,
             setup_complete: false,
         }));
-        node.process_cycle_actions(actions, &tx, &block_tx, &None, &test_identity);
+        let (cycle_tx, _) = broadcast::channel(16);
+        node.process_cycle_actions(actions, &tx, &block_tx, &cycle_tx, &None, &test_identity);
         // No assertion needed — just verifying no panics
     }
 }

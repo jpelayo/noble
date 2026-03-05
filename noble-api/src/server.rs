@@ -13,6 +13,7 @@ use noble_storage::StorageEngine;
 use crate::error::ApiError;
 use crate::ip_filter::{IpFilter, IpFilterLayer};
 use crate::methods::address::AddressApiServer;
+use crate::methods::badge::BadgeApiServer;
 use crate::methods::block::BlockApiServer;
 use crate::methods::consensus::ConsensusApiServer;
 use crate::methods::document::DocumentApiServer;
@@ -240,6 +241,9 @@ fn build_rpc_module<S: StorageEngine + Send + Sync + 'static>(
     module
         .merge(ConsensusApiServer::into_rpc(state.clone()))
         .map_err(|e| ApiError::Internal(format!("merge ConsensusApi: {e}")))?;
+    module
+        .merge(BadgeApiServer::into_rpc(state.clone()))
+        .map_err(|e| ApiError::Internal(format!("merge BadgeApi: {e}")))?;
     module
         .merge(AddressApiServer::into_rpc(state.clone()))
         .map_err(|e| ApiError::Internal(format!("merge AddressApi: {e}")))?;

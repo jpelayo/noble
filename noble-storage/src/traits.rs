@@ -233,6 +233,54 @@ pub trait StorageEngine {
         Ok(StorageStats::default())
     }
 
+    // ── Badge State ──
+
+    /// Store a badge for a pubkey (CBOR-encoded VoteBadge).
+    fn store_badge(&self, pubkey_wire: &[u8], badge_cbor: &[u8]) -> Result<(), StorageError> {
+        let _ = (pubkey_wire, badge_cbor);
+        Ok(()) // default no-op
+    }
+
+    /// Get a badge by pubkey wire bytes (returns CBOR bytes).
+    fn get_badge(&self, pubkey_wire: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let _ = pubkey_wire;
+        Ok(None) // default no-op
+    }
+
+    /// Remove a badge.
+    fn remove_badge(&self, pubkey_wire: &[u8]) -> Result<(), StorageError> {
+        let _ = pubkey_wire;
+        Ok(()) // default no-op
+    }
+
+    /// List all badges: (pubkey_wire, cbor_bytes).
+    fn list_badges(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(Vec::new()) // default no-op
+    }
+
+    /// Store a badge proposal (keyed by proposal hash).
+    fn store_badge_proposal(&self, proposal_hash: &[u8], proposal_cbor: &[u8]) -> Result<(), StorageError> {
+        let _ = (proposal_hash, proposal_cbor);
+        Ok(()) // default no-op
+    }
+
+    /// Get a badge proposal by hash.
+    fn get_badge_proposal(&self, proposal_hash: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let _ = proposal_hash;
+        Ok(None) // default no-op
+    }
+
+    /// Remove a badge proposal.
+    fn remove_badge_proposal(&self, proposal_hash: &[u8]) -> Result<(), StorageError> {
+        let _ = proposal_hash;
+        Ok(()) // default no-op
+    }
+
+    /// List all badge proposals: (proposal_hash, cbor_bytes).
+    fn list_badge_proposals(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(Vec::new()) // default no-op
+    }
+
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
     fn close(&mut self) -> Result<(), StorageError>;

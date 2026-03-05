@@ -470,9 +470,9 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     async fn get_cycle_status(&self) -> Result<CycleStatusResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read();
         let tip_height = consensus.chain_tip().0;
-        let cycle = consensus.current_cycle();
-        let (_engine_phase_idx, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
-        let engine_phase = consensus.current_phase();
+        // phase_timing() computes phase/timing from real-time (cycle_mgr),
+        // avoiding stale tracked_phase during the 1-tick window after epoch changes.
+        let (phase_index, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
 
         // No genesis block → hide cycle identity.  Return u64::MAX sentinel so
         // the GUI shows a "bootstrapping" indicator instead of a cycle number.
@@ -486,13 +486,15 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             });
         }
 
-        // 4 phases: direct 1:1 mapping from engine phases.
-        let (phase_name, phase_index) = match engine_phase {
-            noble_consensus::CyclePhase::Proposal => ("Block Proposal", 0u8),
-            noble_consensus::CyclePhase::Voting => ("Voting", 1),
-            noble_consensus::CyclePhase::Reflection => ("Reflection", 2),
-            noble_consensus::CyclePhase::Propagation => ("Propagation", 3),
+        // 4 phases: derive name from real-time phase index (not tick-tracked).
+        let phase_name = match phase_index {
+            0 => "Block Proposal",
+            1 => "Voting",
+            2 => "Reflection",
+            _ => "Propagation",
         };
+
+        let cycle = consensus.current_cycle();
 
         Ok(CycleStatusResponse {
             cycle_number: Some(cycle),
@@ -698,6 +700,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                         block_hash: hash_to_hex(&v.block_hash),
                         validator: v.validator,
                         vote_count: v.vote_count,
+                        r2_vote_count: v.r2_vote_count,
                     })
                     .collect(),
                 winner: entry.winner,

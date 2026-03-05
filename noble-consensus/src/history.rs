@@ -47,8 +47,11 @@ pub struct CycleVoteTally {
     pub block_hash: Hash256,
     /// Hex-encoded validator who proposed this block.
     pub validator: String,
-    /// Number of votes received.
+    /// Number of R1 votes received.
     pub vote_count: usize,
+    /// Number of R2 (confirmation) votes received.
+    #[serde(default)]
+    pub r2_vote_count: usize,
 }
 
 #[cfg(test)]
@@ -70,6 +73,7 @@ mod tests {
                 block_hash: Hash256::from_bytes([0x11; 32]),
                 validator: "abcd".to_string(),
                 vote_count: 3,
+                r2_vote_count: 2,
             }],
             winner: Some("validator-1".to_string()),
             winning_hash: Some(Hash256::from_bytes([0x11; 32])),

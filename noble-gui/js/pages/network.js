@@ -17,7 +17,10 @@ export function init(root, ctx) {
   let peerChart = null;
 
   root.innerHTML = `
-    <div class="page-header"><h1>Network</h1><p>Connected peers and sync status</p></div>
+    <div class="page-header" style="display:flex;align-items:baseline;gap:var(--gap-sm)">
+      <div><h1 style="display:inline">Network</h1><p>Connected peers and sync status</p></div>
+      <button id="net-ban-gear" title="Ban Management" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;margin-top:4px">&#9881;</button>
+    </div>
 
     <div class="kpi-grid">
       <div class="kpi-card">
@@ -81,6 +84,62 @@ export function init(root, ctx) {
           </thead>
           <tbody id="net-peers"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Ban Management Modal -->
+    <div id="net-ban-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:900px;width:95%;max-height:80vh;overflow-y:auto;padding:var(--gap-lg)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)">
+          <h2 style="margin:0;font-size:1.2rem">Ban Management</h2>
+          <button id="ban-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
+        </div>
+        <div style="display:flex;gap:var(--gap-sm);margin-bottom:var(--gap);border-bottom:1px solid var(--border);padding-bottom:var(--gap-sm)">
+          <button class="ban-tab btn-sm" data-tab="banned" style="padding:6px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);cursor:pointer;background:var(--accent);color:#fff">Banned Peers</button>
+          <button class="ban-tab btn-sm" data-tab="manual" style="padding:6px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);cursor:pointer;background:var(--bg-tertiary);color:var(--text-primary)">Manual Ban</button>
+          <button class="ban-tab btn-sm" data-tab="scores" style="padding:6px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);cursor:pointer;background:var(--bg-tertiary);color:var(--text-primary)">Active Scores</button>
+        </div>
+        <div id="ban-tab-banned">
+          <table class="data-table" style="width:100%">
+            <thead><tr><th>Peer ID</th><th>Name</th><th>Reason</th><th>Expires</th><th></th></tr></thead>
+            <tbody id="ban-list-body"></tbody>
+          </table>
+          <p id="ban-list-empty" style="color:var(--text-muted);text-align:center;padding:var(--gap);display:none">No banned peers</p>
+        </div>
+        <div id="ban-tab-manual" style="display:none">
+          <div style="display:flex;flex-direction:column;gap:var(--gap-sm)">
+            <label style="font-size:var(--font-size-sm);color:var(--text-secondary)">Peer ID (hex)</label>
+            <input id="ban-peer-id" type="text" placeholder="Hex-encoded peer ID" style="padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            <label style="font-size:var(--font-size-sm);color:var(--text-secondary)">Reason</label>
+            <select id="ban-reason" style="padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
+              <option value="manual_ban">Manual Ban</option>
+              <option value="invalid_block">Invalid Block</option>
+              <option value="invalid_transaction">Invalid Transaction</option>
+              <option value="protocol_violation">Protocol Violation</option>
+              <option value="duplicate_proposal">Duplicate Proposal</option>
+              <option value="tx_flood">TX Flood</option>
+              <option value="misrepresentation">Misrepresentation</option>
+              <option value="unresponsive">Unresponsive</option>
+            </select>
+            <label style="font-size:var(--font-size-sm);color:var(--text-secondary)">Duration</label>
+            <select id="ban-duration" style="padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
+              <option value="3600">1 hour</option>
+              <option value="21600">6 hours</option>
+              <option value="86400" selected>24 hours</option>
+              <option value="604800">7 days</option>
+              <option value="0">Permanent</option>
+            </select>
+            <button id="ban-submit-btn" class="btn-sm" style="padding:8px 16px;background:var(--error);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;align-self:flex-start;margin-top:var(--gap-sm)">Ban Peer</button>
+            <div id="ban-submit-msg" style="font-size:var(--font-size-xs);display:none"></div>
+          </div>
+        </div>
+        <div id="ban-tab-scores" style="display:none">
+          <table class="data-table" style="width:100%">
+            <thead><tr><th>Peer ID</th><th>Name</th><th>Score</th><th>Bar</th><th>Last Reason</th></tr></thead>
+            <tbody id="ban-scores-body"></tbody>
+          </table>
+          <p id="ban-scores-empty" style="color:var(--text-muted);text-align:center;padding:var(--gap);display:none">No peers with active ban scores</p>
+        </div>
       </div>
     </div>
   `;
@@ -243,6 +302,142 @@ export function init(root, ctx) {
       setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
     }
   });
+
+  // ── Ban Management Modal ──
+  const banGear = root.querySelector('#net-ban-gear');
+  const banModal = root.querySelector('#net-ban-modal');
+  const banModalClose = root.querySelector('#ban-modal-close');
+  let banPollInterval = null;
+
+  function openBanModal() {
+    banModal.style.display = 'flex';
+    loadBannedPeers();
+    banPollInterval = setInterval(loadBannedPeers, 10000);
+  }
+  function closeBanModal() {
+    banModal.style.display = 'none';
+    if (banPollInterval) { clearInterval(banPollInterval); banPollInterval = null; }
+  }
+  banGear.addEventListener('click', openBanModal);
+  banModalClose.addEventListener('click', closeBanModal);
+  banModal.addEventListener('click', (e) => { if (e.target === banModal) closeBanModal(); });
+
+  // Tab switching
+  const banTabs = root.querySelectorAll('.ban-tab');
+  banTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      banTabs.forEach(t => { t.style.background = 'var(--bg-tertiary)'; t.style.color = 'var(--text-primary)'; });
+      tab.style.background = 'var(--accent)'; tab.style.color = '#fff';
+      root.querySelector('#ban-tab-banned').style.display = tab.dataset.tab === 'banned' ? '' : 'none';
+      root.querySelector('#ban-tab-manual').style.display = tab.dataset.tab === 'manual' ? '' : 'none';
+      root.querySelector('#ban-tab-scores').style.display = tab.dataset.tab === 'scores' ? '' : 'none';
+      if (tab.dataset.tab === 'scores') loadBanScores();
+      if (tab.dataset.tab === 'banned') loadBannedPeers();
+    });
+  });
+
+  async function loadBannedPeers() {
+    try {
+      const bans = await rpc.call('noble_listBannedPeers');
+      const tbody = root.querySelector('#ban-list-body');
+      const empty = root.querySelector('#ban-list-empty');
+      tbody.innerHTML = '';
+      if (!bans || bans.length === 0) {
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      for (const b of bans) {
+        const tr = document.createElement('tr');
+        const expiry = new Date(b.banned_until * 1000).toLocaleString();
+        const name = b.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
+        const reason = `${b.reason_category}${b.reason_subject ? ': ' + b.reason_subject : ''}`;
+        tr.innerHTML = `
+          <td class="mono" style="font-size:var(--font-size-xs)">${truncateHash(b.peer_id, 8)}</td>
+          <td>${name}</td>
+          <td style="font-size:var(--font-size-xs)">${reason}</td>
+          <td style="font-size:var(--font-size-xs)">${expiry}</td>
+          <td><button class="btn-sm unban-btn" data-pid="${b.peer_id}" style="padding:4px 10px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Unban</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    } catch (e) { console.error('[ban-modal] load bans:', e); }
+  }
+
+  // Unban delegation
+  root.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.unban-btn');
+    if (!btn) return;
+    const pid = btn.dataset.pid;
+    btn.disabled = true;
+    try {
+      await rpc.call('noble_unbanPeer', { peer_id: pid });
+      loadBannedPeers();
+    } catch (err) { console.error('[ban-modal] unban:', err); }
+    btn.disabled = false;
+  });
+
+  // Manual ban submit
+  const banSubmitBtn = root.querySelector('#ban-submit-btn');
+  const banSubmitMsg = root.querySelector('#ban-submit-msg');
+  banSubmitBtn.addEventListener('click', async () => {
+    const peerId = root.querySelector('#ban-peer-id').value.trim();
+    if (!peerId) return;
+    const reason = root.querySelector('#ban-reason').value;
+    const durVal = parseInt(root.querySelector('#ban-duration').value, 10);
+    const durSecs = durVal === 0 ? 31536000 : durVal; // 0 = "permanent" → 1 year
+    banSubmitBtn.disabled = true;
+    banSubmitMsg.style.display = 'block';
+    banSubmitMsg.style.color = 'var(--text-muted)';
+    banSubmitMsg.textContent = 'Banning...';
+    try {
+      const result = await rpc.call('noble_banPeer', { peer_id: peerId, reason, duration_secs: durSecs });
+      if (result.success) {
+        banSubmitMsg.style.color = 'var(--success)';
+        banSubmitMsg.textContent = 'Peer banned successfully';
+        root.querySelector('#ban-peer-id').value = '';
+        loadBannedPeers();
+      } else {
+        banSubmitMsg.style.color = 'var(--error)';
+        banSubmitMsg.textContent = 'Ban failed';
+      }
+    } catch (err) {
+      banSubmitMsg.style.color = 'var(--error)';
+      banSubmitMsg.textContent = err.message || 'Ban failed';
+    }
+    banSubmitBtn.disabled = false;
+    setTimeout(() => { banSubmitMsg.style.display = 'none'; }, 5000);
+  });
+
+  // Active scores tab
+  async function loadBanScores() {
+    try {
+      const peers = await rpc.call('noble_getPeerInfo');
+      const withScore = (peers || []).filter(p => p.ban_score > 0 && p.status === 'connected');
+      const tbody = root.querySelector('#ban-scores-body');
+      const empty = root.querySelector('#ban-scores-empty');
+      tbody.innerHTML = '';
+      if (withScore.length === 0) { empty.style.display = ''; return; }
+      empty.style.display = 'none';
+      for (const p of withScore.sort((a, b) => b.ban_score - a.ban_score)) {
+        const tr = document.createElement('tr');
+        const name = p.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
+        const pct = Math.min(100, p.ban_score);
+        const barColor = pct > 50 ? 'var(--error)' : pct > 25 ? 'var(--warning)' : 'var(--success)';
+        const lastReason = p.last_ban_reason ? `${p.last_ban_reason.category}` : '&mdash;';
+        tr.innerHTML = `
+          <td class="mono" style="font-size:var(--font-size-xs)">${truncateHash(p.peer_id, 8)}</td>
+          <td>${name}</td>
+          <td style="font-weight:600;color:${barColor}">${p.ban_score}</td>
+          <td><div style="background:var(--bg-tertiary);border-radius:2px;height:8px;width:100px;overflow:hidden"><div style="background:${barColor};height:100%;width:${pct}%"></div></div></td>
+          <td style="font-size:var(--font-size-xs)">${lastReason}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    } catch (e) { console.error('[ban-modal] load scores:', e); }
+  }
+
+  unsubs.push(() => { if (banPollInterval) clearInterval(banPollInterval); });
 
   loadNetwork();
 

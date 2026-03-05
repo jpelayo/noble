@@ -18,7 +18,8 @@ pub mod validator;
 pub mod vote;
 
 pub use badge::{
-    BadgeStatus, BadgeStore, RevocationReason, SuspensionNotice, SuspensionReason, VoteBadge,
+    BadgeProposal, BadgeProposalType, BadgeStatus, BadgeStore, RevocationReason,
+    SuspensionNotice, SuspensionReason, VoteBadge, BADGE_VOTE_WINDOW_CYCLES,
 };
 pub use candidate::CandidateTracker;
 pub use config::ConsensusConfig;

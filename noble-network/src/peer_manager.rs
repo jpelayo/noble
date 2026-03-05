@@ -542,6 +542,41 @@ impl PeerManager {
         self.peers.get(peer_id)
     }
 
+    /// Unban a peer (operator RPC). Removes from both in-memory ban map and connected peer state.
+    pub fn unban(&mut self, peer_id: &PeerId) {
+        self.banned.remove(peer_id);
+    }
+
+    /// List all currently banned peers with metadata for the RPC response.
+    pub fn list_banned_entries(&self) -> Vec<crate::messages::BannedPeerEntry> {
+        let mut entries = Vec::new();
+        for (pid, banned_at) in &self.banned {
+            if banned_at.elapsed() >= self.ban_duration {
+                continue; // expired
+            }
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let remaining = self.ban_duration.as_secs().saturating_sub(banned_at.elapsed().as_secs());
+            let banned_until = now_unix + remaining;
+
+            // Try to get last ban reason from peer state (may be disconnected already)
+            let (category, subject, score) = self.peers.get(pid).and_then(|s| {
+                s.last_ban_reason.as_ref().map(|r| (r.category.as_str().to_string(), r.subject.clone(), s.ban_score))
+            }).unwrap_or_else(|| ("manual_ban".to_string(), String::new(), 100));
+
+            entries.push(crate::messages::BannedPeerEntry {
+                peer_id_bytes: pid.to_bytes(),
+                ban_score: score,
+                banned_until,
+                reason_category: category,
+                reason_subject: subject,
+            });
+        }
+        entries
+    }
+
     /// Remove expired bans. Should be called periodically.
     pub fn cleanup_expired_bans(&mut self) -> usize {
         let before = self.banned.len();

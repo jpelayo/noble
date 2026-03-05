@@ -8,11 +8,12 @@
 
 use noble_core::{
     validate_block, validate_transaction, Block, BlockHeader, BlockValidationContext,
-    TxValidationContext,
+    TxValidationContext, TX_TYPE_BADGE_PROPOSAL, TX_TYPE_BADGE_VOTE,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::badge::{self, BadgeProposalType, BadgeStore, VoteBadge};
 use crate::candidate::CandidateTracker;
 use crate::config::ConsensusConfig;
 use crate::cycle::{CycleManager, CyclePhase};
@@ -83,6 +84,10 @@ pub struct CycleEngine {
     /// Whether this node should cast R1/R2 votes (true for voters and full
     /// validators, false for block-producer-only nodes).
     voting_enabled: bool,
+    /// Badge store for governance (grant/revoke) tracking.
+    badge_store: BadgeStore,
+    /// Active badge proposals (keyed by proposal hash hex).
+    badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
 }
 
 impl CycleEngine {
@@ -131,6 +136,8 @@ impl CycleEngine {
             first_tick: true,
             proposals_enabled: true, // default; call set_proposals_enabled(false) for vote-only
             voting_enabled: true,   // default; call set_voting_enabled(false) for propose-only
+            badge_store: BadgeStore::new(),
+            badge_proposals: std::collections::HashMap::new(),
         }
     }
 
@@ -169,6 +176,26 @@ impl CycleEngine {
     /// Get a reference to the candidate tracker (for API queries).
     pub fn candidate_tracker(&self) -> &CandidateTracker {
         &self.candidate_tracker
+    }
+
+    /// Get a reference to the badge store.
+    pub fn badge_store(&self) -> &BadgeStore {
+        &self.badge_store
+    }
+
+    /// Get a mutable reference to the badge store.
+    pub fn badge_store_mut(&mut self) -> &mut BadgeStore {
+        &mut self.badge_store
+    }
+
+    /// Get a reference to the active badge proposals.
+    pub fn badge_proposals(&self) -> &std::collections::HashMap<String, badge::BadgeProposal> {
+        &self.badge_proposals
+    }
+
+    /// Get a mutable reference to the active badge proposals.
+    pub fn badge_proposals_mut(&mut self) -> &mut std::collections::HashMap<String, badge::BadgeProposal> {
+        &mut self.badge_proposals
     }
 
     /// Update the chain tip (height + block hash).
@@ -419,6 +446,7 @@ impl CycleEngine {
 
         // H-002: Build vote tallies snapshot before clearing.
         let tallies = self.vote_mgr.current_tallies();
+        let r2_tallies = self.vote_mgr.r2_tallies();
         let vote_entries: Vec<CycleVoteTally> = tallies
             .iter()
             .map(|(hash, count)| {
@@ -431,6 +459,7 @@ impl CycleEngine {
                     block_hash: *hash,
                     validator,
                     vote_count: *count,
+                    r2_vote_count: r2_tallies.get(hash).copied().unwrap_or(0),
                 }
             })
             .collect();
@@ -499,7 +528,13 @@ impl CycleEngine {
                                 self.cycle_mgr
                                     .set_genesis_timestamp(block.header.timestamp);
                                 self.first_tick = true;
+                                // Purge stale cycle history from the bootstrap epoch.
+                                // The cycle numbers from the old epoch are meaningless
+                                // after the epoch change.
+                                outputs.push(CycleIo::ClearCycleHistory);
                             }
+                            // Process badge txs from the committed block.
+                            self.process_badge_transactions(&block, completed_cycle);
                             outputs.push(CycleIo::CommitBlock(block));
                             outputs.push(CycleIo::EmitMetric {
                                 name: "block_committed".to_string(),
@@ -657,6 +692,35 @@ impl CycleEngine {
             );
         }
 
+        // Check badge proposal expirations at cycle boundary.
+        self.expire_badge_proposals(completed_cycle);
+
+        // Persist badge state to storage if there are any badges or proposals.
+        if !self.badge_store.is_empty() || !self.badge_proposals.is_empty() {
+            let badges: Vec<(Vec<u8>, Vec<u8>)> = self
+                .badge_store
+                .list_all()
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    noble_codec::to_canonical_cbor(v)
+                        .ok()
+                        .map(|cbor| (k.clone(), cbor))
+                })
+                .collect();
+            let proposals: Vec<(String, Vec<u8>)> = self
+                .badge_proposals
+                .iter()
+                .filter_map(|(k, v)| {
+                    noble_codec::to_canonical_cbor(v)
+                        .ok()
+                        .map(|cbor| (k.clone(), cbor))
+                })
+                .collect();
+            if !badges.is_empty() || !proposals.is_empty() {
+                outputs.push(CycleIo::PersistBadgeState { badges, proposals });
+            }
+        }
+
         // Clear state for next cycle
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
@@ -665,6 +729,189 @@ impl CycleEngine {
         self.r2_vote_cast = false;
 
         outputs
+    }
+
+    /// Process badge-related transactions from a committed block.
+    ///
+    /// Scans for TX_TYPE_BADGE_PROPOSAL (0x03) and TX_TYPE_BADGE_VOTE (0x04),
+    /// updates the badge store and proposal tracking accordingly.
+    fn process_badge_transactions(&mut self, block: &Block, current_cycle: u64) {
+        for tx in &block.transactions {
+            match tx.tx_type {
+                TX_TYPE_BADGE_PROPOSAL => {
+                    // Decode metadata from the transaction's metadata entries.
+                    let target = tx.metadata.iter().find(|m| m.key == "target_pubkey");
+                    let ptype = tx.metadata.iter().find(|m| m.key == "proposal_type");
+                    let reason = tx.metadata.iter().find(|m| m.key == "reason");
+
+                    let (Some(target_entry), Some(ptype_entry)) = (target, ptype) else {
+                        warn!("badge proposal tx missing required metadata fields");
+                        continue;
+                    };
+
+                    let proposal_type = match ptype_entry.value.first() {
+                        Some(&badge::PROPOSAL_TYPE_GRANT) => BadgeProposalType::Grant,
+                        Some(&badge::PROPOSAL_TYPE_REVOKE) => BadgeProposalType::Revoke,
+                        _ => {
+                            warn!("badge proposal tx has invalid proposal_type byte");
+                            continue;
+                        }
+                    };
+
+                    // Validate: grant target must not already have active badge.
+                    if proposal_type == BadgeProposalType::Grant
+                        && self.badge_store.is_active(&target_entry.value)
+                    {
+                        debug!("badge grant proposal for already-active peer, skipping");
+                        continue;
+                    }
+                    // Validate: revoke target must hold an active badge.
+                    if proposal_type == BadgeProposalType::Revoke
+                        && !self.badge_store.is_active(&target_entry.value)
+                    {
+                        debug!("badge revoke proposal for non-active peer, skipping");
+                        continue;
+                    }
+
+                    let revocation_reason = if proposal_type == BadgeProposalType::Revoke {
+                        reason.and_then(|r| match r.value.first() {
+                            Some(0) => Some(badge::RevocationReason::DuplicateProposal),
+                            Some(1) => Some(badge::RevocationReason::ProtocolAbuse),
+                            Some(2) => Some(badge::RevocationReason::ExtendedAbsence),
+                            Some(3) => Some(badge::RevocationReason::Misrepresentation),
+                            _ => Some(badge::RevocationReason::Other),
+                        })
+                    } else {
+                        None
+                    };
+
+                    let mut proposer_wire = vec![tx.publisher_sig.scheme_id];
+                    proposer_wire.extend_from_slice(&tx.publisher_sig.public_key);
+                    let proposal = badge::BadgeProposal::new(
+                        proposal_type,
+                        target_entry.value.clone(),
+                        proposer_wire,
+                        revocation_reason,
+                        current_cycle,
+                    );
+
+                    let tx_hash = hex::encode(noble_crypto::sha256(&noble_codec::to_canonical_cbor(tx).unwrap_or_default()));
+                    info!(
+                        "badge proposal recorded: type={:?}, target={}..., hash={}",
+                        proposal_type,
+                        hex::encode(&target_entry.value[..4.min(target_entry.value.len())]),
+                        &tx_hash[..8]
+                    );
+                    self.badge_proposals.insert(tx_hash, proposal);
+                }
+                TX_TYPE_BADGE_VOTE => {
+                    let phash = tx.metadata.iter().find(|m| m.key == "proposal_hash");
+                    let vote = tx.metadata.iter().find(|m| m.key == "vote");
+
+                    let (Some(phash_entry), Some(vote_entry)) = (phash, vote) else {
+                        warn!("badge vote tx missing required metadata fields");
+                        continue;
+                    };
+
+                    let proposal_hash = hex::encode(&phash_entry.value);
+                    let approve = vote_entry.value.first() == Some(&1);
+                    let mut voter_wire = vec![tx.publisher_sig.scheme_id];
+                    voter_wire.extend_from_slice(&tx.publisher_sig.public_key);
+
+                    // Voter must hold an active badge.
+                    if !self.badge_store.is_active(&voter_wire) {
+                        debug!("badge vote from non-badge-holder, skipping");
+                        continue;
+                    }
+
+                    if let Some(proposal) = self.badge_proposals.get_mut(&proposal_hash) {
+                        if proposal.status != "active" {
+                            debug!("badge vote for non-active proposal {}", &proposal_hash[..8]);
+                            continue;
+                        }
+                        if proposal.record_vote(voter_wire, approve) {
+                            debug!(
+                                "badge vote recorded for proposal {}: approve={}",
+                                &proposal_hash[..8],
+                                approve
+                            );
+                        } else {
+                            debug!("duplicate badge vote for proposal {}", &proposal_hash[..8]);
+                        }
+                    } else {
+                        debug!("badge vote references unknown proposal {}", &proposal_hash[..8]);
+                    }
+                }
+                _ => {} // Not a badge tx
+            }
+        }
+    }
+
+    /// Check all open badge proposals for expiration; execute those that pass.
+    fn expire_badge_proposals(&mut self, current_cycle: u64) {
+        let total_eligible = self.badge_store.count_active();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Collect proposals that need resolution.
+        let expired_keys: Vec<String> = self
+            .badge_proposals
+            .iter()
+            .filter(|(_, p)| p.status == "active" && current_cycle >= p.expires_at_cycle)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in expired_keys {
+            let Some(proposal) = self.badge_proposals.get_mut(&key) else {
+                continue;
+            };
+
+            if proposal.passes(total_eligible) {
+                match proposal.proposal_type {
+                    BadgeProposalType::Grant => {
+                        let badge = VoteBadge::new(
+                            self.tip_height,
+                            current_cycle,
+                            proposal.proposer_pubkey.clone(),
+                            now,
+                        );
+                        self.badge_store
+                            .set_badge(proposal.target_pubkey.clone(), badge);
+                        info!(
+                            "badge GRANTED to {}... (proposal {})",
+                            hex::encode(&proposal.target_pubkey[..4.min(proposal.target_pubkey.len())]),
+                            &key[..8]
+                        );
+                        proposal.status = "passed".to_string();
+                    }
+                    BadgeProposalType::Revoke => {
+                        if let Some(b) = self
+                            .badge_store
+                            .get_badge_mut(&proposal.target_pubkey)
+                        {
+                            b.revoke();
+                            info!(
+                                "badge REVOKED from {}... (proposal {})",
+                                hex::encode(&proposal.target_pubkey[..4.min(proposal.target_pubkey.len())]),
+                                &key[..8]
+                            );
+                        }
+                        proposal.status = "passed".to_string();
+                    }
+                }
+            } else {
+                proposal.status = "expired".to_string();
+                debug!(
+                    "badge proposal {} expired without majority ({} for / {} against / {} eligible)",
+                    &key[..8],
+                    proposal.votes_for.len(),
+                    proposal.votes_against.len(),
+                    total_eligible
+                );
+            }
+        }
     }
 
     fn handle_block_proposed(&mut self, block: Box<Block>, from_peer: Vec<u8>) -> Vec<CycleIo> {
@@ -1144,7 +1391,9 @@ impl ConsensusStateMachine for CycleEngine {
             .duration_since(self.clock_anchor.0)
             .as_secs();
         let now = self.clock_anchor.1 + elapsed;
-        let phase_idx = match self.tracked_phase {
+        // Compute phase from cycle_mgr in real-time (not from tracked_phase)
+        // to avoid stale data during the 1-tick window after epoch changes.
+        let phase_idx = match self.cycle_mgr.current_phase(now) {
             CyclePhase::Proposal => 0,
             CyclePhase::Voting => 1,
             CyclePhase::Reflection => 2,

@@ -46,6 +46,10 @@ struct Inner {
     version_chain: HashMap<Hash256, Vec<Hash256>>,
     /// Publisher index: pubkey_wire_bytes → list of notarization tx_ids.
     publisher_index: HashMap<Vec<u8>, Vec<Hash256>>,
+    /// Badge state: pubkey_wire → CBOR-encoded VoteBadge.
+    badges: HashMap<Vec<u8>, Vec<u8>>,
+    /// Badge proposals: proposal_hash → CBOR-encoded BadgeProposal.
+    badge_proposals: HashMap<Vec<u8>, Vec<u8>>,
     closed: bool,
 }
 
@@ -810,6 +814,60 @@ impl StorageEngine for MemoryStorage {
         Self::check_open(&inner)?;
         inner.cycle_history.clear();
         Ok(())
+    }
+
+    // ── Badge State ──
+
+    fn store_badge(&self, pubkey_wire: &[u8], badge_cbor: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.badges.insert(pubkey_wire.to_vec(), badge_cbor.to_vec());
+        Ok(())
+    }
+
+    fn get_badge(&self, pubkey_wire: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.badges.get(pubkey_wire).cloned())
+    }
+
+    fn remove_badge(&self, pubkey_wire: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.badges.remove(pubkey_wire);
+        Ok(())
+    }
+
+    fn list_badges(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.badges.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
+    fn store_badge_proposal(&self, proposal_hash: &[u8], proposal_cbor: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.badge_proposals.insert(proposal_hash.to_vec(), proposal_cbor.to_vec());
+        Ok(())
+    }
+
+    fn get_badge_proposal(&self, proposal_hash: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.badge_proposals.get(proposal_hash).cloned())
+    }
+
+    fn remove_badge_proposal(&self, proposal_hash: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.badge_proposals.remove(proposal_hash);
+        Ok(())
+    }
+
+    fn list_badge_proposals(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.badge_proposals.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 
     fn close(&mut self) -> Result<(), StorageError> {

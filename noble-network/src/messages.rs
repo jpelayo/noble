@@ -193,8 +193,30 @@ pub enum NetworkCommand {
     /// The optional oneshot sender receives `Ok(())` on connection success or
     /// `Err(reason)` on failure/timeout. When `None`, dial is fire-and-forget.
     DialPeer(libp2p::Multiaddr, Option<tokio::sync::oneshot::Sender<Result<(), String>>>),
+    /// Manually ban a peer by their serialized PeerId bytes (operator RPC).
+    ManualBanPeer {
+        peer_id: Vec<u8>,
+        reason: String,
+        duration_secs: u64,
+    },
+    /// Unban a peer by their serialized PeerId bytes (operator RPC).
+    UnbanPeer(Vec<u8>),
+    /// List all currently banned peers. Response via oneshot channel.
+    ListBannedPeers(
+        tokio::sync::oneshot::Sender<Vec<BannedPeerEntry>>,
+    ),
     /// Shut down the network service.
     Shutdown,
+}
+
+/// A single banned peer entry returned by `ListBannedPeers`.
+#[derive(Debug, Clone)]
+pub struct BannedPeerEntry {
+    pub peer_id_bytes: Vec<u8>,
+    pub ban_score: u32,
+    pub banned_until: u64,
+    pub reason_category: String,
+    pub reason_subject: String,
 }
 
 /// Events emitted from the network service to the node.
