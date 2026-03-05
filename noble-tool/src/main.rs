@@ -1567,6 +1567,12 @@ fn cmd_chain_info(cli_data_dir: PathBuf) {
     println!("Data directory: {}", data_dir.display());
     println!();
 
+    // Only open if CURRENT file exists — otherwise RocksDB::open creates a fresh empty DB.
+    if !data_dir.join("CURRENT").exists() {
+        println!("Chain is empty (no database found).");
+        return;
+    }
+
     let storage = match RocksDbStorage::open(&data_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -1641,36 +1647,29 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
         return;
     }
 
-    // 2. Check RocksDB LOCK file — if locked, node is running
-    let lock_path = data_dir.join("LOCK");
-    if lock_path.exists() {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .open(&lock_path)
-        {
-            Ok(f) => {
-                use std::os::unix::io::AsRawFd;
-                let fd = f.as_raw_fd();
-                let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-                if ret != 0 {
-                    eprintln!("Error: database is locked — the node is still running.");
-                    eprintln!("Stop it first:  brew services stop noble");
-                    std::process::exit(1);
-                }
-                // Lock succeeded → node is not running, release
-                unsafe { libc::flock(fd, libc::LOCK_UN) };
-            }
-            Err(_) => {} // Can't open LOCK file — proceed cautiously
+    // 2. Check if the noble-node process is running.
+    // pgrep is portable across macOS and Linux.
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-x", "noble-node"])
+        .output()
+    {
+        if output.status.success() {
+            eprintln!("Error: noble-node is still running (PID {}).",
+                String::from_utf8_lossy(&output.stdout).trim());
+            eprintln!("Stop it first:  brew services stop noble");
+            std::process::exit(1);
         }
     }
 
     // 3. Show chain height before wipe (best-effort).
-    // Open and close RocksDB first — it may rotate logs during open.
-    if let Ok(storage) = RocksDbStorage::open(&data_dir) {
-        if let Ok(Some(tip)) = storage.get_chain_tip() {
-            println!("Current chain: height {}, tip {}", tip.height, tip.block_hash);
+    // Only open if CURRENT file exists — otherwise RocksDB::open creates a fresh empty DB.
+    if data_dir.join("CURRENT").exists() {
+        if let Ok(storage) = RocksDbStorage::open(&data_dir) {
+            if let Ok(Some(tip)) = storage.get_chain_tip() {
+                println!("Current chain: height {}, tip {}", tip.height, tip.block_hash);
+            }
+            drop(storage);
         }
-        drop(storage);
     }
 
     // 4. Preserved files and directories (never touched)
