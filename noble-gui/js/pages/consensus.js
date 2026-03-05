@@ -241,6 +241,7 @@ export function init(root, ctx) {
           <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Drag rows to set priority order &mdash; used by Round Robin and Weighted Probability strategies.</p>
       </div>
     </div>
 
