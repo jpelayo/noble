@@ -1829,6 +1829,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         announce.host_address.clone(),
                         announce.country_code.clone(),
                     );
+                    // Set friendly name from NodeAnnounce so vote tallies show names.
+                    if !announce.node_name.is_empty() {
+                        engine.validator_list_mut().set_friendly_name(
+                            &announce.identity_key,
+                            announce.node_name.clone(),
+                        );
+                    }
                     engine.validator_list_mut().update_known_peer(
                         &hex::encode(&identity_wire),
                         Some(announce.node_name.clone()),
