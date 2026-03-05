@@ -561,16 +561,29 @@ export function init(root, ctx) {
     }));
   }
 
-  // Seed activity log with already-connected peers (handshakes happen before page load)
-  rpc.call('noble_getPeerInfo').then(peers => {
-    if (Array.isArray(peers)) {
-      for (const p of peers) {
-        if (p.status === 'connected') {
-          pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
+  // Seed activity log on page load: current phase + already-connected peers
+  function seedActivityLog() {
+    rpc.call('noble_getCycleStatus').then(status => {
+      if (status && status.phase) {
+        pushActivity({ event: 'phase_change', phase: status.phase, cycle: status.cycle_number });
+      }
+    }).catch(() => {});
+    rpc.call('noble_getPeerInfo').then(peers => {
+      if (Array.isArray(peers)) {
+        for (const p of peers) {
+          if (p.status === 'connected') {
+            pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
+          }
         }
       }
-    }
-  }).catch(() => {});
+    }).catch(() => {});
+  }
+  seedActivityLog();
+  // Retry after 5s in case peers haven't reconnected yet (fresh node restart)
+  const seedRetry = setTimeout(() => {
+    if (activityEntries.length <= 1) seedActivityLog();
+  }, 5000);
+  unsubs.push(() => clearTimeout(seedRetry));
 
   function updateManualVoteVisibility() {
     const panel = root.querySelector('#cs-manual-vote-panel');

@@ -821,10 +821,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 .map_err(|e| NodeError::Config(e.to_string()))?;
 
         // --- Build broadcast channels for WebSocket subscriptions ---
-        let (new_block_tx, _) = broadcast::channel(64);
-        let (new_tx_tx, _) = broadcast::channel(256);
-        let (cycle_phase_tx, _) = broadcast::channel(16);
-        let (peer_update_tx, _) = broadcast::channel(64);
+        // Keep one receiver alive per channel so messages are buffered (not lost)
+        // until the first WS subscriber connects.
+        let (new_block_tx, _block_rx_keepalive) = broadcast::channel(64);
+        let (new_tx_tx, _tx_rx_keepalive) = broadcast::channel(256);
+        let (cycle_phase_tx, _phase_rx_keepalive) = broadcast::channel(64);
+        let (peer_update_tx, _peer_rx_keepalive) = broadcast::channel(64);
 
         // --- IP access control ---
         // Setup mode when the wizard has not been completed (explicit flag).
