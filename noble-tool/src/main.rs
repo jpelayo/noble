@@ -1519,16 +1519,13 @@ fn format_bytes(bytes: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Resolve the effective data directory.
-/// Priority: explicit --data-dir > noble.toml [storage] data_dir > platform default.
+/// Priority: noble.toml [storage] data_dir > CLI --data-dir > platform default.
+///
+/// noble.toml is always consulted first because the platform default compiled
+/// into the binary may differ from the Homebrew-configured data directory
+/// (e.g. Linuxbrew uses /home/linuxbrew/.linuxbrew/var/noble/data).
 fn resolve_data_dir(cli_data_dir: &std::path::Path) -> PathBuf {
-    let platform_default = noble_core::paths::platform_data_dir();
-
-    // If user explicitly passed a non-default --data-dir, use it
-    if cli_data_dir != platform_default {
-        return cli_data_dir.to_path_buf();
-    }
-
-    // Try noble.toml
+    // Always try noble.toml first — it is the canonical source of truth.
     let config_path = noble_core::paths::platform_config_path();
     if config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -1540,20 +1537,18 @@ fn resolve_data_dir(cli_data_dir: &std::path::Path) -> PathBuf {
                     .and_then(|d| d.as_str())
                 {
                     let path = PathBuf::from(dir);
-                    if path.exists() {
-                        eprintln!(
-                            "Data dir from {}: {}",
-                            config_path.display(),
-                            path.display()
-                        );
-                        return path;
-                    }
+                    eprintln!(
+                        "Data dir from {}: {}",
+                        config_path.display(),
+                        path.display()
+                    );
+                    return path;
                 }
             }
         }
     }
 
-    platform_default
+    cli_data_dir.to_path_buf()
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,7 +1664,16 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
         }
     }
 
-    // 3. Preserved files and directories (never touched)
+    // 3. Show chain height before wipe (best-effort).
+    // Open and close RocksDB first — it may rotate logs during open.
+    if let Ok(storage) = RocksDbStorage::open(&data_dir) {
+        if let Ok(Some(tip)) = storage.get_chain_tip() {
+            println!("Current chain: height {}, tip {}", tip.height, tip.block_hash);
+        }
+        drop(storage);
+    }
+
+    // 4. Preserved files and directories (never touched)
     let preserved_files: &[&str] = &[
         "identity.json",
         "validator.key",
@@ -1682,7 +1686,7 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
     ];
     let preserved_dirs: &[&str] = &["keystore"];
 
-    // 4. Enumerate what exists in data_dir
+    // 5. Enumerate what exists in data_dir (after RocksDB close)
     let entries: Vec<_> = match fs::read_dir(&data_dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
         Err(e) => {
@@ -1705,14 +1709,6 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
         } else {
             to_delete.push(entry.path());
         }
-    }
-
-    // 5. Show chain height before wipe (best-effort)
-    if let Ok(storage) = RocksDbStorage::open(&data_dir) {
-        if let Ok(Some(tip)) = storage.get_chain_tip() {
-            println!("Current chain: height {}, tip {}", tip.height, tip.block_hash);
-        }
-        drop(storage);
     }
 
     // 6. Print plan
@@ -1748,9 +1744,12 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
 
     if !confirm {
         println!();
-        println!("Dry run — no files were deleted.");
-        println!("Add --confirm to actually perform the reset.");
-        return;
+        eprint!("Type YES to confirm deletion: ");
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() || input.trim() != "YES" {
+            println!("Aborted — no files were deleted.");
+            return;
+        }
     }
 
     // 6. Perform deletion
@@ -1767,22 +1766,22 @@ fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
                     }
                 }
             }
-            if let Err(e) = fs::remove_dir_all(path) {
-                eprintln!(
+            match fs::remove_dir_all(path) {
+                Ok(()) => deleted_count += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!(
                     "Warning: could not delete directory {}: {e}",
                     path.display()
-                );
-            } else {
-                deleted_count += 1;
+                ),
             }
         } else {
             if let Ok(meta) = path.metadata() {
                 freed_bytes += meta.len();
             }
-            if let Err(e) = fs::remove_file(path) {
-                eprintln!("Warning: could not delete file {}: {e}", path.display());
-            } else {
-                deleted_count += 1;
+            match fs::remove_file(path) {
+                Ok(()) => deleted_count += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("Warning: could not delete file {}: {e}", path.display()),
             }
         }
     }

@@ -264,18 +264,18 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let data_dir_str = self.data_dir.as_ref().map(|d| d.display().to_string());
 
         // Genesis-block-based identification: no identity until chain exists.
+        // The network IS the genesis block — no genesis means no identity.
         let tip_height = self.consensus.read().chain_tip().0;
-        let (network_name, genesis_hash) = if tip_height > 0 {
-            (self.network_name.clone(), self.genesis_hash.clone())
-        } else {
-            (String::new(), String::new())
-        };
+        let has_chain = tip_height > 0;
+        let network_name = if has_chain { self.network_name.clone() } else { String::new() };
+        let genesis_hash = if has_chain { self.genesis_hash.clone() } else { String::new() };
+        let chain_id = if has_chain { self.chain_id } else { 0 };
 
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
             software_version: SOFTWARE_VERSION.to_string(),
             protocol_version: PROTOCOL_VERSION,
-            chain_id: self.chain_id,
+            chain_id,
             network_name,
             genesis_hash,
             uptime_secs: uptime,
