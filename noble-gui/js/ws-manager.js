@@ -106,7 +106,8 @@ export class WsManager {
         }
 
         // Subscription confirmation: {"jsonrpc":"2.0","id":N,"result":"sub_id"}
-        if (msg.id != null && typeof msg.result === 'string' && this.#pending.has(msg.id)) {
+        // jsonrpsee sends sub_id as a number (not a string)
+        if (msg.id != null && msg.result != null && this.#pending.has(msg.id)) {
           const { topic } = this.#pending.get(msg.id);
           this.#pending.delete(msg.id);
           this.#subIds.set(topic, msg.result);

@@ -378,8 +378,8 @@ ws.subscribe('newTransactions', () => {
   }).catch(() => {});
 });
 
-ws.subscribe('cyclePhaseChange', (status) => {
-  state.cyclePhase = status.phase;
+ws.subscribe('cyclePhaseChange', (data) => {
+  if (data.phase) state.cyclePhase = data.phase;
 });
 
 // ── Start ──

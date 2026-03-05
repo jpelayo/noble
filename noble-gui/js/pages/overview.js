@@ -135,7 +135,7 @@ export function init(root, ctx) {
     try {
       const count = await rpc.call('noble_getBlockCount');
       const start = Math.max(0, count.height - 9);
-      const blocks = await rpc.call('noble_getBlockRange', { start, end: count.height });
+      const blocks = await rpc.call('noble_getBlockRange', [start, count.height - start + 1]);
       ovBlocks.innerHTML = '';
       for (const b of blocks.reverse()) {
         const tr = document.createElement('tr');
@@ -216,15 +216,13 @@ export function init(root, ctx) {
   }
 
   // WS: new blocks refresh
-  ws.subscribe('newBlocks', () => {
+  unsubs.push(ws.subscribe('newBlocks', () => {
     loadRecentBlocks();
-  });
-  unsubs.push(() => ws.unsubscribe('newBlocks'));
+  }));
 
-  ws.subscribe('newTransactions', () => {
+  unsubs.push(ws.subscribe('newTransactions', () => {
     loadRecentTxs();
-  });
-  unsubs.push(() => ws.unsubscribe('newTransactions'));
+  }));
 
   loadRecentBlocks();
   loadRecentTxs();

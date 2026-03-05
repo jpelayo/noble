@@ -121,15 +121,14 @@ export function init(root, ctx) {
   }
 
   // WS: new transactions
-  ws.subscribe('newTransactions', (entry) => {
+  unsubs.push(ws.subscribe('newTransactions', (entry) => {
     appendStreamItem(entry);
     const cur = parseInt(mpCount.textContent.replace(/,/g, ''), 10) || 0;
     mpCount.textContent = formatNumber(cur + 1);
-  });
-  unsubs.push(() => ws.unsubscribe('newTransactions'));
+  }));
 
   // WS: mempool stats refresh
-  ws.subscribe('mempoolStats', (info) => {
+  unsubs.push(ws.subscribe('mempoolStats', (info) => {
     mpCount.textContent = formatNumber(info.count);
     mpSize.textContent = formatBytes(info.total_bytes);
     mpMinFee.textContent = formatFee(info.min_fee);
@@ -140,8 +139,7 @@ export function init(root, ctx) {
         series: [{ data: info.fee_histogram.map(b => b.count) }],
       });
     }
-  });
-  unsubs.push(() => ws.unsubscribe('mempoolStats'));
+  }));
 
   loadMempoolInfo();
 

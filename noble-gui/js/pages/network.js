@@ -284,13 +284,12 @@ export function init(root, ctx) {
   }
 
   // WS: peer updates
-  ws.subscribe('peerUpdates', async () => {
+  unsubs.push(ws.subscribe('peerUpdates', async () => {
     try {
       const peers = await rpc.call('noble_getPeerInfo');
       renderPeerTable(peers);
     } catch { /* ignore */ }
-  });
-  unsubs.push(() => ws.unsubscribe('peerUpdates'));
+  }));
 
   // ── Copy-to-clipboard delegation ──
   root.addEventListener('click', (e) => {

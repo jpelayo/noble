@@ -559,18 +559,13 @@ export function init(root, ctx) {
         loadCycle(); loadTimeline(); loadVoteTallies();
       }
     }));
-    // Also subscribe to peer updates for connect/disconnect
-    unsubs.push(ws.subscribe('peerUpdates', (data) => {
-      const evt = data.event === 'connected' ? 'peer_connected' : 'peer_disconnected';
-      pushActivity({ event: evt, peer_id: data.peer_id || '' });
-    }));
   }
 
   // Seed activity log with already-connected peers (handshakes happen before page load)
-  rpc.call('noble_getPeers').then(peers => {
+  rpc.call('noble_getPeerInfo').then(peers => {
     if (Array.isArray(peers)) {
       for (const p of peers) {
-        if (p.status === 'alive') {
+        if (p.status === 'connected') {
           pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
         }
       }

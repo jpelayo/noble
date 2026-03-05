@@ -554,8 +554,7 @@ export function init(root, ctx) {
   });
 
   // WS: refresh on new block (might include new subsidy)
-  ws.subscribe('newBlocks', () => loadWallet());
-  unsubs.push(() => ws.unsubscribe('newBlocks'));
+  unsubs.push(ws.subscribe('newBlocks', () => loadWallet()));
 
   loadWallet();
 
