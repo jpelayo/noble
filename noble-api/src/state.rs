@@ -85,6 +85,8 @@ pub struct PeerInfoEntry {
     pub chain_tip_hash: Option<String>,
     /// Peer's active proposal height (from gossip NodeAnnounce). `None` if not proposing.
     pub proposed_height: Option<u64>,
+    /// Noble identity key wire bytes (from NodeAnnounce). Links PeerId to validator key.
+    pub identity_key: Option<Vec<u8>>,
 }
 
 /// Shared state available to all RPC method handlers.

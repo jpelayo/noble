@@ -1651,17 +1651,20 @@ fn do_reset_chain(data_dir: PathBuf, confirm: bool) {
         return;
     }
 
-    // 2. Check if the noble-node process is running.
-    // pgrep is portable across macOS and Linux.
-    if let Ok(output) = std::process::Command::new("pgrep")
-        .args(["-x", "noble-node"])
-        .output()
-    {
-        if output.status.success() {
-            eprintln!("Error: noble-node is still running (PID {}).",
-                String::from_utf8_lossy(&output.stdout).trim());
-            eprintln!("Stop it first:  brew services stop noble");
-            std::process::exit(1);
+    // 2. Check if the noble-node process is running (only when targeting the real data dir).
+    // Skip when resetting a temp/test directory that can't conflict with the live node.
+    let platform_dir = noble_core::paths::platform_data_dir();
+    if data_dir == platform_dir || data_dir.starts_with(&platform_dir) {
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-x", "noble-node"])
+            .output()
+        {
+            if output.status.success() {
+                eprintln!("Error: noble-node is still running (PID {}).",
+                    String::from_utf8_lossy(&output.stdout).trim());
+                eprintln!("Stop it first:  brew services stop noble");
+                std::process::exit(1);
+            }
         }
     }
 

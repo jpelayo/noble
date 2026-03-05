@@ -177,7 +177,38 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
         // Cross-reference validators with peer memory for last_seen
         let storage = self.storage.read();
-        let peer_records = storage.list_peer_records().unwrap_or_default();
+        let mut peer_records = storage.list_peer_records().unwrap_or_default();
+
+        // Build set of identity_keys for currently-connected peers.
+        // Links PeerId (live connection) → identity_key (validator key) directly,
+        // bypassing PeerRecord entirely.  Solves: no PeerRecord yet, stale PeerRecord,
+        // and gossip-forwarder PeerId mismatch.
+        let connected_identity_keys: std::collections::HashSet<Vec<u8>> = {
+            let info = self.peer_info.read();
+            info.values()
+                .filter_map(|entry| entry.identity_key.clone())
+                .collect()
+        };
+
+        // Backfill: if peer_records is empty but we have live connected peers with
+        // identity_keys, synthesize PeerRecords from the live state and persist them.
+        // Covers post-reset scenarios where peer_records were wiped but connections exist.
+        if peer_records.is_empty() && !connected_identity_keys.is_empty() {
+            let info = self.peer_info.read();
+            for entry in info.values() {
+                if let Some(ref ik) = entry.identity_key {
+                    let mut rec = noble_core::PeerRecord::new(
+                        ik.clone(),
+                        hex::decode(&entry.peer_id).unwrap_or_default(),
+                        now,
+                    );
+                    rec.last_addr = Some(entry.addr.clone());
+                    let _ = storage.store_peer_record(&rec);
+                    peer_records.push(rec);
+                }
+            }
+            drop(info);
+        }
         drop(storage);
 
         // Build lookup: identity_key wire bytes → (host_address, country_code)
@@ -192,34 +223,34 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             }
         }
 
-        // Build set of currently-connected peer_id bytes for liveness override.
-        let connected_peer_ids: std::collections::HashSet<Vec<u8>> = {
-            let info = self.peer_info.read();
-            info.keys()
-                .filter_map(|hex_pid| hex::decode(hex_pid).ok())
-                .collect()
-        };
-
         let mut consensus = self.consensus.write();
-        // Update last_seen from peer records.
-        // If the peer is currently connected → force last_seen = now (alive).
+
+        // 1. Update last_seen from peer records (historical data).
         for rec in &peer_records {
             if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
                 if consensus.validator_list().is_validator(&pk) {
-                    let ts = if connected_peer_ids.contains(&rec.peer_id_bytes) {
-                        now // currently connected → alive
-                    } else {
-                        rec.last_seen
-                    };
                     consensus
                         .validator_list_mut()
-                        .update_last_seen(&pk, ts);
+                        .update_last_seen(&pk, rec.last_seen);
                 }
             }
         }
 
-        // SELF is never in its own peer_records — inject current timestamp
-        // so the local validator doesn't show as "unreachable".
+        // 2. Override: any validator whose identity_key matches a connected peer → alive NOW.
+        //    This works even with no PeerRecord (announce arrived, record not yet persisted,
+        //    or gossipsub forwarder PeerId differs from direct connection PeerId).
+        for wire_key in &connected_identity_keys {
+            if let Ok(pk) = NoblePublicKey::from_wire_bytes(wire_key) {
+                if consensus.validator_list().is_validator(&pk) {
+                    consensus
+                        .validator_list_mut()
+                        .update_last_seen(&pk, now);
+                }
+            }
+        }
+
+        // 3. SELF is never in its own peer_records — inject current timestamp
+        //    so the local validator doesn't show as "unreachable".
         if let Some(ref self_pk_hex) = self.validator_pubkey {
             if let Ok(self_pk) = NoblePublicKey::from_wire_bytes(
                 &hex::decode(self_pk_hex).unwrap_or_default(),

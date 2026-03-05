@@ -1352,6 +1352,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut initial_announce_sent = false;
 
+        // --- Delayed re-announce: fires 3s after last PeerConnected to survive gossipsub mesh race ---
+        let announce_delay = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(announce_delay);
+        let mut announce_delay_armed = false;
+
         // --- Peer status polling (every 60s) — populates chain_tip for fork detection ---
         let mut peer_status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         peer_status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1380,12 +1385,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 &metrics,
                                 &shared_identity,
                             );
-                            // Re-publish NodeAnnounce on every new peer connection.
-                            // Ensures the new peer receives our identity/chain state
-                            // even if they reset their data and have no peer records.
+                            // On PeerConnected: publish NodeAnnounce immediately AND
+                            // arm a 3-second delayed re-announce.  The immediate publish
+                            // may be lost if the gossipsub mesh hasn't formed yet (needs
+                            // a heartbeat).  The delayed re-publish ensures delivery.
                             if is_peer_connected {
                                 self.publish_node_announce(&shared_identity, &network_cmd);
                                 initial_announce_sent = true;
+                                announce_delay.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(3));
+                                announce_delay_armed = true;
                             }
                         }
                         None => {
@@ -1457,6 +1465,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if initial_announce_sent {
                         self.publish_node_announce(&shared_identity, &network_cmd);
                     }
+                }
+
+                // Delayed re-announce: 3s after PeerConnected, re-publish to survive
+                // gossipsub mesh formation race.
+                _ = &mut announce_delay, if announce_delay_armed => {
+                    self.publish_node_announce(&shared_identity, &network_cmd);
+                    announce_delay_armed = false;
                 }
 
                 // Peer status polling — request chain tips from all peers (fork detection)
@@ -1586,6 +1601,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             chain_tip_height: cth,
                             chain_tip_hash: cthash,
                             proposed_height: None,
+                            identity_key: None, // set when NodeAnnounce received
                         },
                     );
                 }
@@ -1678,12 +1694,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 drop(storage);
 
-                // S55: Track gossip-received proposed_height for the proposal gate.
-                if announce.proposed_height.is_some() {
+                // Link PeerId → identity_key in live connection map, and track proposed_height.
+                {
                     let hex_pid = hex::encode(&peer_id);
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
-                        entry.proposed_height = announce.proposed_height;
+                        entry.identity_key = Some(identity_wire.clone());
+                        if announce.proposed_height.is_some() {
+                            entry.proposed_height = announce.proposed_height;
+                        }
                     }
                 }
 
