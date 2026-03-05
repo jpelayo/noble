@@ -54,8 +54,8 @@ export function init(root, ctx) {
       const endHeight = totalHeight - currentPage * PAGE_SIZE;
       const startHeight = Math.max(0, endHeight - PAGE_SIZE + 1);
 
-      const count = endHeight - startHeight + 1;
-      const blocks = await rpc.call('noble_getBlockRange', [startHeight, count]);
+      const rangeSize = endHeight - startHeight + 1;
+      const blocks = await rpc.call('noble_getBlockRange', [startHeight, rangeSize]);
 
       tbody.innerHTML = '';
       for (const b of blocks.reverse()) {
