@@ -265,10 +265,20 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Genesis-block-based identification: no identity until chain exists.
         // The network IS the genesis block — no genesis means no identity.
+        // The genesis hash is block 1's hash (the first consensus-produced block),
+        // NOT the precomputed genesis constant.
         let tip_height = self.consensus.read().chain_tip().0;
         let has_chain = tip_height > 0;
         let network_name = if has_chain { self.network_name.clone() } else { String::new() };
-        let genesis_hash = if has_chain { self.genesis_hash.clone() } else { String::new() };
+        let genesis_hash = if has_chain {
+            self.storage
+                .read()
+                .get_block_hash_by_height(1)
+                .map(|h| hex::encode(h.as_bytes()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let chain_id = if has_chain { self.chain_id } else { 0 };
 
         Ok(NodeInfoResponse {

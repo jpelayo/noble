@@ -27,7 +27,7 @@ pub struct NobleMetrics {
     pub mempool_size: Gauge,
     /// Total byte size of mempool transactions (approximate).
     pub mempool_bytes: Gauge,
-    /// Current consensus cycle phase (0 = Idle, 1 = Proposal, 2 = Voting).
+    /// Current consensus cycle phase (0 = Proposal, 1 = Voting, 2 = Reflection, 3 = Propagation).
     pub cycle_phase: Gauge,
     /// Seconds elapsed in the current consensus cycle.
     pub cycle_elapsed_secs: Gauge,
@@ -74,7 +74,7 @@ impl NobleMetrics {
         .expect("metric");
         let cycle_phase = Gauge::with_opts(Opts::new(
             "noble_cycle_phase",
-            "Current consensus cycle phase (0=Idle, 1=Proposal, 2=Voting)",
+            "Current consensus cycle phase (0=Proposal, 1=Voting, 2=Reflection, 3=Propagation)",
         ))
         .expect("metric");
         let cycle_elapsed_secs = Gauge::with_opts(Opts::new(

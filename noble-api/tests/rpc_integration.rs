@@ -537,7 +537,8 @@ async fn get_cycle_status_shape() {
         .await
         .unwrap();
 
-    assert!(resp["cycle_number"].is_number());
+    // cycle_number is null when bootstrapping (no genesis), number otherwise.
+    assert!(resp["cycle_number"].is_number() || resp["cycle_number"].is_null());
     assert!(resp["phase"].is_string());
     assert!(resp["phase_index"].is_number());
     assert!(resp["phase_remaining_secs"].is_number());

@@ -25,7 +25,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
 
     /// After any number of tick events, the engine's phase is always
-    /// either Validation (0) or Reflection (1).
+    /// one of the four valid phases (Proposal, Voting, Reflection, Propagation).
     #[test]
     fn phase_is_always_valid(
         timestamps in proptest::collection::vec(0u64..100_000, 1..20),
@@ -47,8 +47,8 @@ proptest! {
             engine.step(CycleEvent::Tick { now: ts });
             let phase = engine.current_phase();
             prop_assert!(
-                matches!(phase, CyclePhase::Validation | CyclePhase::Reflection),
-                "phase must be Validation or Reflection, got {:?}",
+                matches!(phase, CyclePhase::Proposal | CyclePhase::Voting | CyclePhase::Reflection | CyclePhase::Propagation),
+                "phase must be Proposal, Voting, Reflection, or Propagation, got {:?}",
                 phase
             );
         }
@@ -149,7 +149,7 @@ proptest! {
         engine.step(CycleEvent::Tick { now: tick_time });
         let (phase_idx, phase_remaining, cycle_remaining) = engine.phase_timing();
 
-        prop_assert!(phase_idx <= 1, "phase_index must be 0 or 1, got {}", phase_idx);
+        prop_assert!(phase_idx <= 3, "phase_index must be 0..3, got {}", phase_idx);
         prop_assert!(
             phase_remaining <= noble_core::CYCLE_DURATION_SECS,
             "phase_remaining {} exceeds cycle duration {}",
@@ -193,10 +193,10 @@ proptest! {
         );
         engine.step(CycleEvent::Tick { now: cycle * 1800 });
 
-        // Force Reflection phase for vote acceptance
+        // Force Voting phase for vote acceptance
         engine.step(CycleEvent::PhaseTransition {
             cycle,
-            new_phase: CyclePhase::Reflection,
+            new_phase: CyclePhase::Voting,
         });
 
         let candidate = Hash256::from_bytes([0xCC; 32]);

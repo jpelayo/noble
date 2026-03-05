@@ -150,24 +150,24 @@ async fn three_nodes_complete_consensus_cycle() {
         })
         .await;
 
-    // 3. Transition to Reflection phase (triggers auto-vote).
+    // 3. Transition to Voting phase (votes are cast via tick after delay).
     let cycle = node1.engine.current_cycle();
     node1
         .step(CycleEvent::PhaseTransition {
             cycle,
-            new_phase: noble_consensus::CyclePhase::Reflection,
+            new_phase: noble_consensus::CyclePhase::Voting,
         })
         .await;
     node2
         .step(CycleEvent::PhaseTransition {
             cycle,
-            new_phase: noble_consensus::CyclePhase::Reflection,
+            new_phase: noble_consensus::CyclePhase::Voting,
         })
         .await;
     node3
         .step(CycleEvent::PhaseTransition {
             cycle,
-            new_phase: noble_consensus::CyclePhase::Reflection,
+            new_phase: noble_consensus::CyclePhase::Voting,
         })
         .await;
 

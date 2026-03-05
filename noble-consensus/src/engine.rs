@@ -33,7 +33,7 @@ pub trait ConsensusStateMachine {
     /// Return the chain tip (height, block_hash).
     fn chain_tip(&self) -> (u64, Hash256);
     /// Return phase timing: (phase_index, phase_remaining_secs, cycle_remaining_secs).
-    /// phase_index: 0 = Validation, 1 = Reflection.
+    /// phase_index: 0 = Proposal, 1 = Voting, 2 = Reflection, 3 = Propagation.
     fn phase_timing(&self) -> (u8, u64, u64);
 }
 
@@ -68,11 +68,13 @@ pub struct CycleEngine {
     last_cycle_history: Option<CycleHistoryEntry>,
     /// P1.3: Manual vote target for the Manual voting strategy (set via castVote RPC).
     manual_vote: Option<Hash256>,
+    /// Whether an R1 vote has been cast this cycle.
+    r1_vote_cast: bool,
     /// P1.2: Whether an R2 confirmation vote has been cast this cycle.
     r2_vote_cast: bool,
     /// S15-A: Per-validator reputation scoring engine.
     reputation: ReputationEngine,
-    /// First tick: triggers proposal request if starting mid-Validation phase.
+    /// First tick: triggers proposal request if starting mid-Proposal phase.
     first_tick: bool,
     /// Whether this node should propose blocks (true for validators, false for
     /// vote-only peers / voting gateways).  When false the key is still used to
@@ -116,13 +118,14 @@ impl CycleEngine {
             tip_timestamp: 0,
             tip_header: None,
             tracked_cycle: u64::MAX, // sentinel: first tick initializes without boundary event
-            tracked_phase: CyclePhase::Reflection,
+            tracked_phase: CyclePhase::Propagation,
             chain_id,
             our_validator_key: validator_key,
             total_peers: 0,
             clock_anchor: (std::time::Instant::now(), now_unix),
             last_cycle_history: None,
             manual_vote: None,
+            r1_vote_cast: false,
             r2_vote_cast: false,
             reputation: ReputationEngine::new(),
             first_tick: true,
@@ -192,6 +195,7 @@ impl CycleEngine {
         self.candidate_tracker = CandidateTracker::new();
         self.last_cycle_history = None;
         self.manual_vote = None;
+        self.r1_vote_cast = false;
         self.r2_vote_cast = false;
         // When hopping to a new chain (height 0), clear the cycle epoch.
         // Next tick sets epoch to GENESIS_TIMESTAMP; the new chain's block 1
@@ -199,7 +203,7 @@ impl CycleEngine {
         if height == 0 {
             self.cycle_mgr.set_genesis_timestamp(u64::MAX);
             self.tracked_cycle = u64::MAX;
-            self.tracked_phase = CyclePhase::Reflection;
+            self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
         }
         tracing::warn!("consensus engine reset to height {height}");
@@ -293,9 +297,9 @@ impl CycleEngine {
                 "cycle engine: initialized at cycle {}, phase {:?}",
                 new_cycle, new_phase
             );
-            // If starting mid-Validation and we're a validator, request mempool
+            // If starting mid-Proposal and we're a validator, request mempool
             // txs so we can propose in the current cycle.
-            if new_phase == CyclePhase::Validation
+            if new_phase == CyclePhase::Proposal
                 && self.our_validator_key.is_some()
                 && self.proposals_enabled
             {
@@ -320,13 +324,21 @@ impl CycleEngine {
             }
         }
 
-        // P1.2: Cast R2 confirmation vote at Reflection midpoint.
+        // Cast R1 vote after VOTE_CAST_DELAY seconds into the Voting phase.
+        // Blocks had the full Proposal phase + delay to propagate before voters act.
+        const VOTE_CAST_DELAY: u64 = 30;
+        if new_phase == CyclePhase::Voting && !self.r1_vote_cast {
+            let phase_offset = self.cycle_mgr.phase_offset(now);
+            if phase_offset >= VOTE_CAST_DELAY {
+                outputs.extend(self.cast_r1_vote(new_cycle));
+            }
+        }
+
+        // Cast R2 confirmation vote after VOTE_CAST_DELAY seconds into Reflection.
+        // R1 votes had the rest of the Voting phase + delay to propagate.
         if new_phase == CyclePhase::Reflection && !self.r2_vote_cast {
-            let phase_duration = self.config.cycle_duration_secs / 2;
-            let phase_remaining = self.cycle_mgr.seconds_until_phase_change(now);
-            let elapsed_in_phase = phase_duration.saturating_sub(phase_remaining);
-            // Cast R2 at or past the midpoint of the Reflection phase.
-            if elapsed_in_phase >= phase_duration / 2 {
+            let phase_offset = self.cycle_mgr.phase_offset(now);
+            if phase_offset >= VOTE_CAST_DELAY {
                 outputs.extend(self.cast_r2_vote(new_cycle));
             }
         }
@@ -352,13 +364,15 @@ impl CycleEngine {
         );
 
         match phase {
-            CyclePhase::Validation => {
-                // New validation phase: clear previous state
+            CyclePhase::Proposal => {
+                // New proposal phase: clear previous state
                 self.vote_mgr.clear();
                 self.vote_mgr.set_current_cycle(cycle);
                 self.candidate_tracker.clear();
+                self.r1_vote_cast = false;
+                self.r2_vote_cast = false;
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {cycle}: entering Validation phase"
+                    "cycle {cycle}: entering Proposal phase"
                 )));
                 // P0.3: If we are a block-proposing validator, request mempool txs.
                 // Vote-only peers (proposals_enabled=false) skip proposal.
@@ -366,50 +380,22 @@ impl CycleEngine {
                     outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
                 }
             }
+            CyclePhase::Voting => {
+                outputs.push(CycleIo::Log(format!(
+                    "cycle {cycle}: entering Voting phase"
+                )));
+                // R1 vote casting happens in handle_tick after VOTE_CAST_DELAY
+            }
             CyclePhase::Reflection => {
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cycle}: entering Reflection phase"
                 )));
-                // If we are a voting validator, cast R1 vote for our preferred candidate.
-                // Propose-only nodes (voting_enabled=false) skip voting.
-                if self.voting_enabled {
-                if let Some((ref priv_key, ref pub_key)) = self.our_validator_key {
-                    let tallies = self.vote_mgr.current_tallies();
-                    // P1.3: Pass manual_vote to strategy selector
-                    let manual = self.manual_vote.take();
-                    let selected = crate::strategy::select_candidate(
-                        &self.config.voting_strategy,
-                        &self.candidate_tracker,
-                        &self.validator_list,
-                        cycle,
-                        manual,
-                        Some(&tallies),
-                    );
-                    if let Some(candidate_hash) = selected {
-                        match PorVote::sign(cycle, candidate_hash, priv_key, pub_key.clone()) {
-                            Ok(vote) => {
-                                // Record our own R1 vote locally — gossipsub does not
-                                // deliver published messages back to the sender, so
-                                // without this the validator's vote is lost from its
-                                // own tally and compute_majority always returns
-                                // Indeterminate on small networks.
-                                let _ = self.vote_mgr.record_vote(b"self", &vote);
-                                outputs.push(CycleIo::BroadcastVote(vote));
-                                outputs.push(CycleIo::Log(format!(
-                                    "cycle {cycle}: broadcast R1 vote for candidate {} (strategy: {})",
-                                    candidate_hash,
-                                    self.config.voting_strategy.name()
-                                )));
-                            }
-                            Err(e) => {
-                                outputs.push(CycleIo::Log(format!(
-                                    "cycle {cycle}: failed to sign vote: {e}"
-                                )));
-                            }
-                        }
-                    }
-                }
-                } // voting_enabled
+                // R2 vote casting happens in handle_tick after VOTE_CAST_DELAY
+            }
+            CyclePhase::Propagation => {
+                outputs.push(CycleIo::Log(format!(
+                    "cycle {cycle}: entering Propagation phase"
+                )));
             }
         }
 
@@ -465,10 +451,10 @@ impl CycleEngine {
                 candidate_hash,
                 strength,
             } => {
-                // Dual-Witness Rule (bootstrap): blocks 1–2 require ≥ min_unique_voters distinct keys
-                // voting for the WINNING candidate specifically (not just total unique voters).
-                // After block 2, normal plurality consensus applies even with 1 active voter.
-                let witness_ok = self.tip_height >= 2
+                // Dual-Witness Rule: only the genesis block (block 1) requires ≥ min_unique_voters
+                // distinct keys voting for the winning candidate. After block 1 is committed,
+                // normal plurality consensus applies.
+                let witness_ok = self.tip_height >= 1
                     || self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash) >= self.config.min_unique_voters;
 
                 if witness_ok {
@@ -532,8 +518,8 @@ impl CycleEngine {
                     }
                 } else {
                     debug!(
-                        "cycle {}: Dual-Witness not met for bootstrap block {} ({} unique voter(s) for winner {}, need {})",
-                        completed_cycle, self.tip_height + 1,
+                        "cycle {}: Dual-Witness not met for genesis block ({} unique voter(s) for winner {}, need {})",
+                        completed_cycle,
                         self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash),
                         candidate_hash, self.config.min_unique_voters
                     );
@@ -675,6 +661,7 @@ impl CycleEngine {
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
+        self.r1_vote_cast = false;
         self.r2_vote_cast = false;
 
         outputs
@@ -703,9 +690,9 @@ impl CycleEngine {
             return outputs;
         }
 
-        // Blocks are accepted during both Validation and Reflection phases.
-        // During Reflection, a block may arrive via vote-triggered RequestBlock
-        // (the node missed the original BlockAnnounce during Validation).  The
+        // Blocks are accepted during all 4 phases (Proposal, Voting, Reflection, Propagation).
+        // During Voting/Reflection, a block may arrive via vote-triggered RequestBlock
+        // (the node missed the original BlockAnnounce during Proposal).  The
         // block is still fully validated — allowing it into the tracker lets
         // the node cast an informed vote for a candidate it would otherwise
         // never see.
@@ -820,11 +807,14 @@ impl CycleEngine {
             vote.candidate_hash
         );
 
-        // Accept votes during both phases.  With 10-second tick intervals,
-        // nodes transition Validation→Reflection at different wall-clock times.
-        // A vote broadcast by a node that transitioned first would be rejected
-        // by peers still in Validation — causing one-directional vote loss.
-        // Signature, cycle, and dedup checks remain enforced below.
+        // Reject votes during Proposal phase — voting hasn't started yet.
+        // Accept votes during Voting, Reflection, and Propagation phases.
+        if self.tracked_phase == CyclePhase::Proposal {
+            outputs.push(CycleIo::Log(
+                "rejected vote during Proposal phase (voting not yet open)".to_string(),
+            ));
+            return outputs;
+        }
 
         // Votes are accepted from any connected peer with a valid signature.
         // The local validator_list only controls who THIS node votes for,
@@ -882,8 +872,8 @@ impl CycleEngine {
     fn handle_mempool_transactions(&mut self, txs: Vec<noble_core::Transaction>) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // Only propose during Validation phase, and only if proposals are enabled.
-        if self.tracked_phase != CyclePhase::Validation {
+        // Only propose during Proposal phase, and only if proposals are enabled.
+        if self.tracked_phase != CyclePhase::Proposal {
             return outputs;
         }
         if !self.proposals_enabled {
@@ -980,6 +970,59 @@ impl CycleEngine {
                     "cycle {}: failed to propose block: {e}",
                     self.tracked_cycle
                 )));
+            }
+        }
+
+        outputs
+    }
+
+    /// Cast an R1 vote for our preferred candidate.
+    fn cast_r1_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
+        let mut outputs = Vec::new();
+        self.r1_vote_cast = true;
+
+        // Propose-only nodes (voting_enabled=false) don't cast votes.
+        if !self.voting_enabled {
+            return outputs;
+        }
+
+        let (ref priv_key, ref pub_key) = match &self.our_validator_key {
+            Some(kp) => kp,
+            None => return outputs,
+        };
+
+        let tallies = self.vote_mgr.current_tallies();
+        // P1.3: Pass manual_vote to strategy selector
+        let manual = self.manual_vote.take();
+        let selected = crate::strategy::select_candidate(
+            &self.config.voting_strategy,
+            &self.candidate_tracker,
+            &self.validator_list,
+            cycle,
+            manual,
+            Some(&tallies),
+        );
+        if let Some(candidate_hash) = selected {
+            match PorVote::sign(cycle, candidate_hash, priv_key, pub_key.clone()) {
+                Ok(vote) => {
+                    // Record our own R1 vote locally — gossipsub does not
+                    // deliver published messages back to the sender, so
+                    // without this the validator's vote is lost from its
+                    // own tally and compute_majority always returns
+                    // Indeterminate on small networks.
+                    let _ = self.vote_mgr.record_vote(b"self", &vote);
+                    outputs.push(CycleIo::BroadcastVote(vote));
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {cycle}: broadcast R1 vote for candidate {} (strategy: {})",
+                        candidate_hash,
+                        self.config.voting_strategy.name()
+                    )));
+                }
+                Err(e) => {
+                    outputs.push(CycleIo::Log(format!(
+                        "cycle {cycle}: failed to sign vote: {e}"
+                    )));
+                }
             }
         }
 
@@ -1102,8 +1145,10 @@ impl ConsensusStateMachine for CycleEngine {
             .as_secs();
         let now = self.clock_anchor.1 + elapsed;
         let phase_idx = match self.tracked_phase {
-            CyclePhase::Validation => 0,
-            CyclePhase::Reflection => 1,
+            CyclePhase::Proposal => 0,
+            CyclePhase::Voting => 1,
+            CyclePhase::Reflection => 2,
+            CyclePhase::Propagation => 3,
         };
         let phase_remaining = self.cycle_mgr.seconds_until_phase_change(now);
         let cycle_remaining = self.cycle_mgr.seconds_until_cycle_boundary(now);
@@ -1187,10 +1232,10 @@ mod tests {
     // --- Phase acceptance/rejection ---
 
     #[test]
-    fn block_proposal_accepted_during_validation() {
+    fn block_proposal_accepted_during_proposal() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         // Use height=1 (next block after tip=0)
         let (block, _hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
@@ -1204,12 +1249,12 @@ mod tests {
     }
 
     #[test]
-    fn block_proposal_accepted_during_reflection() {
-        // Blocks are accepted during Reflection so that vote-triggered
+    fn block_proposal_accepted_during_voting() {
+        // Blocks are accepted during all phases so that vote-triggered
         // RequestBlock fetches can populate the candidate tracker.
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
 
         // Use height=1 (next block after tip=0)
         let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
@@ -1222,15 +1267,15 @@ mod tests {
         assert_eq!(
             engine.candidate_tracker.len(),
             1,
-            "block should be accepted in Reflection"
+            "block should be accepted in Voting"
         );
     }
 
     #[test]
-    fn vote_accepted_during_reflection() {
+    fn vote_accepted_during_voting() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();
@@ -1244,10 +1289,10 @@ mod tests {
     }
 
     #[test]
-    fn vote_rejected_during_validation() {
+    fn vote_rejected_during_proposal() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();
@@ -1259,7 +1304,7 @@ mod tests {
         assert_eq!(
             engine.vote_mgr.total_votes(),
             0,
-            "vote should be rejected in Validation"
+            "vote should be rejected in Proposal phase"
         );
         assert!(has_log_containing(&outputs, "rejected"));
     }
@@ -1277,14 +1322,14 @@ mod tests {
 
         // Add a candidate
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
         // Add votes (3/5 = 60% > 50% → Strong)
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         for (i, (vk, vpk)) in voters.iter().enumerate() {
             let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
@@ -1306,13 +1351,13 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 1); // < 2 min_peers
 
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         let (vk, vp2) = make_validator();
         let vote = PorVote::sign(0, hash, &vk, vp2).unwrap();
         engine.step(CycleEvent::VoteReceived {
@@ -1331,7 +1376,7 @@ mod tests {
     fn double_proposal_bans_peer() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         // Second block must have a DIFFERENT hash to trigger the double-proposal
@@ -1359,7 +1404,7 @@ mod tests {
     fn duplicate_block_delivery_does_not_ban() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         let block_clone = Box::new(Block {
@@ -1390,7 +1435,7 @@ mod tests {
     fn invalid_vote_sig_bans_peer() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let mut vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();
@@ -1412,17 +1457,17 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5); // no validator key
 
         // Add a candidate
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, _hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
-        // Phase transition to Reflection — observer should NOT broadcast vote
+        // Phase transition to Voting — observer should NOT broadcast vote
         let outputs = engine.step(CycleEvent::PhaseTransition {
             cycle: 0,
-            new_phase: CyclePhase::Reflection,
+            new_phase: CyclePhase::Voting,
         });
 
         assert!(
@@ -1441,7 +1486,7 @@ mod tests {
         let mut engine = make_engine(None, &all_validators, 5);
 
         // Proposal
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
@@ -1449,7 +1494,7 @@ mod tests {
         });
 
         // Votes from others
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         for (i, (vk, vpk)) in voters.iter().enumerate() {
             let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
@@ -1473,20 +1518,28 @@ mod tests {
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         let g = noble_core::GENESIS_TIMESTAMP;
 
-        // Tick at genesis: cycle 0, Validation
+        // Tick at genesis: cycle 0, Proposal
         let outputs = engine.step(CycleEvent::Tick { now: g });
         assert!(has_set_timer(&outputs));
-        assert_eq!(engine.current_phase(), CyclePhase::Validation);
+        assert_eq!(engine.current_phase(), CyclePhase::Proposal);
         assert_eq!(engine.current_cycle(), 0);
+
+        // Tick at g+450: should transition to Voting
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 450 });
+        assert_eq!(engine.current_phase(), CyclePhase::Voting);
 
         // Tick at g+900: should transition to Reflection
         let _outputs = engine.step(CycleEvent::Tick { now: g + 900 });
         assert_eq!(engine.current_phase(), CyclePhase::Reflection);
 
+        // Tick at g+1350: should transition to Propagation
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 1350 });
+        assert_eq!(engine.current_phase(), CyclePhase::Propagation);
+
         // Tick at g+1800: should transition to new cycle
         let _outputs = engine.step(CycleEvent::Tick { now: g + 1800 });
         assert_eq!(engine.current_cycle(), 1);
-        assert_eq!(engine.current_phase(), CyclePhase::Validation);
+        assert_eq!(engine.current_phase(), CyclePhase::Proposal);
     }
 
     #[test]
@@ -1498,7 +1551,7 @@ mod tests {
         let mut all_validators: Vec<NoblePublicKey> = vec![vpub.clone()];
         all_validators.extend(voters.iter().map(|(_, pk)| pk.clone()));
         let mut engine = make_engine(None, &all_validators, 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
@@ -1506,7 +1559,7 @@ mod tests {
             from_peer: b"p1".to_vec(),
         });
 
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         for (i, (vk, vpk)) in voters.iter().enumerate() {
             let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
@@ -1560,13 +1613,13 @@ mod tests {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 2);
         // tip_height=0 from make_engine
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         let vote = PorVote::sign(0, hash, &vp, vpub).unwrap();
         engine.step(CycleEvent::VoteReceived {
             vote,
@@ -1582,13 +1635,13 @@ mod tests {
         let (vp, vpub) = make_validator();
         let (vp2, vpub2) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone(), vpub2.clone()], 2);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         let v1 = PorVote::sign(0, hash, &vp, vpub).unwrap();
         let v2 = PorVote::sign(0, hash, &vp2, vpub2).unwrap();
         engine.step(CycleEvent::VoteReceived {
@@ -1605,11 +1658,11 @@ mod tests {
     }
 
     #[test]
-    fn dual_witness_not_required_after_block_2() {
-        // tip_height=2, 1 voter → normal plurality, no Dual-Witness → commits
+    fn dual_witness_not_required_after_block_1() {
+        // tip_height=1, 1 voter → normal plurality, no Dual-Witness → commits
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 2);
-        engine.tip_height = 2;
+        engine.tip_height = 1;
         let parent_hash = Hash256::from_bytes([0x99; 32]);
         engine.tip_hash = parent_hash;
         // Set a tip_header so B2/B3 validation can work
@@ -1623,7 +1676,7 @@ mod tests {
             prev_block_hash: Hash256::from_bytes([0x88; 32]),
             merkle_root,
             timestamp: now_ts - 10,
-            height: 2,
+            height: 1,
             tx_count: 0,
             validator_id: vpub.clone(),
             validator_sig: SignatureEnvelope {
@@ -1638,14 +1691,14 @@ mod tests {
         // Recompute tip_hash from the actual parent header
         engine.tip_hash = parent_hdr.compute_block_hash().unwrap();
 
-        // Create block 3 with correct prev_hash
-        let (block, hash) = make_valid_block(&vp, &vpub, 3, engine.tip_hash);
-        engine.tracked_phase = CyclePhase::Validation;
+        // Create block 2 with correct prev_hash
+        let (block, hash) = make_valid_block(&vp, &vpub, 2, engine.tip_hash);
+        engine.tracked_phase = CyclePhase::Proposal;
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         let vote = PorVote::sign(0, hash, &vp, vpub).unwrap();
         engine.step(CycleEvent::VoteReceived {
             vote,
@@ -1654,7 +1707,7 @@ mod tests {
         let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
         assert!(
             has_commit(&outputs),
-            "after block 2, single voter can commit"
+            "after block 1, single voter can commit"
         );
     }
 
@@ -1693,18 +1746,18 @@ mod tests {
     // --- P0.3: Block proposal emission ---
 
     #[test]
-    fn validator_requests_mempool_on_validation_entry() {
+    fn validator_requests_mempool_on_proposal_entry() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
         let outputs = engine.step(CycleEvent::PhaseTransition {
             cycle: 1,
-            new_phase: CyclePhase::Validation,
+            new_phase: CyclePhase::Proposal,
         });
         assert!(
             outputs
                 .iter()
                 .any(|o| matches!(o, CycleIo::RequestMempoolTransactions { .. })),
-            "validator should request mempool txs on Validation entry"
+            "validator should request mempool txs on Proposal entry"
         );
     }
 
@@ -1714,7 +1767,7 @@ mod tests {
         let mut engine = make_engine(None, &[vpub], 5);
         let outputs = engine.step(CycleEvent::PhaseTransition {
             cycle: 1,
-            new_phase: CyclePhase::Validation,
+            new_phase: CyclePhase::Proposal,
         });
         assert!(
             !outputs
@@ -1728,7 +1781,7 @@ mod tests {
     fn mempool_transactions_produces_block_proposal() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
         assert!(
@@ -1756,18 +1809,19 @@ mod tests {
         engine.set_manual_vote(target_hash);
 
         // Add a candidate so the tracker isn't empty
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, _hash) = make_valid_block(&vp2, &vpub2, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
-        // Transition to Reflection — should use the manual vote hash
-        let outputs = engine.step(CycleEvent::PhaseTransition {
-            cycle: 0,
-            new_phase: CyclePhase::Reflection,
-        });
+        // Tick into Voting phase with VOTE_CAST_DELAY to trigger R1 vote
+        let g = noble_core::GENESIS_TIMESTAMP;
+        engine.tracked_cycle = 0;
+        engine.tracked_phase = CyclePhase::Voting;
+        engine.r1_vote_cast = false;
+        let outputs = engine.step(CycleEvent::Tick { now: g + 450 + 30 }); // Voting + 30s delay
 
         let vote_broadcast = outputs
             .iter()
@@ -1784,7 +1838,27 @@ mod tests {
     // --- P1.2: Two-round voting ---
 
     #[test]
-    fn r2_vote_cast_at_reflection_midpoint() {
+    fn r1_vote_cast_during_voting_phase() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
+        let g = noble_core::GENESIS_TIMESTAMP;
+
+        // Initialize engine with a tick at genesis
+        engine.step(CycleEvent::Tick { now: g });
+        assert_eq!(engine.current_phase(), CyclePhase::Proposal);
+
+        // Tick into Voting phase past VOTE_CAST_DELAY (30s)
+        // Voting starts at g+450, delay fires at g+480
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 480 });
+
+        assert!(
+            engine.r1_vote_cast,
+            "r1_vote_cast should be set after Voting + 30s tick"
+        );
+    }
+
+    #[test]
+    fn r2_vote_cast_during_reflection_phase() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
         let g = noble_core::GENESIS_TIMESTAMP;
@@ -1792,20 +1866,17 @@ mod tests {
         // Move to Reflection phase
         engine.tracked_phase = CyclePhase::Reflection;
         engine.tracked_cycle = 1;
+        engine.r1_vote_cast = true;
         engine.r2_vote_cast = false;
 
-        // Simulate tick at Reflection midpoint
-        // cycle_duration=1800, phase_duration=900, midpoint=450s into Reflection
-        // Reflection starts at 900s in cycle, midpoint at 1350s
-        let now = g + 1800 + 900 + 450; // cycle 1 start + validation + midpoint
+        // Tick at 30s into Reflection phase of cycle 1
+        // Reflection starts at 900s in cycle, so offset 930s from cycle start
+        let now = g + 1800 + 900 + 30; // cycle 1 start + Reflection + 30s delay
         let _outputs = engine.step(CycleEvent::Tick { now });
 
-        // R2 should have been broadcast (even though no candidates exist,
-        // the strategy returns None and no vote is emitted in that case).
-        // The r2_vote_cast flag should be set.
         assert!(
             engine.r2_vote_cast,
-            "r2_vote_cast should be set after midpoint tick"
+            "r2_vote_cast should be set after Reflection + 30s tick"
         );
     }
 
@@ -1818,7 +1889,7 @@ mod tests {
         let mut engine = make_engine(None, &all_validators, 7);
 
         // Propose a candidate
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
@@ -1826,7 +1897,7 @@ mod tests {
         });
 
         // R1 votes: 2 out of 6 validators → not Strong
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         for (i, (vk, vpk)) in voters[..2].iter().enumerate() {
             let vote = PorVote::sign(0, hash, vk, vpk.clone()).unwrap();
             engine.step(CycleEvent::VoteReceived {
@@ -1859,8 +1930,8 @@ mod tests {
         let (_vp, vpub) = make_validator();
         let engine = make_engine(None, &[vpub], 5);
         let (phase_idx, _phase_remaining, _cycle_remaining) = engine.phase_timing();
-        // Phase index should be 0 (Validation) or 1 (Reflection)
-        assert!(phase_idx <= 1);
+        // Phase index should be 0..3 (Proposal, Voting, Reflection, Propagation)
+        assert!(phase_idx <= 3);
     }
 
     // --- AUD2-C2: Block with wrong prev_hash rejected ---
@@ -1869,7 +1940,7 @@ mod tests {
     fn block_with_wrong_prev_hash_rejected() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         // Create a parent block at height 1 so tip_header is set
         let (parent_block, _parent_hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
@@ -1898,7 +1969,7 @@ mod tests {
         // Engine only knows vpub, not unknown_pub — but open consensus
         // accepts votes from any peer with a valid signature.
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &unknown_priv, unknown_pub).unwrap();
@@ -1915,7 +1986,7 @@ mod tests {
     fn vote_from_valid_validator_accepted() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &vp, vpub).unwrap();
@@ -1947,18 +2018,17 @@ mod tests {
         );
 
         // Propose a block from the peer
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&peer_priv, &peer_pub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
-        // Trigger Reflection phase transition — engine casts its own R1 vote
-        let _outputs = engine.step(CycleEvent::PhaseTransition {
-            cycle: 0,
-            new_phase: CyclePhase::Reflection,
-        });
+        // Trigger R1 vote via cast_r1_vote directly (replaces old Reflection phase transition)
+        engine.tracked_phase = CyclePhase::Voting;
+        engine.vote_mgr.set_current_cycle(0);
+        let _outputs = engine.cast_r1_vote(0);
 
         // Vote from the peer → 2 distinct keys (self + peer)
         let vote = PorVote::sign(0, hash, &peer_priv, peer_pub).unwrap();
@@ -1982,14 +2052,14 @@ mod tests {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 1);
 
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
         let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         engine.step(CycleEvent::BlockProposed {
             block,
             from_peer: b"p1".to_vec(),
         });
 
-        engine.tracked_phase = CyclePhase::Reflection;
+        engine.tracked_phase = CyclePhase::Voting;
         let vote = PorVote::sign(0, hash, &vp, vpub).unwrap();
         engine.step(CycleEvent::VoteReceived {
             vote,
@@ -2012,7 +2082,7 @@ mod tests {
         // and is broadcast.
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
         let has_broadcast = outputs
@@ -2037,7 +2107,7 @@ mod tests {
         let (_other_priv, other_pub) = make_validator();
         // Engine has vp as validator key, but only other_pub is in the list
         let mut engine = make_engine(Some((vp, vpub)), &[other_pub], 5);
-        engine.tracked_phase = CyclePhase::Validation;
+        engine.tracked_phase = CyclePhase::Proposal;
 
         let outputs = engine.step(CycleEvent::MempoolTransactions(vec![]));
         let has_broadcast = outputs

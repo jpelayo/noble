@@ -392,7 +392,8 @@ pub struct ValidatorListResponse {
 /// Response for `noble_getCycleStatus`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CycleStatusResponse {
-    pub cycle_number: u64,
+    /// `null` when bootstrapping (no genesis block yet).
+    pub cycle_number: Option<u64>,
     pub phase: String,
     pub phase_index: u8,
     pub phase_remaining_secs: u64,

@@ -194,7 +194,7 @@ fn self_proposal_validates_before_broadcast() {
     // Transition to Validation phase (triggers mempool request for validators)
     let _init_outputs = engine.step(CycleEvent::PhaseTransition {
         cycle: 0,
-        new_phase: CyclePhase::Validation,
+        new_phase: CyclePhase::Proposal,
     });
 
     // Feed empty mempool transactions — should produce a valid empty block

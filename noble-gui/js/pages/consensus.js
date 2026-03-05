@@ -13,10 +13,10 @@ function extractIpFromMultiaddr(ma) {
 
 // ── Phase & status colors ──
 const PHASE_COLORS = {
-  Proposal:      { bg: '#3b82f6', fg: '#fff' },
-  Voting:        { bg: '#8b5cf6', fg: '#fff' },
-  Confirmation:  { bg: '#f59e0b', fg: '#000' },
-  Finalization:  { bg: '#10b981', fg: '#fff' },
+  'Block Proposal':  { bg: '#3b82f6', fg: '#fff' },
+  'Voting':          { bg: '#8b5cf6', fg: '#fff' },
+  'Reflection':      { bg: '#10b981', fg: '#fff' },
+  'Propagation':     { bg: '#f59e0b', fg: '#fff' },
 };
 
 const STATE_STYLES = {
@@ -178,7 +178,7 @@ export function init(root, ctx) {
           </tbody>
         </table>
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap)">
-          <strong>Round 1 (Reflection)</strong> selects the candidate block. <strong>Round 2 (Confirmation)</strong> ratifies the R1 winner —
+          <strong>Round 1</strong> selects the candidate block. <strong>Round 2</strong> ratifies the R1 winner —
           if R2 disagrees, its vote overrides R1. Strategies persist to <code>noble.toml</code>.
         </p>
       </div>
@@ -470,7 +470,8 @@ export function init(root, ctx) {
     }
   }
 
-  const PHASES = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
+  const PHASES = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
+  const PHASE_DURATION = 450; // 7:30 per phase
 
   // ══════════════════════════════════════════════
   // SUPERPOSITION TIMELINE
@@ -491,8 +492,8 @@ export function init(root, ctx) {
       winning_hash: entry.winning_hash,
       phases: [
         {
-          name: 'Proposal',
-          state: 'complete',
+          name: 'Block Proposal',
+          state: isCurrent && !hasWinner ? 'active' : 'complete',
           proposals: entry.proposals || [],
         },
         {
@@ -502,14 +503,14 @@ export function init(root, ctx) {
           total_voters: (entry.votes || []).reduce((s, v) => s + v.vote_count, 0),
         },
         {
-          name: 'Confirmation',
+          name: 'Reflection',
           state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
           winner: entry.winner,
           winning_hash: entry.winning_hash,
           disambiguation: entry.disambiguation,
         },
         {
-          name: 'Finalization',
+          name: 'Propagation',
           state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
           finalized: hasWinner,
           block_hash: entry.winning_hash,
@@ -589,53 +590,56 @@ export function init(root, ctx) {
         }
 
         // Phase label
-        let label = `<div style="font-weight:700;font-size:0.65rem;letter-spacing:0.03em">${phase.name.toUpperCase()}</div>`;
+        let label = `<div style="font-weight:700;font-size:0.6rem;letter-spacing:0.03em">${phase.name.toUpperCase()}</div>`;
 
         // Phase-specific content
-        if (pi === 0 && phase.proposals) {
-          if (phase.proposals.length === 0) {
-            label += `<div style="font-size:0.6rem;opacity:0.5">no proposals</div>`;
-          } else {
+        if (pi === 0) {
+          // Block Proposal
+          if (phase.proposals && phase.proposals.length > 0) {
             const names = phase.proposals.map(p => {
               const name = p.validator.replace('noble-', '');
-              return name.length > 16 ? name.slice(0, 8) + '…' + name.slice(-4) : name;
+              return name.length > 12 ? name.slice(0, 6) + '…' : name;
             }).join(', ');
-            label += `<div style="font-size:0.6rem;opacity:0.85">${phase.proposals.length} proposal${phase.proposals.length !== 1 ? 's' : ''}${names ? ': ' + names : ''}</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${phase.proposals.length} prop.</div>`;
+          } else {
+            label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           }
 
           // Track participants
-          for (const p of phase.proposals) {
+          for (const p of (phase.proposals || [])) {
             if (!participantMap.has(p.validator)) participantMap.set(p.validator, { roles: [], cycles: [] });
             const entry = participantMap.get(p.validator);
             entry.roles.push('proposed');
             entry.cycles.push(cycle.cycle_number);
           }
-        } else if (pi === 1 && phase.votes && phase.votes.length > 0) {
-          const voteStr = phase.votes.map(v => `${v.validator.replace('noble-', '')}:${v.vote_count}`).join(' | ');
-          label += `<div style="font-size:0.6rem;opacity:0.85">${voteStr}</div>`;
+        } else if (pi === 1) {
+          // Voting (R1)
+          if (phase.votes && phase.votes.length > 0) {
+            label += `<div style="font-size:0.55rem;opacity:0.85">${phase.total_voters || 0} votes</div>`;
+          } else {
+            label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
+          }
         } else if (pi === 2) {
+          // Reflection (R2 / winner)
           if (phase.winner) {
             const icon = phase.disambiguation ? '&#9878;' : '&#10003;';
-            label += `<div style="font-size:0.6rem;opacity:0.85">${icon} ${phase.winner.replace('noble-', '')}</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${icon} ${phase.winner.replace('noble-', '').slice(0, 10)}</div>`;
 
             if (!participantMap.has(phase.winner)) participantMap.set(phase.winner, { roles: [], cycles: [] });
             participantMap.get(phase.winner).roles.push('won');
           } else if (phase.state === 'skipped') {
-            label += `<div style="font-size:0.6rem;opacity:0.5">—</div>`;
-          } else if (phase.state === 'pending') {
-            label += `<div style="font-size:0.6rem;opacity:0.5">pending</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           } else {
-            label += `<div style="font-size:0.6rem;opacity:0.5">&#10003; done</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.5">pending</div>`;
           }
-        } else if (pi === 3) {
-          if (phase.state === 'skipped') {
-            label += `<div style="font-size:0.6rem;opacity:0.5">—</div>`;
-          } else if (phase.finalized) {
-            label += `<div style="font-size:0.6rem;opacity:0.85">&#10003; sealed</div>`;
-          } else if (phase.state === 'active') {
-            label += `<div style="font-size:0.6rem;opacity:0.85">sealing...</div>`;
+        } else {
+          // Propagation
+          if (phase.finalized) {
+            label += `<div style="font-size:0.55rem;opacity:0.85">&#10003; sealed</div>`;
+          } else if (phase.state === 'skipped') {
+            label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           } else {
-            label += `<div style="font-size:0.6rem;opacity:0.5">waiting</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.5">waiting</div>`;
           }
         }
 
@@ -668,8 +672,8 @@ export function init(root, ctx) {
             </div>
           `;
 
-          // Show vote count if voting phase has data
-          const votingPhase = cycle.phases[1];
+          // Show vote count if phase 0 has vote data
+          const votingPhase = cycle.phases[0];
           if (votingPhase.votes && votingPhase.votes.length > 0) {
             const voteEntry = votingPhase.votes.find(v => v.block_hash === p.block_hash);
             if (voteEntry) {
@@ -725,8 +729,6 @@ export function init(root, ctx) {
   // CYCLE STATUS (countdown, phase progression)
   // ══════════════════════════════════════════════
 
-  const PHASE_DURATION = 450; // 7:30 per sub-phase
-
   function renderPipeline(activeIdx, remaining) {
     const arrow = '<span style="color:var(--text-muted);font-size:var(--font-size-sm);margin:0 2px">\u2192</span>';
     return PHASES.map((p, i) => {
@@ -748,29 +750,55 @@ export function init(root, ctx) {
   }
 
   function updateCycleDisplay(status) {
-    // Guard u64::MAX sentinel — no genesis block yet.
-    const sane = status.cycle_number < 1e15;
+    // null cycle_number = bootstrapping (no genesis block yet).
+    const sane = status.cycle_number != null;
     csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
     csPhaseName.textContent = sane ? status.phase : 'Bootstrapping';
     csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
 
     if (!sane) {
-      // Show live bootstrapping state — the engine IS running, just no blocks yet.
-      let remaining = status.cycle_remaining_secs || 0;
-      csPhaseRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
-      csCycleRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
+      // Bootstrap: the engine IS running full consensus (proposals, votes, phases).
+      // Derive phase from cycle_remaining_secs so the pipeline looks alive.
+      const cycleDur = PHASE_DURATION * 4; // 1800s
+      let cycleRemaining = status.cycle_remaining_secs || 0;
+      const elapsed = cycleDur - cycleRemaining;
+      // 4 phases of PHASE_DURATION each
+      const activeIdx = Math.min(3, Math.floor(elapsed / PHASE_DURATION));
+      const phaseElapsed = elapsed - (activeIdx * PHASE_DURATION);
+      let phaseRemaining = Math.max(0, PHASE_DURATION - phaseElapsed);
+
+      csPhaseName.textContent = PHASES[activeIdx];
+      csPhaseRemaining.textContent = formatCountdown(phaseRemaining);
+      csCycleRemaining.textContent = formatCountdown(cycleRemaining);
       csValidator.textContent = '—';
-      csPhases.innerHTML = `<div style="color:var(--accent);font-size:var(--font-size-sm);display:flex;align-items:center;gap:8px">
-        <span class="pulse-dot"></span> Consensus engine active — waiting for first block commit
-      </div>`;
-      csPipeline.innerHTML = '';
-      // Countdown ticker for bootstrap — keeps the clock ticking
+
+      // Show phase sidebar — same as normal operation
+      csPhases.innerHTML = PHASES.map((p, i) => {
+        const active = i === activeIdx;
+        const done = i < activeIdx;
+        const color = PHASE_COLORS[p];
+        const cls = active ? 'accent' : done ? 'success' : 'text-muted';
+        const time = active ? formatCountdown(phaseRemaining) : done ? '0:00' : formatCountdown(PHASE_DURATION);
+        return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
+          <span style="width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:700;background:${active ? color.bg : done ? 'var(--success)' : 'var(--bg-tertiary)'};color:${active || done ? '#fff' : 'var(--text-muted)'}">${i + 1}</span>
+          <span style="font-weight:${active ? '700' : '400'};color:var(--${cls})">${p}</span>
+          <span style="margin-left:auto;font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary)">${time}</span>
+        </div>`;
+      }).join('');
+
+      // Pipeline header
+      csPipeline.innerHTML = renderPipeline(activeIdx, phaseRemaining);
+
+      // Countdown ticker
       clearInterval(countdownInterval);
       countdownInterval = setInterval(() => {
-        remaining = Math.max(0, remaining - 1);
-        csPhaseRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
-        csCycleRemaining.textContent = remaining > 0 ? formatCountdown(remaining) : '—';
-        if (remaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
+        phaseRemaining = Math.max(0, phaseRemaining - 1);
+        cycleRemaining = Math.max(0, cycleRemaining - 1);
+        csPhaseRemaining.textContent = formatCountdown(phaseRemaining);
+        csCycleRemaining.textContent = formatCountdown(cycleRemaining);
+        const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
+        if (activeTimer) activeTimer.textContent = formatCountdown(phaseRemaining);
+        if (phaseRemaining <= 0 || cycleRemaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
       }, 1000);
       return;
     }

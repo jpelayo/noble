@@ -798,8 +798,8 @@ export class MockRpcClient {
         const now = Math.floor(Date.now() / 1000);
         const elapsed = now % CYCLE_DURATION_SECS;
         const phaseLen = CYCLE_DURATION_SECS / 4;
-        const phaseIndex = Math.floor(elapsed / phaseLen);
-        const phases = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
+        const phaseIndex = Math.min(3, Math.floor(elapsed / phaseLen));
+        const phases = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
         const remaining = phaseLen - (elapsed % phaseLen);
         const cycleRemaining = CYCLE_DURATION_SECS - elapsed;
         return {
@@ -817,7 +817,7 @@ export class MockRpcClient {
         const currentCycle = Math.floor(now / CYCLE_DURATION_SECS);
         const elapsed = now % CYCLE_DURATION_SECS;
         const phaseLen = CYCLE_DURATION_SECS / 4;
-        const currentPhaseIndex = Math.floor(elapsed / phaseLen);
+        const currentPhaseIndex = Math.min(3, Math.floor(elapsed / phaseLen));
 
         // Generate history for last 3 cycles (current + 2 past)
         const cycles = [];
@@ -858,7 +858,8 @@ export class MockRpcClient {
           const winner = votes[0];
           const disambiguation = proposals.length > 1;
 
-          // Build phase states for the cycle
+          // Build phase states for the cycle (4 phases)
+          const phaseNames = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
           const phaseStates = [];
           for (let ph = 0; ph < 4; ph++) {
             let state;
@@ -871,24 +872,28 @@ export class MockRpcClient {
             }
 
             const phaseData = {
-              name: ['Proposal', 'Voting', 'Confirmation', 'Finalization'][ph],
+              name: phaseNames[ph],
               state,
             };
 
             if (ph === 0) {
+              // Block Proposal: proposals submitted
               phaseData.proposals = proposals.map(p => ({
                 validator: p.validator,
                 tx_count: p.tx_count,
                 block_hash: p.block_hash,
               }));
             } else if (ph === 1) {
+              // Voting: votes cast
               phaseData.votes = state !== 'pending' ? votes : [];
               phaseData.total_voters = state !== 'pending' ? 23 : 0;
             } else if (ph === 2) {
+              // Reflection: winner determined
               phaseData.winner = state !== 'pending' ? winner.validator : null;
               phaseData.winning_hash = state !== 'pending' ? winner.block_hash : null;
               phaseData.disambiguation = disambiguation;
-            } else if (ph === 3) {
+            } else {
+              // Propagation: finalization
               phaseData.finalized = state === 'complete';
               phaseData.block_hash = state === 'complete' ? winner.block_hash : null;
             }
@@ -941,8 +946,8 @@ export class MockRpcClient {
         const cycle = Math.floor(now / CYCLE_DURATION_SECS);
         const elapsed = now % CYCLE_DURATION_SECS;
         const phaseLen = CYCLE_DURATION_SECS / 4;
-        const phaseIndex = Math.floor(elapsed / phaseLen);
-        const phases = ['Proposal', 'Voting', 'Confirmation', 'Finalization'];
+        const phaseIndex = Math.min(3, Math.floor(elapsed / phaseLen));
+        const phases = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
         // Always return candidates so manual vote dropdown has options
         const tallies = [
           { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), validator: 'noble-alpha', vote_count: phaseIndex >= 1 ? 3 : 0 },
@@ -1825,7 +1830,7 @@ export class MockRpcClient {
       'Validating transaction T7: fee check passed',
       'Block #{{h}} committed to storage ({{n}} txs)',
       'Peer 12D3KooW...a3f2 connected (outbound)',
-      'CycleEngine step: Proposal → Voting',
+      'CycleEngine step: Proposals & Voting → Reflection & Propagation',
       'Mempool admit: 8-step validation passed for tx {{id}}',
       'Ed25519 signature verified in 0.12ms',
       'RPC request: noble_getBlockCount (2ms)',

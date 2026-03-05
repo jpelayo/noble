@@ -6,13 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The two alternating phases within each consensus cycle.
+/// The four phases within each consensus cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CyclePhase {
-    /// First half of the cycle: validators propose and broadcast blocks.
-    Validation,
-    /// Second half: validators vote on candidates and reach consensus.
+    /// First quarter: validators propose and broadcast blocks.
+    Proposal,
+    /// Second quarter: R1 votes cast and collected.
+    Voting,
+    /// Third quarter: R2 confirmation votes cast and collected.
     Reflection,
+    /// Fourth quarter: final block propagation window, commit at boundary.
+    Propagation,
 }
 
 /// Manages cycle and phase computations using only wall-clock timestamps.
@@ -63,13 +67,15 @@ impl CycleManager {
     }
 
     /// Return the current phase at the given timestamp.
-    /// First half (offset < duration/2) = Validation, second half = Reflection.
+    /// Four quarters: Proposal, Voting, Reflection, Propagation.
     pub fn current_phase(&self, now: u64) -> CyclePhase {
         let offset = self.cycle_offset(now);
-        if offset < self.cycle_duration / 2 {
-            CyclePhase::Validation
-        } else {
-            CyclePhase::Reflection
+        let quarter = self.cycle_duration / 4;
+        match offset / quarter {
+            0 => CyclePhase::Proposal,
+            1 => CyclePhase::Voting,
+            2 => CyclePhase::Reflection,
+            _ => CyclePhase::Propagation,
         }
     }
 
@@ -78,17 +84,17 @@ impl CycleManager {
         self.elapsed(now) % self.cycle_duration
     }
 
-    /// Offset within the current phase (0..cycle_duration/2).
+    /// Offset within the current phase (0..cycle_duration/4).
     pub fn phase_offset(&self, now: u64) -> u64 {
         let offset = self.cycle_offset(now);
-        let half = self.cycle_duration / 2;
-        offset % half
+        let quarter = self.cycle_duration / 4;
+        offset % quarter
     }
 
     /// Seconds until the next phase boundary.
     pub fn seconds_until_phase_change(&self, now: u64) -> u64 {
-        let half = self.cycle_duration / 2;
-        half - self.phase_offset(now)
+        let quarter = self.cycle_duration / 4;
+        quarter - self.phase_offset(now)
     }
 
     /// Seconds until the next cycle boundary.
@@ -128,33 +134,52 @@ mod tests {
     }
 
     #[test]
-    fn phase_first_half_is_validation() {
+    fn phase_first_quarter_is_proposal() {
         let m = mgr();
-        assert_eq!(m.current_phase(G), CyclePhase::Validation);
-        assert_eq!(m.current_phase(G + 899), CyclePhase::Validation);
+        assert_eq!(m.current_phase(G), CyclePhase::Proposal);
+        assert_eq!(m.current_phase(G + 449), CyclePhase::Proposal);
     }
 
     #[test]
-    fn phase_second_half_is_reflection() {
+    fn phase_second_quarter_is_voting() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
-        assert_eq!(m.current_phase(G + 1799), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 450), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Voting);
     }
 
     #[test]
-    fn phase_transition_at_midpoint() {
+    fn phase_third_quarter_is_reflection() {
         let m = mgr();
-        assert_eq!(m.current_phase(G + 899), CyclePhase::Validation);
         assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 1349), CyclePhase::Reflection);
+    }
+
+    #[test]
+    fn phase_fourth_quarter_is_propagation() {
+        let m = mgr();
+        assert_eq!(m.current_phase(G + 1350), CyclePhase::Propagation);
+        assert_eq!(m.current_phase(G + 1799), CyclePhase::Propagation);
+    }
+
+    #[test]
+    fn phase_transitions_at_quarter_boundaries() {
+        let m = mgr();
+        assert_eq!(m.current_phase(G + 449), CyclePhase::Proposal);
+        assert_eq!(m.current_phase(G + 450), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 899), CyclePhase::Voting);
+        assert_eq!(m.current_phase(G + 900), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 1349), CyclePhase::Reflection);
+        assert_eq!(m.current_phase(G + 1350), CyclePhase::Propagation);
     }
 
     #[test]
     fn seconds_until_phase_change() {
         let m = mgr();
-        assert_eq!(m.seconds_until_phase_change(G), 900);
+        assert_eq!(m.seconds_until_phase_change(G), 450);
+        assert_eq!(m.seconds_until_phase_change(G + 225), 225);
+        assert_eq!(m.seconds_until_phase_change(G + 449), 1);
         assert_eq!(m.seconds_until_phase_change(G + 450), 450);
-        assert_eq!(m.seconds_until_phase_change(G + 899), 1);
-        assert_eq!(m.seconds_until_phase_change(G + 900), 900);
+        assert_eq!(m.seconds_until_phase_change(G + 900), 450);
     }
 
     #[test]

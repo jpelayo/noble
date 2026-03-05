@@ -478,7 +478,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // the GUI shows a "bootstrapping" indicator instead of a cycle number.
         if tip_height == 0 {
             return Ok(CycleStatusResponse {
-                cycle_number: u64::MAX,
+                cycle_number: None,
                 phase: "Bootstrapping".to_string(),
                 phase_index: 0,
                 phase_remaining_secs: cycle_remaining,
@@ -486,37 +486,19 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             });
         }
 
-        // H-005: Project 2 engine phases → 4 API phases.
-        // Engine phase duration = cycle_duration / 2.
-        // Sub-phase = engine_phase_duration / 2.
-        // Validation → [Proposal, Voting], Reflection → [Confirmation, Finalization].
-        // engine_phase_remaining counts down from engine_phase_duration to 0.
-        let half_phase = noble_core::CYCLE_DURATION_SECS / 4;
-        let engine_phase_duration = noble_core::CYCLE_DURATION_SECS / 2;
-        let elapsed_in_phase = engine_phase_duration.saturating_sub(engine_phase_remaining);
-
-        let (projected_phase, projected_index, phase_remaining) = match engine_phase {
-            noble_consensus::CyclePhase::Validation => {
-                if elapsed_in_phase < half_phase {
-                    ("Proposal", 0u8, half_phase - elapsed_in_phase)
-                } else {
-                    ("Voting", 1, engine_phase_duration - elapsed_in_phase)
-                }
-            }
-            noble_consensus::CyclePhase::Reflection => {
-                if elapsed_in_phase < half_phase {
-                    ("Confirmation", 2, half_phase - elapsed_in_phase)
-                } else {
-                    ("Finalization", 3, engine_phase_duration - elapsed_in_phase)
-                }
-            }
+        // 4 phases: direct 1:1 mapping from engine phases.
+        let (phase_name, phase_index) = match engine_phase {
+            noble_consensus::CyclePhase::Proposal => ("Block Proposal", 0u8),
+            noble_consensus::CyclePhase::Voting => ("Voting", 1),
+            noble_consensus::CyclePhase::Reflection => ("Reflection", 2),
+            noble_consensus::CyclePhase::Propagation => ("Propagation", 3),
         };
 
         Ok(CycleStatusResponse {
-            cycle_number: cycle,
-            phase: projected_phase.to_string(),
-            phase_index: projected_index,
-            phase_remaining_secs: phase_remaining,
+            cycle_number: Some(cycle),
+            phase: phase_name.to_string(),
+            phase_index,
+            phase_remaining_secs: engine_phase_remaining,
             cycle_remaining_secs: cycle_remaining,
         })
     }
