@@ -1701,6 +1701,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                 }));
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "peer_connected",
+                    "peer_id": hex_pid,
+                    "addr": addr,
+                    "direction": direction,
+                }));
                 // Request peer status immediately on connect so sync and
                 // block proposal don't wait for the 60s poll interval.
                 let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
@@ -1739,15 +1745,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "event": "disconnected",
                     "peer_id": hex_pid,
                 }));
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "peer_disconnected",
+                    "peer_id": hex_pid,
+                }));
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
+                let hex_pid = hex::encode(peer_id);
                 tracing::warn!(
                     task = "peer_tracking",
-                    "Peer banned: {} — {reason}",
-                    hex::encode(peer_id)
+                    "Peer banned: {hex_pid} — {reason}",
                 );
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "peer_banned",
+                    "peer_id": hex_pid,
+                    "reason": reason,
+                }));
             }
-            NetworkEvent::TransactionAnnounced { tx_id, .. } => {
+            NetworkEvent::TransactionAnnounced { tx_id, peer_id } => {
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "tx_announced",
+                    "tx_id": hex::encode(tx_id),
+                    "peer_id": hex::encode(peer_id),
+                }));
                 let _ = new_tx_tx.send(serde_json::json!({
                     "tx_id": hex::encode(tx_id),
                 }));
@@ -1829,6 +1849,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
 
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "announce_received",
+                    "node_name": announce.node_name,
+                    "identity": hex::encode(&identity_wire),
+                    "wants_to_validate": announce.wants_to_validate,
+                    "wants_to_vote": announce.wants_to_vote,
+                    "software_version": announce.software_version,
+                }));
                 tracing::debug!(
                     task = "peer_tracking",
                     "Stored announce from {} ({})",
@@ -1846,6 +1874,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     hex::encode(peer_id),
                 );
                 // TODO(year2): Slash/ban the misbehaving validator
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "evidence_received",
+                    "peer_id": hex::encode(peer_id),
+                }));
                 let _ = evidence; // Acknowledge receipt; slashing not yet implemented.
             }
             NetworkEvent::BlockAnnounced {
@@ -1853,25 +1885,28 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 height,
                 hash,
             } => {
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "block_announced",
+                    "peer_id": hex::encode(peer_id),
+                    "height": height,
+                    "hash": hex::encode(hash),
+                }));
                 tracing::debug!(
                     task = "sync",
                     "Block announced by {}: height={height}, hash={}",
                     hex::encode(peer_id),
                     hex::encode(hash),
                 );
-                // If the announced height is ahead of our tip, request a fresh
-                // status from peers so we learn their COMMITTED height and can
-                // trigger sync import for any blocks we're missing.
-                // We do NOT update peer_info from announces because the announce
-                // height reflects a PROPOSAL, not a committed block — using it
-                // in we_are_behind would bypass voting and cause chain splits
-                // in multi-proposer networks.
                 let our_height = self.consensus.read().chain_tip().0;
                 if *height > our_height {
                     let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                 }
             }
             NetworkEvent::SyncComplete { new_height } => {
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "sync_complete",
+                    "height": new_height,
+                }));
                 tracing::info!(
                     task = "sync",
                     "Sync complete up to height {new_height}"
@@ -1900,6 +1935,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // validation and commitment, then triggers another RequestSync
                 // to continue the chain until we're caught up.
                 let our_height = self.consensus.read().chain_tip().0;
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "peer_status",
+                    "peer_id": hex_pid,
+                    "height": height,
+                }));
                 if *height > our_height {
                     let next_height = our_height + 1;
                     tracing::debug!(
@@ -1929,6 +1969,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 //
                 // Bootstrap: route to consensus engine for candidate tracking + voting.
 
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "block_received",
+                    "peer_id": hex::encode(peer_id),
+                    "height": block.header.height,
+                }));
                 let tip_height = self.consensus.read().chain_tip().0;
                 // Check if any peer is ahead of us (indicating we need to sync).
                 let max_peer_height = {
@@ -1972,6 +2017,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
             _ => {
+                // Emit protocol activity for VoteReceived before routing to engine
+                if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "vote_received",
+                        "voter_id": hex::encode(voter_id),
+                        "cycle": cycle,
+                        "candidate_hash": hex::encode(candidate_hash),
+                        "round": round,
+                    }));
+                }
                 // Route remaining events to consensus engine
                 if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {
                     let actions = {

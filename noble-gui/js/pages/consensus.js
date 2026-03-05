@@ -429,51 +429,86 @@ export function init(root, ctx) {
   const activityEntries = []; // circular buffer (oldest at 0)
 
   const ACTIVITY_ICONS = {
-    block_committed: '\u2705',  // green check
-    block_proposed:  '\u{1f4e6}',  // package
-    vote_broadcast:  '\u{1f5f3}',  // ballot box
-    peer_banned:     '\u26d4',  // no entry
-    block_requested: '\u{1f50d}',  // magnifying glass
-    consensus_log:   '\u2139',  // info
-    warning:         '\u26a0',  // warning
-    phase_change:    '\u23f1',  // stopwatch
-    peer_connected:  '\u{1f517}',  // link
-    peer_disconnected: '\u274c', // cross mark
+    block_committed:    '\u2705',  // green check
+    block_proposed:     '\u{1f4e6}',  // package
+    block_received:     '\u{1f4e5}',  // inbox
+    block_announced:    '\u{1f4e2}',  // loudspeaker
+    block_requested:    '\u{1f50d}',  // magnifying glass
+    vote_broadcast:     '\u{1f5f3}',  // ballot box
+    vote_received:      '\u2611',  // ballot check
+    peer_connected:     '\u{1f517}',  // link
+    peer_disconnected:  '\u274c',  // cross mark
+    peer_banned:        '\u26d4',  // no entry
+    peer_status:        '\u{1f4ca}',  // bar chart
+    announce_received:  '\u{1f4cb}',  // clipboard
+    tx_announced:       '\u{1f4b8}',  // money with wings
+    sync_complete:      '\u{1f504}',  // arrows cycle
+    evidence_received:  '\u{1f6a8}',  // rotating light
+    consensus_log:      '\u2139',  // info
+    warning:            '\u26a0',  // warning
+    phase_change:       '\u23f1',  // stopwatch
   };
 
   function activityColor(evt) {
     switch (evt) {
       case 'block_committed': return 'var(--success, #22c55e)';
+      case 'sync_complete': return 'var(--success, #22c55e)';
       case 'warning':
-      case 'peer_banned': return 'var(--danger, #ef4444)';
-      case 'vote_broadcast': return 'var(--accent, #3b82f6)';
+      case 'peer_banned':
+      case 'evidence_received': return 'var(--danger, #ef4444)';
+      case 'vote_broadcast':
+      case 'vote_received': return 'var(--accent, #3b82f6)';
       case 'phase_change': return '#f59e0b';
+      case 'block_proposed':
+      case 'block_received':
+      case 'block_announced': return '#a78bfa';
+      case 'peer_connected': return '#34d399';
+      case 'peer_disconnected': return '#f87171';
+      case 'announce_received': return '#60a5fa';
       default: return 'var(--text-muted)';
     }
   }
 
   function formatActivityMessage(data) {
+    const vName = (id) => getValidatorDisplayName(id, 8);
+    const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
       case 'block_committed':
         return `Block #${data.height} committed (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
       case 'block_proposed':
         return `Proposed block #${data.height}`;
-      case 'vote_broadcast':
-        return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
-      case 'peer_banned':
-        return `Peer banned: ${truncateHash(data.peer_id || '')} \u2014 ${data.reason}`;
+      case 'block_received':
+        return `Block #${data.height} received from ${pName(data.peer_id)}`;
+      case 'block_announced':
+        return `Block #${data.height} announced by ${pName(data.peer_id)}`;
       case 'block_requested':
         return `Requested block ${truncateHash(data.hash || '')}`;
+      case 'vote_broadcast':
+        return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
+      case 'vote_received':
+        return `Vote R${data.round} received from ${vName(data.voter_id)} \u2192 ${truncateHash(data.candidate_hash || '')}`;
+      case 'peer_connected':
+        return `Peer connected: ${pName(data.peer_id)} (${data.direction || ''})`;
+      case 'peer_disconnected':
+        return `Peer disconnected: ${pName(data.peer_id)}`;
+      case 'peer_banned':
+        return `Peer banned: ${pName(data.peer_id)} \u2014 ${data.reason}`;
+      case 'peer_status':
+        return `Peer ${pName(data.peer_id)} at height ${data.height}`;
+      case 'announce_received':
+        return `Announce: ${data.node_name || pName(data.identity)} (v${data.software_version || '?'})`;
+      case 'tx_announced':
+        return `Tx ${truncateHash(data.tx_id || '')} from ${pName(data.peer_id)}`;
+      case 'sync_complete':
+        return `Sync complete \u2192 height ${data.height}`;
+      case 'evidence_received':
+        return `Double-proposal evidence from ${pName(data.peer_id)}`;
       case 'consensus_log':
         return data.message;
       case 'warning':
         return data.message;
       case 'phase_change':
         return `Phase \u2192 ${data.phase} (cycle #${data.cycle})`;
-      case 'peer_connected':
-        return `Peer connected: ${truncateHash(data.peer_id || '')}`;
-      case 'peer_disconnected':
-        return `Peer disconnected: ${truncateHash(data.peer_id || '')}`;
       default:
         return JSON.stringify(data);
     }
