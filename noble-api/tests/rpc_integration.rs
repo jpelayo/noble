@@ -30,7 +30,7 @@ use noble_api::methods::wallet::WalletApiServer;
 use noble_api::{ApiState, NetworkStats, NodeIdentityData};
 
 use noble_consensus::{ConsensusConfig, CycleEngine, ValidatorList};
-use noble_core::{genesis_block, MAINNET_CHAIN_ID};
+use noble_core::{genesis_block, mainnet_chain_id};
 use noble_mempool::Mempool;
 use noble_storage::{MemoryStorage, StorageEngine};
 use noble_wallet::{KeyStore, WalletState};
@@ -49,7 +49,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let tx_ids: Vec<noble_crypto::Hash256> = genesis
         .transactions
         .iter()
-        .filter_map(|tx| tx.compute_tx_id(MAINNET_CHAIN_ID).ok())
+        .filter_map(|tx| tx.compute_tx_id(mainnet_chain_id()).ok())
         .collect();
     storage
         .read()
@@ -63,7 +63,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         ValidatorList::new(),
         0,
         block_hash,
-        MAINNET_CHAIN_ID,
+        mainnet_chain_id(),
         None,
         Some(noble_core::GENESIS_TIMESTAMP),
     )));
@@ -87,7 +87,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         wallet_keystore,
         wallet_state,
         network_stats,
-        chain_id: MAINNET_CHAIN_ID,
+        chain_id: mainnet_chain_id(),
         start_time: Instant::now(),
         max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
         rate_limiter: None,   // disabled in tests
@@ -679,7 +679,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
 
     // Get genesis hash for prev_block_hash
     let storage = state.storage.read();

@@ -10,6 +10,8 @@
 //! - A deterministic Ed25519 keypair derived from a domain-separated seed
 //! - A real cryptographic signature (not a placeholder)
 
+use std::sync::LazyLock;
+
 use noble_crypto::{
     sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
     SCHEME_ED25519,
@@ -83,6 +85,33 @@ pub fn testnet_genesis_hash() -> Hash256 {
         .header
         .compute_block_hash()
         .expect("testnet genesis block hash computation must succeed")
+}
+
+/// Derive a chain identifier from a genesis block hash.
+///
+/// Takes the first 4 bytes of the hash and interprets them as a big-endian u32.
+/// Each distinct genesis block produces a unique, deterministic chain ID.
+pub fn derive_chain_id(hash: &Hash256) -> u32 {
+    let bytes = hash.as_bytes();
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Mainnet chain identifier — derived from the mainnet genesis block hash.
+pub fn mainnet_chain_id() -> u32 {
+    static ID: LazyLock<u32> = LazyLock::new(|| derive_chain_id(&genesis_hash()));
+    *ID
+}
+
+/// Testnet chain identifier — derived from the testnet genesis block hash.
+pub fn testnet_chain_id() -> u32 {
+    static ID: LazyLock<u32> = LazyLock::new(|| derive_chain_id(&testnet_genesis_hash()));
+    *ID
+}
+
+/// Regtest chain identifier — derived from the regtest genesis block hash.
+pub fn regtest_chain_id() -> u32 {
+    static ID: LazyLock<u32> = LazyLock::new(|| derive_chain_id(&regtest_genesis_hash()));
+    *ID
 }
 
 fn build_genesis(timestamp: u64, seed: &[u8]) -> Block {
@@ -256,5 +285,35 @@ mod tests {
         let (_, pk_main) = deterministic_keypair(MAINNET_SEED);
         let (_, pk_test) = deterministic_keypair(TESTNET_SEED);
         assert_ne!(pk_main, pk_test);
+    }
+
+    #[test]
+    fn derive_chain_id_uses_first_four_bytes() {
+        let hash = genesis_hash();
+        let id = derive_chain_id(&hash);
+        let bytes = hash.as_bytes();
+        let expected = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn chain_ids_are_deterministic() {
+        assert_eq!(mainnet_chain_id(), mainnet_chain_id());
+        assert_eq!(testnet_chain_id(), testnet_chain_id());
+        assert_eq!(regtest_chain_id(), regtest_chain_id());
+    }
+
+    #[test]
+    fn chain_ids_are_distinct() {
+        assert_ne!(mainnet_chain_id(), testnet_chain_id());
+        assert_ne!(mainnet_chain_id(), regtest_chain_id());
+        assert_ne!(testnet_chain_id(), regtest_chain_id());
+    }
+
+    #[test]
+    fn chain_ids_are_nonzero() {
+        assert_ne!(mainnet_chain_id(), 0);
+        assert_ne!(testnet_chain_id(), 0);
+        assert_ne!(regtest_chain_id(), 0);
     }
 }

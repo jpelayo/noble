@@ -881,7 +881,7 @@ impl StorageEngine for MemoryStorage {
 mod tests {
     use super::*;
     use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY};
-    use noble_core::{Block, BlockHeader, Transaction, MAINNET_CHAIN_ID, PROTOCOL_VERSION};
+    use noble_core::{Block, BlockHeader, Transaction, mainnet_chain_id, PROTOCOL_VERSION};
     use noble_crypto::{
         ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
         SCHEME_ED25519,
@@ -917,7 +917,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -953,7 +953,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -1658,7 +1658,7 @@ mod tests {
             prev = hash;
         }
 
-        let tip = store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        let tip = store.rollback_to_height(1, mainnet_chain_id()).unwrap();
         assert_eq!(tip.height, 1);
         assert!(store.get_block_hash_by_height(2).is_err());
         let new_tip = store.get_chain_tip().unwrap().unwrap();
@@ -1681,7 +1681,7 @@ mod tests {
 
         // Heights 0..=3: height 0 gives 0 subsidy, heights 1-3 give INITIAL_SUBSIDY each
         assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
-        store.rollback_to_height(2, MAINNET_CHAIN_ID).unwrap();
+        store.rollback_to_height(2, mainnet_chain_id()).unwrap();
         // After rollback to height 2: heights 0,1,2 remain; 0 gives 0, 1-2 give INITIAL_SUBSIDY each
         assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
     }
@@ -1694,7 +1694,7 @@ mod tests {
             make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
         store.commit_block(&b, &hash, &ids).unwrap();
 
-        let tip = store.rollback_to_height(0, MAINNET_CHAIN_ID).unwrap();
+        let tip = store.rollback_to_height(0, mainnet_chain_id()).unwrap();
         assert_eq!(tip.height, 0);
     }
 
@@ -1715,7 +1715,7 @@ mod tests {
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
         assert!(store.has_transaction(&id1).unwrap());
-        store.rollback_to_height(0, MAINNET_CHAIN_ID).unwrap();
+        store.rollback_to_height(0, mainnet_chain_id()).unwrap();
         assert!(!store.has_transaction(&id1).unwrap());
     }
 
@@ -1995,7 +1995,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -2198,7 +2198,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -2347,7 +2347,7 @@ mod tests {
         );
 
         // Rollback to height 1 (removes block 2 which has the v2)
-        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        store.rollback_to_height(1, mainnet_chain_id()).unwrap();
 
         // Version chain should be empty after rollback
         let successors = store.lookup_version_successors(&v1_checksum).unwrap();
@@ -2514,7 +2514,7 @@ mod tests {
         assert_eq!(store.lookup_by_publisher(&wire).unwrap().len(), 3);
 
         // Rollback to height 1 (removes blocks 2 and 3)
-        store.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        store.rollback_to_height(1, mainnet_chain_id()).unwrap();
 
         // After rollback: only tx_id1 from block 1
         let results = store.lookup_by_publisher(&wire).unwrap();
@@ -2626,7 +2626,7 @@ mod tests {
         let msg1 = tx1.compute_signing_message().unwrap();
         let sig1 = noble_crypto::secp256k1::sign(&secp_sk, &msg1).unwrap();
         tx1.publisher_sig.signature = sig1;
-        let tx1_id = tx1.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx1_id = tx1.compute_tx_id(mainnet_chain_id()).unwrap();
 
         // Create tx2: debit Hash160 bucket (amount=5000, fee=1000)
         let mut tx2 = Transaction {
@@ -2652,7 +2652,7 @@ mod tests {
         let msg2 = tx2.compute_signing_message().unwrap();
         let sig2 = noble_crypto::secp256k1::sign(&secp_sk, &msg2).unwrap();
         tx2.publisher_sig.signature = sig2;
-        let tx2_id = tx2.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx2_id = tx2.compute_tx_id(mainnet_chain_id()).unwrap();
 
         // Build block with both txs
         let block = make_block_with_validator(

@@ -50,8 +50,8 @@ export function init(root, ctx) {
 
   root.innerHTML = `
     <div class="page-header" style="display:flex;align-items:baseline;gap:var(--gap-sm)">
-      <div><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
-      <button id="cs-badge-gear" title="Badge Governance" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;margin-top:4px">&#9881;</button>
+      <div style="flex:1"><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
+      <button id="cs-badge-gear" title="Badge Governance" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;flex-shrink:0;align-self:flex-start">&#9881;</button>
     </div>
 
     <!-- Superposition Timeline -->
@@ -429,28 +429,28 @@ export function init(root, ctx) {
   const activityEntries = []; // circular buffer (oldest at 0)
 
   const ACTIVITY_ICONS = {
-    block_committed:    '\u2705',  // green check
-    block_proposed:     '\u{1f4e6}',  // package
-    block_received:     '\u{1f4e5}',  // inbox
-    block_announced:    '\u{1f4e2}',  // loudspeaker
-    block_requested:    '\u{1f50d}',  // magnifying glass
-    vote_broadcast:     '\u{1f5f3}',  // ballot box
-    vote_received:      '\u2611',  // ballot check
-    peer_connected:     '\u{1f517}',  // link
-    peer_disconnected:  '\u274c',  // cross mark
-    peer_banned:        '\u26d4',  // no entry
-    peer_status:        '\u{1f4ca}',  // bar chart
-    announce_received:  '\u{1f4cb}',  // clipboard
-    announce_published: '\u{1f4e1}',  // satellite antenna
-    tx_announced:       '\u{1f4b8}',  // money with wings
-    sync_complete:      '\u{1f504}',  // arrows cycle
-    sync_requested:     '\u{1f50e}',  // right magnifying glass
-    reconnect_attempt:  '\u{1f50c}',  // electric plug
-    evidence_received:  '\u{1f6a8}',  // rotating light
-    consensus_log:      '\u2139',  // info
-    warning:            '\u26a0',  // warning
-    phase_change:       '\u23f1',  // stopwatch
-    heartbeat:          '\u{1f49a}',  // green heart
+    block_committed:    '\u2713',  // checkmark
+    block_proposed:     '\u25b6',  // right triangle
+    block_received:     '\u25bc',  // down triangle
+    block_announced:    '\u25b7',  // right triangle outline
+    block_requested:    '\u2190',  // left arrow
+    vote_broadcast:     '\u2191',  // up arrow
+    vote_received:      '\u2193',  // down arrow
+    peer_connected:     '\u2192',  // right arrow
+    peer_disconnected:  '\u00d7',  // multiplication sign
+    peer_banned:        '\u2298',  // circled division
+    peer_status:        '\u2022',  // bullet
+    announce_received:  '\u2022',  // bullet
+    announce_published: '\u2022',  // bullet
+    tx_announced:       '\u2022',  // bullet
+    sync_complete:      '\u21bb',  // clockwise arrow
+    sync_requested:     '\u21bb',  // clockwise arrow
+    reconnect_attempt:  '\u21ba',  // counter-clockwise arrow
+    evidence_received:  '\u26a0',  // warning triangle
+    consensus_log:      '\u2022',  // bullet
+    warning:            '\u26a0',  // warning triangle
+    phase_change:       '\u25cf',  // filled circle
+    heartbeat:          '\u25cf',  // filled circle
   };
 
   function activityColor(evt) {
@@ -575,6 +575,14 @@ export function init(root, ctx) {
       if (data.event === 'block_committed') {
         loadCycle(); loadTimeline(); loadVoteTallies();
       }
+      // Refresh tallies on vote events (live updates)
+      if (data.event === 'vote_received' || data.event === 'vote_broadcast') {
+        loadVoteTallies();
+      }
+      // Refresh cycle display on phase changes
+      if (data.event === 'phase_change') {
+        loadCycle(); loadVoteTallies();
+      }
     }));
     unsubs.push(ws.subscribe('peerUpdates', (data) => {
       // Normalize peerUpdates event names to match activity log conventions.
@@ -584,6 +592,9 @@ export function init(root, ctx) {
       pushActivity(normalized);
     }));
   }
+
+  // Periodic poll for vote tallies (fallback if WS events are delayed)
+  const tallyPollInterval = setInterval(() => { loadVoteTallies(); }, 10000);
 
   // Seed activity log on page load: current phase + already-connected peers.
   // Phase is seeded once; peers are retried a few times to catch late reconnections.
@@ -1102,11 +1113,12 @@ export function init(root, ctx) {
     // null cycle_number = bootstrapping (no genesis block yet).
     const sane = status.cycle_number != null;
     csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
-    csPhaseName.textContent = sane ? status.phase : 'Bootstrapping';
+    csPhaseName.textContent = status.phase || 'Bootstrapping';
     csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
 
-    // Emit phase change activity event
-    const phaseKey = `${status.cycle_number || 0}:${status.phase_index}`;
+    // Emit phase change activity event (works during bootstrap too —
+    // phase_index now reflects real phase even when cycle_number is null)
+    const phaseKey = `${status.cycle_number || 'boot'}:${status.phase_index}`;
     if (lastPhaseKey !== null && lastPhaseKey !== phaseKey) {
       pushActivity({ event: 'phase_change', phase: status.phase || 'Bootstrapping', cycle: status.cycle_number });
     }
@@ -1171,7 +1183,7 @@ export function init(root, ctx) {
       // Update active timer in pipeline
       const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
       if (activeTimer) activeTimer.textContent = formatCountdown(remaining);
-      if (remaining <= 0) { loadCycle(); loadTimeline(); }
+      if (remaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
     }, 1000);
     csPhaseRemaining.textContent = formatCountdown(remaining);
     csCycleRemaining.textContent = formatCountdown(cycleRemaining);
@@ -1893,16 +1905,16 @@ export function init(root, ctx) {
   });
 
   // ── Bootstrap ──
-  // Load validators first to populate name lookup, then timeline uses friendly names
-  loadValidators().then(() => loadTimeline());
+  // Load validators first to populate name lookup, then timeline and tallies use friendly names
+  loadValidators().then(() => { loadTimeline(); loadVoteTallies(); });
   loadCycle();
   loadCandidates();
   loadVotingStrategy();
-  loadVoteTallies();
 
   return {
     destroy() {
       clearInterval(countdownInterval);
+      clearInterval(tallyPollInterval);
       if (badgePollInterval) clearInterval(badgePollInterval);
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },

@@ -166,7 +166,7 @@ mod tests {
         let tx_ids: Vec<Hash256> = genesis
             .transactions
             .iter()
-            .filter_map(|tx| tx.compute_tx_id(noble_core::MAINNET_CHAIN_ID).ok())
+            .filter_map(|tx| tx.compute_tx_id(noble_core::mainnet_chain_id()).ok())
             .collect();
         {
             let s = storage.read();

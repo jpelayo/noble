@@ -108,9 +108,9 @@ impl Transaction {
     /// The signing payload includes checksum, timestamp, fee, and sorted metadata.
     /// Fee is included for atomic commitment (no tx malleability).
     pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
-        // AUD3-D7: Default to MAINNET_CHAIN_ID for cross-chain replay protection.
+        // AUD3-D7: Default to mainnet_chain_id for cross-chain replay protection.
         // The blockchain has never run, so no backward compat concern.
-        self.compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
+        self.compute_signing_message_for_chain(crate::mainnet_chain_id())
     }
 
     /// AUD2-H7: Compute the signing message with an explicit chain_id.
@@ -331,10 +331,10 @@ mod tests {
     fn signing_message_differs_by_chain_id() {
         let tx = make_test_tx();
         let mainnet_msg = tx
-            .compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
+            .compute_signing_message_for_chain(crate::mainnet_chain_id())
             .unwrap();
         let testnet_msg = tx
-            .compute_signing_message_for_chain(crate::TESTNET_CHAIN_ID)
+            .compute_signing_message_for_chain(crate::testnet_chain_id())
             .unwrap();
         assert_ne!(
             mainnet_msg, testnet_msg,
@@ -347,11 +347,11 @@ mod tests {
         let tx = make_test_tx();
         let default_msg = tx.compute_signing_message().unwrap();
         let mainnet_msg = tx
-            .compute_signing_message_for_chain(crate::MAINNET_CHAIN_ID)
+            .compute_signing_message_for_chain(crate::mainnet_chain_id())
             .unwrap();
         assert_eq!(
             default_msg, mainnet_msg,
-            "default signing message should use MAINNET_CHAIN_ID"
+            "default signing message should use mainnet_chain_id"
         );
     }
 

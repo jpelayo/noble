@@ -64,15 +64,12 @@ impl Default for FaucetConfig {
     }
 }
 
-/// Known chain IDs.
-pub const MAINNET_CHAIN_ID: u64 = 0x4E4F424C;
-
 /// Derive a human-readable network label from the chain ID.
 pub fn network_label_from_chain_id(chain_id: u64) -> String {
     match chain_id {
-        MAINNET_CHAIN_ID => "mainnet".to_string(),
-        0x4E4F4254 => "testnet".to_string(),
-        0x4E4F4252 => "regtest".to_string(),
+        x if x == noble_core::mainnet_chain_id() as u64 => "mainnet".to_string(),
+        x if x == noble_core::testnet_chain_id() as u64 => "testnet".to_string(),
+        x if x == noble_core::regtest_chain_id() as u64 => "regtest".to_string(),
         other => format!("unknown (0x{other:X})"),
     }
 }
@@ -270,9 +267,18 @@ mod tests {
 
     #[test]
     fn network_label_detection() {
-        assert_eq!(network_label_from_chain_id(0x4E4F424C), "mainnet");
-        assert_eq!(network_label_from_chain_id(0x4E4F4254), "testnet");
-        assert_eq!(network_label_from_chain_id(0x4E4F4252), "regtest");
+        assert_eq!(
+            network_label_from_chain_id(noble_core::mainnet_chain_id() as u64),
+            "mainnet"
+        );
+        assert_eq!(
+            network_label_from_chain_id(noble_core::testnet_chain_id() as u64),
+            "testnet"
+        );
+        assert_eq!(
+            network_label_from_chain_id(noble_core::regtest_chain_id() as u64),
+            "regtest"
+        );
         assert_eq!(
             network_label_from_chain_id(0x12345678),
             "unknown (0x12345678)"

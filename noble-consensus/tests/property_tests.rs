@@ -38,7 +38,7 @@ proptest! {
             val_list,
             0,
             Hash256::ZERO,
-            noble_core::MAINNET_CHAIN_ID,
+            noble_core::mainnet_chain_id(),
             None,
             Some(0),
         );
@@ -141,7 +141,7 @@ proptest! {
             val_list,
             0,
             Hash256::ZERO,
-            noble_core::MAINNET_CHAIN_ID,
+            noble_core::mainnet_chain_id(),
             None,
             Some(0),
         );
@@ -187,7 +187,7 @@ proptest! {
             val_list,
             0,
             Hash256::ZERO,
-            noble_core::MAINNET_CHAIN_ID,
+            noble_core::mainnet_chain_id(),
             None,
             Some(0),
         );

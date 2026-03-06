@@ -9,7 +9,7 @@
 //! 3. tx_id determinism: same tx → same tx_id
 
 use noble_codec::NobleCbor;
-use noble_core::{MetadataEntry, Transaction, MAINNET_CHAIN_ID};
+use noble_core::{MetadataEntry, Transaction, mainnet_chain_id};
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
     SCHEME_ED25519,
@@ -172,8 +172,8 @@ proptest! {
 
     #[test]
     fn tx_id_deterministic(tx in arb_transaction()) {
-        let id1 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
-        let id2 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let id1 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+        let id2 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         prop_assert_eq!(id1, id2);
     }
 }
@@ -304,8 +304,8 @@ fn signed_transaction_roundtrip_100() {
         assert_eq!(tx, decoded2);
 
         // tx_id determinism
-        let id1 = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
-        let id2 = decoded.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let id1 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+        let id2 = decoded.compute_tx_id(mainnet_chain_id()).unwrap();
         assert_eq!(id1, id2);
     }
 }

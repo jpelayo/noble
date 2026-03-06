@@ -3,7 +3,8 @@
 
 //! Network configuration.
 
-use noble_core::constants::{MAINNET_CHAIN_ID, PROTOCOL_VERSION};
+use noble_core::constants::PROTOCOL_VERSION;
+use noble_core::{mainnet_chain_id, testnet_chain_id};
 
 /// Primary P2P listen port.
 pub const P2P_PORT_PRIMARY: u16 = 8780;
@@ -69,7 +70,7 @@ pub struct NetworkConfig {
     /// How long a banned peer stays banned, in seconds.
     pub ban_duration_secs: u64,
 
-    /// Network chain identifier (e.g. `MAINNET_CHAIN_ID`).
+    /// Network chain identifier (e.g. `mainnet_chain_id()`).
     pub chain_id: u32,
 
     /// Protocol version for compatibility checks.
@@ -125,7 +126,7 @@ impl Default for NetworkConfig {
             max_inbound: DEFAULT_MAX_INBOUND,
             ban_threshold: DEFAULT_BAN_THRESHOLD,
             ban_duration_secs: DEFAULT_BAN_DURATION_SECS,
-            chain_id: MAINNET_CHAIN_ID,
+            chain_id: mainnet_chain_id(),
             protocol_version: PROTOCOL_VERSION,
             enable_mdns: true,
             enable_kademlia: true,
@@ -148,7 +149,7 @@ impl NetworkConfig {
     pub fn testnet() -> Self {
         Self {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
-            chain_id: noble_core::constants::TESTNET_CHAIN_ID,
+            chain_id: testnet_chain_id(),
             ..Self::default()
         }
     }
@@ -170,7 +171,7 @@ mod tests {
         assert_eq!(cfg.max_inbound, 32);
         assert_eq!(cfg.ban_threshold, 100);
         assert_eq!(cfg.ban_duration_secs, 86_400);
-        assert_eq!(cfg.chain_id, MAINNET_CHAIN_ID);
+        assert_eq!(cfg.chain_id, mainnet_chain_id());
         assert_eq!(cfg.protocol_version, PROTOCOL_VERSION);
         assert!(cfg.enable_mdns);
         assert!(cfg.listen_addr.contains("8780"));
@@ -198,7 +199,7 @@ mod tests {
     #[test]
     fn testnet_config() {
         let cfg = NetworkConfig::testnet();
-        assert_eq!(cfg.chain_id, noble_core::constants::TESTNET_CHAIN_ID);
+        assert_eq!(cfg.chain_id, testnet_chain_id());
         assert!(cfg.listen_addr.contains("127.0.0.1"));
         assert!(cfg.listen_addr.contains("/tcp/0"));
     }

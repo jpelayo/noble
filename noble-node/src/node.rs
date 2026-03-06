@@ -242,7 +242,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let consensus_config = build_consensus_config(config);
 
         // C-003: Load persisted validator list if the file exists.
-        let validator_list_path = config.consensus.validator_list_path.clone();
+        // Resolve relative paths against data_dir so the file lives inside the
+        // data directory and gets properly cleaned up by `noble-tool reset-chain`.
+        let validator_list_path = {
+            let p = config.consensus.validator_list_path.clone();
+            if p.is_relative() {
+                config.storage.data_dir.join(p)
+            } else {
+                p
+            }
+        };
         let mut validator_list = if validator_list_path.exists() {
             match std::fs::read(&validator_list_path) {
                 Ok(bytes) => {
@@ -419,7 +428,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             last_proposed: parking_lot::Mutex::new(None),
-            validator_list_path: Some(config.consensus.validator_list_path.clone()),
+            validator_list_path: Some(validator_list_path),
             seed_addrs: config.network.seeds.clone(),
         })
     }
@@ -1371,7 +1380,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 Some(std::path::PathBuf::from(&config.gateway.key_path))
             },
             ip_filter: ip_filter.clone(),
-            validator_list_path: Some(config.consensus.validator_list_path.clone()),
+            validator_list_path: self.validator_list_path.clone(),
             peer_info: self.peer_info.clone(),
             node_identity: shared_identity.clone(),
             identity_path: Some(identity_path),
@@ -2116,14 +2125,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // block from a peer ahead of us) or a live consensus proposal.
                 //
                 // Sync import:  block.height == our_tip + 1 AND any peer is
-                //   ahead of us (they've committed this block already).
+                //   ahead of us AND tip_height > 0.
                 //   Validate against the parent in storage, commit directly.
                 //
-                // Consensus proposal:  block.height == our_tip + 1 AND no peer
-                //   is ahead (this is a fresh proposal for the current cycle).
-                //   Route to the consensus engine for candidate tracking + voting.
+                // Block 1 exception:  when tip_height == 0, block 1 is ALWAYS
+                //   routed to consensus for Dual-Witness validation.  This
+                //   prevents phantom chain resurrection after noble-tool reset.
                 //
-                // Bootstrap: route to consensus engine for candidate tracking + voting.
+                // Consensus proposal:  everything else → route to the consensus
+                //   engine for candidate tracking + voting.
 
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "block_received",
@@ -2143,10 +2153,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 if block.header.height <= tip_height {
                     // Already have this block — ignore.
-                } else if block.header.height == tip_height + 1 && we_are_behind {
+                } else if block.header.height == tip_height + 1 && we_are_behind && tip_height > 0 {
                     // Sync import: committed block from peer ahead of us.
                     // Takes priority over live proposals — the network already has
                     // this block, we should import it rather than propose our own.
+                    //
+                    // IMPORTANT: Block 1 (tip_height == 0) is NEVER sync-imported.
+                    // It must always go through consensus with Dual-Witness validation
+                    // (min_unique_voters >= 2).  This prevents phantom chain resurrection
+                    // after noble-tool reset-chain — without this guard, a reset node
+                    // would automatically re-import the deleted chain from its peers.
                     self.try_sync_import(
                         block.clone(),
                         peer_id,
@@ -3596,7 +3612,7 @@ mod tests {
 
         // Chain tip should be genesis (height 0).
         assert_eq!(node.chain_height(), 0);
-        assert_eq!(node.chain_id, noble_core::MAINNET_CHAIN_ID);
+        assert_eq!(node.chain_id, noble_core::mainnet_chain_id());
 
         // Mempool should be empty.
         assert_eq!(node.mempool.lock().len(), 0);
@@ -3694,9 +3710,9 @@ mod tests {
         use crate::config::NetworkId;
 
         for (network, expected_id) in [
-            (NetworkId::Mainnet, noble_core::MAINNET_CHAIN_ID),
-            (NetworkId::Testnet, noble_core::TESTNET_CHAIN_ID),
-            (NetworkId::Regtest, noble_core::REGTEST_CHAIN_ID),
+            (NetworkId::Mainnet, noble_core::mainnet_chain_id()),
+            (NetworkId::Testnet, noble_core::testnet_chain_id()),
+            (NetworkId::Regtest, noble_core::regtest_chain_id()),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut config = NodeConfig::default();

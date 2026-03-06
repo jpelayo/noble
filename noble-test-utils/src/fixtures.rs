@@ -7,7 +7,7 @@
 //! and blocks with proper cryptographic signatures.
 
 use noble_core::{
-    Block, BlockHeader, MetadataEntry, Transaction, MAINNET_CHAIN_ID, PROTOCOL_VERSION,
+    Block, BlockHeader, MetadataEntry, Transaction, mainnet_chain_id, PROTOCOL_VERSION,
 };
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
@@ -67,7 +67,7 @@ pub fn make_signed_tx(
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -102,7 +102,7 @@ pub fn make_signed_tx_with_metadata(
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -138,7 +138,7 @@ pub fn make_signed_transfer_tx(
     };
     let msg = tx.compute_signing_message().unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -214,7 +214,7 @@ mod tests {
         assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
-        let recomputed = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let recomputed = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         assert_eq!(tx_id, recomputed);
     }
 
@@ -240,7 +240,7 @@ mod tests {
         assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
-        let recomputed = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let recomputed = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         assert_eq!(tx_id, recomputed);
     }
 

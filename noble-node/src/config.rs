@@ -64,9 +64,9 @@ impl NetworkId {
     /// Return the chain ID constant for this network.
     pub fn chain_id(self) -> u32 {
         match self {
-            Self::Mainnet => noble_core::MAINNET_CHAIN_ID,
-            Self::Testnet => noble_core::TESTNET_CHAIN_ID,
-            Self::Regtest => noble_core::REGTEST_CHAIN_ID,
+            Self::Mainnet => noble_core::mainnet_chain_id(),
+            Self::Testnet => noble_core::testnet_chain_id(),
+            Self::Regtest => noble_core::regtest_chain_id(),
         }
     }
 
@@ -797,9 +797,9 @@ mod tests {
 
     #[test]
     fn network_id_chain_id_and_genesis() {
-        assert_eq!(NetworkId::Mainnet.chain_id(), noble_core::MAINNET_CHAIN_ID);
-        assert_eq!(NetworkId::Testnet.chain_id(), noble_core::TESTNET_CHAIN_ID);
-        assert_eq!(NetworkId::Regtest.chain_id(), noble_core::REGTEST_CHAIN_ID);
+        assert_eq!(NetworkId::Mainnet.chain_id(), noble_core::mainnet_chain_id());
+        assert_eq!(NetworkId::Testnet.chain_id(), noble_core::testnet_chain_id());
+        assert_eq!(NetworkId::Regtest.chain_id(), noble_core::regtest_chain_id());
 
         // Each network produces a distinct genesis block
         let m = NetworkId::Mainnet.genesis_block();

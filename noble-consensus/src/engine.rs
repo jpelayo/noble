@@ -307,12 +307,17 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // No genesis block yet — set epoch to GENESIS_TIMESTAMP so the normal
-        // cycle machinery runs.  All nodes compute the same cycle/phase.
-        // Block 1 will reset the epoch to its actual timestamp when committed.
+        // No genesis block yet — set epoch to GENESIS_TIMESTAMP so all nodes
+        // compute identical cycle numbers (required for vote cycle matching).
+        // Using `now`-aligned epochs would break if nodes start in different
+        // 1200-second windows (they'd disagree on cycle numbers → WrongCycle
+        // vote rejection).  The resulting high cycle number (days since
+        // GENESIS_TIMESTAMP / 1200) is cosmetic — it resets to 0 when block 1
+        // is committed and the epoch is set to block 1's timestamp.
         if !self.cycle_mgr.has_genesis() {
-            self.cycle_mgr.set_genesis_timestamp(noble_core::GENESIS_TIMESTAMP);
-            info!("cycle engine: epoch set to GENESIS_TIMESTAMP (no blocks yet)");
+            self.cycle_mgr
+                .set_genesis_timestamp(noble_core::GENESIS_TIMESTAMP);
+            debug!("cycle engine: bootstrap epoch set to GENESIS_TIMESTAMP (no blocks yet)");
         }
 
         let new_cycle = self.cycle_mgr.current_cycle(now);
@@ -470,6 +475,49 @@ impl CycleEngine {
                 }
             })
             .collect();
+
+        // Genesis protection: before block 1 is committed, require at least one
+        // live connected peer.  The Dual-Witness rule (unique_voter_count >= 2)
+        // already requires 2 distinct keys, but a stale validator_list could let
+        // compute_majority() return Adopt(Plurality) with only a self-vote.  This
+        // hard gate ensures a disconnected node can never attempt genesis — it must
+        // have real peers to even reach the majority computation.
+        if self.tip_height == 0 && self.total_peers == 0 {
+            debug!(
+                "cycle {}: genesis guard — no connected peers, skipping consensus",
+                completed_cycle
+            );
+            // Re-admit all candidate txs
+            let all_txs: Vec<_> = self
+                .candidate_tracker
+                .collect_orphaned_txs(&Hash256::ZERO, self.chain_id);
+            if !all_txs.is_empty() {
+                outputs.push(CycleIo::ReadmitTransactions(all_txs));
+            }
+            // Record empty cycle history and clear state
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.last_cycle_history = Some(CycleHistoryEntry {
+                cycle_number: completed_cycle,
+                status: "no_peers".to_string(),
+                proposals: Vec::new(),
+                votes: Vec::new(),
+                winner: None,
+                winning_hash: None,
+                disambiguation: false,
+                finalized_at: now_ts,
+            });
+            self.vote_mgr.clear();
+            self.candidate_tracker.clear();
+            self.r1_vote_cast = false;
+            self.r2_vote_cast = false;
+            outputs.push(CycleIo::Log(format!(
+                "cycle {completed_cycle}: no connected peers — genesis requires live witnesses"
+            )));
+            return outputs;
+        }
 
         // C-004: Use the actual number of unique voters who cast votes in this
         // cycle as the denominator, NOT the raw peer count.  total_peers includes
@@ -1451,7 +1499,7 @@ impl ConsensusStateMachine for CycleEngine {
 mod tests {
     use super::*;
     use crate::strategy::VotingStrategy;
-    use noble_core::{BlockHeader, MAINNET_CHAIN_ID, PROTOCOL_VERSION};
+    use noble_core::{mainnet_chain_id, BlockHeader, PROTOCOL_VERSION};
     use noble_crypto::{ed25519, NobleSigner, SignatureEnvelope, SCHEME_ED25519};
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
@@ -1475,7 +1523,7 @@ mod tests {
             val_list,
             0,
             Hash256::ZERO,
-            MAINNET_CHAIN_ID,
+            mainnet_chain_id(),
             validator_key,
             Some(noble_core::GENESIS_TIMESTAMP),
         );
@@ -2037,7 +2085,10 @@ mod tests {
 
     #[test]
     fn bootstrap_epoch_initializes_cycle_machinery() {
-        // Engine with genesis_timestamp=None → first tick sets epoch=GENESIS_TIMESTAMP → normal phases
+        // Engine with genesis_timestamp=None → first tick sets epoch=GENESIS_TIMESTAMP.
+        // All nodes use the same fixed epoch so vote cycle numbers match.
+        // The cycle number is high (days since GENESIS_TIMESTAMP / 1200) but
+        // that's cosmetic — it resets to 0 when block 1 is committed.
         let (vp, vpub) = make_validator();
         let val_list = ValidatorList::new();
         let mut engine = CycleEngine::new(
@@ -2045,7 +2096,7 @@ mod tests {
             val_list,
             0,
             Hash256::ZERO,
-            MAINNET_CHAIN_ID,
+            mainnet_chain_id(),
             Some((vp, vpub)),
             None,
         );
@@ -2059,11 +2110,10 @@ mod tests {
             has_set_timer(&outputs),
             "bootstrap should enable normal timer"
         );
-        // Cycle should be based on GENESIS_TIMESTAMP, not epoch=0
         let expected_cycle = (now - noble_core::GENESIS_TIMESTAMP) / 1200;
         assert_eq!(
             engine.tracked_cycle, expected_cycle,
-            "cycle should be (now - GENESIS_TIMESTAMP) / 1200"
+            "bootstrap cycle should use GENESIS_TIMESTAMP epoch for cross-node consistency"
         );
     }
 

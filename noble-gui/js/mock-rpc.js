@@ -11,7 +11,8 @@
  *   scheme_id: 0x00 = Ed25519, 0x01 = secp256k1
  */
 
-// ── Constants (from noble-core/src/constants.rs) ──
+// ── Constants ──
+// Mock chain ID — real value is derived from the genesis block hash at runtime.
 const MAINNET_CHAIN_ID = 0x4E4F424C;
 const CYCLE_DURATION_SECS = 1200;
 const MIN_TX_FEE = 1000;

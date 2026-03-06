@@ -474,18 +474,6 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // avoiding stale tracked_phase during the 1-tick window after epoch changes.
         let (phase_index, engine_phase_remaining, cycle_remaining) = consensus.phase_timing();
 
-        // No genesis block → hide cycle identity.  Return u64::MAX sentinel so
-        // the GUI shows a "bootstrapping" indicator instead of a cycle number.
-        if tip_height == 0 {
-            return Ok(CycleStatusResponse {
-                cycle_number: None,
-                phase: "Bootstrapping".to_string(),
-                phase_index: 0,
-                phase_remaining_secs: cycle_remaining,
-                cycle_remaining_secs: cycle_remaining,
-            });
-        }
-
         // 4 phases: derive name from real-time phase index (not tick-tracked).
         let phase_name = match phase_index {
             0 => "Block Proposal",
@@ -493,6 +481,20 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             2 => "Reflection",
             _ => "Propagation",
         };
+
+        // No genesis block → hide cycle number but still report real phase info.
+        // The engine IS running full consensus during bootstrap (proposals, votes,
+        // phase transitions) — the GUI needs the real phase_index to show the
+        // pipeline progression and log phase change events.
+        if tip_height == 0 {
+            return Ok(CycleStatusResponse {
+                cycle_number: None,
+                phase: phase_name.to_string(),
+                phase_index,
+                phase_remaining_secs: engine_phase_remaining,
+                cycle_remaining_secs: cycle_remaining,
+            });
+        }
 
         let cycle = consensus.current_cycle();
 
@@ -625,15 +627,39 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let candidate_tracker = consensus.candidate_tracker();
         let validator_list = consensus.validator_list();
 
+        // Build peer announce name lookup as fallback for validators not in local list
+        let peer_name_map: std::collections::HashMap<Vec<u8>, String> = {
+            let storage = self.storage.read();
+            storage
+                .list_peer_records()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|rec| {
+                    let name = rec
+                        .last_announce
+                        .as_ref()
+                        .map(|ann| ann.node_name.clone())
+                        .unwrap_or_default();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some((rec.identity_key.clone(), name))
+                    }
+                })
+                .collect()
+        };
+
         let mut entries: Vec<VoteTallyEntry> = tallies
             .into_iter()
             .map(|(h, c)| {
-                // Look up proposer: friendly name from validator list, else hex pubkey
+                // Look up proposer: friendly name from validator list,
+                // then peer announce name, else hex pubkey
                 let validator = candidate_tracker.validator_of(&h).map(|wire| {
                     validator_list
                         .find_by_wire(&wire)
                         .map(|v| v.name())
                         .filter(|n| !n.is_empty())
+                        .or_else(|| peer_name_map.get(&wire).cloned())
                         .unwrap_or_else(|| hex::encode(&wire))
                 });
                 VoteTallyEntry {

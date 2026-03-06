@@ -19,7 +19,7 @@ use std::time::Duration;
 use noble_codec::NobleCbor;
 use noble_consensus::PorVote;
 use noble_core::node_announce::{NodeRole, OrgType};
-use noble_core::{Block, BlockHeader, NodeAnnounce, MAINNET_CHAIN_ID};
+use noble_core::{mainnet_chain_id, Block, BlockHeader, NodeAnnounce};
 use noble_crypto::{ed25519, Hash256, NoblePrivateKey, NoblePublicKey};
 use noble_network::config::NetworkConfig;
 use noble_network::messages::{NetworkCommand, NetworkEvent};
@@ -308,7 +308,7 @@ async fn gossip_block_announce_end_to_end() {
         Hash256::ZERO,
         1,
         now,
-        MAINNET_CHAIN_ID,
+        mainnet_chain_id(),
         &sk,
         &pk,
         4 * 1024 * 1024,

@@ -1583,7 +1583,7 @@ fn parse_checksum_index_value(bytes: &[u8]) -> Result<Vec<Hash256>, StorageError
 mod tests {
     use super::*;
     use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY};
-    use noble_core::{Block, BlockHeader, Transaction, MAINNET_CHAIN_ID, PROTOCOL_VERSION};
+    use noble_core::{Block, BlockHeader, Transaction, mainnet_chain_id, PROTOCOL_VERSION};
     use noble_crypto::{
         ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
         SCHEME_ED25519,
@@ -1626,7 +1626,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -1662,7 +1662,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -2498,7 +2498,7 @@ mod tests {
             prev = hash;
         }
 
-        let tip = db.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        let tip = db.rollback_to_height(1, mainnet_chain_id()).unwrap();
         assert_eq!(tip.height, 1);
         assert!(db.get_block_hash_by_height(2).is_err());
     }
@@ -2520,7 +2520,7 @@ mod tests {
 
         // Heights 1,2,3 each give INITIAL_SUBSIDY; height 0 gives 0
         assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
-        db.rollback_to_height(2, MAINNET_CHAIN_ID).unwrap();
+        db.rollback_to_height(2, mainnet_chain_id()).unwrap();
         // After rollback: heights 0,1,2 remain → 0 + INITIAL_SUBSIDY + INITIAL_SUBSIDY
         assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
     }
@@ -2640,7 +2640,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -2955,7 +2955,7 @@ mod tests {
         };
         let msg = tx.compute_signing_message().unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
         (tx, tx_id)
     }
 
@@ -3101,7 +3101,7 @@ mod tests {
         assert_eq!(db.lookup_version_successors(&v1_checksum).unwrap().len(), 1);
 
         // Rollback to height 1 (removes block 2 which has the v2)
-        db.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        db.rollback_to_height(1, mainnet_chain_id()).unwrap();
 
         // Version chain should be empty after rollback (block 2 removed)
         let successors = db.lookup_version_successors(&v1_checksum).unwrap();
@@ -3257,7 +3257,7 @@ mod tests {
         assert_eq!(db.lookup_by_publisher(&wire).unwrap().len(), 3);
 
         // Rollback to height 1 (removes blocks 2 and 3)
-        db.rollback_to_height(1, MAINNET_CHAIN_ID).unwrap();
+        db.rollback_to_height(1, mainnet_chain_id()).unwrap();
 
         // After rollback: only tx_id1 from block 1
         let results = db.lookup_by_publisher(&wire).unwrap();

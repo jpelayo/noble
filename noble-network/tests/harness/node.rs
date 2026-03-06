@@ -9,7 +9,7 @@ use std::sync::Arc;
 use noble_consensus::{
     ConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo, ValidatorList,
 };
-use noble_core::{Block, BlockHeader, Transaction, MAINNET_CHAIN_ID};
+use noble_core::{mainnet_chain_id, Block, BlockHeader, Transaction};
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use noble_mempool::{Mempool, MempoolConfig, NoBalanceLookup, NoChainLookup};
 use noble_network::config::NetworkConfig;
@@ -105,7 +105,7 @@ impl TestNode {
             validator_list,
             0,
             Hash256::ZERO,
-            MAINNET_CHAIN_ID,
+            mainnet_chain_id(),
             Some((private_key.clone_for_test(), public_key.clone())),
             Some(0), // tests: genesis at epoch 0
         );
@@ -145,7 +145,7 @@ impl TestNode {
             tip_hash,
             tip_height + 1,
             timestamp,
-            MAINNET_CHAIN_ID,
+            mainnet_chain_id(),
             &self.private_key,
             &self.public_key,
             4 * 1024 * 1024,
@@ -178,7 +178,7 @@ impl TestNode {
                 let tx_ids: Vec<Hash256> = block
                     .transactions
                     .iter()
-                    .filter_map(|tx| tx.compute_tx_id(MAINNET_CHAIN_ID).ok())
+                    .filter_map(|tx| tx.compute_tx_id(mainnet_chain_id()).ok())
                     .collect();
                 let _ = self.storage.commit_block(&block, &block_hash, &tx_ids);
                 self.committed_blocks.push(*block);

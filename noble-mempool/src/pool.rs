@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_codec::NobleCbor;
 use noble_core::{
-    Transaction, MAINNET_CHAIN_ID, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
+    Transaction, mainnet_chain_id, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
     TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
 };
 use noble_crypto::{is_recognized_scheme, Hash256};
@@ -63,7 +63,7 @@ impl Default for MempoolConfig {
             max_count: DEFAULT_MAX_COUNT,
             expiry_secs: DEFAULT_EXPIRY_SECS,
             sig_cache_size: crate::sigcache::DEFAULT_SIG_CACHE_SIZE,
-            chain_id: MAINNET_CHAIN_ID,
+            chain_id: mainnet_chain_id(),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }
@@ -669,7 +669,7 @@ mod tests {
             max_size_bytes: 1024 * 1024,
             expiry_secs: 3600,
             sig_cache_size: 100,
-            chain_id: MAINNET_CHAIN_ID,
+            chain_id: mainnet_chain_id(),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }
@@ -746,7 +746,7 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
-        let tx_id = tx.compute_tx_id(MAINNET_CHAIN_ID).unwrap();
+        let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
 
         let chain = ConfirmedChain(tx_id);
         let result = pool.admit(&tx, 1_700_000_000, &chain, &NoBalanceLookup, 0);

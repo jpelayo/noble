@@ -28,8 +28,9 @@ pub use encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipi
 pub use error::ValidationError;
 pub use evidence::{DoubleProposalEvidence, EvidenceError};
 pub use genesis::{
-    genesis_block, genesis_hash, regtest_genesis_block, regtest_genesis_hash,
-    testnet_genesis_block, testnet_genesis_hash, GENESIS_TIMESTAMP,
+    derive_chain_id, genesis_block, genesis_hash, mainnet_chain_id, regtest_chain_id,
+    regtest_genesis_block, regtest_genesis_hash, testnet_chain_id, testnet_genesis_block,
+    testnet_genesis_hash, GENESIS_TIMESTAMP,
 };
 pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};
