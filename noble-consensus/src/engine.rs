@@ -268,9 +268,14 @@ impl CycleEngine {
         self.config.confirmation_strategy = strategy;
     }
 
-    /// Get current vote tallies (candidate_hash → vote count).
+    /// Get current R1 vote tallies (candidate_hash → vote count).
     pub fn vote_tallies(&self) -> std::collections::HashMap<Hash256, usize> {
         self.vote_mgr.current_tallies()
+    }
+
+    /// Get current R2 (confirmation) vote tallies (candidate_hash → vote count).
+    pub fn r2_tallies(&self) -> std::collections::HashMap<Hash256, usize> {
+        self.vote_mgr.r2_tallies()
     }
 
     /// Take the last completed cycle's history entry (H-002).

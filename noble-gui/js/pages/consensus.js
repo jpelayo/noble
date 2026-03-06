@@ -48,6 +48,15 @@ export function init(root, ctx) {
     return truncateHash(pubkeyHex, maxLen || 6);
   }
 
+  // ── Peer ID → friendly name cache (populated from announce events) ──
+  const peerIdToName = new Map();
+  function getPeerDisplayName(peerId) {
+    if (!peerId) return '—';
+    const name = peerIdToName.get(peerId);
+    if (name) return name;
+    return truncateHash(peerId, 6);
+  }
+
   root.innerHTML = `
     <div class="page-header" style="display:flex;align-items:baseline;gap:var(--gap-sm)">
       <div style="flex:1"><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
@@ -495,10 +504,15 @@ export function init(root, ctx) {
         return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
       case 'vote_received':
         return `Vote R${data.round} received from ${vName(data.voter_id)} \u2192 ${truncateHash(data.candidate_hash || '')}`;
-      case 'peer_connected':
-        return `Peer connected: ${pName(data.peer_id)} (${data.direction || ''})`;
-      case 'peer_disconnected':
-        return `Peer disconnected: ${pName(data.peer_id)}`;
+      case 'peer_connected': {
+        const name = data.node_name || peerIdToName.get(data.peer_id) || '';
+        const display = name || pName(data.peer_id);
+        return `Peer connected: ${display} (${data.direction || ''})`;
+      }
+      case 'peer_disconnected': {
+        const name = peerIdToName.get(data.peer_id) || '';
+        return `Peer disconnected: ${name || pName(data.peer_id)}`;
+      }
       case 'peer_banned':
         return `Peer banned: ${pName(data.peer_id)} \u2014 ${data.reason}`;
       case 'peer_status':
@@ -570,7 +584,26 @@ export function init(root, ctx) {
   // Both streams are normalized into a single scrolling list.
   if (ws && ws.subscribe) {
     unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
+      // Cache peer names from announce events (peer_id → node_name).
+      if (data.event === 'announce_received' && data.peer_id && data.node_name) {
+        peerIdToName.set(data.peer_id, data.node_name);
+      }
       pushActivity(data);
+      // Push follow-up context entries for enriched events.
+      if (data.event === 'phase_change') {
+        if (data.phase === 'Reflection' && data.leader_name) {
+          pushActivity({ event: 'consensus_log', message: `Voting results favor ${data.leader_name || truncateHash(data.leader_hash || '', 6)} with ${data.leader_pct}% of votes (${data.total_votes} total)` });
+        }
+        if (data.phase === 'Propagation' && data.winner_name) {
+          pushActivity({ event: 'consensus_log', message: `Winning proposer: ${data.winner_name}` });
+        }
+      }
+      if (data.event === 'vote_broadcast' && data.candidate_name) {
+        pushActivity({ event: 'consensus_log', message: `This node voted for ${data.candidate_name}` });
+      }
+      if (data.event === 'block_proposed' && data.hash) {
+        pushActivity({ event: 'consensus_log', message: `This node proposes block ${truncateHash(data.hash)}` });
+      }
       // Refresh data panels on significant events
       if (data.event === 'block_committed') {
         loadCycle(); loadTimeline(); loadVoteTallies();
@@ -609,12 +642,20 @@ export function init(root, ctx) {
   }
 
   function seedPeers() {
+    // Pre-populate peer names from peer memory before seeding connections.
+    rpc.call('noble_getPeerMemory').then(records => {
+      if (Array.isArray(records)) {
+        for (const r of records) {
+          if (r.peer_id && r.node_name) peerIdToName.set(r.peer_id, r.node_name);
+        }
+      }
+    }).catch(() => {});
     rpc.call('noble_getPeerInfo').then(peers => {
       if (Array.isArray(peers)) {
         for (const p of peers) {
           if (p.status === 'connected' && !seededPeerIds.has(p.peer_id)) {
             seededPeerIds.add(p.peer_id);
-            pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
+            pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '', node_name: peerIdToName.get(p.peer_id) || '' });
           }
         }
       }
@@ -635,8 +676,22 @@ export function init(root, ctx) {
 
   function seedReconnectStatus() {
     rpc.call('noble_getPeerInfo').then(peers => {
-      const count = Array.isArray(peers) ? peers.filter(p => p.status === 'connected').length : 0;
-      pushActivity({ event: 'heartbeat', message: `${count} peer(s) connected \u2014 reconnect loop armed` });
+      const connected = Array.isArray(peers) ? peers.filter(p => p.status === 'connected') : [];
+      pushActivity({ event: 'heartbeat', message: `${connected.length} peer(s) connected \u2014 reconnect loop armed` });
+      // Show connected peer names (resolved from peer memory).
+      if (connected.length > 0) {
+        rpc.call('noble_getPeerMemory').then(records => {
+          if (Array.isArray(records)) {
+            for (const r of records) {
+              if (r.peer_id && r.node_name) peerIdToName.set(r.peer_id, r.node_name);
+            }
+          }
+          const names = connected.map(p => peerIdToName.get(p.peer_id) || truncateHash(p.peer_id || '', 6));
+          if (names.length > 0) {
+            pushActivity({ event: 'heartbeat', message: `Connected: ${names.join(', ')}` });
+          }
+        }).catch(() => {});
+      }
     }).catch(() => {});
   }
 

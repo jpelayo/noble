@@ -1855,11 +1855,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                 }));
+                // Look up friendly name from known_peers (set by previous NodeAnnounce).
+                let peer_name = {
+                    let engine = self.consensus.read();
+                    engine.validator_list().known_peers().values()
+                        .find(|kp| kp.peer_id_hex.as_deref() == Some(&hex_pid))
+                        .and_then(|kp| kp.node_name.clone())
+                };
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_connected",
                     "peer_id": hex_pid,
                     "addr": addr,
                     "direction": direction,
+                    "node_name": peer_name.as_deref().unwrap_or(""),
                 }));
                 // Request peer status immediately on connect so sync and
                 // block proposal don't wait for the 60s poll interval.
@@ -2018,6 +2026,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "event": "announce_received",
                     "node_name": announce.node_name,
                     "identity": hex::encode(&identity_wire),
+                    "peer_id": hex::encode(&peer_id),
                     "wants_to_validate": announce.wants_to_validate,
                     "wants_to_vote": announce.wants_to_vote,
                     "software_version": announce.software_version,
@@ -2382,11 +2391,64 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
-                    let _ = cycle_phase_tx.send(serde_json::json!({
+                    let mut event = serde_json::json!({
                         "event": "phase_change",
                         "phase": phase_name,
                         "cycle": cycle,
-                    }));
+                    });
+                    // Enrich phase transitions with vote/candidate context.
+                    match phase {
+                        noble_consensus::CyclePhase::Reflection => {
+                            // Reflection start: R1 votes are in — show current leader.
+                            let engine = self.consensus.read();
+                            let tallies = engine.vote_tallies(); // R1
+                            let total_votes: usize = tallies.values().sum();
+                            if let Some((best_hash, best_count)) = tallies.iter().max_by_key(|e| e.1) {
+                                let pct = if total_votes > 0 { (*best_count * 100) / total_votes } else { 0 };
+                                let name = engine.candidate_tracker().get(best_hash)
+                                    .and_then(|entry| {
+                                        let wire = entry.block.header.validator_id.to_wire_bytes();
+                                        let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
+                                        if n.is_empty() { None } else { Some(n) }
+                                    });
+                                event["leader_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
+                                event["leader_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
+                                event["leader_pct"] = serde_json::json!(pct);
+                                event["total_votes"] = serde_json::json!(total_votes);
+                            }
+                        }
+                        noble_consensus::CyclePhase::Propagation => {
+                            // Propagation start: R2 votes are in — show winner.
+                            let engine = self.consensus.read();
+                            let r2 = engine.r2_tallies();
+                            let total_r2: usize = r2.values().sum();
+                            if let Some((best_hash, _)) = r2.iter().max_by_key(|e| e.1) {
+                                let name = engine.candidate_tracker().get(best_hash)
+                                    .and_then(|entry| {
+                                        let wire = entry.block.header.validator_id.to_wire_bytes();
+                                        let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
+                                        if n.is_empty() { None } else { Some(n) }
+                                    });
+                                event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
+                                event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
+                            } else if total_r2 == 0 {
+                                // Fall back to R1 tallies if no R2 votes yet.
+                                let r1 = engine.vote_tallies();
+                                if let Some((best_hash, _)) = r1.iter().max_by_key(|e| e.1) {
+                                    let name = engine.candidate_tracker().get(best_hash)
+                                        .and_then(|entry| {
+                                            let wire = entry.block.header.validator_id.to_wire_bytes();
+                                            let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
+                                            if n.is_empty() { None } else { Some(n) }
+                                        });
+                                    event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
+                                    event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let _ = cycle_phase_tx.send(event);
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
@@ -2506,9 +2568,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
 
                     // Protocol activity: block proposed
+                    let proposed_hash = _block.header.compute_block_hash()
+                        .map(|h| hex::encode(h.as_bytes()))
+                        .unwrap_or_default();
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "block_proposed",
                         "height": _block.header.height,
+                        "hash": proposed_hash,
                     }));
 
                     // S53: Re-publish announce with updated proposed_height/hash.
@@ -2518,10 +2584,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Emit protocol activity events for votes and bans
                     match &other {
                         CycleIo::BroadcastVote(vote) => {
+                            // Resolve candidate proposer name for activity display.
+                            let proposer_name = {
+                                let engine = self.consensus.read();
+                                engine.candidate_tracker().get(&vote.candidate_hash)
+                                    .and_then(|entry| {
+                                        let wire = entry.block.header.validator_id.to_wire_bytes();
+                                        engine.validator_list().find_by_wire(&wire)
+                                            .map(|ve| ve.name())
+                                    })
+                                    .filter(|n| !n.is_empty())
+                            };
                             let _ = cycle_phase_tx.send(serde_json::json!({
                                 "event": "vote_broadcast",
                                 "round": vote.round,
                                 "block_hash": hex::encode(vote.candidate_hash.as_bytes()),
+                                "candidate_name": proposer_name.as_deref().unwrap_or(""),
                             }));
                         }
                         CycleIo::BanPeer { peer_id, reason } => {

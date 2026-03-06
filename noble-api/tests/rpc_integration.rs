@@ -450,8 +450,8 @@ async fn get_node_info() {
         resp["protocol_version"],
         noble_core::PROTOCOL_VERSION as u64
     );
-    // No genesis block (tip=0) → chain_id is 0 (genesis-block-based identification).
-    assert_eq!(resp["chain_id"], 0);
+    // Chain identity always available (genesis committed at startup).
+    assert_eq!(resp["chain_id"], noble_core::mainnet_chain_id());
     // uptime_secs should be a small number (just started)
     assert!(resp["uptime_secs"].as_u64().unwrap() < 60);
     assert_eq!(resp["rpc_port"], 8783);
@@ -475,8 +475,8 @@ async fn get_chain_stats() {
         .unwrap();
 
     assert_eq!(resp["height"], 0);
-    // No genesis block (tip=0) → chain_id is 0 (genesis-block-based identification).
-    assert_eq!(resp["chain_id"], 0);
+    // Chain identity always available (genesis committed at startup).
+    assert_eq!(resp["chain_id"], noble_core::mainnet_chain_id());
 }
 
 // ---------------------------------------------------------------------------
