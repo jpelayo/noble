@@ -6,9 +6,9 @@ import NobleClientCore
 
 /// Protocol for all NOBLE node JSON-RPC operations used by the app.
 ///
-/// Implementations include:
+/// Implementations:
 /// - ``MockAPIService`` for SwiftUI previews and tests
-/// - A real JSON-RPC client (Sprint 3)
+/// - ``LiveNobleAPIService`` for real node connections
 public protocol NobleAPIService: Sendable {
 
     // MARK: - Node Status
@@ -19,34 +19,57 @@ public protocol NobleAPIService: Sendable {
     /// Check if the node is reachable.
     func ping() async throws -> Bool
 
+    /// Fetch sync status (height, syncing state, progress).
+    func getSyncStatus() async throws -> SyncStatus
+
+    /// Fetch current consensus cycle status.
+    func getCycleStatus() async throws -> CycleStatus
+
+    /// Fetch connected peers.
+    func getPeers() async throws -> [PeerInfo]
+
     // MARK: - Wallet
 
     /// Fetch wallet state from the node.
     func getWalletInfo() async throws -> WalletInfo
 
     /// Fetch balance for a specific address.
-    func getBalance(address: NobleAddress) async throws -> AddressBalance
+    func getBalance(address: String) async throws -> AddressBalance
+
+    /// Validate a NOBLE or Bitcoin address.
+    func validateAddress(_ address: String) async throws -> Bool
+
+    // MARK: - Fees
+
+    /// Estimate transaction fees.
+    func estimateFee() async throws -> FeeEstimate
 
     // MARK: - Transactions
 
     /// Submit a raw signed transaction (hex-encoded CBOR).
-    func submitTransaction(rawHex: String) async throws -> Hash256
+    func submitTransaction(rawHex: String) async throws -> String
 
     /// Fetch a transaction by its ID.
-    func getTransaction(txId: Hash256) async throws -> TransactionRecord
+    func getTransaction(txId: String) async throws -> TransactionRecord
+
+    /// Fetch transaction status.
+    func getTransactionStatus(txId: String) async throws -> TransactionStatus
 
     /// Fetch transaction history for an address.
     func getTransactionHistory(
-        address: NobleAddress,
-        limit: Int,
-        offset: Int
+        address: String,
+        page: Int,
+        limit: Int
     ) async throws -> [TransactionRecord]
 
     // MARK: - Documents
 
-    /// Query documents by checksum.
-    func queryDocuments(checksum: Hash256) async throws -> RegistrationRecord?
+    /// Verify a document checksum on-chain.
+    func verifyDocument(checksum: String) async throws -> VerificationResult
+
+    /// Fetch document registration records for a checksum.
+    func lookupChecksum(checksum: String) async throws -> [RegistrationRecord]
 
     /// Fetch version history for a document checksum.
-    func getDocumentHistory(checksum: Hash256) async throws -> [VersionEntry]
+    func getDocumentVersions(checksum: String) async throws -> [VersionEntry]
 }

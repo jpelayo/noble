@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3E1C2D372F5BBB0000D8F7D6 /* NobleClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D322F5BBB0000D8F7D6 /* NobleClientCore */; };
+		3E1C2D382F5BBB0000D8F7D6 /* NobleClientAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D332F5BBB0000D8F7D6 /* NobleClientAPI */; };
+		3E1C2D392F5BBB0000D8F7D6 /* NobleClientCrypto in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D342F5BBB0000D8F7D6 /* NobleClientCrypto */; };
+		3E1C2D3A2F5BBB0000D8F7D6 /* NobleClientSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D352F5BBB0000D8F7D6 /* NobleClientSecurity */; };
+		3E1C2D3B2F5BBB0000D8F7D6 /* NobleClientDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D362F5BBB0000D8F7D6 /* NobleClientDesignSystem */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3EA5F35F2F4F1AA400E6F4A3 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +60,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3E1C2D372F5BBB0000D8F7D6 /* NobleClientCore in Frameworks */,
+				3E1C2D382F5BBB0000D8F7D6 /* NobleClientAPI in Frameworks */,
+				3E1C2D392F5BBB0000D8F7D6 /* NobleClientCrypto in Frameworks */,
+				3E1C2D3A2F5BBB0000D8F7D6 /* NobleClientSecurity in Frameworks */,
+				3E1C2D3B2F5BBB0000D8F7D6 /* NobleClientDesignSystem in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +125,11 @@
 			);
 			name = NobleDoc;
 			packageProductDependencies = (
+				3E1C2D322F5BBB0000D8F7D6 /* NobleClientCore */,
+				3E1C2D332F5BBB0000D8F7D6 /* NobleClientAPI */,
+				3E1C2D342F5BBB0000D8F7D6 /* NobleClientCrypto */,
+				3E1C2D352F5BBB0000D8F7D6 /* NobleClientSecurity */,
+				3E1C2D362F5BBB0000D8F7D6 /* NobleClientDesignSystem */,
 			);
 			productName = NobleDoc;
 			productReference = 3EA5F34F2F4F1AA300E6F4A3 /* NobleDoc.app */;
@@ -605,6 +623,29 @@
 			relativePath = Packages/NobleClientSecurity;
 		};
 /* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3E1C2D322F5BBB0000D8F7D6 /* NobleClientCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NobleClientCore;
+		};
+		3E1C2D332F5BBB0000D8F7D6 /* NobleClientAPI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NobleClientAPI;
+		};
+		3E1C2D342F5BBB0000D8F7D6 /* NobleClientCrypto */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NobleClientCrypto;
+		};
+		3E1C2D352F5BBB0000D8F7D6 /* NobleClientSecurity */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NobleClientSecurity;
+		};
+		3E1C2D362F5BBB0000D8F7D6 /* NobleClientDesignSystem */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NobleClientDesignSystem;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3EA5F3472F4F1AA300E6F4A3 /* Project object */;
 }

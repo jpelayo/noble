@@ -9,7 +9,16 @@ struct NobleDocApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MainView(appState: appState)
+            Group {
+                if appState.hasCompletedOnboarding {
+                    MainView(appState: appState)
+                } else {
+                    OnboardingView(appState: appState)
+                }
+            }
+            .task {
+                appState.checkExistingWallet()
+            }
         }
         #if os(macOS)
         .defaultSize(width: 960, height: 640)

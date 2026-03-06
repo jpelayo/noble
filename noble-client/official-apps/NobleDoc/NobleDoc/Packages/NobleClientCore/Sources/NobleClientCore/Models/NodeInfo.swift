@@ -1,9 +1,9 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-/// Node information returned by `noble_getNodeInfo`.
+/// Basic information about the connected NOBLE node.
 public struct NodeInfo: Codable, Equatable, Sendable {
-    /// Software version string (e.g. "0.20.0").
+    /// Software version string (e.g. "0.21.0").
     public let version: String
 
     /// Network label (e.g. "mainnet", "testnet").

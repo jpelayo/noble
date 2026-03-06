@@ -36,7 +36,7 @@ public struct MockAPIService: NobleAPIService {
     public func getNodeInfo() async throws -> NodeInfo {
         await simulateDelay()
         return NodeInfo(
-            version: "0.20.0",
+            version: "0.21.0",
             network: "testnet",
             blockHeight: 1_247,
             peerCount: 3,
@@ -47,6 +47,50 @@ public struct MockAPIService: NobleAPIService {
     public func ping() async throws -> Bool {
         await simulateDelay()
         return true
+    }
+
+    public func getSyncStatus() async throws -> SyncStatus {
+        await simulateDelay()
+        return SyncStatus(
+            isSynced: true,
+            currentHeight: 1_247,
+            highestKnown: 1_247,
+            progress: 1.0
+        )
+    }
+
+    public func getCycleStatus() async throws -> CycleStatus {
+        await simulateDelay()
+        return CycleStatus(
+            cycleNumber: 42,
+            phase: "Voting",
+            phaseRemainingSecs: 180,
+            cycleRemainingSecs: 780
+        )
+    }
+
+    public func getPeers() async throws -> [PeerInfo] {
+        await simulateDelay()
+        return [
+            PeerInfo(
+                peerId: "12D3KooWExample1",
+                direction: "outbound",
+                address: "/ip4/192.168.1.100/tcp/8780",
+                nodeName: "Blackview-Node",
+                countryCode: "ESP",
+                connectedAt: Date(timeIntervalSinceNow: -3600),
+                chainTipHeight: 1_247
+            ),
+            PeerInfo(
+                peerId: "12D3KooWExample2",
+                direction: "inbound",
+                address: "/ip4/10.0.0.50/tcp/8780",
+                nodeName: "Mac-Validator",
+                countryCode: "USA",
+                connectedAt: Date(timeIntervalSinceNow: -7200),
+                chainTipHeight: 1_245
+            ),
+        ]
     }
 
     // MARK: - Wallet
@@ -60,10 +104,11 @@ public struct MockAPIService: NobleAPIService {
         )
     }
 
-    public func getBalance(address: NobleAddress) async throws -> AddressBalance {
+    public func getBalance(address: String) async throws -> AddressBalance {
         await simulateDelay()
+        let addr = NobleAddress(wireHex: address) ?? Self.sampleSender
         return AddressBalance(
-            address: address,
+            address: addr,
             balance: NobleAmount(atomic: 42_500_000),
             available: NobleAmount(atomic: 42_000_000),
             pending: NobleAmount(atomic: 500_000),
@@ -71,18 +116,34 @@ public struct MockAPIService: NobleAPIService {
         )
     }
 
-    // MARK: - Transactions
-
-    public func submitTransaction(rawHex: String) async throws -> Hash256 {
+    public func validateAddress(_ address: String) async throws -> Bool {
         await simulateDelay()
-        // swiftlint:disable:next force_unwrapping
-        return Hash256(hex: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")!
+        return address.count >= 4
     }
 
-    public func getTransaction(txId: Hash256) async throws -> TransactionRecord {
+    // MARK: - Fees
+
+    public func estimateFee() async throws -> FeeEstimate {
         await simulateDelay()
+        return FeeEstimate(
+            minFee: NobleAmount(atomic: 1),
+            recommendedFee: NobleAmount(atomic: 100),
+            highPriorityFee: NobleAmount(atomic: 500)
+        )
+    }
+
+    // MARK: - Transactions
+
+    public func submitTransaction(rawHex: String) async throws -> String {
+        await simulateDelay()
+        return "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    }
+
+    public func getTransaction(txId: String) async throws -> TransactionRecord {
+        await simulateDelay()
+        let hash = Hash256(hex: txId) ?? Hash256(hex: String(repeating: "ab", count: 32))!
         return TransactionRecord(
-            txId: txId,
+            txId: hash,
             txType: .transfer,
             status: .confirmed,
             from: Self.sampleSender,
@@ -94,42 +155,72 @@ public struct MockAPIService: NobleAPIService {
         )
     }
 
+    public func getTransactionStatus(txId: String) async throws -> TransactionStatus {
+        await simulateDelay()
+        return .confirmed
+    }
+
     public func getTransactionHistory(
-        address: NobleAddress,
-        limit: Int,
-        offset: Int
+        address: String,
+        page: Int,
+        limit: Int
     ) async throws -> [TransactionRecord] {
         await simulateDelay()
         return Self.makeSampleTransactions()
-            .dropFirst(offset)
+            .dropFirst(page * limit)
             .prefix(limit)
             .map { $0 }
     }
 
     // MARK: - Documents
 
-    public func queryDocuments(checksum: Hash256) async throws -> RegistrationRecord? {
+    public func verifyDocument(checksum: String) async throws -> VerificationResult {
         await simulateDelay()
-        // swiftlint:disable:next force_unwrapping
+        guard let cs = Hash256(hex: checksum) else {
+            return VerificationResult(isRegistered: false)
+        }
         let txId = Hash256(hex: "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3")!
-        return RegistrationRecord(
+        let record = RegistrationRecord(
             txId: txId,
-            checksum: checksum,
+            checksum: cs,
             publisher: Self.sampleSender,
             blockHeight: 1_200,
             timestamp: Date(timeIntervalSinceNow: -3600),
             metadata: [MetadataItem(key: "filename", value: "contract.pdf")],
             fee: NobleAmount(atomic: 100)
         )
+        return VerificationResult(
+            isRegistered: true,
+            registration: record,
+            registrationCount: 1,
+            versions: []
+        )
     }
 
-    public func getDocumentHistory(checksum: Hash256) async throws -> [VersionEntry] {
+    public func lookupChecksum(checksum: String) async throws -> [RegistrationRecord] {
         await simulateDelay()
-        // swiftlint:disable:next force_unwrapping
+        guard let cs = Hash256(hex: checksum) else { return [] }
+        let txId = Hash256(hex: "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3")!
+        return [
+            RegistrationRecord(
+                txId: txId,
+                checksum: cs,
+                publisher: Self.sampleSender,
+                blockHeight: 1_200,
+                timestamp: Date(timeIntervalSinceNow: -3600),
+                metadata: [MetadataItem(key: "filename", value: "contract.pdf")],
+                fee: NobleAmount(atomic: 100)
+            ),
+        ]
+    }
+
+    public func getDocumentVersions(checksum: String) async throws -> [VersionEntry] {
+        await simulateDelay()
+        guard let cs = Hash256(hex: checksum) else { return [] }
         let txId = Hash256(hex: "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4")!
         return [
             VersionEntry(
-                checksum: checksum,
+                checksum: cs,
                 previousChecksum: nil,
                 txId: txId,
                 publisher: Self.sampleSender,

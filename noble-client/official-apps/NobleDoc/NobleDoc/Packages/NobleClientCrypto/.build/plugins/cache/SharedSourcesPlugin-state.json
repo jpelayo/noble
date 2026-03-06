@@ -43,7 +43,7 @@
   "environment" : {
     "CLAUDECODE" : "1",
     "CLAUDE_CODE_ENTRYPOINT" : "cli",
-    "CLAUDE_CODE_SESSION_ACCESS_TOKEN" : "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",
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN" : "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",
     "COLORFGBG" : "15;0",
     "COLORTERM" : "truecolor",
     "COMMAND_MODE" : "unix2003",
@@ -60,7 +60,7 @@
     "LOGNAME" : "pelayo",
     "MANPATH" : "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk/usr/share/man:/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/usr/share/man:/Applications/Xcode.app/Contents/Developer/usr/share/man:/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/share/man:",
     "NoDefaultCurrentDirectoryInExePath" : "1",
-    "OLDPWD" : "/Users/pelayo/Documents/Developer/Noble/NOBLEv1/noble-client/official-apps/NobleDoc/NobleDoc/Packages/NobleClientSecurity",
+    "OLDPWD" : "/Users/pelayo/Documents/Developer/Noble/NOBLEv1/noble-client/official-apps/NobleDoc/NobleDoc/Packages/NobleClientCrypto",
     "OSLogRateLimit" : "64",
     "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE" : "delta",
     "PATH" : "/Users/pelayo/.antigravity/antigravity/bin:/Users/pelayo/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/opt/openssl@3/bin:/Library/Frameworks/Python.framework/Versions/3.10/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Library/Apple/usr/bin:/Applications/VMware Fusion.app/Contents/Public:/Users/pelayo/.cargo/bin:/Applications/iTerm.app/Contents/Resources/utilities",
@@ -78,7 +78,7 @@
     "__CFBundleIdentifier" : "com.googlecode.iterm2",
     "__CF_USER_TEXT_ENCODING" : "0x1F5:0x0:0x8"
   },
-  "inputHash" : "6ce52238a2cd50401016c14620a617c537ecd3ab4fedbd9d62d2728464c6d1f3",
+  "inputHash" : "255b50c192433e50389c620867042b7f0a859fc05636b060f718b9ae1fa54231",
   "output" : "",
   "result" : {
     "exit" : {

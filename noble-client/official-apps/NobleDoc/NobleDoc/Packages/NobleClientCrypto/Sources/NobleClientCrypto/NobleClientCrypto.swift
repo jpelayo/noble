@@ -5,87 +5,58 @@
 
 import Foundation
 import NobleClientCore
-import P256K
-import SwiftCBOR
 
 /// Protocol for building and signing NOBLE transactions locally.
 ///
 /// Implementations use secp256k1 signing + CBOR serialization.
 /// The signed transaction is submitted as raw hex via JSON-RPC.
-public protocol TransactionSigner: Sendable {
-    /// Build and sign a transfer transaction.
+public protocol TransactionSigning: Sendable {
+    /// Build and sign a transfer transaction. Returns hex-encoded CBOR.
     func signTransfer(
-        from: NobleAddress,
         to: NobleAddress,
         amount: NobleAmount,
         fee: NobleAmount,
-        nonce: UInt64,
-        privateKey: Data
-    ) throws -> Data
+        privateKey: Data,
+        chainId: UInt32,
+        sourceAddress: Data?
+    ) throws -> String
 
-    /// Build and sign a document notarization transaction.
+    /// Build and sign a document notarization transaction. Returns hex-encoded CBOR.
     func signNotarization(
-        from: NobleAddress,
         checksum: Hash256,
         metadata: [MetadataItem],
         fee: NobleAmount,
-        nonce: UInt64,
-        privateKey: Data
-    ) throws -> Data
+        privateKey: Data,
+        chainId: UInt32
+    ) throws -> String
 }
 
 /// Protocol for mnemonic wallet operations.
-public protocol MnemonicProvider: Sendable {
-    /// Generate a new 24-word BIP-39 mnemonic.
-    func generateMnemonic() throws -> [String]
+public protocol MnemonicProviding: Sendable {
+    /// Generate a new BIP-39 mnemonic (24 words).
+    func generateMnemonic(wordCount: Int) throws -> [String]
+
+    /// Validate a BIP-39 mnemonic phrase.
+    func validateMnemonic(_ words: [String]) -> Bool
 
     /// Derive the primary secp256k1 private key from a mnemonic.
+    /// Uses derivation path m/44'/9999'/0'/0/0.
     func derivePrivateKey(mnemonic: [String]) throws -> Data
 
-    /// Derive the NOBLE wire-hex public key from a private key.
-    func derivePublicKey(privateKey: Data) throws -> NobleAddress
+    /// Derive the compressed secp256k1 public key from a private key.
+    func derivePublicKey(privateKey: Data) throws -> Data
+
+    /// Derive the NOBLE wire-hex address from a private key.
+    func deriveAddress(privateKey: Data) throws -> NobleAddress
 }
 
-/// Placeholder stub that will be implemented in Sprint 4.
-public struct StubTransactionSigner: TransactionSigner {
-    public init() {}
-
-    public func signTransfer(
-        from: NobleAddress,
-        to: NobleAddress,
-        amount: NobleAmount,
-        fee: NobleAmount,
-        nonce: UInt64,
-        privateKey: Data
-    ) throws -> Data {
-        fatalError("TransactionSigner not yet implemented — Sprint 4")
-    }
-
-    public func signNotarization(
-        from: NobleAddress,
-        checksum: Hash256,
-        metadata: [MetadataItem],
-        fee: NobleAmount,
-        nonce: UInt64,
-        privateKey: Data
-    ) throws -> Data {
-        fatalError("TransactionSigner not yet implemented — Sprint 4")
-    }
-}
-
-/// Placeholder stub that will be implemented in Sprint 4.
-public struct StubMnemonicProvider: MnemonicProvider {
-    public init() {}
-
-    public func generateMnemonic() throws -> [String] {
-        fatalError("MnemonicProvider not yet implemented — Sprint 4")
-    }
-
-    public func derivePrivateKey(mnemonic: [String]) throws -> Data {
-        fatalError("MnemonicProvider not yet implemented — Sprint 4")
-    }
-
-    public func derivePublicKey(privateKey: Data) throws -> NobleAddress {
-        fatalError("MnemonicProvider not yet implemented — Sprint 4")
-    }
+/// Errors from the crypto package.
+public enum CryptoError: Error, Sendable {
+    case invalidPrivateKey
+    case invalidPublicKey
+    case invalidMnemonic
+    case signingFailed(String)
+    case cborEncodingFailed(String)
+    case invalidChecksum
+    case unsupportedScheme(UInt8)
 }

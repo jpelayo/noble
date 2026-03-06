@@ -51,23 +51,8 @@ public protocol AppLockService: Sendable {
     func authenticateWithBiometrics(reason: String) async throws -> Bool
 }
 
-/// Placeholder Keychain stub that will be implemented in Sprint 3.
-public struct StubKeychainService: KeychainService {
-    public init() {}
-
-    public func storeKey(_ data: Data, label: String) throws {
-        fatalError("KeychainService not yet implemented — Sprint 3")
-    }
-
-    public func loadKey(label: String) throws -> Data? {
-        fatalError("KeychainService not yet implemented — Sprint 3")
-    }
-
-    public func deleteKey(label: String) throws {
-        fatalError("KeychainService not yet implemented — Sprint 3")
-    }
-
-    public func hasKey(label: String) throws -> Bool {
-        fatalError("KeychainService not yet implemented — Sprint 3")
-    }
+/// Errors from secure key operations.
+public enum SecureKeyError: Error, Sendable {
+    case keyNotFound(String)
+    case invalidKeyData
 }
