@@ -103,3 +103,4 @@ Secrets.swift
 # Entitlements (contain team IDs and private signing info)
 *.entitlements
 .DS_Store
+.DS_Store
