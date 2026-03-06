@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 noble-core.workspace = true
 noble-codec.workspace = true
+noble-consensus.workspace = true
 noble-crypto.workspace = true
 noble-storage.workspace = true
 noble-wallet.workspace = true

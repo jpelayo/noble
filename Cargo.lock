@@ -3244,6 +3244,7 @@ dependencies = [
  "hex",
  "libc",
  "noble-codec",
+ "noble-consensus",
  "noble-core",
  "noble-crypto",
  "noble-storage",

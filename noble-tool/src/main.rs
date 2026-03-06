@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use zeroize::Zeroize;
 
 use noble_codec::NobleCbor;
+use noble_consensus::ValidatorList;
 use noble_core::{
     compute_merkle_root, genesis_block, regtest_genesis_block, testnet_genesis_block, Block,
 };
@@ -111,9 +112,9 @@ enum Commands {
         /// Actually perform the deletion (without this flag, only a dry-run is shown).
         #[arg(long)]
         confirm: bool,
-        /// Preserve peer memory (recently-seen peers) across the reset. (Not yet implemented — flag accepted but ignored.)
+        /// Also clear discovered peers from validators.txt (peers are kept by default).
         #[arg(long)]
-        keep_peers: bool,
+        delete_peers: bool,
     },
 
     /// Show chain state from the offline database.
@@ -343,8 +344,8 @@ fn main() {
         Commands::ResetChain {
             data_dir,
             confirm,
-            keep_peers,
-        } => cmd_reset_chain(data_dir, confirm, keep_peers),
+            delete_peers,
+        } => cmd_reset_chain(data_dir, confirm, delete_peers),
         Commands::ChainInfo { data_dir } => cmd_chain_info(data_dir),
     }
 }
@@ -1635,13 +1636,13 @@ fn cmd_chain_info(cli_data_dir: PathBuf) {
 // reset-chain
 // ---------------------------------------------------------------------------
 
-fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, _keep_peers: bool) {
+fn cmd_reset_chain(cli_data_dir: PathBuf, confirm: bool, delete_peers: bool) {
     let data_dir = resolve_data_dir(&cli_data_dir);
-    do_reset_chain(data_dir, confirm);
+    do_reset_chain(data_dir, confirm, delete_peers);
 }
 
 /// Inner reset logic operating on an already-resolved data directory.
-fn do_reset_chain(data_dir: PathBuf, confirm: bool) {
+fn do_reset_chain(data_dir: PathBuf, confirm: bool, delete_peers: bool) {
     // 1. Graceful missing dir
     if !data_dir.exists() {
         println!(
@@ -1689,6 +1690,7 @@ fn do_reset_chain(data_dir: PathBuf, confirm: bool) {
         "p2p_identity.key",
         "identity_attestation.cbor",
         "noble.toml",
+        "validators.txt",
     ];
     let preserved_dirs: &[&str] = &["keystore"];
 
@@ -1797,6 +1799,32 @@ fn do_reset_chain(data_dir: PathBuf, confirm: bool) {
     println!(
         "Done. Deleted {deleted_count} items, freed {freed_mb:.1} MB."
     );
+
+    // --delete-peers: clear discovered peers from validators.txt while keeping
+    // the operator's curated validator entries.
+    if delete_peers {
+        let vlist_path = data_dir.join("validators.txt");
+        if vlist_path.exists() {
+            match fs::read(&vlist_path) {
+                Ok(bytes) => match ValidatorList::from_cbor(&bytes) {
+                    Ok(mut vlist) => {
+                        let peer_count = vlist.known_peers().len();
+                        vlist.clear_known_peers();
+                        if let Ok(out) = vlist.to_cbor() {
+                            if let Err(e) = fs::write(&vlist_path, out) {
+                                eprintln!("Warning: could not write cleaned validators.txt: {e}");
+                            } else {
+                                println!("Cleared {peer_count} discovered peer(s) from validators.txt.");
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Warning: could not parse validators.txt: {e}"),
+                },
+                Err(e) => eprintln!("Warning: could not read validators.txt: {e}"),
+            }
+        }
+    }
+
     println!("Restart the node to create a fresh genesis block.");
 }
 
@@ -2014,12 +2042,13 @@ mod tests {
         let preserved: &[&str] = &[
             "identity.json", "validator.key", ".chain_meta",
             "tls-cert.pem", "tls-key.pem", "p2p_identity.key",
-            "identity_attestation.cbor", "noble.toml",
+            "identity_attestation.cbor", "noble.toml", "validators.txt",
         ];
         assert!(preserved.contains(&"identity.json"));
         assert!(preserved.contains(&"validator.key"));
         assert!(preserved.contains(&".chain_meta"));
         assert!(preserved.contains(&"noble.toml"));
+        assert!(preserved.contains(&"validators.txt"));
     }
 
     #[test]
@@ -2032,6 +2061,10 @@ mod tests {
         fs::write(base.join("validator.key"), b"key").unwrap();
         fs::write(base.join(".chain_meta"), b"meta").unwrap();
         fs::write(base.join("noble.toml"), b"toml").unwrap();
+        // Create a validators.txt with a ValidatorList (CBOR)
+        let vlist = ValidatorList::new();
+        let vlist_bytes = vlist.to_cbor().unwrap();
+        fs::write(base.join("validators.txt"), &vlist_bytes).unwrap();
         fs::create_dir(base.join("keystore")).unwrap();
         fs::write(base.join("keystore/key1.json"), b"k").unwrap();
 
@@ -2044,13 +2077,14 @@ mod tests {
         fs::write(base.join("IDENTITY"), b"id").unwrap();
 
         // Call inner function directly (bypasses resolve_data_dir)
-        do_reset_chain(base.to_path_buf(), true);
+        do_reset_chain(base.to_path_buf(), true, false);
 
         // Preserved files should still exist
         assert!(base.join("identity.json").exists());
         assert!(base.join("validator.key").exists());
         assert!(base.join(".chain_meta").exists());
         assert!(base.join("noble.toml").exists());
+        assert!(base.join("validators.txt").exists(), "validators.txt must survive reset");
         assert!(base.join("keystore").exists());
         assert!(base.join("keystore/key1.json").exists());
 
@@ -2064,6 +2098,67 @@ mod tests {
     }
 
     #[test]
+    fn reset_chain_delete_peers_clears_known_peers() {
+        use noble_crypto::NoblePublicKey;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let base = dir.path();
+
+        // Create a validators.txt with one validator and two known peers
+        let mut vlist = ValidatorList::new();
+        let dummy_pk = NoblePublicKey::Ed25519(vec![0xAA; 32]);
+        vlist.add_validator(dummy_pk, 100, 1000);
+        vlist.update_known_peer(
+            "peer1hex", Some("Node A".to_string()), Some("/ip4/1.2.3.4/tcp/8780".to_string()),
+            None, true, true, None, None, None, 2000,
+        );
+        vlist.update_known_peer(
+            "peer2hex", Some("Node B".to_string()), None,
+            None, false, true, None, None, None, 2000,
+        );
+        assert_eq!(vlist.known_peers().len(), 2);
+        assert_eq!(vlist.list_validators().len(), 1);
+
+        let vlist_bytes = vlist.to_cbor().unwrap();
+        fs::write(base.join("validators.txt"), &vlist_bytes).unwrap();
+        // Need at least one non-preserved file so reset has something to "delete"
+        fs::write(base.join("CURRENT"), b"data").unwrap();
+
+        // Reset with --delete-peers
+        do_reset_chain(base.to_path_buf(), true, true);
+
+        // validators.txt preserved, but peers should be cleared
+        assert!(base.join("validators.txt").exists());
+        let after_bytes = fs::read(base.join("validators.txt")).unwrap();
+        let after: ValidatorList = ValidatorList::from_cbor(&after_bytes).unwrap();
+        assert_eq!(after.known_peers().len(), 0, "peers should be cleared");
+        assert_eq!(after.list_validators().len(), 1, "validators should be kept");
+    }
+
+    #[test]
+    fn reset_chain_keeps_peers_by_default() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let base = dir.path();
+
+        let mut vlist = ValidatorList::new();
+        vlist.update_known_peer(
+            "peerhex", Some("Node X".to_string()), None,
+            None, true, true, None, None, None, 3000,
+        );
+        let vlist_bytes = vlist.to_cbor().unwrap();
+        fs::write(base.join("validators.txt"), &vlist_bytes).unwrap();
+        fs::write(base.join("CURRENT"), b"data").unwrap();
+
+        // Reset WITHOUT --delete-peers (default)
+        do_reset_chain(base.to_path_buf(), true, false);
+
+        assert!(base.join("validators.txt").exists());
+        let after_bytes = fs::read(base.join("validators.txt")).unwrap();
+        let after: ValidatorList = ValidatorList::from_cbor(&after_bytes).unwrap();
+        assert_eq!(after.known_peers().len(), 1, "peers should be preserved by default");
+    }
+
+    #[test]
     fn reset_chain_dry_run_preserves_everything() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let base = dir.path();
@@ -2073,7 +2168,7 @@ mod tests {
         fs::write(base.join("000001.sst"), b"sst").unwrap();
 
         // Dry run — nothing should be deleted (bypasses resolve_data_dir)
-        do_reset_chain(base.to_path_buf(), false);
+        do_reset_chain(base.to_path_buf(), false, false);
 
         assert!(base.join("identity.json").exists());
         assert!(base.join("CURRENT").exists());

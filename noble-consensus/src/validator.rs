@@ -297,6 +297,12 @@ impl ValidatorList {
         &self.known_peers
     }
 
+    /// Remove all discovered peers (keeps validator entries intact).
+    /// Used by `noble-tool reset-chain --delete-peers`.
+    pub fn clear_known_peers(&mut self) {
+        self.known_peers.clear();
+    }
+
     /// Get all known peer host addresses (for auto-dial on startup).
     pub fn known_peer_addresses(&self) -> Vec<String> {
         self.known_peers

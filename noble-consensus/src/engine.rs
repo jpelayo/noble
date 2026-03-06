@@ -682,7 +682,14 @@ impl CycleEngine {
 
         // Only persist cycles that had real activity (proposals, votes, or a winner).
         // Empty indeterminate cycles are noise — don't waste storage on them.
-        if !proposals.is_empty() || !vote_entries.is_empty() || winner.is_some() {
+        // Skip the genesis cycle entirely: when block 1 commits, first_tick is set
+        // and ClearCycleHistory purges bootstrap entries.  Recording this cycle would
+        // use a bootstrap-epoch number (e.g. 224) that is meaningless after the epoch
+        // change.  The block commit itself is the permanent record; the first REAL
+        // post-genesis cycle (cycle 0 under the new epoch) will be the first entry.
+        if self.first_tick {
+            // Genesis cycle — block 1 commit resets the epoch; skip history.
+        } else if !proposals.is_empty() || !vote_entries.is_empty() || winner.is_some() {
             self.last_cycle_history = Some(CycleHistoryEntry {
                 cycle_number: completed_cycle,
                 status,
