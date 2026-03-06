@@ -49,6 +49,13 @@ pub enum CycleIo {
         peer_id: Vec<u8>,
         block_hash: Hash256,
     },
+    /// Request a specific block from ALL connected peers.
+    /// Used when a vote references an unknown candidate — the voter may not
+    /// have the block cached, so we broadcast the request to maximise the
+    /// chance of obtaining the block body before the cycle boundary.
+    RequestBlockFromAll {
+        block_hash: Hash256,
+    },
     /// Emit an observable metric.
     EmitMetric { name: String, value: f64 },
     /// Log a message.
@@ -68,4 +75,7 @@ pub enum CycleIo {
     /// Emitted when block 1 commits and the cycle epoch changes, so stale
     /// history entries from the bootstrap epoch are purged.
     ClearCycleHistory,
+    /// Notify the node that the consensus phase has changed.
+    /// Used to broadcast phase transitions to GUI/WebSocket subscribers.
+    PhaseChanged { cycle: u64, phase: CyclePhase },
 }

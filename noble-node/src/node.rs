@@ -107,6 +107,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub last_proposed: parking_lot::Mutex<Option<(u64, [u8; 32])>>,
     /// Path to the CBOR validator list file (for persisting network metadata).
     pub validator_list_path: Option<std::path::PathBuf>,
+    /// Seed/bootstrap peer addresses from config (for auto-reconnection).
+    pub seed_addrs: Vec<String>,
 }
 
 impl Node<MemoryStorage> {
@@ -418,6 +420,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             last_proposed: parking_lot::Mutex::new(None),
             validator_list_path: Some(config.consensus.validator_list_path.clone()),
+            seed_addrs: config.network.seeds.clone(),
         })
     }
 
@@ -603,10 +606,125 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     }
 
     /// Build and publish a NodeAnnounce to the network.
+    /// Redial seed peers and stored peer records when connectivity is low.
+    ///
+    /// Called periodically (every 30s) when `peer_count < seed_count` (or < 2),
+    /// and immediately when the last peer disconnects.
+    /// Dials: (1) seed/bootstrap addresses from config, (2) stored peer records
+    /// with known multiaddrs, (3) validator registry IPs from CBOR metadata.
+    fn redial_known_peers(
+        &self,
+        cmd: &mpsc::Sender<NetworkCommand>,
+        activity_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
+    ) {
+        let mut dialed = 0u32;
+        let mut seen = std::collections::HashSet::<String>::new();
+
+        // Dial a multiaddr string, deduplicating.
+        let mut try_dial = |maddr_str: &str, cmd: &mpsc::Sender<NetworkCommand>| {
+            if !seen.insert(maddr_str.to_string()) {
+                return;
+            }
+            if let Ok(maddr) = maddr_str.parse::<noble_network::Multiaddr>() {
+                let _ = cmd.try_send(NetworkCommand::DialPeer(maddr, None));
+                dialed += 1;
+            }
+        };
+
+        // For bare IPs, try all 3 P2P ports (8780, 8781, 8782) so we reach
+        // peers that fell back to alternate ports on restart.
+        let expand_addr = |addr: &str| -> Vec<String> {
+            if addr.starts_with('/') {
+                vec![addr.to_string()]
+            } else {
+                vec![
+                    format!("/ip4/{addr}/tcp/8780"),
+                    format!("/ip4/{addr}/tcp/8781"),
+                    format!("/ip4/{addr}/tcp/8782"),
+                ]
+            }
+        };
+
+        // 1. Seed peers from config
+        for addr_str in &self.seed_addrs {
+            for maddr_str in expand_addr(addr_str) {
+                try_dial(&maddr_str, cmd);
+            }
+        }
+
+        // 2. Stored peer records with known addresses
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let storage = self.storage.read();
+        let all_records = storage.list_peer_records().unwrap_or_default();
+        drop(storage);
+
+        let self_pk_wire = self
+            .announce_keypair
+            .as_ref()
+            .map(|(_, pk)| pk.to_wire_bytes());
+
+        for rec in &all_records {
+            // Skip SELF
+            if let Some(ref self_wire) = self_pk_wire {
+                if rec.identity_key == *self_wire {
+                    continue;
+                }
+            }
+            // Skip very stale records (> 7 days)
+            if rec.is_stale(now, 604_800) {
+                continue;
+            }
+            // Prefer the actual last-seen address (includes correct port).
+            let addr_str = rec
+                .last_addr
+                .as_deref()
+                .or_else(|| {
+                    rec.last_announce
+                        .as_ref()
+                        .and_then(|a| a.host_address.as_deref())
+                });
+            if let Some(addr) = addr_str {
+                for maddr_str in expand_addr(addr) {
+                    try_dial(&maddr_str, cmd);
+                }
+            }
+        }
+
+        // 3. Validator registry IPs (CBOR-persistent)
+        {
+            let engine = self.consensus.read();
+            let mut addrs = engine.validator_list().validator_addresses();
+            addrs.extend(engine.validator_list().known_peer_addresses());
+            drop(engine);
+            for addr in addrs {
+                for maddr_str in expand_addr(&addr) {
+                    try_dial(&maddr_str, cmd);
+                }
+            }
+        }
+
+        if dialed > 0 {
+            let peer_count = self.network_stats.read().peer_count;
+            tracing::info!(
+                task = "reconnect",
+                "Low connectivity ({peer_count} peers) — redialing {dialed} known addresses"
+            );
+            let _ = activity_tx.send(serde_json::json!({
+                "event": "reconnect_attempt",
+                "addresses": dialed,
+                "current_peers": peer_count,
+            }));
+        }
+    }
+
     fn publish_node_announce(
         &self,
         identity: &Arc<RwLock<NodeIdentityData>>,
         cmd: &mpsc::Sender<NetworkCommand>,
+        activity_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
     ) {
         let id = identity.read().clone();
         if let Some(announce) = self.build_node_announce(&id) {
@@ -617,6 +735,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             );
             if let Err(e) = cmd.try_send(NetworkCommand::PublishNodeAnnounce(announce)) {
                 tracing::warn!(task = "announce", "Failed to send PublishNodeAnnounce: {e}");
+            } else {
+                let _ = activity_tx.send(serde_json::json!({
+                    "event": "announce_published",
+                    "node_name": id.node_name,
+                }));
             }
         }
     }
@@ -1441,6 +1564,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mut peer_status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         peer_status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // --- Auto-reconnect timer (every 30s) — redial seeds + stored peers when isolated ---
+        let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         tracing::info!(
             task = "node_startup",
             "Node event loop started — chain height: {}",
@@ -1470,7 +1597,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             // may be lost if the gossipsub mesh hasn't formed yet (needs
                             // a heartbeat).  The delayed re-publish ensures delivery.
                             if is_peer_connected {
-                                self.publish_node_announce(&shared_identity, &network_cmd);
+                                self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                                 initial_announce_sent = true;
                                 announce_delay.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(3));
                                 announce_delay_armed = true;
@@ -1556,25 +1683,41 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Periodic NodeAnnounce re-broadcast (every 20 min)
                 _ = announce_interval.tick() => {
                     if initial_announce_sent {
-                        self.publish_node_announce(&shared_identity, &network_cmd);
+                        self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                     }
                 }
 
                 // Delayed re-announce: 3s after PeerConnected, re-publish to survive
                 // gossipsub mesh formation race.
                 _ = &mut announce_delay, if announce_delay_armed => {
-                    self.publish_node_announce(&shared_identity, &network_cmd);
+                    self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                     announce_delay_armed = false;
                 }
 
                 // Peer status polling — request chain tips from all peers (fork detection)
                 _ = peer_status_interval.tick() => {
                     let _ = network_cmd.try_send(NetworkCommand::RequestSync);
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "sync_requested",
+                    }));
+                }
+
+                // Auto-reconnect: redial when connectivity is low.
+                // Threshold: fewer peers than seed count (minimum 2).
+                _ = reconnect_interval.tick() => {
+                    let current_peers = {
+                        let stats = self.network_stats.read();
+                        stats.peer_count
+                    };
+                    let min_desired = self.seed_addrs.len().max(2);
+                    if current_peers < min_desired {
+                        self.redial_known_peers(&network_cmd, &cycle_phase_tx);
+                    }
                 }
 
                 // On-demand NodeAnnounce re-broadcast (triggered by identity update RPC)
                 Some(()) = announce_trigger_rx.recv() => {
-                    self.publish_node_announce(&shared_identity, &network_cmd);
+                    self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                     initial_announce_sent = true;
                 }
 
@@ -1751,6 +1894,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "event": "peer_disconnected",
                     "peer_id": hex_pid,
                 }));
+                // Auto-reconnect: immediately try to redial when last peer disconnects.
+                if new_count == 0 {
+                    self.redial_known_peers(network_cmd, cycle_phase_tx);
+                }
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
                 let hex_pid = hex::encode(peer_id);
@@ -2136,7 +2283,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
 
                     // S55: Re-publish announce with updated chain_tip_height after commit.
-                    self.publish_node_announce(shared_identity, network_cmd);
+                    self.publish_node_announce(shared_identity, network_cmd, cycle_phase_tx);
                 }
                 CycleIo::ReadmitTransactions(txs) => {
                     let now = std::time::SystemTime::now()
@@ -2216,6 +2363,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             "cleared stale cycle history (block 1 epoch change)"
                         );
                     }
+                }
+                CycleIo::PhaseChanged { cycle, phase } => {
+                    let phase_name = format!("{phase:?}");
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "phase_change",
+                        "phase": phase_name,
+                        "cycle": cycle,
+                    }));
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
@@ -2341,7 +2496,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
 
                     // S53: Re-publish announce with updated proposed_height/hash.
-                    self.publish_node_announce(&shared_identity, &network_cmd);
+                    self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                 }
                 other => {
                     // Emit protocol activity events for votes and bans

@@ -179,6 +179,10 @@ pub enum NetworkCommand {
     RequestBlock { peer_id: Vec<u8>, hash: [u8; 32] },
     /// Request a block by its hash from any connected peer.
     RequestBlockByHash { hash: [u8; 32] },
+    /// Request a block by its hash from ALL connected peers.
+    /// Used when a vote references a block we don't have — the voter may not
+    /// cache it, so broadcast to maximise chance of obtaining the block body.
+    RequestBlockFromAll { hash: [u8; 32] },
     /// Request a block by height from a specific peer (sync catch-up).
     RequestBlockByHeight { peer_id: Vec<u8>, height: u64 },
     /// Trigger a chain sync check.

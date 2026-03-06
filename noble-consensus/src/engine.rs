@@ -23,6 +23,11 @@ use crate::reputation::ReputationEngine;
 use crate::validator::ValidatorList;
 use crate::vote::{MigrationResult, PorVote, VoteManager};
 
+/// Accept votes from peers whose clocks are up to this many seconds ahead.
+/// Prevents dropping valid votes when a peer enters the Voting phase before
+/// our local clock recognises the phase transition.
+const VOTE_ACCEPT_TOLERANCE: u64 = 30;
+
 /// Trait for the consensus state machine.
 pub trait ConsensusStateMachine {
     /// Process an input event and return output actions.
@@ -390,6 +395,8 @@ impl CycleEngine {
             old_phase, phase
         );
 
+        outputs.push(CycleIo::PhaseChanged { cycle, phase });
+
         match phase {
             CyclePhase::Proposal => {
                 // New proposal phase: clear previous state
@@ -464,15 +471,16 @@ impl CycleEngine {
             })
             .collect();
 
-        // Network-level voter count: connected peers + self (if we are a voting validator).
-        // Propose-only nodes (voting_enabled=false) don't count themselves — they
-        // never cast votes, so including them would inflate the denominator.
-        let self_vote = if self.our_validator_key.is_some() && self.voting_enabled {
-            1
-        } else {
-            0
-        };
-        let voter_count = self.total_peers + self_vote;
+        // C-004: Use the actual number of unique voters who cast votes in this
+        // cycle as the denominator, NOT the raw peer count.  total_peers includes
+        // observers, light clients, and any other non-voting connections — using it
+        // inflates the denominator and can make valid unanimous votes look like
+        // minority consensus.  Fall back to validator_list size as the minimum
+        // denominator so that a single self-voter doesn't trivially win on an
+        // otherwise idle network.
+        let unique_voters = self.vote_mgr.unique_voter_count();
+        let validator_set_size = self.validator_list.len();
+        let voter_count = unique_voters.max(validator_set_size).max(1);
         let result = self.vote_mgr.compute_majority(voter_count, &self.config);
 
         match result {
@@ -680,6 +688,24 @@ impl CycleEngine {
                 if !active.contains(&wire) {
                     active.push(wire);
                 }
+            }
+
+            // Diagnostic tracing for reputation accounting.
+            info!(
+                "cycle {} reputation: validators={}, voters={}, candidates={}, result={:?}",
+                completed_cycle,
+                all_validators.len(),
+                voters.len(),
+                self.candidate_tracker.all_candidates().len(),
+                std::mem::discriminant(&result)
+            );
+            for v in &all_validators {
+                let in_voters = voters.contains(v);
+                debug!(
+                    "  validator {}: in_voters={}",
+                    hex::encode(&v[..v.len().min(8)]),
+                    in_voters
+                );
             }
 
             self.reputation.process_cycle_boundary(
@@ -1054,13 +1080,26 @@ impl CycleEngine {
             vote.candidate_hash
         );
 
-        // Reject votes during Proposal phase — voting hasn't started yet.
-        // Accept votes during Voting, Reflection, and Propagation phases.
+        // Reject votes during early Proposal phase — voting hasn't started yet.
+        // Accept votes during Voting, Reflection, Propagation, and the final
+        // 30 seconds of Proposal phase.  The tolerance window prevents dropping
+        // valid votes from peers whose clocks are slightly ahead and have already
+        // entered the Voting phase while we're still in late Proposal.
         if self.tracked_phase == CyclePhase::Proposal {
-            outputs.push(CycleIo::Log(
-                "rejected vote during Proposal phase (voting not yet open)".to_string(),
-            ));
-            return outputs;
+            let phase_remaining = self.cycle_mgr.seconds_until_phase_change(
+                self.clock_anchor.1
+                    + self.clock_anchor.0.elapsed().as_secs(),
+            );
+            if phase_remaining > VOTE_ACCEPT_TOLERANCE {
+                outputs.push(CycleIo::Log(
+                    "rejected vote during Proposal phase (voting not yet open)".to_string(),
+                ));
+                return outputs;
+            }
+            // Late Proposal: accept the vote (peer likely entered Voting already)
+            debug!(
+                "accepting vote during late Proposal phase ({phase_remaining}s until Voting)"
+            );
         }
 
         // Votes are accepted from any connected peer with a valid signature.
@@ -1072,11 +1111,14 @@ impl CycleEngine {
         //   - peer not banned (handled at the network layer)
 
         // If we receive a vote for a candidate we haven't seen yet, request
-        // the block from the voting peer so we can add it to our tracker.
-        // This handles late-joining peers who missed the BlockAnnounce gossip.
+        // the block from ALL connected peers.  The voter (from_peer) likely
+        // didn't propose the block and may not have it cached.  Only the
+        // proposer has the block in pending_proposals; other peers may have
+        // committed it or received it via gossip.  Broadcasting the request
+        // maximises the chance of actually obtaining the block body before
+        // the cycle boundary.
         if self.candidate_tracker.get(&vote.candidate_hash).is_none() {
-            outputs.push(CycleIo::RequestBlock {
-                peer_id: from_peer.clone(),
+            outputs.push(CycleIo::RequestBlockFromAll {
                 block_hash: vote.candidate_hash,
             });
         }
@@ -1538,10 +1580,15 @@ mod tests {
     }
 
     #[test]
-    fn vote_rejected_during_proposal() {
+    fn vote_rejected_during_early_proposal() {
+        // Votes should be rejected during early Proposal phase (>30s until Voting).
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
+        // Pin the clock to the very START of a Proposal phase so
+        // seconds_until_phase_change() returns ~300 (well above tolerance).
+        let g = noble_core::GENESIS_TIMESTAMP;
+        engine.clock_anchor = (std::time::Instant::now(), g);
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();
@@ -1553,9 +1600,34 @@ mod tests {
         assert_eq!(
             engine.vote_mgr.total_votes(),
             0,
-            "vote should be rejected in Proposal phase"
+            "vote should be rejected in early Proposal phase"
         );
         assert!(has_log_containing(&outputs, "rejected"));
+    }
+
+    #[test]
+    fn vote_accepted_during_late_proposal() {
+        // Votes should be accepted during late Proposal phase (≤30s until Voting).
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Proposal;
+        // Pin clock to 280s into the Proposal phase → 20s until Voting (< tolerance).
+        let g = noble_core::GENESIS_TIMESTAMP;
+        engine.clock_anchor = (std::time::Instant::now(), g + 280);
+
+        let candidate = Hash256::from_bytes([0x42; 32]);
+        let vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();
+        let outputs = engine.step(CycleEvent::VoteReceived {
+            vote,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert_eq!(
+            engine.vote_mgr.total_votes(),
+            1,
+            "vote should be accepted in late Proposal phase (clock skew tolerance)"
+        );
+        assert!(!has_log_containing(&outputs, "rejected"));
     }
 
     // --- Majority tiers ---
@@ -1908,9 +1980,12 @@ mod tests {
 
     #[test]
     fn dual_witness_not_required_after_block_1() {
-        // tip_height=1, 1 voter → normal plurality, no Dual-Witness → commits
+        // tip_height=1, 1 voter → normal plurality, no Dual-Witness → commits.
+        // Use min_peers_for_consensus=1 to isolate the Dual-Witness check
+        // (this test is not about the minimum voter threshold).
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 2);
+        engine.config.min_peers_for_consensus = 1;
         engine.tip_height = 1;
         let parent_hash = Hash256::from_bytes([0x99; 32]);
         engine.tip_hash = parent_hash;

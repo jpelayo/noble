@@ -25,6 +25,16 @@ pub enum VoteError {
     WrongCycle { expected: u64, got: u64 },
     /// The vote signature failed verification.
     Crypto(noble_crypto::CryptoError),
+    /// The vote round is not 1 (R1) or 2 (R2).
+    InvalidRound(u8),
+    /// The validator voted for a different candidate in the same round
+    /// (equivocation — analogous to double-proposal).
+    Equivocation {
+        voter: Vec<u8>,
+        round: u8,
+        first_candidate: Hash256,
+        second_candidate: Hash256,
+    },
 }
 
 impl fmt::Display for VoteError {
@@ -34,6 +44,20 @@ impl fmt::Display for VoteError {
                 write!(f, "wrong cycle: expected {expected}, got {got}")
             }
             VoteError::Crypto(e) => write!(f, "crypto: {e}"),
+            VoteError::InvalidRound(r) => {
+                write!(f, "invalid round {r}: only 1 (R1) and 2 (R2) accepted")
+            }
+            VoteError::Equivocation {
+                round,
+                first_candidate,
+                second_candidate,
+                ..
+            } => {
+                write!(
+                    f,
+                    "vote equivocation in round {round}: voted for {first_candidate} then {second_candidate}"
+                )
+            }
         }
     }
 }
@@ -164,6 +188,10 @@ pub struct VoteManager {
     r2_votes: HashMap<Hash256, HashSet<Vec<u8>>>,
     /// Set of `(voter_pubkey_wire_bytes, round)` that have already voted.
     voted_validators: HashSet<(Vec<u8>, u8)>,
+    /// Equivocation tracker: `(voter_wire, round) → candidate_hash`.
+    /// Detects when the same validator votes for different candidates in the
+    /// same round — a protocol violation analogous to double-proposal.
+    vote_commitments: HashMap<(Vec<u8>, u8), Hash256>,
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
 }
@@ -175,6 +203,7 @@ impl VoteManager {
             votes: HashMap::new(),
             r2_votes: HashMap::new(),
             voted_validators: HashSet::new(),
+            vote_commitments: HashMap::new(),
             current_cycle: 0,
         }
     }
@@ -200,20 +229,42 @@ impl VoteManager {
             });
         }
 
+        // Reject invalid round values — only R1 (1) and R2 (2) are valid.
+        // Prevents round-inflation attacks where rounds 3+ bypass R1 dedup
+        // while still being tallied as R1 votes.
+        if vote.round != 1 && vote.round != 2 {
+            return Err(VoteError::InvalidRound(vote.round));
+        }
+
         // GAP-C7: Verify signature before recording
         vote.verify()?;
 
         // P0.2 + P1.2: One vote per validator per round.
         let voter_key = vote.voter_pubkey.to_wire_bytes();
         let dedup_key = (voter_key.clone(), vote.round);
-        if self.voted_validators.contains(&dedup_key) {
-            debug!(
-                "duplicate vote from validator round {} (ignored)",
-                vote.round
-            );
-            return Ok(false);
+
+        // Equivocation detection: if the same validator already voted in this
+        // round, check whether it's a duplicate (same candidate) or an
+        // equivocation (different candidate).
+        if let Some(&first_candidate) = self.vote_commitments.get(&dedup_key) {
+            if first_candidate == vote.candidate_hash {
+                debug!(
+                    "duplicate vote from validator round {} (ignored)",
+                    vote.round
+                );
+                return Ok(false);
+            } else {
+                return Err(VoteError::Equivocation {
+                    voter: voter_key,
+                    round: vote.round,
+                    first_candidate,
+                    second_candidate: vote.candidate_hash,
+                });
+            }
         }
 
+        self.vote_commitments
+            .insert(dedup_key.clone(), vote.candidate_hash);
         self.voted_validators.insert(dedup_key);
         let target_map = if vote.round == 2 {
             &mut self.r2_votes
@@ -428,6 +479,7 @@ impl VoteManager {
         self.votes.clear();
         self.r2_votes.clear();
         self.voted_validators.clear();
+        self.vote_commitments.clear();
     }
 }
 

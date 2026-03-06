@@ -133,7 +133,10 @@ impl ReputationEngine {
     ) {
         for wire in all_validators {
             let entry = self.data.entry(wire.clone()).or_default();
-            if entry.last_cycle >= cycle && cycle > 0 {
+            // Dedup: skip if we already processed this exact cycle.
+            // Use strict equality instead of >= to handle epoch resets
+            // where cycle numbers restart from a lower value.
+            if entry.last_cycle == cycle && cycle > 0 {
                 continue; // Already processed this cycle
             }
             entry.total_cycles += 1;
@@ -169,12 +172,19 @@ impl ReputationEngine {
             self.record_block_rejected(loser);
         }
 
-        // Record votes cast/missed
-        for wire in all_validators {
-            if voters.contains(wire) {
-                self.record_vote_cast(wire);
-            } else {
-                self.record_vote_missed(wire);
+        // Record votes cast/missed.
+        // Only count vote participation in cycles that had candidates to vote
+        // for.  Penalising validators for not voting in empty cycles (e.g.,
+        // during sync catch-up when candidate_tracker is empty) produces
+        // incorrect 0% participation scores.
+        let had_candidates = winner_wire.is_some() || !loser_wires.is_empty();
+        if had_candidates {
+            for wire in all_validators {
+                if voters.contains(wire) {
+                    self.record_vote_cast(wire);
+                } else {
+                    self.record_vote_missed(wire);
+                }
             }
         }
 

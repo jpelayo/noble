@@ -256,7 +256,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th>B(V)</th><th>U(V)</th><th>T(V)</th><th>Blocks</th><th>Listers</th><th>Last Active</th><th></th></tr></thead>
+          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Block acceptance rate (weight 0.4)">Acceptance</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Drag rows to set priority order &mdash; used by Round Robin and Weighted Probability strategies.</p>
@@ -441,12 +441,16 @@ export function init(root, ctx) {
     peer_banned:        '\u26d4',  // no entry
     peer_status:        '\u{1f4ca}',  // bar chart
     announce_received:  '\u{1f4cb}',  // clipboard
+    announce_published: '\u{1f4e1}',  // satellite antenna
     tx_announced:       '\u{1f4b8}',  // money with wings
     sync_complete:      '\u{1f504}',  // arrows cycle
+    sync_requested:     '\u{1f50e}',  // right magnifying glass
+    reconnect_attempt:  '\u{1f50c}',  // electric plug
     evidence_received:  '\u{1f6a8}',  // rotating light
     consensus_log:      '\u2139',  // info
     warning:            '\u26a0',  // warning
     phase_change:       '\u23f1',  // stopwatch
+    heartbeat:          '\u{1f49a}',  // green heart
   };
 
   function activityColor(evt) {
@@ -464,7 +468,11 @@ export function init(root, ctx) {
       case 'block_announced': return '#a78bfa';
       case 'peer_connected': return '#34d399';
       case 'peer_disconnected': return '#f87171';
-      case 'announce_received': return '#60a5fa';
+      case 'announce_received':
+      case 'announce_published': return '#60a5fa';
+      case 'reconnect_attempt': return '#fbbf24';
+      case 'sync_requested': return '#94a3b8';
+      case 'heartbeat': return '#6ee7b7';
       default: return 'var(--text-muted)';
     }
   }
@@ -509,6 +517,14 @@ export function init(root, ctx) {
         return data.message;
       case 'phase_change':
         return `Phase \u2192 ${data.phase}${data.cycle != null ? ` (cycle #${data.cycle})` : ''}`;
+      case 'announce_published':
+        return `NodeAnnounce published${data.node_name ? ` (${data.node_name})` : ''}`;
+      case 'reconnect_attempt':
+        return `Reconnect: dialing ${data.addresses} address(es) (${data.current_peers} peers)`;
+      case 'sync_requested':
+        return 'Sync requested \u2014 polling peer chain tips';
+      case 'heartbeat':
+        return data.message;
       default:
         return JSON.stringify(data);
     }
@@ -550,7 +566,8 @@ export function init(root, ctx) {
     renderActivityLog();
   });
 
-  // Subscribe to cyclePhaseChange WS topic for protocol events
+  // Subscribe to cyclePhaseChange + peerUpdates WS topics for the activity feed.
+  // Both streams are normalized into a single scrolling list.
   if (ws && ws.subscribe) {
     unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
       pushActivity(data);
@@ -558,6 +575,13 @@ export function init(root, ctx) {
       if (data.event === 'block_committed') {
         loadCycle(); loadTimeline(); loadVoteTallies();
       }
+    }));
+    unsubs.push(ws.subscribe('peerUpdates', (data) => {
+      // Normalize peerUpdates event names to match activity log conventions.
+      const normalized = { ...data };
+      if (data.event === 'connected') normalized.event = 'peer_connected';
+      else if (data.event === 'disconnected') normalized.event = 'peer_disconnected';
+      pushActivity(normalized);
     }));
   }
 
@@ -586,8 +610,29 @@ export function init(root, ctx) {
     }).catch(() => {});
   }
 
+  // ── Startup seed: lightweight "node is alive" snapshot ──
+  function seedNodeStatus() {
+    rpc.call('noble_getNodeInfo').then(info => {
+      if (info) {
+        pushActivity({ event: 'heartbeat', message: `Node v${info.version} \u2014 ${info.network || 'unknown'} \u2014 height ${info.block_height ?? '?'}` });
+        if (info.is_syncing) {
+          pushActivity({ event: 'heartbeat', message: 'Sync in progress\u2026' });
+        }
+      }
+    }).catch(() => {});
+  }
+
+  function seedReconnectStatus() {
+    rpc.call('noble_getPeerInfo').then(peers => {
+      const count = Array.isArray(peers) ? peers.filter(p => p.status === 'connected').length : 0;
+      pushActivity({ event: 'heartbeat', message: `${count} peer(s) connected \u2014 reconnect loop armed` });
+    }).catch(() => {});
+  }
+
+  seedNodeStatus();
   seedPhase();
   seedPeers();
+  seedReconnectStatus();
   // Retry peer seeding at 3s, 8s, 15s to catch late reconnections after node restart
   const seedTimers = [3000, 8000, 15000].map(delay =>
     setTimeout(() => seedPeers(), delay)

@@ -60,6 +60,11 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 round: vote.round,
             }]
         }
+        CycleIo::RequestBlockFromAll { block_hash } => {
+            vec![NetworkCommand::RequestBlockFromAll {
+                hash: *block_hash.as_bytes(),
+            }]
+        }
         CycleIo::BanPeer { peer_id, .. } => {
             vec![NetworkCommand::BanPeer(peer_id)]
         }

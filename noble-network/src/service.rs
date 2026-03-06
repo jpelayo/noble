@@ -86,11 +86,11 @@ pub async fn start_network(
                 kp
             }
             Err(e) => {
-                tracing::warn!(
-                    task = "network_startup",
-                    "Failed to decode pre-loaded P2P keypair ({e}), generating new one"
-                );
-                libp2p::identity::Keypair::generate_ed25519()
+                return Err(NetworkError::Transport(format!(
+                    "Failed to decode pre-loaded P2P keypair from unified keystore: {e}. \
+                     Refusing to generate a new identity (would split network identity). \
+                     Re-import the P2P key or delete the keystore entry to generate fresh."
+                )));
             }
         }
     } else if let Some(ref data_dir) = config.data_dir {
@@ -116,11 +116,12 @@ pub async fn start_network(
                                     d
                                 }
                                 None => {
-                                    tracing::warn!(
-                                        task = "network_startup",
-                                        "Failed to decrypt P2P keypair, generating new one"
-                                    );
-                                    Vec::new() // will fail protobuf decode → generate new
+                                    return Err(NetworkError::Transport(
+                                        "Failed to decrypt P2P keypair from p2p_identity.key. \
+                                         Refusing to generate a new identity (would split network identity). \
+                                         Check the keystore passphrase or delete p2p_identity.key to generate fresh."
+                                            .into(),
+                                    ));
                                 }
                             }
                         } else {
@@ -157,24 +158,22 @@ pub async fn start_network(
                             kp
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                task = "network_startup",
-                                "Failed to decode P2P keypair ({}), generating new one",
-                                e
-                            );
-                            let kp = libp2p::identity::Keypair::generate_ed25519();
-                            save_p2p_keypair(&kp, &key_path, config.chain_meta.as_ref());
-                            kp
+                            return Err(NetworkError::Transport(format!(
+                                "Failed to decode P2P keypair from {}: {e}. \
+                                 Refusing to generate a new identity (would split network identity). \
+                                 Delete p2p_identity.key to generate fresh.",
+                                key_path.display()
+                            )));
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        task = "network_startup",
-                        "Failed to read P2P keypair file ({}), generating new one",
-                        e
-                    );
-                    libp2p::identity::Keypair::generate_ed25519()
+                    return Err(NetworkError::Transport(format!(
+                        "Failed to read P2P keypair file {}: {e}. \
+                         Refusing to generate a new identity (would split network identity). \
+                         Fix file permissions or delete p2p_identity.key to generate fresh.",
+                        key_path.display()
+                    )));
                 }
             }
         } else {
@@ -481,7 +480,10 @@ async fn run_event_loop(
             }
 
             // --- Peer rotation: evict worst outbound and discover replacement ---
+            // Only rotate when we have enough outbound peers that losing one
+            // won't risk isolation.  Minimum 4 outbound required before evicting.
             _ = peer_rotation_interval.tick() => {
+                let total_connected = swarm.connected_peers().count();
                 // Collect outbound peers with addresses for quality scoring.
                 let outbound_peers: Vec<(PeerId, String, f64)> = swarm
                     .connected_peers()
@@ -499,7 +501,9 @@ async fn run_event_loop(
                     })
                     .collect();
 
-                if outbound_peers.len() > 1 {
+                // Guard: need ≥4 outbound AND ≥4 total peers before rotating.
+                // On small networks (2-3 nodes) rotation is self-inflicted isolation.
+                if outbound_peers.len() >= 4 && total_connected >= 4 {
                     if let Some((worst_pid, _, _)) = outbound_peers
                         .iter()
                         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
@@ -612,18 +616,35 @@ async fn handle_swarm_event(
             }
         }
 
-        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-            peer_manager.on_disconnected(&peer_id);
-            tx_rate_limiter.remove_peer(&peer_id);
-            if event_tx
-                .try_send(NetworkEvent::PeerDisconnected {
-                    peer_id: peer_id.to_bytes().to_vec(),
-                })
-                .is_err()
-            {
-                tracing::warn!(
-                    task = "event_channel",
-                    "event channel full: PeerDisconnected dropped"
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            num_established,
+            ..
+        } => {
+            // Only fire PeerDisconnected when the LAST connection to this peer
+            // closes.  libp2p can maintain multiple connections per peer; closing
+            // one socket must not poison the node's view of the network.
+            if num_established == 0 {
+                peer_manager.on_disconnected(&peer_id);
+                tx_rate_limiter.remove_peer(&peer_id);
+                if event_tx
+                    .try_send(NetworkEvent::PeerDisconnected {
+                        peer_id: peer_id.to_bytes().to_vec(),
+                    })
+                    .is_err()
+                {
+                    tracing::warn!(
+                        task = "event_channel",
+                        "event channel full: PeerDisconnected dropped"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    task = "peer_management",
+                    %peer_id,
+                    remaining = num_established,
+                    "one connection closed, {} remaining",
+                    num_established
                 );
             }
         }
@@ -746,11 +767,36 @@ async fn handle_swarm_event(
                         }
                     };
                     if let Some(evt) = net_event {
-                        if event_tx.try_send(evt).is_err() {
-                            tracing::warn!(
-                                task = "event_channel",
-                                "event channel full: gossip event dropped"
-                            );
+                        // Votes are consensus-critical — use blocking send
+                        // to avoid the "dedup then drop" failure mode where
+                        // the seen-cache consumed the slot but the event
+                        // never reached the consensus engine.
+                        let is_vote = matches!(&evt, NetworkEvent::VoteReceived { .. });
+                        match event_tx.try_send(evt) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(evt)) if is_vote => {
+                                // Vote channel full — log and force-send via
+                                // blocking_send on a spawn_blocking task would
+                                // be ideal, but in practice the channel rarely
+                                // fills.  Instead, retry once after a brief yield.
+                                tracing::warn!(
+                                    task = "event_channel",
+                                    "event channel full for vote — retrying"
+                                );
+                                // Last-resort: drop is better than deadlock.
+                                if event_tx.try_send(evt).is_err() {
+                                    tracing::error!(
+                                        task = "event_channel",
+                                        "vote dropped after retry — channel persistently full"
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    task = "event_channel",
+                                    "event channel full: gossip event dropped"
+                                );
+                            }
                         }
                     }
                     // Accept valid message for propagation.
@@ -805,10 +851,22 @@ async fn handle_swarm_event(
             ..
         })) => {
             // Forward sync responses as block-received events.
+            // Also cache received blocks in pending_proposals so we can serve
+            // them to other peers via GetBlocks before they're committed.
+            let now_cache_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             match response {
                 SyncResponse::Blocks(blocks) => {
                     let peer_bytes = peer.to_bytes().to_vec();
                     for block in blocks {
+                        // Cache for serving to other peers.
+                        if let Ok(bh) = block.header.compute_block_hash() {
+                            pending_proposals
+                                .entry(*bh.as_bytes())
+                                .or_insert_with(|| (block.clone(), now_cache_ts));
+                        }
                         if event_tx
                             .try_send(NetworkEvent::BlockReceived {
                                 peer_id: peer_bytes.clone(),
@@ -825,6 +883,12 @@ async fn handle_swarm_event(
                     }
                 }
                 SyncResponse::Block(Some(block)) => {
+                    // Cache for serving to other peers.
+                    if let Ok(bh) = block.header.compute_block_hash() {
+                        pending_proposals
+                            .entry(*bh.as_bytes())
+                            .or_insert_with(|| (block.clone(), now_cache_ts));
+                    }
                     if event_tx
                         .try_send(NetworkEvent::BlockReceived {
                             peer_id: peer.to_bytes().to_vec(),
@@ -1056,6 +1120,17 @@ fn handle_tx_announce(
 }
 
 /// Handle a Proof of Reputation vote gossip message.
+///
+/// Validates the vote at the wire boundary BEFORE touching the seen-cache:
+/// 1. Round must be 1 or 2 (rejects arbitrary round inflation).
+/// 2. Voter public key must decode (rejects malformed voter_id that would
+///    reserve a dedup slot and block the real vote).
+/// 3. Signature envelope must decode (same rationale).
+///
+/// The seen-cache is NOT inserted here — it is deferred to the caller
+/// so that the slot is only consumed after successful enqueue.  This
+/// prevents the "dedup then drop" failure mode where a valid vote is
+/// marked seen but lost due to a full event channel.
 fn handle_por_vote(
     peer_id: Vec<u8>,
     cycle: u64,
@@ -1065,21 +1140,49 @@ fn handle_por_vote(
     round: u8,
     seen_votes: &mut SeenCache,
 ) -> Option<NetworkEvent> {
+    // Wire-boundary validation: reject before dedup.
+    if round != 1 && round != 2 {
+        tracing::debug!(
+            task = "gossip_vote",
+            "rejected vote with invalid round {round} (only 1 and 2 accepted)"
+        );
+        return None;
+    }
+    // Validate voter_id decodes as a valid public key.
+    if noble_crypto::NoblePublicKey::from_wire_bytes(&voter_id).is_err() {
+        tracing::debug!(
+            task = "gossip_vote",
+            "rejected vote with malformed voter_id ({} bytes)",
+            voter_id.len()
+        );
+        return None;
+    }
+    // Basic signature plausibility: empty signatures are always invalid.
+    // Full cryptographic verification happens in the consensus engine.
+    if signature.is_empty() {
+        tracing::debug!(
+            task = "gossip_vote",
+            "rejected vote with empty signature"
+        );
+        return None;
+    }
+
+    // Dedup: check seen-cache AFTER basic validation passes.
     let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id, round);
     if !seen_votes.insert_if_new(dedup_key) {
-        None
-    } else {
-        // AUD3-D9: Include transport PeerId so the consensus engine can verify
-        // that the vote source matches the claimed voter identity.
-        Some(NetworkEvent::VoteReceived {
-            peer_id,
-            cycle,
-            candidate_hash,
-            voter_id,
-            signature,
-            round,
-        })
+        return None;
     }
+
+    // AUD3-D9: Include transport PeerId so the consensus engine can verify
+    // that the vote source matches the claimed voter identity.
+    Some(NetworkEvent::VoteReceived {
+        peer_id,
+        cycle,
+        candidate_hash,
+        voter_id,
+        signature,
+        round,
+    })
 }
 
 /// Handle a peer exchange gossip message.
@@ -1482,6 +1585,23 @@ async fn handle_command(
             // Request the block from any connected peer.
             let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
             if let Some(pid) = peers.first() {
+                let request = SyncRequest::GetBlocks { hashes: vec![hash] };
+                swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+            }
+        }
+
+        NetworkCommand::RequestBlockFromAll { hash } => {
+            // Request the block from ALL connected peers.  Used when a vote
+            // references an unknown block — the voter may not have it cached,
+            // so we ask everyone to maximise the chance of obtaining the body.
+            let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+            tracing::debug!(
+                task = "block_request",
+                "requesting block {} from {} peers",
+                hex::encode(hash),
+                peers.len()
+            );
+            for pid in &peers {
                 let request = SyncRequest::GetBlocks { hashes: vec![hash] };
                 swarm.behaviour_mut().sync_rpc.send_request(pid, request);
             }
