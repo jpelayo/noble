@@ -196,6 +196,19 @@ pub trait StorageEngine {
         Ok(()) // default no-op
     }
 
+    // ── Finality State ──
+
+    /// Store finality state (height, hash, cycle) in chain_state CF.
+    fn store_finality_state(&self, data: &[u8]) -> Result<(), StorageError> {
+        let _ = data;
+        Ok(()) // default no-op for backends that don't support it
+    }
+
+    /// Load finality state from chain_state CF. Returns None if never stored.
+    fn load_finality_state(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(None) // default no-op
+    }
+
     // ── Per-Block Vote Witness ──
 
     /// Store per-block vote witness data, keyed by block height.

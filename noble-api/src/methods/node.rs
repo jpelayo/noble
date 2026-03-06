@@ -233,6 +233,10 @@ pub trait NodeApi {
     #[method(name = "getDiscoveredBlockchains")]
     async fn get_discovered_blockchains(&self) -> Result<DiscoveredBlockchainsResponse, ErrorObjectOwned>;
 
+    /// Get the current finality status of the chain.
+    #[method(name = "getFinalityStatus")]
+    async fn get_finality_status(&self) -> Result<FinalityStatusResponse, ErrorObjectOwned>;
+
     /// Reset the chain to genesis and trigger re-sync from peers.
     ///
     /// This is a destructive operation used for fork recovery ("blockchain hop").
@@ -1172,6 +1176,29 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(DiscoveredBlockchainsResponse { blockchains })
     }
 
+    async fn get_finality_status(&self) -> Result<FinalityStatusResponse, ErrorObjectOwned> {
+        let consensus = self.consensus.read();
+        let ft = consensus.finality_tracker();
+        let (tip_height, tip_hash) = consensus.chain_tip();
+        let confirmations = ft.confirmations_for_tip();
+        let status = ft.status_for_height(tip_height);
+        Ok(FinalityStatusResponse {
+            finalized_height: ft.finalized_height,
+            finalized_hash: hex::encode(ft.finalized_hash.as_bytes()),
+            finalized_at_cycle: ft.finalized_at_cycle,
+            confirmation_threshold: ft.confirmation_threshold(),
+            latest_height: tip_height,
+            latest_hash: hex::encode(tip_hash.as_bytes()),
+            confirmations_for_latest: confirmations,
+            status: match status {
+                noble_consensus::FinalityStatus::Committed => "committed",
+                noble_consensus::FinalityStatus::Confirmed { .. } => "confirmed",
+                noble_consensus::FinalityStatus::Finalized => "finalized",
+            }
+            .to_string(),
+        })
+    }
+
     async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned> {
         // TOTP auth required (scope: All). Check via request extensions.
         // The TOTP middleware handles this at the RPC layer.
@@ -1213,7 +1240,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                     height: 0,
                 });
             let mut engine = self.consensus.write();
-            engine.reset_tip(tip.height, tip.block_hash);
+            engine.reset_tip(tip.height, tip.block_hash, true)
+                .map_err(|e| ApiError::Internal(format!("reset_tip: {e}")))?;
         }
 
         // Trigger re-sync from peers.

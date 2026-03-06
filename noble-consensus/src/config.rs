@@ -26,6 +26,8 @@ pub struct ConsensusConfig {
     pub voting_strategy: VotingStrategy,
     /// Voting strategy for Round 2 (Confirmation phase). Default: FollowMajority.
     pub confirmation_strategy: VotingStrategy,
+    /// Number of consecutive clean cycles required to finalize a block (default: 3).
+    pub confirmation_threshold: u32,
 }
 
 impl Default for ConsensusConfig {
@@ -38,6 +40,7 @@ impl Default for ConsensusConfig {
             min_unique_voters: 2,
             voting_strategy: VotingStrategy::FirstValid,
             confirmation_strategy: VotingStrategy::FollowMajority,
+            confirmation_threshold: 3,
         }
     }
 }
@@ -55,5 +58,6 @@ mod tests {
         assert_eq!(cfg.plurality_floor_divisor, 3);
         assert_eq!(cfg.min_peers_for_consensus, 2);
         assert_eq!(cfg.min_unique_voters, 2);
+        assert_eq!(cfg.confirmation_threshold, 3);
     }
 }

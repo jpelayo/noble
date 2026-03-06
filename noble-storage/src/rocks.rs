@@ -84,6 +84,7 @@ const ALL_CF_NAMES: &[&str] = &[
 
 const KEY_TIP_HASH: &[u8] = b"tip_hash";
 const KEY_TIP_HEIGHT: &[u8] = b"tip_height";
+const KEY_FINALITY_STATE: &[u8] = b"finality_state";
 /// Running total supply in atomic units (AUD2-M2: O(1) supply tracking).
 const KEY_TOTAL_SUPPLY: &[u8] = b"total_supply";
 
@@ -1403,6 +1404,22 @@ impl StorageEngine for RocksDbStorage {
         key.extend_from_slice(&height.to_be_bytes());
         self.db
             .get_cf(&cf, &key)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn store_finality_state(&self, data: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        self.db
+            .put_cf(&cf, KEY_FINALITY_STATE, data)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn load_finality_state(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        self.db
+            .get_cf(&cf, KEY_FINALITY_STATE)
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 

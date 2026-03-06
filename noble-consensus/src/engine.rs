@@ -16,6 +16,8 @@ use tracing::{debug, info, warn};
 use crate::badge::{self, BadgeProposalType, BadgeStore, VoteBadge};
 use crate::candidate::CandidateTracker;
 use crate::config::ConsensusConfig;
+use crate::error::ConsensusError;
+use crate::finality::FinalityTracker;
 use crate::cycle::{CycleManager, CyclePhase};
 use crate::event::{CycleEvent, CycleIo};
 use crate::history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
@@ -93,6 +95,8 @@ pub struct CycleEngine {
     badge_store: BadgeStore,
     /// Active badge proposals (keyed by proposal hash hex).
     badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
+    /// Phase 1: Finality tracker — counts consecutive clean cycles for finality.
+    finality_tracker: FinalityTracker,
 }
 
 impl CycleEngine {
@@ -113,6 +117,7 @@ impl CycleEngine {
         genesis_timestamp: Option<u64>,
     ) -> Self {
         let cycle_mgr = CycleManager::new(noble_core::CYCLE_DURATION_SECS, genesis_timestamp);
+        let confirmation_threshold = config.confirmation_threshold;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -143,6 +148,7 @@ impl CycleEngine {
             voting_enabled: true,   // default; call set_voting_enabled(false) for propose-only
             badge_store: BadgeStore::new(),
             badge_proposals: std::collections::HashMap::new(),
+            finality_tracker: FinalityTracker::new(confirmation_threshold),
         }
     }
 
@@ -166,6 +172,16 @@ impl CycleEngine {
     /// but never casts votes.  Used for block-producer-only nodes.
     pub fn set_voting_enabled(&mut self, enabled: bool) {
         self.voting_enabled = enabled;
+    }
+
+    /// Get finality tracker (read-only) for RPC queries.
+    pub fn finality_tracker(&self) -> &FinalityTracker {
+        &self.finality_tracker
+    }
+
+    /// Restore finality state from storage on startup.
+    pub fn restore_finality(&mut self, height: u64, hash: Hash256, cycle: u64) {
+        self.finality_tracker.restore(height, hash, cycle);
     }
 
     /// Whether a validator key is configured.
@@ -240,7 +256,13 @@ impl CycleEngine {
     /// Clears the vote manager, candidate tracker, cycle history, and — when
     /// resetting to height 0 — the cycle epoch so the engine re-enters pre-genesis
     /// mode and waits for the new chain's block 1 to set the epoch.
-    pub fn reset_tip(&mut self, height: u64, block_hash: Hash256) {
+    pub fn reset_tip(&mut self, height: u64, block_hash: Hash256, force: bool) -> Result<(), ConsensusError> {
+        if !force && height != 0 && height <= self.finality_tracker.finalized_height {
+            return Err(ConsensusError::ReorgPastFinality {
+                finalized: self.finality_tracker.finalized_height,
+                requested: height,
+            });
+        }
         self.tip_height = height;
         self.tip_hash = block_hash;
         self.tip_timestamp = 0;
@@ -259,8 +281,12 @@ impl CycleEngine {
             self.tracked_cycle = u64::MAX;
             self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
+            self.finality_tracker.reset_full();
+        } else {
+            self.finality_tracker.reset();
         }
         tracing::warn!("consensus engine reset to height {height}");
+        Ok(())
     }
 
     /// Update the chain tip with timestamp for full parent validation (AUD2-C2).
@@ -678,6 +704,20 @@ impl CycleEngine {
                                 "cycle {completed_cycle}: committed block {} at height {} ({:?})",
                                 new_hash, new_height, strength
                             )));
+                            // Track finality: record this commit for finality counting.
+                            self.finality_tracker.on_block_committed(new_height, new_hash, completed_cycle);
+                            let fh = self.finality_tracker.finalized_height;
+                            if fh > 0 {
+                                outputs.push(CycleIo::PersistFinalityState {
+                                    height: self.finality_tracker.finalized_height,
+                                    hash: self.finality_tracker.finalized_hash,
+                                    cycle: self.finality_tracker.finalized_at_cycle,
+                                });
+                                outputs.push(CycleIo::EmitMetric {
+                                    name: "finalized_height".to_string(),
+                                    value: fh as f64,
+                                });
+                            }
                         }
                     } else {
                         outputs.push(CycleIo::Log(format!(

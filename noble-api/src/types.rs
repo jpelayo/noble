@@ -1237,6 +1237,19 @@ pub struct WalletTransactionEntry {
     pub running_balance: u64,
 }
 
+/// Response for `noble_getFinalityStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct FinalityStatusResponse {
+    pub finalized_height: u64,
+    pub finalized_hash: String,
+    pub finalized_at_cycle: u64,
+    pub confirmation_threshold: u32,
+    pub latest_height: u64,
+    pub latest_hash: String,
+    pub confirmations_for_latest: u32,
+    pub status: String,
+}
+
 /// Response for `noble_backupChain`.
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupChainResponse {

@@ -41,6 +41,10 @@ pub enum ConsensusError {
     #[error("crypto: {0}")]
     Crypto(String),
 
+    /// Cannot reorg past a finalized height.
+    #[error("cannot reorg past finalized height {finalized} (requested: {requested})")]
+    ReorgPastFinality { finalized: u64, requested: u64 },
+
     /// Catch-all internal error.
     #[error("internal: {0}")]
     Internal(String),

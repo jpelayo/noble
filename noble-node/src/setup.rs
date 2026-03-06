@@ -648,6 +648,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             voting_preferred_validator: defaults.consensus.voting_preferred_validator.clone(),
             voting_subset: defaults.consensus.voting_subset.clone(),
             min_peers_for_consensus: defaults.consensus.min_peers_for_consensus,
+            confirmation_threshold: defaults.consensus.confirmation_threshold,
         },
         api: ApiConfig {
             rpc_addr: defaults.api.rpc_addr.clone(),

@@ -11,6 +11,12 @@ function extractIpFromMultiaddr(ma) {
   return m ? m[1] : '--';
 }
 
+/** Escape HTML-special characters to prevent XSS via peer-supplied names. */
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 // ── Phase & status colors ──
 const PHASE_COLORS = {
   'Block Proposal':  { bg: '#3b82f6', fg: '#fff' },
@@ -27,7 +33,7 @@ const STATE_STYLES = {
 };
 
 export function init(root, ctx) {
-  const { rpc, ws } = ctx;
+  const { rpc, ws, getState } = ctx;
   const unsubs = [];
   let countdownInterval = null;
 
@@ -44,7 +50,7 @@ export function init(root, ctx) {
   function getValidatorDisplayName(pubkeyHex, maxLen) {
     if (!pubkeyHex) return '—';
     const name = validatorNameMap.get(pubkeyHex);
-    if (name) return name;
+    if (name) return escapeHtml(name);
     return truncateHash(pubkeyHex, maxLen || 6);
   }
 
@@ -308,7 +314,7 @@ export function init(root, ctx) {
           <button id="badge-modal-close" style="background:none;border:none;color:var(--text-muted);font-size:1.5rem;cursor:pointer;padding:0 4px;line-height:1" title="Close">&times;</button>
         </div>
         <div style="display:flex;gap:var(--gap-sm);margin-bottom:var(--gap);border-bottom:1px solid var(--border);padding-bottom:var(--gap-sm)">
-          <button class="badge-tab-btn" data-tab="holders" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--accent);color:#fff;font-size:var(--font-size-sm)">Badge Holders</button>
+          <button class="badge-tab-btn" data-tab="holders" data-active="true" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--accent);color:#fff;font-size:var(--font-size-sm)">Badge Holders</button>
           <button class="badge-tab-btn" data-tab="proposals" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">Active Proposals</button>
           <button class="badge-tab-btn" data-tab="propose" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">Propose</button>
           <button class="badge-tab-btn" data-tab="history" style="padding:4px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;background:var(--bg-tertiary);color:var(--text);font-size:var(--font-size-sm)">History</button>
@@ -436,6 +442,22 @@ export function init(root, ctx) {
   };
 
   // ── Protocol Activity Log ──
+  // ── Debounced reload scheduler ──
+  // Merges multiple rapid WS events into a single batch of RPC calls.
+  let _pendingReloads = new Set();
+  let _reloadTimer = null;
+  function scheduleReload(...fns) {
+    for (const f of fns) _pendingReloads.add(f);
+    if (!_reloadTimer) {
+      _reloadTimer = setTimeout(() => {
+        _reloadTimer = null;
+        const batch = [..._pendingReloads];
+        _pendingReloads.clear();
+        batch.forEach(f => f());
+      }, 150);
+    }
+  }
+
   const ACTIVITY_MAX_ENTRIES = 100;
   const activityEntries = []; // circular buffer (oldest at 0)
 
@@ -582,7 +604,7 @@ export function init(root, ctx) {
       const icon = ACTIVITY_ICONS[data.event] || '\u2022';
       const color = activityColor(data.event);
       const msg = formatActivityMessage(data);
-      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${msg}</div>`;
+      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}</div>`;
     }
     csActivityLog.innerHTML = html;
   }
@@ -663,15 +685,15 @@ export function init(root, ctx) {
       }
       // Refresh data panels on significant events
       if (data.event === 'block_committed') {
-        loadCycle(); loadTimeline(); loadVoteTallies(); loadValidators();
+        scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
       // Refresh tallies on vote events (live updates)
       if (data.event === 'vote_received' || data.event === 'vote_broadcast') {
-        loadVoteTallies();
+        scheduleReload(loadVoteTallies);
       }
       // Refresh cycle display on phase changes
       if (data.event === 'phase_change') {
-        loadCycle(); loadVoteTallies();
+        scheduleReload(loadCycle, loadVoteTallies);
       }
     }));
     unsubs.push(ws.subscribe('peerUpdates', (data) => {
@@ -729,9 +751,6 @@ export function init(root, ctx) {
     rpc.call('noble_getNodeInfo').then(info => {
       if (info) {
         pushActivity({ event: 'heartbeat', message: `Node v${info.version}` });
-        if (info.is_syncing) {
-          pushActivity({ event: 'heartbeat', message: 'Sync in progress\u2026' });
-        }
       }
     }).catch(() => {});
   }
@@ -863,7 +882,7 @@ export function init(root, ctx) {
   async function loadVoteTallies() {
     try {
       const result = await rpc.call('noble_getVoteTallies');
-      tallyMeta.textContent = `Cycle #${formatNumber(result.cycle)} — ${result.phase}`;
+      tallyMeta.textContent = `Cycle #${formatNumber(result.cycle ?? 0)} — ${result.phase || '--'}`;
 
       // Update manual vote phase indicator
       const manualPhase = root.querySelector('#cs-manual-phase');
@@ -988,31 +1007,40 @@ export function init(root, ctx) {
         return;
       }
       const cycles = raw.map((e, i) =>
-        apiEntryToCycle(e, i === raw.length - 1 && (e.status === 'active' || !e.finalized_at))
+        apiEntryToCycle(e, i === 0 && (e.status === 'active' || !e.finalized_at))
       );
 
       // Fetch per-block vote witnesses for recent blocks.
       // These survive ClearCycleHistory and carry individual voter names.
       try {
         const tipInfo = await rpc.call('noble_getSyncStatus', []);
-        const tipHeight = tipInfo ? tipInfo.height : 0;
+        const tipHeight = tipInfo ? tipInfo.current_height : 0;
+        const votePromises = [];
         for (let h = tipHeight; h >= Math.max(1, tipHeight - TIMELINE_LIMIT); h--) {
-          const bv = await rpc.call('noble_getBlockVotes', [h]);
+          votePromises.push(rpc.call('noble_getBlockVotes', [h]).catch(() => null));
+        }
+        const voteResults = await Promise.all(votePromises);
+        for (const bv of voteResults) {
           if (!bv) continue;
-          // Match block votes to the cycle that produced this block.
           const match = cycles.find(c => c.cycle_number === bv.cycle_number);
           if (match) match._blockVotes = bv;
         }
       } catch (_) { /* getSyncStatus or getBlockVotes not available */ }
 
-      renderTimeline(cycles);
+      // Fetch finality status for per-block finality badges.
+      let finalityStatus = null;
+      try {
+        finalityStatus = await rpc.call('noble_getFinalityStatus', []);
+      } catch (_) { /* getFinalityStatus not available */ }
+
+      renderTimeline(cycles, finalityStatus);
     } catch (e) {
       console.error('[consensus] load timeline:', e);
       csTimeline.innerHTML = '<div class="empty-state">Failed to load cycle history</div>';
     }
   }
 
-  function renderTimeline(cycles) {
+  function renderTimeline(cycles, finalityStatus) {
     csTimeline.innerHTML = '';
 
     // Track all validators that participated
@@ -1103,9 +1131,30 @@ export function init(root, ctx) {
             label += `<div style="font-size:0.55rem;opacity:0.5">pending</div>`;
           }
         } else {
-          // Propagation
+          // Propagation — show finality status badge
           if (phase.finalized) {
-            label += `<div style="font-size:0.55rem;opacity:0.85">&#10003; sealed</div>`;
+            let badge = '&#10003; sealed';
+            let badgeColor = 'opacity:0.85';
+            if (finalityStatus && finalityStatus.finalized_height > 0) {
+              // Estimate block depth from cycle position within the displayed list.
+              // Cycles are ordered newest-first; cycleIdx counts from 0 (most recent).
+              const cycleIdx = cycles.indexOf(cycle);
+              const tipH = finalityStatus.latest_height;
+              const depth = cycleIdx; // approximate: each cycle = 1 block deeper
+              const blockH = tipH - depth;
+              if (blockH > 0 && blockH <= finalityStatus.finalized_height) {
+                badge = '&#9989; finalized';
+                badgeColor = 'color:var(--accent-green,#4caf50)';
+              } else if (blockH > 0) {
+                const threshold = finalityStatus.confirmation_threshold;
+                const confs = Math.min(Math.max(tipH - blockH, 0), threshold);
+                if (confs > 0 && confs < threshold) {
+                  badge = `&#9679; ${confs}/${threshold}`;
+                  badgeColor = 'color:var(--accent-blue,#2196f3)';
+                }
+              }
+            }
+            label += `<div style="font-size:0.55rem;${badgeColor}">${badge}</div>`;
           } else if (phase.state === 'skipped') {
             label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           } else {
@@ -1297,15 +1346,13 @@ export function init(root, ctx) {
         csCycleRemaining.textContent = formatCountdown(cycleRemaining);
         const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
         if (activeTimer) activeTimer.textContent = formatCountdown(phaseRemaining);
-        if (phaseRemaining <= 0 || cycleRemaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
+        if ((phaseRemaining <= 0 || cycleRemaining <= 0) && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
       }, 1000);
       return;
     }
 
-    if (status.current_validator) {
-      const key = status.current_validator.Ed25519 || status.current_validator.Secp256k1 || [];
-      csValidator.textContent = truncateHash(bytesToHex(key), 12);
-    }
+    // CycleStatusResponse doesn't carry current_validator — show '—'.
+    csValidator.textContent = '—';
 
     const activeIdx = status.phase_index;
 
@@ -1326,7 +1373,7 @@ export function init(root, ctx) {
       // Update active timer in pipeline
       const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
       if (activeTimer) activeTimer.textContent = formatCountdown(remaining);
-      if (remaining <= 0) { loadCycle(); loadTimeline(); loadVoteTallies(); }
+      if (remaining <= 0 && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
     }, 1000);
     csPhaseRemaining.textContent = formatCountdown(remaining);
     csCycleRemaining.textContent = formatCountdown(cycleRemaining);
@@ -1357,7 +1404,7 @@ export function init(root, ctx) {
         rpc.call('noble_getNodeIdentity').catch(() => ({})),
       ]);
       const selfKey = nodeInfo.validator_pubkey || null;
-      const validators = result.validators;
+      const validators = result?.validators || [];
       const priorityOrder = result.priority_order || [];
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
@@ -1429,7 +1476,7 @@ export function init(root, ctx) {
               onmouseleave="this.style.opacity='0.7';this.style.color='var(--text-secondary)'">&#8942;&#8942;</td>
           <td>${i + 1}</td>
           <td>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${v.name || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${escapeHtml(v.name) || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)} <button class="btn-copy" data-copy="${keyHex}" title="Copy public key">&#128203;</button></div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}${v.host_address ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(v.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>
@@ -1521,7 +1568,7 @@ export function init(root, ctx) {
         <div class="panel-body">
           <div class="split-layout">
             <dl class="detail-grid">
-              <dt>Name</dt><dd>${v.name}</dd>
+              <dt>Name</dt><dd>${escapeHtml(v.name) || '—'}</dd>
               <dt>Public Key</dt><dd class="mono">${keyHex}</dd>
               <dt>Scheme</dt><dd>${scheme}</dd>
               <dt>Host Address</dt><dd class="mono">${v.host_address || 'N/A'}</dd>
@@ -1782,7 +1829,7 @@ export function init(root, ctx) {
           : `<button class="btn btn-danger btn-sm cs-remove-candidate" data-key="${peer.identity_key}" title="Remove from peer memory">&#10005;</button>`;
         tr.innerHTML = `
           <td>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${peer.node_name || 'Unknown'}${youBadge}</div>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${escapeHtml(peer.node_name) || 'Unknown'}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${peer.identity_key.slice(0, 12)}...${peer.identity_key.slice(-8)} <button class="btn-copy" data-copy="${peer.identity_key}" title="Copy public key">&#128203;</button></div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}${(peer.last_addr || peer.host_address) ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>
@@ -1862,8 +1909,8 @@ export function init(root, ctx) {
   // ── WS subscriptions ──
   // (cyclePhaseChange events are handled by the Protocol Activity log above)
 
-  // ── Copy-to-clipboard delegation ──
-  root.addEventListener('click', (e) => {
+  // ── Copy-to-clipboard delegation (named for cleanup) ──
+  function handleRootCopyClick(e) {
     const btn = e.target.closest('.btn-copy');
     if (btn) {
       e.stopPropagation();
@@ -1871,7 +1918,9 @@ export function init(root, ctx) {
       btn.textContent = '\u2713';
       setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
     }
-  });
+  }
+  root.addEventListener('click', handleRootCopyClick);
+  unsubs.push(() => root.removeEventListener('click', handleRootCopyClick));
 
   // ── Badge Governance Modal ──
   const badgeGear = root.querySelector('#cs-badge-gear');
@@ -1884,7 +1933,7 @@ export function init(root, ctx) {
     loadBadgeHolders();
     loadActiveProposals();
     badgePollInterval = setInterval(() => {
-      const active = root.querySelector('.badge-tab-btn[style*="background:var(--accent)"]');
+      const active = root.querySelector('.badge-tab-btn[data-active="true"]');
       if (active) {
         const tab = active.dataset.tab;
         if (tab === 'holders') loadBadgeHolders();
@@ -1905,8 +1954,10 @@ export function init(root, ctx) {
     btn.addEventListener('click', () => {
       root.querySelectorAll('.badge-tab-btn').forEach(b => {
         b.style.background = 'var(--bg-tertiary)'; b.style.color = 'var(--text)';
+        b.dataset.active = '';
       });
       btn.style.background = 'var(--accent)'; btn.style.color = '#fff';
+      btn.dataset.active = 'true';
       root.querySelectorAll('.badge-tab-content').forEach(c => c.style.display = 'none');
       root.querySelector('#badge-tab-' + btn.dataset.tab).style.display = '';
       if (btn.dataset.tab === 'holders') loadBadgeHolders();
@@ -1936,7 +1987,7 @@ export function init(root, ctx) {
       empty.style.display = 'none';
       tbody.innerHTML = holders.map(h => `<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:6px 8px" class="mono">${truncateHash(h.pubkey, 10)}</td>
-        <td style="padding:6px 8px">${h.node_name || '--'}</td>
+        <td style="padding:6px 8px">${escapeHtml(h.node_name) || '--'}</td>
         <td style="padding:6px 8px"><span style="padding:2px 8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);background:${h.status==='active'?'var(--success)':h.status==='suspended'?'var(--warning)':'var(--error)'};color:#fff">${h.status}</span></td>
         <td style="padding:6px 8px;text-align:right">${formatNumber(h.granted_at_height)}</td>
         <td style="padding:6px 8px;text-align:right">${h.last_seen ? timeAgo(h.last_seen) : '--'}</td>
@@ -2011,17 +2062,20 @@ export function init(root, ctx) {
     }
   }
 
-  // Event delegation for vote & revoke buttons
-  root.addEventListener('click', async (e) => {
+  // Event delegation for vote & revoke buttons (named for cleanup)
+  async function handleRootBadgeClick(e) {
     const voteBtn = e.target.closest('.badge-vote-btn');
     if (voteBtn) {
       const hash = voteBtn.dataset.hash;
       const vote = voteBtn.dataset.vote === 'true';
       try {
+        voteBtn.disabled = true;
         await rpc.call('noble_voteBadgeProposal', { proposal_hash: hash, vote });
         loadActiveProposals();
       } catch (err) {
-        alert('Vote failed: ' + (err.message || err));
+        voteBtn.style.color = 'var(--error)';
+        voteBtn.textContent = err.message || 'Failed';
+        setTimeout(() => loadActiveProposals(), 3000);
       }
       return;
     }
@@ -2034,13 +2088,18 @@ export function init(root, ctx) {
       // Switch to Propose tab
       root.querySelectorAll('.badge-tab-btn').forEach(b => {
         b.style.background = 'var(--bg-tertiary)'; b.style.color = 'var(--text)';
+        b.dataset.active = '';
       });
-      root.querySelector('.badge-tab-btn[data-tab="propose"]').style.background = 'var(--accent)';
-      root.querySelector('.badge-tab-btn[data-tab="propose"]').style.color = '#fff';
+      const proposeTab = root.querySelector('.badge-tab-btn[data-tab="propose"]');
+      proposeTab.style.background = 'var(--accent)';
+      proposeTab.style.color = '#fff';
+      proposeTab.dataset.active = 'true';
       root.querySelectorAll('.badge-tab-content').forEach(c => c.style.display = 'none');
       root.querySelector('#badge-tab-propose').style.display = '';
     }
-  });
+  }
+  root.addEventListener('click', handleRootBadgeClick);
+  unsubs.push(() => root.removeEventListener('click', handleRootBadgeClick));
 
   // Submit proposal
   root.querySelector('#badge-propose-submit').addEventListener('click', async () => {
@@ -2071,6 +2130,9 @@ export function init(root, ctx) {
     destroy() {
       clearInterval(countdownInterval);
       if (badgePollInterval) clearInterval(badgePollInterval);
+      if (_reloadTimer) clearTimeout(_reloadTimer);
+      for (const entry of deferredPeerEvents.values()) clearTimeout(entry.timer);
+      deferredPeerEvents.clear();
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };

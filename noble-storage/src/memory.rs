@@ -52,6 +52,8 @@ struct Inner {
     badge_proposals: HashMap<Vec<u8>, Vec<u8>>,
     /// Per-block vote witness: height → CBOR-encoded BlockVotes.
     block_votes: BTreeMap<u64, Vec<u8>>,
+    /// Finality state persistence.
+    finality_state: Option<Vec<u8>>,
     closed: bool,
 }
 
@@ -831,6 +833,19 @@ impl StorageEngine for MemoryStorage {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
         Ok(inner.block_votes.get(&height).cloned())
+    }
+
+    fn store_finality_state(&self, data: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.finality_state = Some(data.to_vec());
+        Ok(())
+    }
+
+    fn load_finality_state(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.finality_state.clone())
     }
 
     // ── Badge State ──

@@ -165,6 +165,9 @@ pub struct ConsensusConfig {
     /// Minimum validators required for consensus participation (default: 2).
     #[serde(default = "default_min_peers_for_consensus")]
     pub min_peers_for_consensus: usize,
+    /// Number of consecutive clean cycles to finalize a block (default: 3).
+    #[serde(default = "default_confirmation_threshold")]
+    pub confirmation_threshold: u32,
 }
 
 fn default_voting_strategy() -> String {
@@ -177,6 +180,10 @@ fn default_confirmation_strategy() -> String {
 
 fn default_min_peers_for_consensus() -> usize {
     2
+}
+
+fn default_confirmation_threshold() -> u32 {
+    3
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -538,6 +545,7 @@ impl Default for ConsensusConfig {
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
+            confirmation_threshold: default_confirmation_threshold(),
         }
     }
 }
@@ -624,6 +632,7 @@ mod tests {
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
+            confirmation_threshold: default_confirmation_threshold(),
         };
         let debug_str = format!("{config:?}");
         assert!(

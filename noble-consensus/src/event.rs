@@ -86,4 +86,6 @@ pub enum CycleIo {
     /// Notify the node that the consensus phase has changed.
     /// Used to broadcast phase transitions to GUI/WebSocket subscribers.
     PhaseChanged { cycle: u64, phase: CyclePhase },
+    /// Persist finality state to storage.
+    PersistFinalityState { height: u64, hash: Hash256, cycle: u64 },
 }

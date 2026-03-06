@@ -377,6 +377,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
         }
+        // Restore finality state from storage.
+        if let Ok(Some(data)) = storage.read().load_finality_state() {
+            if let Some((height, hash, cycle)) = decode_finality_state(&data) {
+                engine.restore_finality(height, hash, cycle);
+                tracing::info!(task = "init", finalized_height = height, "restored finality state");
+            }
+        }
         let consensus = Arc::new(RwLock::new(engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---
@@ -2639,6 +2646,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         );
                     }
                 }
+                CycleIo::PersistFinalityState { height, hash, cycle } => {
+                    let data = encode_finality_state(height, &hash, cycle);
+                    let storage = self.storage.read();
+                    if let Err(e) = storage.store_finality_state(&data) {
+                        tracing::warn!(task = "finality", "failed to persist finality state: {e}");
+                    }
+                }
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
                     let mut event = serde_json::json!({
@@ -3586,6 +3600,28 @@ fn load_identity(config: &NodeConfig) -> NodeIdentityData {
     }
 }
 
+/// Encode finality state as 48 bytes: height(8) + hash(32) + cycle(8).
+fn encode_finality_state(height: u64, hash: &noble_crypto::Hash256, cycle: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(48);
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(hash.as_bytes());
+    data.extend_from_slice(&cycle.to_be_bytes());
+    data
+}
+
+/// Decode finality state from 48 bytes: height(8) + hash(32) + cycle(8).
+fn decode_finality_state(data: &[u8]) -> Option<(u64, noble_crypto::Hash256, u64)> {
+    if data.len() < 48 {
+        return None;
+    }
+    let height = u64::from_be_bytes(data[0..8].try_into().ok()?);
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(&data[8..40]);
+    let hash = noble_crypto::Hash256::from_bytes(hash_bytes);
+    let cycle = u64::from_be_bytes(data[40..48].try_into().ok()?);
+    Some((height, hash, cycle))
+}
+
 /// Build a `ConsensusConfig` from the parsed TOML node configuration.
 fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
     let voting_strategy = parse_voting_strategy(
@@ -3603,6 +3639,7 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
         min_peers_for_consensus: config.consensus.min_peers_for_consensus,
+        confirmation_threshold: config.consensus.confirmation_threshold,
         ..CConsensusConfig::default()
     }
 }
