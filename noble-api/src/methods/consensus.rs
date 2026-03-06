@@ -159,6 +159,13 @@ pub trait ConsensusApi {
         count: Option<usize>,
     ) -> Result<CycleHistoryResponse, ErrorObjectOwned>;
 
+    /// Get per-block vote witness data proving which validators approved a block.
+    #[method(name = "getBlockVotes")]
+    async fn get_block_votes(
+        &self,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Set the validator priority order (drag handles in GUI).
     #[method(name = "setValidatorOrder")]
     async fn set_validator_order(
@@ -738,6 +745,52 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
         let count = entries.len();
         Ok(CycleHistoryResponse { entries, count })
+    }
+
+    async fn get_block_votes(
+        &self,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let storage = self.storage.read();
+        let raw = storage
+            .get_block_votes(height)
+            .map_err(|e| ApiError::Internal(format!("read block votes: {e}")))?;
+        match raw {
+            Some(bytes) => {
+                let votes: noble_consensus::BlockVotes =
+                    noble_codec::NobleCbor::from_cbor(&bytes).map_err(|e| {
+                        ApiError::Internal(format!("decode block votes: {e}"))
+                    })?;
+                let resp = crate::types::BlockVotesResponse {
+                    height,
+                    cycle_number: votes.cycle_number,
+                    voter_count: votes.voter_count,
+                    strength: votes.strength,
+                    r1_voters: votes
+                        .r1_voters
+                        .into_iter()
+                        .map(|v| crate::types::BlockVoterResponse {
+                            validator_key: v.validator_key,
+                            name: v.name,
+                        })
+                        .collect(),
+                    r2_voters: votes
+                        .r2_voters
+                        .into_iter()
+                        .map(|v| crate::types::BlockVoterResponse {
+                            validator_key: v.validator_key,
+                            name: v.name,
+                        })
+                        .collect(),
+                    unique_witness_count: votes.unique_witness_count,
+                    dual_witness_required: votes.dual_witness_required,
+                    dual_witness_met: votes.dual_witness_met,
+                };
+                serde_json::to_value(resp)
+                    .map_err(|e| ApiError::Internal(format!("serialize block votes: {e}")).into())
+            }
+            None => Ok(serde_json::json!(null)),
+        }
     }
 
     async fn set_validator_order(

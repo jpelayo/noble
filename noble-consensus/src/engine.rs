@@ -168,6 +168,21 @@ impl CycleEngine {
         self.voting_enabled = enabled;
     }
 
+    /// Whether a validator key is configured.
+    pub fn has_validator_key(&self) -> bool {
+        self.our_validator_key.is_some()
+    }
+
+    /// Whether block proposals are enabled.
+    pub fn proposals_enabled(&self) -> bool {
+        self.proposals_enabled
+    }
+
+    /// Current tracked phase.
+    pub fn current_tracked_phase(&self) -> CyclePhase {
+        self.tracked_phase
+    }
+
     /// Get a reference to the validator list.
     pub fn validator_list(&self) -> &ValidatorList {
         &self.validator_list
@@ -594,6 +609,50 @@ impl CycleEngine {
                                 // after the epoch change.
                                 outputs.push(CycleIo::ClearCycleHistory);
                             }
+                            // Collect per-block vote witness before CommitBlock.
+                            let r1_voters: Vec<crate::history::BlockVoter> = self
+                                .vote_mgr
+                                .r1_voters_for(&candidate_hash)
+                                .iter()
+                                .map(|key| crate::history::BlockVoter {
+                                    validator_key: hex::encode(key),
+                                    name: self
+                                        .validator_list
+                                        .find_by_wire(key)
+                                        .map(|ve| ve.name())
+                                        .unwrap_or_default(),
+                                })
+                                .collect();
+                            let r2_voters: Vec<crate::history::BlockVoter> = self
+                                .vote_mgr
+                                .r2_voters_for(&candidate_hash)
+                                .iter()
+                                .map(|key| crate::history::BlockVoter {
+                                    validator_key: hex::encode(key),
+                                    name: self
+                                        .validator_list
+                                        .find_by_wire(key)
+                                        .map(|ve| ve.name())
+                                        .unwrap_or_default(),
+                                })
+                                .collect();
+                            let unique_witness =
+                                self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
+                            let dual_required = self.tip_height < 1;
+                            outputs.push(CycleIo::StoreBlockVotes {
+                                height: new_height,
+                                votes: Box::new(crate::history::BlockVotes {
+                                    cycle_number: completed_cycle,
+                                    voter_count,
+                                    strength: format!("{:?}", strength),
+                                    r1_voters,
+                                    r2_voters,
+                                    unique_witness_count: unique_witness,
+                                    dual_witness_required: dual_required,
+                                    dual_witness_met: witness_ok,
+                                }),
+                            });
+
                             // Process badge txs from the committed block.
                             self.process_badge_transactions(&block, completed_cycle);
                             outputs.push(CycleIo::CommitBlock(block));

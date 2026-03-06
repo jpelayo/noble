@@ -54,6 +54,40 @@ pub struct CycleVoteTally {
     pub r2_vote_count: usize,
 }
 
+/// Per-block vote witness — records which validators approved each committed block.
+///
+/// Stored separately from cycle history (different key prefix in storage),
+/// so it survives `ClearCycleHistory` at genesis.  Every committed block
+/// gets one of these, providing a permanent legitimacy proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockVotes {
+    /// Cycle number during which this block was committed.
+    pub cycle_number: u64,
+    /// Denominator used in the majority computation.
+    pub voter_count: usize,
+    /// Consensus strength: "Strong" or "Plurality".
+    pub strength: String,
+    /// Validators who cast an R1 vote for this block.
+    pub r1_voters: Vec<BlockVoter>,
+    /// Validators who cast an R2 (confirmation) vote for this block.
+    pub r2_voters: Vec<BlockVoter>,
+    /// Number of distinct validator keys that voted for this block (R1+R2 combined).
+    pub unique_witness_count: usize,
+    /// Whether the Dual-Witness rule applied (true for blocks 1–2).
+    pub dual_witness_required: bool,
+    /// Whether the Dual-Witness threshold was met.
+    pub dual_witness_met: bool,
+}
+
+/// A single validator's vote record within a [`BlockVotes`] witness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockVoter {
+    /// Hex-encoded wire-format public key of the voting validator.
+    pub validator_key: String,
+    /// Friendly name of the validator (may be empty if unknown).
+    pub name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +144,43 @@ mod tests {
         assert_eq!(decoded.status, "indeterminate");
         assert!(decoded.winner.is_none());
         assert!(decoded.winning_hash.is_none());
+    }
+
+    #[test]
+    fn block_votes_cbor_roundtrip() {
+        let votes = BlockVotes {
+            cycle_number: 100,
+            voter_count: 3,
+            strength: "Strong".to_string(),
+            r1_voters: vec![
+                BlockVoter {
+                    validator_key: "01abcd".to_string(),
+                    name: "Node A".to_string(),
+                },
+                BlockVoter {
+                    validator_key: "01ef01".to_string(),
+                    name: "Node B".to_string(),
+                },
+            ],
+            r2_voters: vec![BlockVoter {
+                validator_key: "01abcd".to_string(),
+                name: "Node A".to_string(),
+            }],
+            unique_witness_count: 2,
+            dual_witness_required: true,
+            dual_witness_met: true,
+        };
+
+        let bytes = votes.to_cbor().unwrap();
+        let decoded = BlockVotes::from_cbor(&bytes).unwrap();
+        assert_eq!(decoded.cycle_number, 100);
+        assert_eq!(decoded.voter_count, 3);
+        assert_eq!(decoded.strength, "Strong");
+        assert_eq!(decoded.r1_voters.len(), 2);
+        assert_eq!(decoded.r2_voters.len(), 1);
+        assert_eq!(decoded.r1_voters[0].name, "Node A");
+        assert_eq!(decoded.unique_witness_count, 2);
+        assert!(decoded.dual_witness_required);
+        assert!(decoded.dual_witness_met);
     }
 }

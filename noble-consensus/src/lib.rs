@@ -27,7 +27,7 @@ pub use cycle::{CycleManager, CyclePhase};
 pub use engine::{ConsensusStateMachine, CycleEngine};
 pub use error::ConsensusError;
 pub use event::{CycleEvent, CycleIo};
-pub use history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
+pub use history::{BlockVoter, BlockVotes, CycleHistoryEntry, CycleProposal, CycleVoteTally};
 pub use proposal::propose_block;
 pub use reputation::{ReputationData, ReputationEngine};
 pub use strategy::VotingStrategy;

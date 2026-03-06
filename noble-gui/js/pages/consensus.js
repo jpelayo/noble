@@ -481,6 +481,7 @@ export function init(root, ctx) {
       case 'announce_received':
       case 'announce_published': return '#60a5fa';
       case 'reconnect_attempt': return '#fbbf24';
+      case 'peer_wrong_chain': return 'var(--danger, #ef4444)';
       case 'blockchain_discovered': return '#c084fc';
       case 'sync_requested': return '#94a3b8';
       case 'heartbeat': return '#6ee7b7';
@@ -494,41 +495,45 @@ export function init(root, ctx) {
     const vName = (id) => getValidatorDisplayName(id, 8);
     const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
-      case 'block_committed':
-        return `Block #${data.height} committed (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
+      case 'block_committed': {
+        const who = data.proposer_name || vName(data.proposer) || '';
+        return `Block #${data.height} committed${who ? ` by ${who}` : ''} (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
+      }
       case 'block_proposed':
         return `Proposed block #${data.height}`;
-      case 'block_received':
-        return `Block #${data.height} received from ${pName(data.peer_id)}`;
+      case 'block_received': {
+        const from = data.proposer_name || vName(data.proposer) || pName(data.peer_id);
+        return `Block #${data.height} received from ${from}`;
+      }
       case 'block_announced':
-        return `Block #${data.height} announced by ${pName(data.peer_id)}`;
+        return `Block #${data.height} announced by ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
       case 'block_requested':
         return `Requested block ${truncateHash(data.hash || '')}`;
       case 'vote_broadcast':
         return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
-      case 'vote_received':
-        return `Vote R${data.round} received from ${vName(data.voter_id)} \u2192 ${truncateHash(data.candidate_hash || '')}`;
-      case 'peer_connected': {
-        const name = data.node_name || peerIdToName.get(data.peer_id) || '';
-        const display = name || pName(data.peer_id);
-        return `Peer connected: ${display} (${data.direction || ''})`;
+      case 'vote_received': {
+        const voter = data.voter_name || vName(data.voter_id);
+        const candidate = data.candidate_name || truncateHash(data.candidate_hash || '', 6);
+        return `Vote R${data.round} received from ${voter} \u2192 ${candidate}`;
       }
-      case 'peer_disconnected': {
-        const name = peerIdToName.get(data.peer_id) || '';
-        return `Peer disconnected: ${name || pName(data.peer_id)}`;
-      }
+      case 'peer_connected':
+        return `Peer connected: ${data.node_name || peerIdToName.get(data.peer_id) || pName(data.peer_id)} (${data.direction || ''})`;
+      case 'peer_disconnected':
+        return `Peer disconnected: ${data.node_name || peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
       case 'peer_banned':
-        return `Peer banned: ${pName(data.peer_id)} \u2014 ${data.reason}`;
+        return `Peer banned: ${peerIdToName.get(data.peer_id) || pName(data.peer_id)} \u2014 ${data.reason}`;
       case 'peer_status':
-        return `Peer ${pName(data.peer_id)} at height ${data.height}`;
+        return `Peer ${peerIdToName.get(data.peer_id) || pName(data.peer_id)} at height ${data.height}`;
       case 'announce_received':
-        return `Announce: ${data.node_name || pName(data.identity)} (v${data.software_version || '?'})`;
+        return `${data.node_name || pName(data.identity)} v${data.software_version || '?'}${data.wants_to_validate ? ' \u2022 validator' : ''}${data.wants_to_vote ? ' \u2022 voter' : ''} \u2014 ${data.connected ? 'connected' : 'via gossip'}`;
       case 'tx_announced':
-        return `Tx ${truncateHash(data.tx_id || '')} from ${pName(data.peer_id)}`;
+        return `Tx ${truncateHash(data.tx_id || '')} from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received':
-        return `Double-proposal evidence from ${pName(data.peer_id)}`;
+        return `Double-proposal evidence from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+      case 'peer_wrong_chain':
+        return `Kicked ${data.peer_name || pName(data.peer_id)} \u2014 wrong chain (${data.their_network || data.their_chain_id})`;
       case 'blockchain_discovered':
         return `Blockchain discovered: ${data.network_name || data.chain_id} from ${data.peer_name || 'unknown peer'}`;
       case 'consensus_log':
@@ -590,9 +595,12 @@ export function init(root, ctx) {
   // Both streams are normalized into a single scrolling list.
   if (ws && ws.subscribe) {
     unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
-      // Cache peer names from announce events (peer_id → node_name).
-      if (data.event === 'announce_received' && data.peer_id && data.node_name) {
-        peerIdToName.set(data.peer_id, data.node_name);
+      // Cache peer names from announce events for display resolution.
+      if (data.event === 'announce_received' && data.node_name) {
+        if (data.peer_id) peerIdToName.set(data.peer_id, data.node_name);
+        // Also populate validatorNameMap (identity_key → name) so vote/block
+        // events can resolve names immediately without waiting for refreshList().
+        if (data.identity) validatorNameMap.set(data.identity, data.node_name);
       }
       // Events with enriched follow-up messages: push the enriched version only
       // (skip the raw event to avoid duplicate log lines).
@@ -939,6 +947,21 @@ export function init(root, ctx) {
       const cycles = raw.map((e, i) =>
         apiEntryToCycle(e, i === raw.length - 1 && (e.status === 'active' || !e.finalized_at))
       );
+
+      // Fetch per-block vote witnesses for recent blocks.
+      // These survive ClearCycleHistory and carry individual voter names.
+      try {
+        const tipInfo = await rpc.call('noble_getSyncStatus', []);
+        const tipHeight = tipInfo ? tipInfo.height : 0;
+        for (let h = tipHeight; h >= Math.max(1, tipHeight - TIMELINE_LIMIT); h--) {
+          const bv = await rpc.call('noble_getBlockVotes', [h]);
+          if (!bv) continue;
+          // Match block votes to the cycle that produced this block.
+          const match = cycles.find(c => c.cycle_number === bv.cycle_number);
+          if (match) match._blockVotes = bv;
+        }
+      } catch (_) { /* getSyncStatus or getBlockVotes not available */ }
+
       renderTimeline(cycles);
     } catch (e) {
       console.error('[consensus] load timeline:', e);
@@ -1103,6 +1126,36 @@ export function init(root, ctx) {
           }
 
           strip.appendChild(card);
+        }
+
+        // Per-block vote witness strip (below proposal cards)
+        if (cycle._blockVotes) {
+          const bv = cycle._blockVotes;
+          const witnessDiv = document.createElement('div');
+          witnessDiv.style.cssText = 'margin-top:var(--gap-xs);padding:var(--gap-sm);border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)';
+          const allVoters = new Map();
+          for (const v of bv.r1_voters || []) allVoters.set(v.validator_key, { name: v.name || v.validator_key.slice(0, 8), r1: true, r2: false });
+          for (const v of bv.r2_voters || []) {
+            const existing = allVoters.get(v.validator_key);
+            if (existing) { existing.r2 = true; }
+            else allVoters.set(v.validator_key, { name: v.name || v.validator_key.slice(0, 8), r1: false, r2: true });
+          }
+          const voterList = [...allVoters.values()].map(v => {
+            const rounds = [v.r1 ? 'R1' : '', v.r2 ? 'R2' : ''].filter(Boolean).join('+');
+            return `<span style="display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:9999px;background:color-mix(in srgb, var(--success) 12%, transparent);color:var(--success)">&#10003; ${v.name} <span style="opacity:0.7;font-size:0.5rem">${rounds}</span></span>`;
+          }).join(' ');
+          const dualBadge = bv.dual_witness_required
+            ? `<span style="padding:1px 6px;border-radius:9999px;font-size:0.55rem;background:color-mix(in srgb, ${bv.dual_witness_met ? 'var(--success)' : 'var(--error)'} 15%, transparent);color:${bv.dual_witness_met ? 'var(--success)' : 'var(--error)'}">Dual-Witness: ${bv.dual_witness_met ? 'PASS' : 'FAIL'}</span>`
+            : '';
+          witnessDiv.innerHTML = `
+            <div style="display:flex;align-items:center;gap:var(--gap-xs);margin-bottom:4px;flex-wrap:wrap">
+              <span style="font-weight:600;color:var(--text-secondary)">Witnesses (${bv.unique_witness_count}/${bv.voter_count})</span>
+              <span style="color:var(--text-muted)">${bv.strength}</span>
+              ${dualBadge}
+            </div>
+            <div style="display:flex;gap:var(--gap-xs);flex-wrap:wrap">${voterList}</div>
+          `;
+          strip.appendChild(witnessDiv);
         }
 
         row.appendChild(strip);

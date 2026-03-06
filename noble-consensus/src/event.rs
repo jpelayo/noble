@@ -7,6 +7,7 @@ use noble_core::{Block, Transaction};
 use noble_crypto::Hash256;
 
 use crate::cycle::CyclePhase;
+use crate::history::BlockVotes;
 use crate::vote::PorVote;
 
 /// Input events consumed by the consensus engine.
@@ -70,6 +71,13 @@ pub enum CycleIo {
     PersistBadgeState {
         badges: Vec<(Vec<u8>, Vec<u8>)>,
         proposals: Vec<(String, Vec<u8>)>,
+    },
+    /// Store per-block vote witness data.
+    /// Emitted alongside CommitBlock so each committed block has a permanent
+    /// record of which validators voted for it (survives ClearCycleHistory).
+    StoreBlockVotes {
+        height: u64,
+        votes: Box<BlockVotes>,
     },
     /// Clear all cycle history from storage.
     /// Emitted when block 1 commits and the cycle epoch changes, so stale

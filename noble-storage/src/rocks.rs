@@ -1384,6 +1384,28 @@ impl StorageEngine for RocksDbStorage {
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 
+    // ── Per-Block Vote Witness ──
+
+    fn store_block_votes(&self, height: u64, data: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        let mut key = b"block_votes:".to_vec();
+        key.extend_from_slice(&height.to_be_bytes());
+        self.db
+            .put_cf(&cf, &key, data)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn get_block_votes(&self, height: u64) -> Result<Option<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        let mut key = b"block_votes:".to_vec();
+        key.extend_from_slice(&height.to_be_bytes());
+        self.db
+            .get_cf(&cf, &key)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
     fn lookup_version_successors(
         &self,
         prev_checksum: &Hash256,

@@ -824,6 +824,45 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
+        // --- Re-wire engine flags from canonical identity.json ---
+        // init_with_storage() wired proposals_enabled/voting_enabled from the TOML
+        // config, but identity.json (written by the setup wizard or setNodeIdentity
+        // RPC) is the authoritative source. The TOML file sync above writes to disk
+        // but does NOT update the in-memory config struct, so the engine may still
+        // have stale defaults (e.g. voting_enabled=false when identity says true).
+        {
+            let mut engine = self.consensus.write();
+            engine.set_proposals_enabled(node_identity.wants_to_validate);
+            engine.set_voting_enabled(node_identity.wants_to_vote);
+            tracing::info!(
+                task = "config_load",
+                "Engine flags re-wired from identity.json: proposals_enabled={}, voting_enabled={}",
+                node_identity.wants_to_validate,
+                node_identity.wants_to_vote,
+            );
+
+            // Re-check validator self-registration: init_with_storage() used TOML
+            // config which may have had stale wants_to_validate=false, causing the
+            // node to remove itself from the validator list. Re-add if identity
+            // says we should be validating.
+            if node_identity.wants_to_validate {
+                if let Some((_, ref pk)) = self.announce_keypair {
+                    if !engine.validator_list().is_validator(pk) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        engine.validator_list_mut().add_validator(pk.clone(), 1, now);
+                        tracing::info!(
+                            task = "config_load",
+                            "Re-registered as validator from identity.json: {}",
+                            hex::encode(pk.to_wire_bytes()),
+                        );
+                    }
+                }
+            }
+        }
+
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone()));
@@ -1890,18 +1929,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         },
                     );
                 }
-                let _ = peer_update_tx.send(serde_json::json!({
-                    "event": "connected",
-                    "peer_id": hex_pid,
-                    "addr": addr,
-                }));
                 // Look up friendly name from known_peers (set by previous NodeAnnounce).
+                // Fallback: check persistent peer records in storage for inbound
+                // connections where peer_id_hex may not yet be in known_peers.
                 let peer_name = {
                     let engine = self.consensus.read();
                     engine.validator_list().known_peers().values()
                         .find(|kp| kp.peer_id_hex.as_deref() == Some(&hex_pid))
                         .and_then(|kp| kp.node_name.clone())
-                };
+                }.or_else(|| {
+                    let storage = self.storage.read();
+                    storage.list_peer_records().ok().and_then(|records| {
+                        records.into_iter()
+                            .find(|r| hex::encode(&r.peer_id_bytes) == hex_pid)
+                            .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                            .filter(|n| !n.is_empty())
+                    })
+                });
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "connected",
+                    "peer_id": hex_pid,
+                    "addr": addr,
+                    "direction": direction,
+                    "node_name": peer_name.as_deref().unwrap_or(""),
+                }));
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_connected",
                     "peer_id": hex_pid,
@@ -1943,13 +1994,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut info = self.peer_info.write();
                     info.remove(&hex_pid);
                 }
+                // Resolve name before peer_info was cleared (name may come from
+                // peerIdToName cache in the GUI, but node-side is more reliable).
+                let disc_name = {
+                    let storage = self.storage.read();
+                    storage.list_peer_records().ok().and_then(|records| {
+                        records.into_iter()
+                            .find(|r| hex::encode(&r.peer_id_bytes) == hex_pid)
+                            .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                            .filter(|n| !n.is_empty())
+                    }).unwrap_or_default()
+                };
                 let _ = peer_update_tx.send(serde_json::json!({
                     "event": "disconnected",
                     "peer_id": hex_pid,
+                    "node_name": disc_name,
                 }));
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_disconnected",
                     "peer_id": hex_pid,
+                    "node_name": disc_name,
                 }));
                 // Auto-reconnect: immediately try to redial when last peer disconnects.
                 if new_count == 0 {
@@ -2032,6 +2096,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
                     // Kick the peer — they're on a different chain.
                     let _ = network_cmd.try_send(NetworkCommand::BanPeer(peer_id.clone()));
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "peer_wrong_chain",
+                        "peer_name": announce.node_name,
+                        "peer_id": hex::encode(&peer_id),
+                        "their_chain_id": format!("{:#010X}", announce.chain_id),
+                        "their_network": chain_name,
+                    }));
                     tracing::info!(
                         task = "peer_tracking",
                         "Disconnected peer {} — different chain ({})",
@@ -2124,6 +2195,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
 
+                let is_connected = {
+                    let info = self.peer_info.read();
+                    info.contains_key(&hex::encode(&peer_id))
+                };
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "announce_received",
                     "node_name": announce.node_name,
@@ -2132,6 +2207,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "wants_to_validate": announce.wants_to_validate,
                     "wants_to_vote": announce.wants_to_vote,
                     "software_version": announce.software_version,
+                    "connected": is_connected,
                 }));
                 tracing::debug!(
                     task = "peer_tracking",
@@ -2230,6 +2306,35 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         },
                     );
                 }
+                // S60: Bootstrap proposal retry — when the first peer status
+                // arrives during Proposal phase at tip=0, re-trigger the
+                // proposal that was suppressed by the "waiting for peer status"
+                // gate.  Without this, the node waits a full 20-min cycle.
+                if our_height == 0 {
+                    let engine = self.consensus.read();
+                    let in_proposal = engine.current_tracked_phase() == noble_consensus::CyclePhase::Proposal;
+                    let has_key = engine.has_validator_key();
+                    let proposals_enabled = engine.proposals_enabled();
+                    drop(engine);
+                    if in_proposal && has_key && proposals_enabled {
+                        tracing::info!(
+                            task = "bootstrap",
+                            "peer status received during Proposal phase at tip=0 — retrying proposal"
+                        );
+                        let actions = {
+                            let mut engine = self.consensus.write();
+                            engine.step(noble_consensus::CycleEvent::MempoolTransactions(Vec::new()))
+                        };
+                        self.process_cycle_actions(
+                            actions,
+                            network_cmd,
+                            new_block_tx,
+                            cycle_phase_tx,
+                            metrics,
+                            shared_identity,
+                        );
+                    }
+                }
             }
             NetworkEvent::BlockReceived { peer_id, block } => {
                 // Determine whether this block is a sync catch-up (committed
@@ -2246,10 +2351,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Consensus proposal:  everything else → route to the consensus
                 //   engine for candidate tracking + voting.
 
+                // Enrich block_received with proposer identity for GUI display.
+                let proposer_wire = block.header.validator_id.to_wire_bytes();
+                let proposer_name = {
+                    let engine = self.consensus.read();
+                    engine.validator_list().find_by_wire(&proposer_wire)
+                        .map(|ve| ve.name())
+                        .filter(|n| !n.is_empty())
+                };
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "block_received",
                     "peer_id": hex::encode(peer_id),
                     "height": block.header.height,
+                    "proposer": hex::encode(&proposer_wire),
+                    "proposer_name": proposer_name.as_deref().unwrap_or(""),
                 }));
                 let tip_height = self.consensus.read().chain_tip().0;
                 // Check if any peer is ahead of us (indicating we need to sync).
@@ -2302,11 +2417,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
                 if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
+                    // Resolve voter name and candidate proposer name for GUI display.
+                    let (voter_name, candidate_name) = {
+                        let engine = self.consensus.read();
+                        let vn = engine.validator_list().find_by_wire(voter_id)
+                            .map(|ve| ve.name())
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_default();
+                        let cn = engine.candidate_tracker().get(&noble_crypto::Hash256(*candidate_hash))
+                            .and_then(|entry| {
+                                let wire = entry.block.header.validator_id.to_wire_bytes();
+                                engine.validator_list().find_by_wire(&wire)
+                                    .map(|ve| ve.name())
+                                    .filter(|n| !n.is_empty())
+                            })
+                            .unwrap_or_default();
+                        (vn, cn)
+                    };
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "vote_received",
                         "voter_id": hex::encode(voter_id),
+                        "voter_name": voter_name,
                         "cycle": cycle,
                         "candidate_hash": hex::encode(candidate_hash),
+                        "candidate_name": candidate_name,
                         "round": round,
                     }));
                 }
@@ -2401,12 +2535,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "tx_count": tx_ids.len(),
                     }));
 
-                    // Protocol activity: block committed
+                    // Protocol activity: block committed (with proposer name)
+                    let proposer_name = {
+                        let engine = self.consensus.read();
+                        let wire = block.header.validator_id.to_wire_bytes();
+                        engine.validator_list().find_by_wire(&wire)
+                            .map(|ve| ve.name())
+                            .filter(|n| !n.is_empty())
+                    };
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "block_committed",
                         "height": block.header.height,
                         "hash": hex::encode(block_hash.as_bytes()),
                         "tx_count": tx_ids.len(),
+                        "proposer": hex::encode(block.header.validator_id.to_wire_bytes()),
+                        "proposer_name": proposer_name.as_deref().unwrap_or(""),
                     }));
 
                     // S55: Re-publish announce with updated chain_tip_height after commit.
@@ -2475,6 +2618,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             badges.len(),
                             proposals.len()
                         );
+                    }
+                }
+                CycleIo::StoreBlockVotes { height, votes } => {
+                    if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*votes) {
+                        let storage = self.storage.read();
+                        if let Err(e) = storage.store_block_votes(height, &bytes) {
+                            tracing::warn!(
+                                task = "consensus",
+                                "Failed to store block votes for height {height}: {e}"
+                            );
+                        } else {
+                            tracing::info!(
+                                task = "consensus",
+                                "Stored vote witness for block {height}: {} R1 + {} R2 voter(s), strength={}",
+                                votes.r1_voters.len(),
+                                votes.r2_voters.len(),
+                                votes.strength,
+                            );
+                        }
                     }
                 }
                 CycleIo::ClearCycleHistory => {

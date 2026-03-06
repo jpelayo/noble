@@ -785,6 +785,27 @@ pub struct CycleHistoryResponse {
     pub count: usize,
 }
 
+/// Response for `noble_getBlockVotes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockVotesResponse {
+    pub height: u64,
+    pub cycle_number: u64,
+    pub voter_count: usize,
+    pub strength: String,
+    pub r1_voters: Vec<BlockVoterResponse>,
+    pub r2_voters: Vec<BlockVoterResponse>,
+    pub unique_witness_count: usize,
+    pub dual_witness_required: bool,
+    pub dual_witness_met: bool,
+}
+
+/// A single validator's vote in a [`BlockVotesResponse`].
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockVoterResponse {
+    pub validator_key: String,
+    pub name: String,
+}
+
 /// Response for `noble_getAllowedIps`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AllowedIpsResponse {

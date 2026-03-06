@@ -462,6 +462,21 @@ impl VoteManager {
         keys.len()
     }
 
+    /// Return the wire-format public key bytes of all R1 voters for a specific candidate.
+    /// Used by per-block vote witness storage to record exactly who approved each block.
+    pub fn r1_voters_for(&self, candidate: &Hash256) -> Vec<Vec<u8>> {
+        self.votes
+            .get(candidate)
+            .map_or(Vec::new(), |s| s.iter().cloned().collect())
+    }
+
+    /// Return the wire-format public key bytes of all R2 voters for a specific candidate.
+    pub fn r2_voters_for(&self, candidate: &Hash256) -> Vec<Vec<u8>> {
+        self.r2_votes
+            .get(candidate)
+            .map_or(Vec::new(), |s| s.iter().cloned().collect())
+    }
+
     /// Return deduplicated wire-format public key bytes of all validators who cast
     /// at least one vote (R1 or R2) in the current cycle. Used by reputation scoring.
     pub fn voter_wire_keys(&self) -> Vec<Vec<u8>> {

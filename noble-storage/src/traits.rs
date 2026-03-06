@@ -196,6 +196,15 @@ pub trait StorageEngine {
         Ok(()) // default no-op
     }
 
+    // ── Per-Block Vote Witness ──
+
+    /// Store per-block vote witness data, keyed by block height.
+    /// Separate from cycle history — survives `clear_cycle_history`.
+    fn store_block_votes(&self, height: u64, data: &[u8]) -> Result<(), StorageError>;
+
+    /// Retrieve vote witness data for a specific block height.
+    fn get_block_votes(&self, height: u64) -> Result<Option<Vec<u8>>, StorageError>;
+
     // ── Pruning Support ──
 
     /// Remove the block body (transactions) for a given block hash,

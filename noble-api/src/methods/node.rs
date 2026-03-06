@@ -619,6 +619,20 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         // Trigger NodeAnnounce re-broadcast so peers see updated identity.
         let _ = self.announce_trigger.try_send(());
 
+        // Hot-reload engine flags so changes take effect without restart.
+        // The setup wizard calls this RPC — without this, the engine would
+        // keep the stale TOML defaults (e.g. voting_enabled=false) until
+        // the next node restart.
+        {
+            let mut engine = self.consensus.write();
+            engine.set_proposals_enabled(wants_to_validate);
+            engine.set_voting_enabled(wants_to_vote);
+            tracing::info!(
+                task = "identity",
+                "Engine flags hot-reloaded: proposals_enabled={wants_to_validate}, voting_enabled={wants_to_vote}",
+            );
+        }
+
         // A1: When the node is configured for validation, ensure a validator key exists.
         let validator_pubkey = if wants_to_validate {
             if let Some(ref identity_path) = self.identity_path {
