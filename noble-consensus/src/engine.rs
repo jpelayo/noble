@@ -1373,6 +1373,11 @@ impl CycleEngine {
                     )));
                 }
             }
+        } else {
+            let n = self.candidate_tracker.all_candidates().len();
+            outputs.push(CycleIo::Log(format!(
+                "cycle {cycle}: no candidate selected for R1 vote ({n} proposal(s) available)"
+            )));
         }
 
         outputs
@@ -1422,6 +1427,11 @@ impl CycleEngine {
                     )));
                 }
             }
+        } else {
+            let r1_count = self.vote_mgr.current_tallies().len();
+            outputs.push(CycleIo::Log(format!(
+                "cycle {cycle}: no candidate selected for R2 vote ({r1_count} R1 candidate(s))"
+            )));
         }
 
         outputs

@@ -489,6 +489,8 @@ export function init(root, ctx) {
   }
 
   function formatActivityMessage(data) {
+    // Enriched events carry a pre-formatted message.
+    if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast')) return data.message;
     const vName = (id) => getValidatorDisplayName(id, 8);
     const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
@@ -592,21 +594,26 @@ export function init(root, ctx) {
       if (data.event === 'announce_received' && data.peer_id && data.node_name) {
         peerIdToName.set(data.peer_id, data.node_name);
       }
-      pushActivity(data);
-      // Push follow-up context entries for enriched events.
-      if (data.event === 'phase_change') {
-        if (data.phase === 'Reflection' && data.leader_name) {
-          pushActivity({ event: 'consensus_log', message: `Voting results favor ${data.leader_name || truncateHash(data.leader_hash || '', 6)} with ${data.leader_pct}% of votes (${data.total_votes} total)` });
-        }
-        if (data.phase === 'Propagation' && data.winner_name) {
-          pushActivity({ event: 'consensus_log', message: `Winning proposer: ${data.winner_name}` });
-        }
-      }
-      if (data.event === 'vote_broadcast' && data.candidate_name) {
-        pushActivity({ event: 'consensus_log', message: `This node voted for ${data.candidate_name}` });
-      }
+      // Events with enriched follow-up messages: push the enriched version only
+      // (skip the raw event to avoid duplicate log lines).
       if (data.event === 'block_proposed' && data.hash) {
-        pushActivity({ event: 'consensus_log', message: `This node proposes block ${truncateHash(data.hash)}` });
+        pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height || '?'} (${truncateHash(data.hash)})` });
+      } else if (data.event === 'vote_broadcast') {
+        const target = data.candidate_name || truncateHash(data.block_hash || '', 6);
+        pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });
+      } else {
+        pushActivity(data);
+      }
+      // Push follow-up context for enriched phase transitions.
+      if (data.event === 'phase_change') {
+        if (data.phase === 'Reflection' && data.total_votes != null) {
+          const leader = data.leader_name || truncateHash(data.leader_hash || '', 6);
+          pushActivity({ event: 'consensus_log', message: `Voting results favor ${leader} with ${data.leader_pct}% of votes (${data.total_votes} total)` });
+        }
+        if (data.phase === 'Propagation' && (data.winner_name || data.winner_hash)) {
+          const winner = data.winner_name || truncateHash(data.winner_hash || '', 6);
+          pushActivity({ event: 'consensus_log', message: `Winning proposer: ${winner}` });
+        }
       }
       // Refresh data panels on significant events
       if (data.event === 'block_committed') {

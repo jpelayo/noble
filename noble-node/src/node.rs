@@ -2628,6 +2628,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             "Block proposal suppressed — syncing from peers at height {} (tip={})",
                             max_known, tip_h
                         );
+                        let _ = cycle_phase_tx.send(serde_json::json!({
+                            "event": "warning",
+                            "message": format!("Block proposal suppressed — syncing (peers at height {}, tip={})", max_known, tip_h),
+                        }));
                         continue;
                     }
 
@@ -2638,6 +2642,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 task = "bootstrap",
                                 "Block proposal suppressed — no peers connected"
                             );
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "warning",
+                                "message": "Block proposal suppressed — no peers connected",
+                            }));
                             continue;
                         }
                         if known_heights.is_empty() {
@@ -2645,6 +2653,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 task = "bootstrap",
                                 "Block proposal suppressed — waiting for peer status"
                             );
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "warning",
+                                "message": "Block proposal suppressed — waiting for peer chain status",
+                            }));
                             continue;
                         }
                         // All known peers at height 0 → form new chain together
