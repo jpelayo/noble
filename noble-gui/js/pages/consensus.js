@@ -1252,19 +1252,32 @@ export function init(root, ctx) {
 
   async function loadValidators() {
     try {
-      const [result, nodeInfo] = await Promise.all([
+      const [result, nodeInfo, peerMemory, identity] = await Promise.all([
         rpc.call('noble_getValidatorList'),
         rpc.call('noble_getNodeInfo'),
+        rpc.call('noble_getPeerMemory').catch(() => []),
+        rpc.call('noble_getNodeIdentity').catch(() => ({})),
       ]);
       const selfKey = nodeInfo.validator_pubkey || null;
       const validators = result.validators;
       const priorityOrder = result.priority_order || [];
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
-      // Populate validator name lookup for use by timeline and other panels
+      // Populate validator name lookup for use by timeline and other panels.
+      // Layer 1: peer memory (identity_key → node_name from NodeAnnounce).
+      if (Array.isArray(peerMemory)) {
+        for (const r of peerMemory) {
+          if (r.identity_key && r.node_name) validatorNameMap.set(r.identity_key, r.node_name);
+        }
+      }
+      // Layer 2: self identity (overrides peer memory for own key).
+      if (selfKey && identity.node_name) {
+        validatorNameMap.set(selfKey, identity.node_name);
+      }
+      // Layer 3: validator list names (highest priority — operator-set).
       for (const v of validators) {
         const keyHex = valKeyHex(v.public_key);
-        const name = v.name || (selfKey && keyHex === selfKey ? 'This Node' : null);
+        const name = v.name || (selfKey && keyHex === selfKey ? (identity.node_name || 'This Node') : null);
         if (name) validatorNameMap.set(keyHex, name);
       }
 
