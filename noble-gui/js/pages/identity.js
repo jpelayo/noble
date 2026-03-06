@@ -143,7 +143,7 @@ export function init(root, ctx) {
               </div>
               <div id="id-host-lan-row" style="display:none;flex-direction:column;gap:var(--gap-sm)">
                 <input type="text" id="id-host-lan" placeholder="e.g. 192.168.1.100">
-                <small class="form-hint" style="margin:0">For local testnet only. Not reachable from the internet.</small>
+                <small class="form-hint" style="margin:0">Local network only. Not reachable from the internet.</small>
               </div>
               <div id="id-host-dns-row" style="display:none">
                 <input type="text" id="id-host-dns" placeholder="e.g. noble.example.com">

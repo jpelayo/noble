@@ -98,20 +98,6 @@ body {
   gap: 6px;
 }
 
-.chain-net-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 3px;
-  font-weight: 700;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: #fff;
-}
-
-.chain-net-badge.net-mainnet { background: #22a663; }
-.chain-net-badge.net-testnet { background: #e08a1e; }
-.chain-net-badge.net-regtest { background: #d14040; }
 
 .chain-id-hex {
   color: var(--text-secondary);

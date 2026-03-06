@@ -149,17 +149,10 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
     }
 
     // getNodeInfo — returns version, protocol_version, chain_id, uptime_secs, ports.
-    // Derive network label from chain_id.
     if let Ok(resp) = rpc_call(&host, port, "noble_getNodeInfo", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
             if let Some(chain_id) = result.get("chain_id").and_then(|v| v.as_u64()) {
-                let label = match chain_id as u32 {
-                    0x4E4F424C => "mainnet",
-                    0x4E4F4254 => "testnet",
-                    0x4E4F4252 => "regtest",
-                    _ => "unknown",
-                };
-                info.network = Some(label.to_string());
+                info.network = Some(format!("0x{:08X}", chain_id as u32));
             }
         }
     }

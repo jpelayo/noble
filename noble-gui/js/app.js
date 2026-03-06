@@ -323,16 +323,13 @@ function showAuthPrompt() {
 // ── Chain identity bar ──
 function populateChainIdentity(nodeInfo) {
   const bar = document.getElementById('chain-id-bar');
-  if (!bar || !nodeInfo.network_name) return;
+  if (!bar) return;
 
-  const badge = document.getElementById('chain-net-badge');
+  const label = formatChainLabel(nodeInfo);
+  if (!label) { bar.style.display = 'none'; return; }
+
   const idHex = document.getElementById('chain-id-hex');
-
-  const net = nodeInfo.network_name.toLowerCase();
-  badge.textContent = net;
-  badge.className = 'chain-net-badge net-' + net;
-
-  idHex.textContent = formatChainLabel(nodeInfo);
+  idHex.textContent = label;
 
   bar.style.display = '';
 }

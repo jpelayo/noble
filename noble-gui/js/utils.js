@@ -100,17 +100,10 @@ export function isHex64(str) {
   return /^[0-9a-fA-F]{64}$/.test(str);
 }
 
-/** Canonical chain identifier: `0xCHAINID (abcd1234…ef56)` */
+/** Chain identifier as hex. Empty if no chain_id. */
 export function formatChainLabel(nodeInfo) {
-  const cid = nodeInfo.chain_id
-    ? '0x' + nodeInfo.chain_id.toString(16).toUpperCase().padStart(8, '0')
-    : '';
-  const gh = nodeInfo.genesis_hash || '';
-  const ghShort = gh.length > 16
-    ? gh.slice(0, 8) + '\u2026' + gh.slice(-4)
-    : gh;
-  if (cid && ghShort) return `${cid} (${ghShort})`;
-  return cid || ghShort || '';
+  if (!nodeInfo.chain_id) return '';
+  return '0x' + nodeInfo.chain_id.toString(16).toUpperCase().padStart(8, '0');
 }
 
 // Create a DOM element from HTML string

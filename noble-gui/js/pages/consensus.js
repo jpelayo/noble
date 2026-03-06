@@ -491,7 +491,7 @@ export function init(root, ctx) {
 
   function formatActivityMessage(data) {
     // Enriched events carry a pre-formatted message.
-    if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast')) return data.message;
+    if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast' || data.event === 'vote_received')) return data.message;
     const vName = (id) => getValidatorDisplayName(id, 8);
     const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
@@ -533,9 +533,9 @@ export function init(root, ctx) {
       case 'evidence_received':
         return `Double-proposal evidence from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
       case 'peer_wrong_chain':
-        return `Kicked ${data.peer_name || pName(data.peer_id)} \u2014 wrong chain (${data.their_network || data.their_chain_id})`;
+        return `Kicked ${data.peer_name || pName(data.peer_id)} \u2014 wrong chain (${data.their_chain_id})`;
       case 'blockchain_discovered':
-        return `Blockchain discovered: ${data.network_name || data.chain_id} from ${data.peer_name || 'unknown peer'}`;
+        return `Blockchain discovered: ${data.chain_id} from ${data.peer_name || 'unknown peer'}`;
       case 'consensus_log':
         return data.message;
       case 'warning':
@@ -685,7 +685,8 @@ export function init(root, ctx) {
   function seedNodeStatus() {
     rpc.call('noble_getNodeInfo').then(info => {
       if (info) {
-        pushActivity({ event: 'heartbeat', message: `Node v${info.version} \u2014 ${info.network || 'unknown'} \u2014 height ${info.block_height ?? '?'}` });
+        const cid = info.chain_id ? '0x' + info.chain_id.toString(16).toUpperCase().padStart(8, '0') : '';
+        pushActivity({ event: 'heartbeat', message: `Node v${info.version}${cid ? ' \u2014 ' + cid : ''}` });
         if (info.is_syncing) {
           pushActivity({ event: 'heartbeat', message: 'Sync in progress\u2026' });
         }
@@ -700,10 +701,25 @@ export function init(root, ctx) {
     }).catch(() => {});
   }
 
+  function seedVoteStatus() {
+    rpc.call('noble_getVoteTallies').then(result => {
+      if (!result || !result.tallies || result.tallies.length === 0) return;
+      const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
+      if (total === 0) return;
+      for (const t of result.tallies) {
+        if (t.vote_count > 0) {
+          const name = t.validator || truncateHash(t.block_hash, 6);
+          pushActivity({ event: 'vote_received', message: `${t.vote_count} vote(s) for ${name}` });
+        }
+      }
+    }).catch(() => {});
+  }
+
   seedNodeStatus();
   seedPhase();
   seedPeers();
   seedReconnectStatus();
+  seedVoteStatus();
   // Retry peer seeding at 3s, 8s, 15s to catch late reconnections after node restart
   const seedTimers = [3000, 8000, 15000].map(delay =>
     setTimeout(() => seedPeers(), delay)

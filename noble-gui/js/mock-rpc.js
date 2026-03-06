@@ -972,7 +972,6 @@ export class MockRpcClient {
           software_version: window.NOBLE_VERSION || '0.0.0',
           protocol_version: PROTOCOL_VERSION,
           chain_id: MAINNET_CHAIN_ID,
-          network_name: 'mainnet',
           genesis_hash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
           uptime_secs: 86400 * 3 + 7200 + 1800,
           storage_bytes: 256 * 1024 * 1024,
@@ -1734,7 +1733,7 @@ export class MockRpcClient {
       case 'noble_getDiscoveredBlockchains':
         return {
           blockchains: [
-            { chain_id: '0x34E9E7A4', network_name: 'Testnet', peer_addresses: ['/ip4/192.168.1.100/tcp/8780'], first_seen: 1709712000, last_seen: 1709715600 },
+            { chain_id: '0x34E9E7A4', peer_addresses: ['/ip4/192.168.1.100/tcp/8780'], first_seen: 1709712000, last_seen: 1709715600 },
           ],
         };
 

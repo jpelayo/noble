@@ -1327,14 +1327,13 @@ export function init(root, ctx) {
         const addrs = bc.peer_addresses.map(a => `<code style="font-size:var(--font-size-xs)">${a}</code>`).join(', ');
         const lastSeen = bc.last_seen ? new Date(bc.last_seen * 1000).toLocaleString() : '\u2014';
         return `<tr>
-          <td>${bc.network_name || bc.chain_id}</td>
           <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${bc.chain_id}</td>
           <td>${addrs || '\u2014'}</td>
           <td>${lastSeen}</td>
         </tr>`;
       }).join('');
       discoveredChainsWrap.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
-        <thead><tr><th>Name</th><th>Chain ID</th><th>Peer Addresses</th><th>Last Seen</th></tr></thead>
+        <thead><tr><th>Chain ID</th><th>Peer Addresses</th><th>Last Seen</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
     } catch (e) {
