@@ -179,6 +179,12 @@ pub struct NodeAnnounce {
     /// Hash of the block this node is currently proposing (if any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_hash: Option<[u8; 32]>,
+    /// Chain ID of the blockchain this node is on (from genesis hash).
+    #[serde(default)]
+    pub chain_id: u32,
+    /// Human-readable network name ("mainnet", "testnet", "regtest").
+    #[serde(default)]
+    pub network_name: String,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
     /// Optional PKI identity attestation — an external signature (PKCS#7/CMS)
@@ -213,6 +219,8 @@ struct AnnounceSigningPayload<'a> {
     chain_tip_hash: &'a Option<[u8; 32]>,
     proposed_height: &'a Option<u64>,
     proposed_hash: &'a Option<[u8; 32]>,
+    chain_id: u32,
+    network_name: &'a str,
     timestamp: u64,
 }
 
@@ -258,6 +266,8 @@ impl NodeAnnounce {
             chain_tip_hash: &self.chain_tip_hash,
             proposed_height: &self.proposed_height,
             proposed_hash: &self.proposed_hash,
+            chain_id: self.chain_id,
+            network_name: &self.network_name,
             timestamp: self.timestamp,
         };
         let cbor = to_canonical_cbor(&payload)?;
@@ -290,6 +300,8 @@ impl NodeAnnounce {
         country_code: Option<String>,
         wants_to_validate: bool,
         wants_to_vote: bool,
+        chain_id: u32,
+        network_name: String,
         timestamp: u64,
         signer: &impl NobleSigner,
     ) -> Result<Self, CryptoError> {
@@ -309,6 +321,8 @@ impl NodeAnnounce {
             None,
             None,
             None,
+            chain_id,
+            network_name,
             timestamp,
             signer,
             None,
@@ -333,6 +347,8 @@ impl NodeAnnounce {
         chain_tip_hash: Option<[u8; 32]>,
         proposed_height: Option<u64>,
         proposed_hash: Option<[u8; 32]>,
+        chain_id: u32,
+        network_name: String,
         timestamp: u64,
         signer: &impl NobleSigner,
         identity_attestation: Option<ExternalAttestation>,
@@ -357,6 +373,8 @@ impl NodeAnnounce {
             chain_tip_hash,
             proposed_height,
             proposed_hash,
+            chain_id,
+            network_name,
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,
@@ -458,6 +476,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             timestamp,
             sk,
         )
@@ -598,6 +618,8 @@ mod tests {
             None,
             true,
             true,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -626,6 +648,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -642,6 +666,8 @@ mod tests {
             None,
             true,
             true,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -668,6 +694,8 @@ mod tests {
                 None,
                 v,
                 vote,
+                0,
+                String::new(),
                 1_700_000_000,
                 &sk,
             )
@@ -742,6 +770,8 @@ mod tests {
             None,
             None,
             None,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
             Some(att.clone()),
@@ -792,6 +822,8 @@ mod tests {
             None,
             None,
             None,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
             Some(att),
@@ -825,6 +857,8 @@ mod tests {
             None,
             None,
             None,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
             Some(att),
@@ -855,6 +889,8 @@ mod tests {
             None,
             None,
             None,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
             Some(att),
@@ -883,6 +919,8 @@ mod tests {
             Some("USA".to_string()),
             false,
             false,
+            0,
+            String::new(),
             now,
             &sk,
         )
@@ -942,6 +980,8 @@ mod tests {
             Some("USA".to_string()),
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -958,6 +998,8 @@ mod tests {
             Some("ESP".to_string()),
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )

@@ -1160,6 +1160,43 @@ pub struct ResetChainResponse {
     pub previous_height: u64,
 }
 
+/// Response for `noble_getDiscoveredBlockchains`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredBlockchainsResponse {
+    /// Discovered blockchains from peers on other chains.
+    pub blockchains: Vec<DiscoveredBlockchainEntry>,
+}
+
+/// A blockchain discovered via NodeAnnounce from a peer on a different chain.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredBlockchainEntry {
+    /// The chain_id of the discovered blockchain (hex).
+    pub chain_id: String,
+    /// Human-readable network name.
+    pub network_name: String,
+    /// Peer addresses that announced this chain.
+    pub peer_addresses: Vec<String>,
+    /// Timestamp of first discovery.
+    pub first_seen: u64,
+    /// Timestamp of most recent announcement.
+    pub last_seen: u64,
+}
+
+/// Runtime info about a discovered blockchain (shared between Node and API).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredBlockchainInfo {
+    /// The chain_id of the discovered blockchain.
+    pub chain_id: u32,
+    /// Human-readable network name (e.g. "Mainnet", "Testnet").
+    pub network_name: String,
+    /// Peer addresses that announced this chain (multiaddr strings).
+    pub peer_addresses: Vec<String>,
+    /// Timestamp of first discovery.
+    pub first_seen: u64,
+    /// Timestamp of most recent announcement.
+    pub last_seen: u64,
+}
+
 /// Response for `noble_getWalletTransactions`.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletTransactionsResponse {

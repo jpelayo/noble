@@ -1731,6 +1731,13 @@ export class MockRpcClient {
           ],
         };
 
+      case 'noble_getDiscoveredBlockchains':
+        return {
+          blockchains: [
+            { chain_id: '0x34E9E7A4', network_name: 'Testnet', peer_addresses: ['/ip4/192.168.1.100/tcp/8780'], first_seen: 1709712000, last_seen: 1709715600 },
+          ],
+        };
+
       case 'noble_resetChain':
         return { reset: true, previous_height: 42 };
 

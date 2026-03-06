@@ -288,6 +288,13 @@ export function init(root, ctx) {
             <p style="font-size:var(--font-size-xs);color:var(--text-muted)">Loading...</p>
           </div>
         </div>
+
+        <div style="margin-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Discovered Blockchains</p>
+          <div id="s-discovered-chains-wrap" style="overflow-x:auto">
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">None discovered yet</p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1236,6 +1243,7 @@ export function init(root, ctx) {
 
   const chainInfoEl = root.querySelector('#s-chain-info');
   const forkWrap = root.querySelector('#s-fork-table-wrap');
+  const discoveredChainsWrap = root.querySelector('#s-discovered-chains-wrap');
   const chainGear = root.querySelector('#s-chain-gear');
   const chainModal = root.querySelector('#s-chain-modal');
   const chainModalClose = root.querySelector('#s-chain-modal-close');
@@ -1308,6 +1316,34 @@ export function init(root, ctx) {
   loadForks();
   const forkTimer = setInterval(loadForks, 30000);
 
+  async function loadDiscoveredChains() {
+    try {
+      const data = await rpc.call('noble_getDiscoveredBlockchains');
+      if (!data.blockchains || data.blockchains.length === 0) {
+        discoveredChainsWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">None discovered yet</p>';
+        return;
+      }
+      const rows = data.blockchains.map(bc => {
+        const addrs = bc.peer_addresses.map(a => `<code style="font-size:var(--font-size-xs)">${a}</code>`).join(', ');
+        const lastSeen = bc.last_seen ? new Date(bc.last_seen * 1000).toLocaleString() : '\u2014';
+        return `<tr>
+          <td>${bc.network_name || bc.chain_id}</td>
+          <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${bc.chain_id}</td>
+          <td>${addrs || '\u2014'}</td>
+          <td>${lastSeen}</td>
+        </tr>`;
+      }).join('');
+      discoveredChainsWrap.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+        <thead><tr><th>Name</th><th>Chain ID</th><th>Peer Addresses</th><th>Last Seen</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    } catch (e) {
+      discoveredChainsWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Unavailable</p>';
+    }
+  }
+  loadDiscoveredChains();
+  const discoveredTimer = setInterval(loadDiscoveredChains, 30000);
+
   // Modal open/close
   function openChainModal() {
     chainModalMsg.textContent = '';
@@ -1369,6 +1405,7 @@ export function init(root, ctx) {
   return {
     destroy() {
       clearInterval(forkTimer);
+      clearInterval(discoveredTimer);
       closeChainModal();
     },
   };

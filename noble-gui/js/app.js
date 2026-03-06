@@ -351,10 +351,13 @@ async function bootstrap() {
     state.blockHeight = blockCount.height;
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
-    // No genesis → no cycle identity.  u64::MAX sentinel → "Awaiting genesis".
-    state.cyclePhase = cycleStatus.cycle_number > 1e15 ? 'Awaiting genesis' : cycleStatus.phase;
+    // null cycle_number = bootstrapping (no blocks beyond genesis).
+    state.cyclePhase = cycleStatus.cycle_number == null ? 'Awaiting genesis' : cycleStatus.phase;
 
-    populateChainIdentity(nodeInfo);
+    // Only show chain identity bar once the chain is active (has blocks beyond genesis).
+    if (cycleStatus.cycle_number != null) {
+      populateChainIdentity(nodeInfo);
+    }
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();
@@ -367,7 +370,12 @@ async function bootstrap() {
 // ── WebSocket subscriptions for global state ──
 // Block notifications from backend: { height, hash, tx_count }
 ws.subscribe('newBlocks', (block) => {
+  const wasBootstrap = state.blockHeight === 0;
   state.blockHeight = block.height;
+  // First real block committed — show chain identity bar (was hidden during bootstrap).
+  if (wasBootstrap && block.height > 0) {
+    rpc.call('noble_getNodeInfo').then(populateChainIdentity).catch(() => {});
+  }
 });
 
 // New-transaction notifications: { tx_id }

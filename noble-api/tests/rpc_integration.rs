@@ -159,6 +159,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         max_db_size_gb: 0,
         network_name: "mainnet".to_string(),
         genesis_hash: hex::encode(noble_core::genesis_hash().as_bytes()),
+        discovered_blockchains: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
     });
 
     (state, dir)

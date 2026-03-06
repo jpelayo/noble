@@ -226,6 +226,13 @@ pub trait NodeApi {
     #[method(name = "getDetectedForks")]
     async fn get_detected_forks(&self) -> Result<DetectedForksResponse, ErrorObjectOwned>;
 
+    /// Get blockchains discovered via NodeAnnounce from peers on different chains.
+    ///
+    /// Returns stored chain_id, network_name, and peer addresses for each
+    /// discovered blockchain, useful for the Chain Management panel.
+    #[method(name = "getDiscoveredBlockchains")]
+    async fn get_discovered_blockchains(&self) -> Result<DiscoveredBlockchainsResponse, ErrorObjectOwned>;
+
     /// Reset the chain to genesis and trigger re-sync from peers.
     ///
     /// This is a destructive operation used for fork recovery ("blockchain hop").
@@ -1132,6 +1139,23 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             local_tip,
             forks,
         })
+    }
+
+    async fn get_discovered_blockchains(&self) -> Result<DiscoveredBlockchainsResponse, ErrorObjectOwned> {
+        let discovered = self.discovered_blockchains.lock();
+        let mut blockchains: Vec<DiscoveredBlockchainEntry> = discovered
+            .values()
+            .map(|info| DiscoveredBlockchainEntry {
+                chain_id: format!("{:#010X}", info.chain_id),
+                network_name: info.network_name.clone(),
+                peer_addresses: info.peer_addresses.clone(),
+                first_seen: info.first_seen,
+                last_seen: info.last_seen,
+            })
+            .collect();
+        // Sort by most recently seen first.
+        blockchains.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        Ok(DiscoveredBlockchainsResponse { blockchains })
     }
 
     async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned> {

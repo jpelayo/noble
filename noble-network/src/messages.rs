@@ -138,6 +138,12 @@ pub enum GossipMessage {
         /// Hash of the block this node is currently proposing as hex string (if any).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposed_hash: Option<String>,
+        /// Chain ID of the blockchain this node is on.
+        #[serde(default)]
+        chain_id: u32,
+        /// Human-readable network name ("mainnet", "testnet", "regtest").
+        #[serde(default)]
+        network_name: String,
         timestamp: u64,
         signature_scheme: u8,
         signature_pubkey: Vec<u8>,
@@ -430,6 +436,8 @@ mod tests {
             chain_tip_hash: Some(hex::encode([0xBB; 32])),
             proposed_height: Some(43),
             proposed_hash: Some(hex::encode([0xCC; 32])),
+            chain_id: 0x34E9E7A4,
+            network_name: "mainnet".into(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],
@@ -464,6 +472,8 @@ mod tests {
             chain_tip_hash: None,
             proposed_height: None,
             proposed_hash: None,
+            chain_id: 0,
+            network_name: String::new(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x01,
             signature_pubkey: vec![1; 32],

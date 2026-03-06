@@ -112,8 +112,8 @@ export function init(root, ctx) {
   async function updateCycleCountdown() {
     try {
       const cs = await rpc.call('noble_getCycleStatus');
-      // No genesis → no cycle countdown.
-      if (cs.cycle_number > 1e15) {
+      // null cycle_number = bootstrapping (no blocks beyond genesis).
+      if (cs.cycle_number == null) {
         ovPhase.textContent = 'Awaiting genesis';
         ovPhaseTimer.textContent = '';
         return;

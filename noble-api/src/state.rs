@@ -288,4 +288,8 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Hex-encoded genesis block hash for chain identity.
     pub genesis_hash: String,
+
+    /// Blockchains discovered via NodeAnnounce from peers on different chains.
+    /// Shared with the Node event loop which writes; API reads.
+    pub discovered_blockchains: Arc<Mutex<HashMap<u32, crate::types::DiscoveredBlockchainInfo>>>,
 }

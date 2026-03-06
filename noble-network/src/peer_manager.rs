@@ -875,6 +875,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -914,6 +916,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -952,6 +956,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )
@@ -972,6 +978,8 @@ mod tests {
             None,
             false,
             false,
+            0,
+            String::new(),
             1_700_000_000,
             &sk,
         )

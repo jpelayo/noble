@@ -456,6 +456,7 @@ export function init(root, ctx) {
     sync_requested:     '\u21bb',  // clockwise arrow
     reconnect_attempt:  '\u21ba',  // counter-clockwise arrow
     evidence_received:  '\u26a0',  // warning triangle
+    blockchain_discovered: '\u2728', // sparkles
     consensus_log:      '\u2022',  // bullet
     warning:            '\u26a0',  // warning triangle
     phase_change:       '\u25cf',  // filled circle
@@ -480,6 +481,7 @@ export function init(root, ctx) {
       case 'announce_received':
       case 'announce_published': return '#60a5fa';
       case 'reconnect_attempt': return '#fbbf24';
+      case 'blockchain_discovered': return '#c084fc';
       case 'sync_requested': return '#94a3b8';
       case 'heartbeat': return '#6ee7b7';
       default: return 'var(--text-muted)';
@@ -525,6 +527,8 @@ export function init(root, ctx) {
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received':
         return `Double-proposal evidence from ${pName(data.peer_id)}`;
+      case 'blockchain_discovered':
+        return `Blockchain discovered: ${data.network_name || data.chain_id} from ${data.peer_name || 'unknown peer'}`;
       case 'consensus_log':
         return data.message;
       case 'warning':
@@ -678,20 +682,6 @@ export function init(root, ctx) {
     rpc.call('noble_getPeerInfo').then(peers => {
       const connected = Array.isArray(peers) ? peers.filter(p => p.status === 'connected') : [];
       pushActivity({ event: 'heartbeat', message: `${connected.length} peer(s) connected \u2014 reconnect loop armed` });
-      // Show connected peer names (resolved from peer memory).
-      if (connected.length > 0) {
-        rpc.call('noble_getPeerMemory').then(records => {
-          if (Array.isArray(records)) {
-            for (const r of records) {
-              if (r.peer_id && r.node_name) peerIdToName.set(r.peer_id, r.node_name);
-            }
-          }
-          const names = connected.map(p => peerIdToName.get(p.peer_id) || truncateHash(p.peer_id || '', 6));
-          if (names.length > 0) {
-            pushActivity({ event: 'heartbeat', message: `Connected: ${names.join(', ')}` });
-          }
-        }).catch(() => {});
-      }
     }).catch(() => {});
   }
 

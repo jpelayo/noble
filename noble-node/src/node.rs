@@ -85,6 +85,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID.
     pub chain_id: u32,
+    /// Network name (e.g. "Mainnet", "Testnet").
+    pub network_name: String,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
     /// PKI identity attestation (CMS/PKCS#7 binding), loaded or created at startup.
@@ -109,6 +111,11 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub validator_list_path: Option<std::path::PathBuf>,
     /// Seed/bootstrap peer addresses from config (for auto-reconnection).
     pub seed_addrs: Vec<String>,
+    /// Blockchains discovered via NodeAnnounce from peers on different chains.
+    /// Key: chain_id. Shared with ApiState for RPC access. Persisted to `discovered_blockchains.cbor`.
+    pub discovered_blockchains: Arc<Mutex<std::collections::HashMap<u32, noble_api::types::DiscoveredBlockchainInfo>>>,
+    /// Path for persisting discovered blockchains CBOR.
+    pub discovered_blockchains_path: Option<std::path::PathBuf>,
 }
 
 impl Node<MemoryStorage> {
@@ -412,6 +419,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- CA trust store ---
         let ca_store = init_ca_store(config);
 
+        // --- Discovered blockchains (load from CBOR if exists) ---
+        let discovered_path = config.storage.data_dir.join("discovered_blockchains.cbor");
+        let discovered_blockchains = if discovered_path.exists() {
+            match std::fs::read(&discovered_path) {
+                Ok(bytes) => {
+                    use noble_codec::NobleCbor;
+                    std::collections::HashMap::<u32, noble_api::types::DiscoveredBlockchainInfo>::from_cbor(&bytes)
+                        .unwrap_or_default()
+                }
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
         Ok(Self {
             storage,
             mempool,
@@ -421,6 +443,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             network_stats,
             peer_info,
             chain_id,
+            network_name: config.node.network.name().to_string(),
             start_time: std::time::Instant::now(),
             pki_attestation,
             ca_store,
@@ -430,6 +453,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             last_proposed: parking_lot::Mutex::new(None),
             validator_list_path: Some(validator_list_path),
             seed_addrs: config.network.seeds.clone(),
+            discovered_blockchains: Arc::new(Mutex::new(discovered_blockchains)),
+            discovered_blockchains_path: Some(discovered_path),
         })
     }
 
@@ -600,6 +625,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             chain_tip_hash,
             proposed_height,
             proposed_hash,
+            self.chain_id,
+            self.network_name.clone(),
             now,
             sk,
             self.pki_attestation.clone(),
@@ -726,6 +753,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 "addresses": dialed,
                 "current_peers": peer_count,
             }));
+        }
+    }
+
+    /// Persist discovered blockchains map to CBOR file.
+    fn persist_discovered_blockchains(&self) {
+        if let Some(ref path) = self.discovered_blockchains_path {
+            let discovered = self.discovered_blockchains.lock();
+            if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*discovered) {
+                if let Err(e) = std::fs::write(path, &bytes) {
+                    tracing::warn!(task = "peer_tracking", "Failed to persist discovered blockchains: {e}");
+                }
+            }
         }
     }
 
@@ -1435,6 +1474,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             max_db_size_gb: config.storage.max_db_size_gb,
             network_name: config.node.network.name().to_string(),
             genesis_hash: hex::encode(config.node.network.genesis_hash().as_bytes()),
+            discovered_blockchains: self.discovered_blockchains.clone(),
         });
 
         // --- Determine RPC bind address ---
@@ -1939,6 +1979,68 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }));
             }
             NetworkEvent::NodeAnnounceReceived { peer_id, announce } => {
+                // --- Chain ID mismatch: blockchain discovery ---
+                // If the peer announces a different chain_id (and it's not 0 = unknown),
+                // record the discovered blockchain and kick the peer if we already have a chain.
+                if announce.chain_id != 0 && announce.chain_id != self.chain_id {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let peer_addr = announce.host_address.clone().unwrap_or_default();
+                    let chain_name = if announce.network_name.is_empty() {
+                        format!("chain-{:08X}", announce.chain_id)
+                    } else {
+                        announce.network_name.clone()
+                    };
+                    // Store/update discovered blockchain.
+                    {
+                        let mut discovered = self.discovered_blockchains.lock();
+                        let entry = discovered.entry(announce.chain_id).or_insert_with(|| {
+                            noble_api::types::DiscoveredBlockchainInfo {
+                                chain_id: announce.chain_id,
+                                network_name: chain_name.clone(),
+                                peer_addresses: Vec::new(),
+                                first_seen: now_ts,
+                                last_seen: now_ts,
+                            }
+                        });
+                        entry.last_seen = now_ts;
+                        if !chain_name.is_empty() {
+                            entry.network_name = chain_name.clone();
+                        }
+                        if !peer_addr.is_empty() && !entry.peer_addresses.contains(&peer_addr) {
+                            entry.peer_addresses.push(peer_addr.clone());
+                        }
+                    }
+                    // Persist to disk.
+                    self.persist_discovered_blockchains();
+
+                    tracing::info!(
+                        task = "peer_tracking",
+                        "Blockchain discovered: {} (chain_id={:#010X}) from peer {}",
+                        chain_name,
+                        announce.chain_id,
+                        announce.node_name,
+                    );
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "blockchain_discovered",
+                        "chain_id": format!("{:#010X}", announce.chain_id),
+                        "network_name": chain_name,
+                        "peer_name": announce.node_name,
+                        "peer_addr": peer_addr,
+                    }));
+                    // Kick the peer — they're on a different chain.
+                    let _ = network_cmd.try_send(NetworkCommand::BanPeer(peer_id.clone()));
+                    tracing::info!(
+                        task = "peer_tracking",
+                        "Disconnected peer {} — different chain ({})",
+                        announce.node_name,
+                        chain_name,
+                    );
+                    return; // Skip normal announce processing.
+                }
+
                 // Persist the announce to storage so getPeerMemory (and thus
                 // the candidates list) can see it.
                 let now_ts = std::time::SystemTime::now()

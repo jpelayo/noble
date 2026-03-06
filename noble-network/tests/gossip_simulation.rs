@@ -170,6 +170,8 @@ fn make_signed_announce(
         chain_tip_hash,
         proposed_height,
         proposed_hash,
+        0,
+        String::new(),
         now,
         sk,
         None,
