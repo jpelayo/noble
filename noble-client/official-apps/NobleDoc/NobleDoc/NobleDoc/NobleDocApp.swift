@@ -1,32 +1,18 @@
-//
-//  NobleDocApp.swift
-//  NobleDoc
-//
-//  Created by pelayo on 25/2/26.
-//
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
 
 import SwiftUI
-import SwiftData
 
 @main
 struct NobleDocApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MainView(appState: appState)
         }
-        .modelContainer(sharedModelContainer)
+        #if os(macOS)
+        .defaultSize(width: 960, height: 640)
+        #endif
     }
 }

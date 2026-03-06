@@ -1,0 +1,27 @@
+{
+  "object" : {
+    "artifacts" : [
+
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "nobleclientcore",
+          "kind" : "fileSystem",
+          "location" : "/Users/pelayo/Documents/Developer/Noble/NOBLEv1/noble-client/official-apps/NobleDoc/NobleDoc/Packages/NobleClientCore",
+          "name" : "NobleClientCore"
+        },
+        "state" : {
+          "name" : "fileSystem",
+          "path" : "/Users/pelayo/Documents/Developer/Noble/NOBLEv1/noble-client/official-apps/NobleDoc/NobleDoc/Packages/NobleClientCore"
+        },
+        "subpath" : "nobleclientcore"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}

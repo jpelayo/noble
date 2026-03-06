@@ -195,6 +195,13 @@
 			);
 			mainGroup = 3EA5F3462F4F1AA300E6F4A3;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientAPI" */,
+				3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCore" */,
+				3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientDesignSystem" */,
+				3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCrypto" */,
+				3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientSecurity" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3EA5F3502F4F1AA300E6F4A3 /* Products */;
 			projectDirPath = "";
@@ -575,6 +582,29 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientAPI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NobleClientAPI;
+		};
+		3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NobleClientCore;
+		};
+		3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientDesignSystem" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NobleClientDesignSystem;
+		};
+		3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCrypto" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NobleClientCrypto;
+		};
+		3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientSecurity" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NobleClientSecurity;
+		};
+/* End XCLocalSwiftPackageReference section */
 	};
 	rootObject = 3EA5F3472F4F1AA300E6F4A3 /* Project object */;
 }

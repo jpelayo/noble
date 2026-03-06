@@ -508,7 +508,7 @@ export function init(root, ctx) {
       case 'warning':
         return data.message;
       case 'phase_change':
-        return `Phase \u2192 ${data.phase} (cycle #${data.cycle})`;
+        return `Phase \u2192 ${data.phase}${data.cycle != null ? ` (cycle #${data.cycle})` : ''}`;
       default:
         return JSON.stringify(data);
     }
@@ -561,29 +561,38 @@ export function init(root, ctx) {
     }));
   }
 
-  // Seed activity log on page load: current phase + already-connected peers
-  function seedActivityLog() {
+  // Seed activity log on page load: current phase + already-connected peers.
+  // Phase is seeded once; peers are retried a few times to catch late reconnections.
+  let seededPeerIds = new Set();
+
+  function seedPhase() {
     rpc.call('noble_getCycleStatus').then(status => {
       if (status && status.phase) {
         pushActivity({ event: 'phase_change', phase: status.phase, cycle: status.cycle_number });
       }
     }).catch(() => {});
+  }
+
+  function seedPeers() {
     rpc.call('noble_getPeerInfo').then(peers => {
       if (Array.isArray(peers)) {
         for (const p of peers) {
-          if (p.status === 'connected') {
+          if (p.status === 'connected' && !seededPeerIds.has(p.peer_id)) {
+            seededPeerIds.add(p.peer_id);
             pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '' });
           }
         }
       }
     }).catch(() => {});
   }
-  seedActivityLog();
-  // Retry after 5s in case peers haven't reconnected yet (fresh node restart)
-  const seedRetry = setTimeout(() => {
-    if (activityEntries.length <= 1) seedActivityLog();
-  }, 5000);
-  unsubs.push(() => clearTimeout(seedRetry));
+
+  seedPhase();
+  seedPeers();
+  // Retry peer seeding at 3s, 8s, 15s to catch late reconnections after node restart
+  const seedTimers = [3000, 8000, 15000].map(delay =>
+    setTimeout(() => seedPeers(), delay)
+  );
+  unsubs.push(() => seedTimers.forEach(t => clearTimeout(t)));
 
   function updateManualVoteVisibility() {
     const panel = root.querySelector('#cs-manual-vote-panel');
@@ -1054,7 +1063,7 @@ export function init(root, ctx) {
     // Emit phase change activity event
     const phaseKey = `${status.cycle_number || 0}:${status.phase_index}`;
     if (lastPhaseKey !== null && lastPhaseKey !== phaseKey) {
-      pushActivity({ event: 'phase_change', phase: status.phase || 'Bootstrapping', cycle: status.cycle_number || 0 });
+      pushActivity({ event: 'phase_change', phase: status.phase || 'Bootstrapping', cycle: status.cycle_number });
     }
     lastPhaseKey = phaseKey;
 

@@ -1,0 +1,29 @@
+// swift-tools-version: 6.1
+import PackageDescription
+
+let package = Package(
+    name: "NobleClientCrypto",
+    platforms: [.macOS(.v15), .iOS(.v18)],
+    products: [
+        .library(name: "NobleClientCrypto", targets: ["NobleClientCrypto"]),
+    ],
+    dependencies: [
+        .package(path: "../NobleClientCore"),
+        .package(url: "https://github.com/GigaBitcoin/secp256k1.swift", from: "0.18.0"),
+        .package(url: "https://github.com/valpackett/SwiftCBOR", from: "0.4.7"),
+    ],
+    targets: [
+        .target(
+            name: "NobleClientCrypto",
+            dependencies: [
+                "NobleClientCore",
+                .product(name: "P256K", package: "secp256k1.swift"),
+                .product(name: "SwiftCBOR", package: "SwiftCBOR"),
+            ]
+        ),
+        .testTarget(
+            name: "NobleClientCryptoTests",
+            dependencies: ["NobleClientCrypto"]
+        ),
+    ]
+)
