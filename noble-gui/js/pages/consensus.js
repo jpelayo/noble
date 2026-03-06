@@ -491,7 +491,7 @@ export function init(root, ctx) {
 
   function formatActivityMessage(data) {
     // Enriched events carry a pre-formatted message.
-    if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast' || data.event === 'vote_received')) return data.message;
+    if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast')) return data.message;
     const vName = (id) => getValidatorDisplayName(id, 8);
     const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
@@ -625,7 +625,7 @@ export function init(root, ctx) {
       }
       // Refresh data panels on significant events
       if (data.event === 'block_committed') {
-        loadCycle(); loadTimeline(); loadVoteTallies();
+        loadCycle(); loadTimeline(); loadVoteTallies(); loadValidators();
       }
       // Refresh tallies on vote events (live updates)
       if (data.event === 'vote_received' || data.event === 'vote_broadcast') {
@@ -645,8 +645,6 @@ export function init(root, ctx) {
     }));
   }
 
-  // Periodic poll for vote tallies (fallback if WS events are delayed)
-  const tallyPollInterval = setInterval(() => { loadVoteTallies(); }, 10000);
 
   // Seed activity log on page load: current phase + already-connected peers.
   // Phase is seeded once; peers are retried a few times to catch late reconnections.
@@ -685,8 +683,7 @@ export function init(root, ctx) {
   function seedNodeStatus() {
     rpc.call('noble_getNodeInfo').then(info => {
       if (info) {
-        const cid = info.chain_id ? '0x' + info.chain_id.toString(16).toUpperCase().padStart(8, '0') : '';
-        pushActivity({ event: 'heartbeat', message: `Node v${info.version}${cid ? ' \u2014 ' + cid : ''}` });
+        pushActivity({ event: 'heartbeat', message: `Node v${info.version}` });
         if (info.is_syncing) {
           pushActivity({ event: 'heartbeat', message: 'Sync in progress\u2026' });
         }
@@ -701,25 +698,10 @@ export function init(root, ctx) {
     }).catch(() => {});
   }
 
-  function seedVoteStatus() {
-    rpc.call('noble_getVoteTallies').then(result => {
-      if (!result || !result.tallies || result.tallies.length === 0) return;
-      const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
-      if (total === 0) return;
-      for (const t of result.tallies) {
-        if (t.vote_count > 0) {
-          const name = t.validator || truncateHash(t.block_hash, 6);
-          pushActivity({ event: 'vote_received', message: `${t.vote_count} vote(s) for ${name}` });
-        }
-      }
-    }).catch(() => {});
-  }
-
   seedNodeStatus();
   seedPhase();
   seedPeers();
   seedReconnectStatus();
-  seedVoteStatus();
   // Retry peer seeding at 3s, 8s, 15s to catch late reconnections after node restart
   const seedTimers = [3000, 8000, 15000].map(delay =>
     setTimeout(() => seedPeers(), delay)
@@ -1237,13 +1219,8 @@ export function init(root, ctx) {
     csPhaseName.textContent = status.phase || 'Bootstrapping';
     csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
 
-    // Emit phase change activity event (works during bootstrap too —
-    // phase_index now reflects real phase even when cycle_number is null)
-    const phaseKey = `${status.cycle_number || 'boot'}:${status.phase_index}`;
-    if (lastPhaseKey !== null && lastPhaseKey !== phaseKey) {
-      pushActivity({ event: 'phase_change', phase: status.phase || 'Bootstrapping', cycle: status.cycle_number });
-    }
-    lastPhaseKey = phaseKey;
+    // Track phase key for UI updates (phase_change activity comes from WS only).
+    lastPhaseKey = `${status.cycle_number || 'boot'}:${status.phase_index}`;
 
     if (!sane) {
       // Bootstrap: the engine IS running full consensus (proposals, votes, phases).
@@ -1357,10 +1334,10 @@ export function init(root, ctx) {
         if (name) validatorNameMap.set(keyHex, name);
       }
 
-      // Display chain identity in timeline header
+      // Display chain identity in timeline header (only when blockchain exists)
       const chainBadge = root.querySelector('#cs-chain-badge');
       if (chainBadge) {
-        chainBadge.textContent = formatChainLabel(nodeInfo);
+        chainBadge.textContent = getState().blockHeight > 0 ? formatChainLabel(nodeInfo) : '';
       }
 
       const online = validators.filter(v => v.status === 'alive').length;
@@ -2048,7 +2025,6 @@ export function init(root, ctx) {
   return {
     destroy() {
       clearInterval(countdownInterval);
-      clearInterval(tallyPollInterval);
       if (badgePollInterval) clearInterval(badgePollInterval);
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },

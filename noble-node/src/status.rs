@@ -148,11 +148,16 @@ fn query_rpc_status(rpc: &str, totp: Option<&str>) -> Result<StatusInfo, String>
         }
     }
 
-    // getNodeInfo — returns version, protocol_version, chain_id, uptime_secs, ports.
+    // getNodeInfo — only show chain identity if genesis_hash is present (blockchain exists).
     if let Ok(resp) = rpc_call(&host, port, "noble_getNodeInfo", &[], totp, use_tls) {
         if let Some(result) = resp.get("result") {
-            if let Some(chain_id) = result.get("chain_id").and_then(|v| v.as_u64()) {
-                info.network = Some(format!("0x{:08X}", chain_id as u32));
+            let has_chain = result.get("genesis_hash")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if has_chain {
+                if let Some(chain_id) = result.get("chain_id").and_then(|v| v.as_u64()) {
+                    info.network = Some(format!("0x{:08X}", chain_id as u32));
+                }
             }
         }
     }

@@ -270,7 +270,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         let data_dir_str = self.data_dir.as_ref().map(|d| d.display().to_string());
 
-        // Chain identity is always available — genesis is committed at startup.
+        // Chain identity: chain_id from config, genesis_hash from storage (empty if no chain).
         let chain_id = self.chain_id;
         let network_name = self.network_name.clone();
         let genesis_hash = self.genesis_hash.clone();

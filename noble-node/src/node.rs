@@ -129,7 +129,7 @@ impl Node<MemoryStorage> {
 impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// Initialize a node with the given storage backend.
     ///
-    /// If the chain is empty (no tip), the mainnet genesis block is committed.
+    /// The node starts stateless — no genesis is auto-committed.
     /// Subsystems (mempool, consensus, wallet) are created from the config.
     pub fn init_with_storage(
         config: &NodeConfig,
@@ -138,27 +138,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
-        // Resolve chain_id and genesis block from network config.
+        // Resolve chain_id from network config.
         let chain_id = config.node.network.chain_id();
-
-        // Ensure genesis block is committed if the chain is empty.
-        {
-            let s = storage.read();
-            if s.get_chain_tip()?.is_none() {
-                let genesis = config.node.network.genesis_block();
-                let block_hash = genesis
-                    .header
-                    .compute_block_hash()
-                    .map_err(|e| format!("genesis hash error: {e}"))?;
-                let tx_ids: Vec<_> = genesis
-                    .transactions
-                    .iter()
-                    .map(|tx| tx.compute_tx_id(chain_id))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| format!("genesis tx_id error: {e}"))?;
-                s.commit_block(&genesis, &block_hash, &tx_ids)?;
-            }
-        }
 
         // Create mempool.
         let mempool = Arc::new(Mutex::new(Mempool::with_defaults()));
@@ -1512,7 +1493,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             compression_enabled: config.storage.compression,
             max_db_size_gb: config.storage.max_db_size_gb,
             network_name: config.node.network.name().to_string(),
-            genesis_hash: hex::encode(config.node.network.genesis_hash().as_bytes()),
+            genesis_hash: {
+                let s = self.storage.read();
+                s.get_block_hash_by_height(0)
+                    .map(|h| hex::encode(h.as_bytes()))
+                    .unwrap_or_default()
+            },
             discovered_blockchains: self.discovered_blockchains.clone(),
         });
 

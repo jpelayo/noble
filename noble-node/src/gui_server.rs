@@ -37,6 +37,8 @@ use axum::Router;
 use http_body_util::{BodyExt, Full};
 use tower_http::services::ServeDir;
 
+use axum::extract::ws::{Message as AxumWsMsg, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use noble_api::ip_filter::IpFilter;
 
 // ── NoCertVerifier ─────────────────────────────────────────────────────────
@@ -218,6 +220,109 @@ async fn proxy_to_rpc(
         })
 }
 
+// ── WebSocket proxy ─────────────────────────────────────────────────────
+
+/// Proxy a WebSocket connection from the browser (port 8785) to the RPC
+/// server (port 8783) over localhost.  Bidirectionally forwards all frames.
+async fn ws_proxy_handler(
+    ws: axum::extract::WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<WsProxyState>,
+) -> axum::response::Response {
+    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state))
+}
+
+#[derive(Clone)]
+struct WsProxyState {
+    rpc_port: u16,
+    tls_connector: Option<tokio_rustls::TlsConnector>,
+}
+
+async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
+    use tokio_tungstenite::tungstenite::Message as TungMsg;
+
+    let url = if state.tls_connector.is_some() {
+        format!("wss://127.0.0.1:{}", state.rpc_port)
+    } else {
+        format!("ws://127.0.0.1:{}", state.rpc_port)
+    };
+
+    let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", state.rpc_port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(task = "ws_proxy", "TCP connect to RPC port failed: {e}");
+            return;
+        }
+    };
+
+    let (mut browser_tx, mut browser_rx): (
+        futures_util::stream::SplitSink<WebSocket, AxumWsMsg>,
+        futures_util::stream::SplitStream<WebSocket>,
+    ) = browser_ws.split();
+
+    // Helper: bidirectionally forward frames between axum WS halves and tungstenite WS.
+    macro_rules! run_bridge {
+        ($backend:expr) => {{
+            let (mut backend_tx, mut backend_rx) = $backend.split();
+            let b2b = async {
+                while let Some(Ok(msg)) = StreamExt::next(&mut browser_rx).await {
+                    let t = match msg {
+                        AxumWsMsg::Text(t) => TungMsg::Text(t),
+                        AxumWsMsg::Binary(b) => TungMsg::Binary(b),
+                        AxumWsMsg::Ping(p) => TungMsg::Ping(p),
+                        AxumWsMsg::Pong(p) => TungMsg::Pong(p),
+                        AxumWsMsg::Close(_) => break,
+                    };
+                    if backend_tx.send(t).await.is_err() { break; }
+                }
+            };
+            let b2f = async {
+                while let Some(Ok(msg)) = StreamExt::next(&mut backend_rx).await {
+                    let a = match msg {
+                        TungMsg::Text(t) => AxumWsMsg::Text(t),
+                        TungMsg::Binary(b) => AxumWsMsg::Binary(b),
+                        TungMsg::Ping(p) => AxumWsMsg::Ping(p),
+                        TungMsg::Pong(p) => AxumWsMsg::Pong(p),
+                        TungMsg::Close(_) => break,
+                        _ => continue,
+                    };
+                    if browser_tx.send(a).await.is_err() { break; }
+                }
+            };
+            tokio::select! { _ = b2b => {} _ = b2f => {} }
+        }};
+    }
+
+    if let Some(connector) = &state.tls_connector {
+        let server_name = rustls_pki_types::ServerName::try_from("localhost")
+            .unwrap()
+            .to_owned();
+        let tls_stream = match connector.connect(server_name, tcp).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(task = "ws_proxy", "TLS handshake failed: {e}");
+                return;
+            }
+        };
+        let (ws, _) = match tokio_tungstenite::client_async(&url, tls_stream).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(task = "ws_proxy", "WS handshake (TLS) failed: {e}");
+                return;
+            }
+        };
+        run_bridge!(ws);
+    } else {
+        let (ws, _) = match tokio_tungstenite::client_async(&url, tcp).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(task = "ws_proxy", "WS handshake failed: {e}");
+                return;
+            }
+        };
+        run_bridge!(ws);
+    }
+}
+
 /// Start the embedded GUI HTTP(S) server.
 ///
 /// Serves all files under `gui_dir` with `index.html` as the SPA fallback.
@@ -300,9 +405,21 @@ pub async fn start_gui_server(
         },
     );
 
+    // /ws proxy — WebSocket upgrade handler that proxies to the RPC server.
+    // Same-origin connection (port 8785) avoids self-signed cert rejection.
+    let ws_proxy_state = WsProxyState {
+        rpc_port,
+        tls_connector: if tls_config.is_some() {
+            Some(build_client_tls_connector())
+        } else {
+            None
+        },
+    };
+
     let mut app = Router::new()
         .route("/", root_handler)
         .route("/rpc", rpc_proxy_handler)
+        .route("/ws", axum::routing::get(ws_proxy_handler).with_state(ws_proxy_state))
         .fallback_service(serve_dir);
 
     // Dynamic CSP middleware — reads rpc_origins on every request so that

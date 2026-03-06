@@ -76,7 +76,9 @@ hkdf = "0.12"
 subtle = "2"
 openssl = { version = "0.10", features = ["vendored"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 hyper = { version = "1", features = ["full"] }
 ipnet = "2"
 bip39 = { version = "2", features = ["rand"] }

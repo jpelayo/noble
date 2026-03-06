@@ -73,7 +73,7 @@ pub struct BlockVotes {
     pub r2_voters: Vec<BlockVoter>,
     /// Number of distinct validator keys that voted for this block (R1+R2 combined).
     pub unique_witness_count: usize,
-    /// Whether the Dual-Witness rule applied (true for blocks 1–2).
+    /// Whether the Dual-Witness rule applied (true for block 1 only).
     pub dual_witness_required: bool,
     /// Whether the Dual-Witness threshold was met.
     pub dual_witness_met: bool,

@@ -61,13 +61,12 @@ if (rpcUrl) {
   const { RpcClient } = await import('./rpc-client.js');
   const { WsManager } = await import('./ws-manager.js');
   rpc = new RpcClient(rpcUrl);
-  // WS connects directly to the RPC port (jsonrpsee HTTP+WS on port 8783).
-  // We can't proxy WS through /rpc (HTTP-only), so fall back to direct port.
-  // F4: use NOBLE_RPC_PORT injected by the GUI server for non-default ports.
+  // WS proxied through the GUI server's /ws route (same origin, same cert).
+  // This avoids self-signed cert rejection when the browser has only
+  // accepted the cert for port 8785 (GUI) but not 8783 (RPC).
   if (!wsUrl) {
     const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const rpcPort = window.NOBLE_RPC_PORT || 8783;
-    wsUrl = `${wsProto}://${window.location.hostname}:${rpcPort}`;
+    wsUrl = `${wsProto}://${window.location.host}/ws`;
   }
   ws = new WsManager(wsUrl, { onStatusChange });
   console.info(`[app] Using RPC proxy: ${rpcUrl}, WS: ${wsUrl}`);
