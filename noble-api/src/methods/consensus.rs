@@ -656,18 +656,35 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 .collect()
         };
 
+        // Self-node identity: the local node's own validator key may not be
+        // in its own validator_list — use node_identity.node_name as fallback.
+        let self_validator_name: Option<(String, String)> = self.validator_pubkey.as_ref().map(|pk| {
+            let id = self.node_identity.read();
+            (pk.clone(), id.node_name.clone())
+        });
+
         let mut entries: Vec<VoteTallyEntry> = tallies
             .into_iter()
             .map(|(h, c)| {
                 // Look up proposer: friendly name from validator list,
-                // then peer announce name, else hex pubkey
+                // then peer announce name, then self-node identity, else hex pubkey
                 let validator = candidate_tracker.validator_of(&h).map(|wire| {
+                    let hex_wire = hex::encode(&wire);
                     validator_list
                         .find_by_wire(&wire)
                         .map(|v| v.name())
                         .filter(|n| !n.is_empty())
                         .or_else(|| peer_name_map.get(&wire).cloned())
-                        .unwrap_or_else(|| hex::encode(&wire))
+                        .or_else(|| {
+                            self_validator_name.as_ref().and_then(|(pk, name)| {
+                                if *pk == hex_wire && !name.is_empty() {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or(hex_wire)
                 });
                 VoteTallyEntry {
                     block_hash: hash_to_hex(&h),

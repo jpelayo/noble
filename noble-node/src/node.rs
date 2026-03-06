@@ -2847,15 +2847,38 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     match &other {
                         CycleIo::BroadcastVote(vote) => {
                             // Resolve candidate proposer name for activity display.
+                            // Priority: validator_list → peer records → self identity.
                             let proposer_name = {
                                 let engine = self.consensus.read();
+                                let our_wire = engine.our_validator_wire_bytes();
                                 engine.candidate_tracker().get(&vote.candidate_hash)
                                     .and_then(|entry| {
                                         let wire = entry.block.header.validator_id.to_wire_bytes();
+                                        // 1. Validator list lookup
                                         engine.validator_list().find_by_wire(&wire)
                                             .map(|ve| ve.name())
+                                            .filter(|n| !n.is_empty())
+                                            .or_else(|| {
+                                                // 2. Peer records lookup
+                                                self.storage.read()
+                                                    .list_peer_records()
+                                                    .unwrap_or_default()
+                                                    .into_iter()
+                                                    .find(|r| r.identity_key == wire)
+                                                    .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                                                    .filter(|n| !n.is_empty())
+                                            })
+                                            .or_else(|| {
+                                                // 3. Self identity fallback
+                                                if our_wire.as_deref() == Some(&wire) {
+                                                    let id = shared_identity.read();
+                                                    if !id.node_name.is_empty() {
+                                                        return Some(id.node_name.clone());
+                                                    }
+                                                }
+                                                None
+                                            })
                                     })
-                                    .filter(|n| !n.is_empty())
                             };
                             let _ = cycle_phase_tx.send(serde_json::json!({
                                 "event": "vote_broadcast",

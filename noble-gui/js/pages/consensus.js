@@ -50,6 +50,8 @@ export function init(root, ctx) {
 
   // ── Peer ID → friendly name cache (populated from announce events) ──
   const peerIdToName = new Map();
+  // ── Deferred peer_connected events: hold until name is known (max 3s) ──
+  const deferredPeerEvents = new Map(); // peer_id → { data, timer }
   function getPeerDisplayName(peerId) {
     if (!peerId) return '—';
     const name = peerIdToName.get(peerId);
@@ -591,13 +593,47 @@ export function init(root, ctx) {
     renderActivityLog();
   });
 
+  // Push peer_connected with deferred name resolution: if no name is known yet,
+  // hold the event for up to 3 s waiting for the announce_received that carries
+  // the friendly name.  If the announce arrives in time, emit with name.
+  // If timeout, emit with whatever is available (hash as last resort).
+  function pushPeerEvent(data) {
+    const pid = data.peer_id;
+    const name = data.node_name || peerIdToName.get(pid);
+    if (name) {
+      data.node_name = name;
+      pushActivity(data);
+      return;
+    }
+    // No name yet — defer up to 3 s.
+    const timer = setTimeout(() => {
+      deferredPeerEvents.delete(pid);
+      data.node_name = peerIdToName.get(pid) || '';
+      pushActivity(data);
+    }, 3000);
+    deferredPeerEvents.set(pid, { data, timer });
+  }
+
+  function flushDeferredPeer(peerId, name) {
+    const entry = deferredPeerEvents.get(peerId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    deferredPeerEvents.delete(peerId);
+    entry.data.node_name = name;
+    pushActivity(entry.data);
+  }
+
   // Subscribe to cyclePhaseChange + peerUpdates WS topics for the activity feed.
   // Both streams are normalized into a single scrolling list.
   if (ws && ws.subscribe) {
     unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
       // Cache peer names from announce events for display resolution.
       if (data.event === 'announce_received' && data.node_name) {
-        if (data.peer_id) peerIdToName.set(data.peer_id, data.node_name);
+        if (data.peer_id) {
+          peerIdToName.set(data.peer_id, data.node_name);
+          // Flush any deferred peer_connected event now that we have the name.
+          flushDeferredPeer(data.peer_id, data.node_name);
+        }
         // Also populate validatorNameMap (identity_key → name) so vote/block
         // events can resolve names immediately without waiting for refreshList().
         if (data.identity) validatorNameMap.set(data.identity, data.node_name);
@@ -609,6 +645,8 @@ export function init(root, ctx) {
       } else if (data.event === 'vote_broadcast') {
         const target = data.candidate_name || truncateHash(data.block_hash || '', 6);
         pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });
+      } else if (data.event === 'peer_connected') {
+        pushPeerEvent(data);
       } else {
         pushActivity(data);
       }
@@ -641,7 +679,12 @@ export function init(root, ctx) {
       const normalized = { ...data };
       if (data.event === 'connected') normalized.event = 'peer_connected';
       else if (data.event === 'disconnected') normalized.event = 'peer_disconnected';
-      pushActivity(normalized);
+      // Defer peer_connected until name is known (max 3s wait for announce).
+      if (normalized.event === 'peer_connected') {
+        pushPeerEvent(normalized);
+      } else {
+        pushActivity(normalized);
+      }
     }));
   }
 
@@ -659,20 +702,22 @@ export function init(root, ctx) {
   }
 
   function seedPeers() {
-    // Pre-populate peer names from peer memory before seeding connections.
+    // Pre-populate peer names from peer memory BEFORE seeding connections.
+    // Must chain: getPeerInfo needs peerIdToName populated by getPeerMemory.
     rpc.call('noble_getPeerMemory').then(records => {
       if (Array.isArray(records)) {
         for (const r of records) {
           if (r.peer_id && r.node_name) peerIdToName.set(r.peer_id, r.node_name);
         }
       }
-    }).catch(() => {});
-    rpc.call('noble_getPeerInfo').then(peers => {
+      // Now that names are populated, seed peer connections.
+      return rpc.call('noble_getPeerInfo');
+    }).then(peers => {
       if (Array.isArray(peers)) {
         for (const p of peers) {
           if (p.status === 'connected' && !seededPeerIds.has(p.peer_id)) {
             seededPeerIds.add(p.peer_id);
-            pushActivity({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '', node_name: peerIdToName.get(p.peer_id) || '' });
+            pushPeerEvent({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '', node_name: peerIdToName.get(p.peer_id) || '' });
           }
         }
       }

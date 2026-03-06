@@ -173,6 +173,13 @@ impl CycleEngine {
         self.our_validator_key.is_some()
     }
 
+    /// Our validator public key as wire bytes (for identity comparison).
+    pub fn our_validator_wire_bytes(&self) -> Option<Vec<u8>> {
+        self.our_validator_key
+            .as_ref()
+            .map(|(_, pk)| pk.to_wire_bytes())
+    }
+
     /// Whether block proposals are enabled.
     pub fn proposals_enabled(&self) -> bool {
         self.proposals_enabled
@@ -400,11 +407,18 @@ impl CycleEngine {
             }
         }
 
-        // Schedule next timer
-        let next_timer = self
-            .cycle_mgr
-            .seconds_until_phase_change(now)
-            .min(self.cycle_mgr.seconds_until_cycle_boundary(now));
+        // Schedule next timer.  If a vote is pending (cast attempted but no
+        // candidate was available), use a short retry interval so we re-check
+        // quickly once a block arrives via gossip.
+        let vote_pending = (new_phase == CyclePhase::Voting && !self.r1_vote_cast)
+            || (new_phase == CyclePhase::Reflection && !self.r2_vote_cast);
+        let next_timer = if vote_pending {
+            5 // retry every 5s until candidate appears
+        } else {
+            self.cycle_mgr
+                .seconds_until_phase_change(now)
+                .min(self.cycle_mgr.seconds_until_cycle_boundary(now))
+        };
         outputs.push(CycleIo::SetTimer {
             duration_secs: next_timer.max(1),
         });
@@ -1387,16 +1401,19 @@ impl CycleEngine {
     /// Cast an R1 vote for our preferred candidate.
     fn cast_r1_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
-        self.r1_vote_cast = true;
 
         // Propose-only nodes (voting_enabled=false) don't cast votes.
         if !self.voting_enabled {
+            self.r1_vote_cast = true;
             return outputs;
         }
 
         let (ref priv_key, ref pub_key) = match &self.our_validator_key {
             Some(kp) => kp,
-            None => return outputs,
+            None => {
+                self.r1_vote_cast = true;
+                return outputs;
+            }
         };
 
         let tallies = self.vote_mgr.current_tallies();
@@ -1411,6 +1428,7 @@ impl CycleEngine {
             Some(&tallies),
         );
         if let Some(candidate_hash) = selected {
+            self.r1_vote_cast = true;
             match PorVote::sign(cycle, candidate_hash, priv_key, pub_key.clone()) {
                 Ok(vote) => {
                     // Record our own R1 vote locally — gossipsub does not
@@ -1433,9 +1451,12 @@ impl CycleEngine {
                 }
             }
         } else {
+            // No candidate available yet — DON'T set r1_vote_cast so
+            // handle_tick will retry on the next tick when a candidate
+            // may have arrived via gossip.
             let n = self.candidate_tracker.all_candidates().len();
             outputs.push(CycleIo::Log(format!(
-                "cycle {cycle}: no candidate selected for R1 vote ({n} proposal(s) available)"
+                "cycle {cycle}: no candidate selected for R1 vote ({n} proposal(s) available), will retry"
             )));
         }
 
@@ -1445,16 +1466,19 @@ impl CycleEngine {
     /// P1.2: Cast an R2 confirmation vote based on R1 tallies.
     fn cast_r2_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
-        self.r2_vote_cast = true;
 
         // Propose-only nodes (voting_enabled=false) don't cast votes.
         if !self.voting_enabled {
+            self.r2_vote_cast = true;
             return outputs;
         }
 
         let (ref priv_key, ref pub_key) = match &self.our_validator_key {
             Some(kp) => kp,
-            None => return outputs,
+            None => {
+                self.r2_vote_cast = true;
+                return outputs;
+            }
         };
 
         // Use confirmation_strategy applied to current R1 tallies.
@@ -1469,6 +1493,7 @@ impl CycleEngine {
         );
 
         if let Some(candidate_hash) = selected {
+            self.r2_vote_cast = true;
             match PorVote::sign_round(cycle, candidate_hash, 2, priv_key, pub_key.clone()) {
                 Ok(vote) => {
                     // Record our own R2 vote
@@ -1487,9 +1512,10 @@ impl CycleEngine {
                 }
             }
         } else {
+            // No candidate available — allow retry on subsequent ticks.
             let r1_count = self.vote_mgr.current_tallies().len();
             outputs.push(CycleIo::Log(format!(
-                "cycle {cycle}: no candidate selected for R2 vote ({r1_count} R1 candidate(s))"
+                "cycle {cycle}: no candidate selected for R2 vote ({r1_count} R1 candidate(s)), will retry"
             )));
         }
 
@@ -2306,9 +2332,11 @@ mod tests {
         // Voting starts at g+300, delay fires at g+330
         let _outputs = engine.step(CycleEvent::Tick { now: g + 330 });
 
+        // With no candidates available, r1_vote_cast stays false so the
+        // engine can retry when a candidate arrives via gossip.
         assert!(
-            engine.r1_vote_cast,
-            "r1_vote_cast should be set after Voting + 30s tick"
+            !engine.r1_vote_cast,
+            "r1_vote_cast should stay false when no candidates available (allows retry)"
         );
     }
 
@@ -2329,9 +2357,11 @@ mod tests {
         let now = g + 1200 + 600 + 30; // cycle 1 start + Reflection + 30s delay
         let _outputs = engine.step(CycleEvent::Tick { now });
 
+        // With no candidates available, r2_vote_cast stays false so the
+        // engine can retry when a candidate arrives.
         assert!(
-            engine.r2_vote_cast,
-            "r2_vote_cast should be set after Reflection + 30s tick"
+            !engine.r2_vote_cast,
+            "r2_vote_cast should stay false when no candidates available (allows retry)"
         );
     }
 
