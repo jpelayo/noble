@@ -2027,9 +2027,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let hex_pid = hex::encode(peer_id);
                 let was_inbound = {
                     let info = self.peer_info.read();
-                    info.get(&hex_pid)
-                        .map(|e| e.direction == "inbound")
-                        .unwrap_or(true)
+                    match info.get(&hex_pid) {
+                        Some(e) => e.direction == "inbound",
+                        None => {
+                            // Defense-in-depth: peer was never in peer_info — this
+                            // should not happen after the service.rs guard, but if
+                            // it does, skip all decrement/event logic to avoid
+                            // corrupting peer_count.
+                            tracing::debug!(task = "peer_tracking", "PeerDisconnected for untracked peer {hex_pid} — ignoring");
+                            return;
+                        }
+                    }
                 };
                 let new_count = {
                     let mut stats = self.network_stats.write();

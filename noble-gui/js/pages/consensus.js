@@ -461,6 +461,30 @@ export function init(root, ctx) {
   const ACTIVITY_MAX_ENTRIES = 100;
   const activityEntries = []; // circular buffer (oldest at 0)
 
+  // ── Rate-limiting: coalesce rapid repeated events ──
+  // Key = event type + peer/node identifier → last entry index + timestamp.
+  // If the same key fires again within DEDUP_WINDOW_MS, increment a counter
+  // on the existing entry instead of appending a new one.
+  const DEDUP_WINDOW_MS = 5000;
+  const _lastEntryByKey = new Map(); // key → { idx, ts }
+
+  function dedupKey(data) {
+    const e = data.event;
+    // Group by event type + peer/node identity
+    if (e === 'peer_connected' || e === 'peer_disconnected')
+      return `${e}:${data.peer_id || data.node_name || ''}`;
+    if (e === 'announce_published' || e === 'announce_received')
+      return `${e}:${data.node_name || data.identity || ''}`;
+    if (e === 'reconnect_attempt')
+      return `${e}:${data.addresses || ''}`;
+    if (e === 'peer_status')
+      return `${e}:${data.peer_id || ''}`;
+    if (e === 'sync_requested')
+      return e;
+    // All other events: no dedup (they carry unique data)
+    return null;
+  }
+
   const ACTIVITY_ICONS = {
     block_committed:    '\u2713',  // checkmark
     block_proposed:     '\u25b6',  // right triangle
@@ -588,14 +612,39 @@ export function init(root, ctx) {
   }
 
   function pushActivity(data) {
-    const now = new Date();
-    const ts = String(now.getHours()).padStart(2, '0') + ':' +
-               String(now.getMinutes()).padStart(2, '0') + ':' +
-               String(now.getSeconds()).padStart(2, '0');
-    activityEntries.push({ ts, data });
-    // Cap at max — drop oldest
+    const now = Date.now();
+    const d = new Date(now);
+    const ts = String(d.getHours()).padStart(2, '0') + ':' +
+               String(d.getMinutes()).padStart(2, '0') + ':' +
+               String(d.getSeconds()).padStart(2, '0');
+
+    // Rate-limit: coalesce rapid repeated events
+    const key = dedupKey(data);
+    if (key) {
+      const prev = _lastEntryByKey.get(key);
+      if (prev && (now - prev.ts) < DEDUP_WINDOW_MS && prev.idx < activityEntries.length) {
+        const entry = activityEntries[prev.idx];
+        entry.count = (entry.count || 1) + 1;
+        entry.ts = ts; // update timestamp to latest occurrence
+        prev.ts = now;
+        renderActivityLog();
+        return;
+      }
+    }
+
+    const entry = { ts, data, count: 1 };
+    activityEntries.push(entry);
+    if (key) _lastEntryByKey.set(key, { idx: activityEntries.length - 1, ts: now });
+
+    // Cap at max — drop oldest and reindex dedup map
     if (activityEntries.length > ACTIVITY_MAX_ENTRIES) {
-      activityEntries.splice(0, activityEntries.length - ACTIVITY_MAX_ENTRIES);
+      const removed = activityEntries.length - ACTIVITY_MAX_ENTRIES;
+      activityEntries.splice(0, removed);
+      // Reindex: shift all tracked indices down
+      for (const [k, v] of _lastEntryByKey) {
+        v.idx -= removed;
+        if (v.idx < 0) _lastEntryByKey.delete(k);
+      }
     }
     renderActivityLog();
   }
@@ -608,11 +657,12 @@ export function init(root, ctx) {
     // Render newest first, reuse innerHTML (fast for <100 entries)
     let html = '';
     for (let i = activityEntries.length - 1; i >= 0; i--) {
-      const { ts, data } = activityEntries[i];
+      const { ts, data, count } = activityEntries[i];
       const icon = ACTIVITY_ICONS[data.event] || '\u2022';
       const color = activityColor(data.event);
       const msg = formatActivityMessage(data);
-      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}</div>`;
+      const badge = count > 1 ? ` <span style="font-size:0.75em;color:var(--text-muted);background:var(--bg-tertiary);padding:0 4px;border-radius:3px">\u00d7${count}</span>` : '';
+      html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}${badge}</div>`;
     }
     csActivityLog.innerHTML = html;
   }

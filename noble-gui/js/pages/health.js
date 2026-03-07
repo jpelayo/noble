@@ -6,7 +6,7 @@
 import { formatNumber, formatBytes, formatDuration, formatChainLabel } from '../utils.js';
 
 export function init(root, ctx) {
-  const { rpc } = ctx;
+  const { rpc, ws } = ctx;
   const unsubs = [];
 
 
@@ -87,7 +87,11 @@ export function init(root, ctx) {
     }
   }
 
-  // Refresh uptime every 60s
+  // Refresh on new blocks (captures storage changes + keeps uptime fresh)
+  if (ws && ws.subscribe) {
+    unsubs.push(ws.subscribe('newBlocks', () => loadNodeInfo()));
+  }
+  // Fallback: refresh uptime every 60s
   const uptimeInterval = setInterval(async () => {
     try {
       const info = await rpc.call('noble_getNodeInfo');

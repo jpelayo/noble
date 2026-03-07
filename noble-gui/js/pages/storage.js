@@ -21,7 +21,7 @@ function usageColor(pct) {
 }
 
 export function init(root, ctx) {
-  const { rpc } = ctx;
+  const { rpc, ws } = ctx;
   const unsubs = [];
 
   root.innerHTML = `
@@ -592,8 +592,12 @@ export function init(root, ctx) {
     unsubs.push(() => { ro.disconnect(); retentionChart?.dispose(); });
   }
 
-  // Refresh every 30s
-  const refreshInterval = setInterval(loadStorage, 30_000);
+  // Refresh on new blocks (storage changes are triggered by block commits)
+  if (ws && ws.subscribe) {
+    unsubs.push(ws.subscribe('newBlocks', () => loadStorage()));
+  }
+  // Fallback: refresh every 60s in case WS is unavailable
+  const refreshInterval = setInterval(loadStorage, 60_000);
   unsubs.push(() => clearInterval(refreshInterval));
 
   // WS reconnect: refresh storage data

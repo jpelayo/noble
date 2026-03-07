@@ -264,10 +264,28 @@ impl PeerManager {
         true
     }
 
-    /// Handle a peer disconnection.
-    pub fn on_disconnected(&mut self, peer_id: &PeerId) {
+    /// Handle a peer disconnection.  Returns `true` if the peer was tracked
+    /// (i.e. was previously accepted via `on_connected`).  Returns `false` for
+    /// peers that were rejected at connection time and never tracked — callers
+    /// should NOT emit `PeerDisconnected` for these.
+    pub fn on_disconnected(&mut self, peer_id: &PeerId) -> bool {
+        if self.peers.remove(peer_id).is_some() {
+            tracing::info!(task = "peer_disconnect", peer_id = %peer_id, "peer disconnected");
+            true
+        } else {
+            tracing::debug!(task = "peer_disconnect", peer_id = %peer_id, "connection closed for untracked peer (rejected at connect)");
+            false
+        }
+    }
+
+    /// Immediately ban a peer regardless of cumulative score.
+    /// Used for definitive violations like chain_id mismatch where the first
+    /// occurrence is sufficient evidence.
+    pub fn force_ban(&mut self, peer_id: &PeerId) {
         self.peers.remove(peer_id);
-        tracing::info!(task = "peer_disconnect", peer_id = %peer_id, "peer disconnected");
+        self.banned.insert(*peer_id, Instant::now());
+        self.banned_count += 1;
+        tracing::info!(task = "peer_ban", %peer_id, "peer force-banned");
     }
 
     /// Record a misbehavior for a peer. Returns `true` if the peer's cumulative

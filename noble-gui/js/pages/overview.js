@@ -134,7 +134,7 @@ export function init(root, ctx) {
   async function loadRecentBlocks() {
     try {
       const count = await rpc.call('noble_getBlockCount');
-      const start = Math.max(0, count.height - 9);
+      const start = Math.max(1, count.height - 9);
       const blocks = await rpc.call('noble_getBlockRange', [start, count.height - start + 1]);
       ovBlocks.innerHTML = '';
       for (const b of blocks.reverse()) {

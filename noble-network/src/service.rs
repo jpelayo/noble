@@ -625,18 +625,25 @@ async fn handle_swarm_event(
             // closes.  libp2p can maintain multiple connections per peer; closing
             // one socket must not poison the node's view of the network.
             if num_established == 0 {
-                peer_manager.on_disconnected(&peer_id);
+                let was_tracked = peer_manager.on_disconnected(&peer_id);
                 tx_rate_limiter.remove_peer(&peer_id);
-                if event_tx
-                    .try_send(NetworkEvent::PeerDisconnected {
-                        peer_id: peer_id.to_bytes().to_vec(),
-                    })
-                    .is_err()
-                {
-                    tracing::warn!(
-                        task = "event_channel",
-                        "event channel full: PeerDisconnected dropped"
-                    );
+                // Only emit PeerDisconnected if this peer was actually accepted
+                // and tracked.  Peers rejected at connection time (subnet
+                // diversity, limit, banned) cause a ConnectionClosed but were
+                // never tracked — emitting a disconnect for them would falsely
+                // decrement the node's peer_count and trigger spurious redials.
+                if was_tracked {
+                    if event_tx
+                        .try_send(NetworkEvent::PeerDisconnected {
+                            peer_id: peer_id.to_bytes().to_vec(),
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            task = "event_channel",
+                            "event channel full: PeerDisconnected dropped"
+                        );
+                    }
                 }
             } else {
                 tracing::debug!(
@@ -682,6 +689,7 @@ async fn handle_swarm_event(
                             seen_txs,
                             tx_rate_limiter,
                             peer_manager,
+                            &event_tx,
                         ),
                         GossipMessage::PorVote {
                             cycle,
@@ -818,13 +826,21 @@ async fn handle_swarm_event(
                 }
                 Err(e) => {
                     tracing::warn!(task = "gossip_receive", %propagation_source, err = %e, "invalid gossip message");
-                    peer_manager.record_misbehavior(
+                    let reason_text = format!("malformed gossip: {e}");
+                    let banned = peer_manager.record_misbehavior(
                         &propagation_source,
                         BanReason::new(
                             BanCategory::ProtocolViolation,
-                            format!("malformed gossip: {e}"),
+                            reason_text.clone(),
                         ),
                     );
+                    if banned {
+                        let _ = swarm.disconnect_peer_id(propagation_source);
+                        let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+                            peer_id: propagation_source.to_bytes().to_vec(),
+                            reason: reason_text,
+                        });
+                    }
                     let _ = swarm
                         .behaviour_mut()
                         .gossip
@@ -915,38 +931,49 @@ async fn handle_swarm_event(
                     ..
                 } => {
                     // GAP-H4: Verify chain_id and protocol_version.
-                    if chain_id != config.chain_id || protocol_version != config.protocol_version {
-                        tracing::warn!(
-                            task = "sync",
-                            %peer,
-                            remote_chain_id = chain_id,
-                            local_chain_id = config.chain_id,
-                            "chain/protocol mismatch — disconnecting"
-                        );
-                        if peer_manager.record_misbehavior(
+                    //
+                    // Both values are deterministic compiled constants:
+                    //   - chain_id: derived from SHA-256 of genesis block (u32)
+                    //   - protocol_version: hardcoded in noble-core (currently 1)
+                    //
+                    // A mismatch is definitive proof the peer is on a different
+                    // blockchain or running an incompatible protocol. No tolerance
+                    // needed — legitimate peers ALWAYS match on both values.
+                    // Disconnect + ban immediately on first occurrence.
+                    let chain_mismatch = chain_id != config.chain_id;
+                    let proto_mismatch = protocol_version != config.protocol_version;
+                    if chain_mismatch || proto_mismatch {
+                        let reason = if chain_mismatch && proto_mismatch {
+                            format!(
+                                "chain_id AND protocol mismatch: local=({}, proto {}) remote=({}, proto {})",
+                                config.chain_id, config.protocol_version, chain_id, protocol_version,
+                            )
+                        } else if chain_mismatch {
+                            format!(
+                                "different blockchain: local chain_id={}, remote chain_id={}",
+                                config.chain_id, chain_id,
+                            )
+                        } else {
+                            format!(
+                                "incompatible protocol version: local={}, remote={}",
+                                config.protocol_version, protocol_version,
+                            )
+                        };
+                        tracing::warn!(task = "sync", %peer, "{reason}");
+                        // Record misbehavior for score tracking, but disconnect
+                        // regardless of whether cumulative threshold is reached.
+                        peer_manager.record_misbehavior(
                             &peer,
-                            BanReason::new(
-                                BanCategory::ProtocolViolation,
-                                format!(
-                                    "chain_id mismatch: expected {}, got {}",
-                                    config.chain_id, chain_id
-                                ),
-                            ),
-                        ) {
-                            let _ = swarm.disconnect_peer_id(peer);
-                            if event_tx
-                                .try_send(NetworkEvent::PeerBanned {
-                                    peer_id: peer.to_bytes().to_vec(),
-                                    reason: "chain/protocol mismatch".into(),
-                                })
-                                .is_err()
-                            {
-                                tracing::warn!(
-                                    task = "event_channel",
-                                    "event channel full: PeerBanned dropped"
-                                );
-                            }
-                        }
+                            BanReason::new(BanCategory::ProtocolViolation, reason.clone()),
+                        );
+                        // Force-ban: ensure the peer is in the banned set even
+                        // if the cumulative score hadn't yet crossed threshold.
+                        peer_manager.force_ban(&peer);
+                        let _ = swarm.disconnect_peer_id(peer);
+                        let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+                            peer_id: peer.to_bytes().to_vec(),
+                            reason,
+                        });
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
                         // S49: Compute clock offset from sender_timestamp.
@@ -1109,12 +1136,20 @@ fn handle_tx_announce(
     seen_txs: &mut SeenCache,
     tx_rate_limiter: &mut TxRateLimiter,
     peer_manager: &mut PeerManager,
+    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
 ) -> Option<NetworkEvent> {
     if !tx_rate_limiter.try_consume(source) {
-        peer_manager.record_misbehavior(
+        let reason = "tx relay rate limit exceeded".to_string();
+        let banned = peer_manager.record_misbehavior(
             source,
-            BanReason::new(BanCategory::TxFlood, "tx relay rate limit exceeded"),
+            BanReason::new(BanCategory::TxFlood, reason.clone()),
         );
+        if banned {
+            let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+                peer_id: source.to_bytes().to_vec(),
+                reason,
+            });
+        }
         None
     } else if !seen_txs.insert_if_new(tx_id) {
         None
@@ -1268,13 +1303,20 @@ fn handle_gossip_node_announce(
         }
         Err(reason) => {
             tracing::warn!(task = "gossip_receive", %source, %reason, "invalid node announce");
-            peer_manager.record_misbehavior(
+            let reason_text = format!("invalid announce: {reason}");
+            let banned = peer_manager.record_misbehavior(
                 source,
                 BanReason::new(
                     BanCategory::InvalidAnnounce,
-                    format!("invalid announce: {reason}"),
+                    reason_text.clone(),
                 ),
             );
+            if banned {
+                let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+                    peer_id: source.to_bytes().to_vec(),
+                    reason: reason_text,
+                });
+            }
             None
         }
     }

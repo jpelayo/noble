@@ -167,9 +167,9 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
                             validator_id: hex::encode(header.validator_id.to_wire_bytes()),
                         });
                     }
-                    Err(_) => break,
+                    Err(_) => continue,
                 },
-                Err(_) => break,
+                Err(_) => continue,
             }
         }
 

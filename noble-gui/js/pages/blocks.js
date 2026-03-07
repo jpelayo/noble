@@ -47,12 +47,13 @@ export function init(root, ctx) {
     try {
       const count = await rpc.call('noble_getBlockCount');
       totalHeight = count.height;
-      const totalPages = Math.ceil((totalHeight + 1) / PAGE_SIZE);
+      const totalPages = Math.max(1, Math.ceil(totalHeight / PAGE_SIZE));
       currentPage = Math.max(0, Math.min(page, totalPages - 1));
 
-      // Show newest first: page 0 = highest blocks
+      // Show newest first: page 0 = highest blocks.
+      // Height 0 (genesis placeholder) has no stored block — start from 1.
       const endHeight = totalHeight - currentPage * PAGE_SIZE;
-      const startHeight = Math.max(0, endHeight - PAGE_SIZE + 1);
+      const startHeight = Math.max(1, endHeight - PAGE_SIZE + 1);
 
       const rangeSize = endHeight - startHeight + 1;
       const blocks = await rpc.call('noble_getBlockRange', [startHeight, rangeSize]);
@@ -62,13 +63,13 @@ export function init(root, ctx) {
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.innerHTML = `
-          <td>${formatNumber(b.header.height)}</td>
+          <td>${formatNumber(b.height)}</td>
           <td class="mono">${truncateHash(b.hash)}</td>
-          <td>${b.header.tx_count}</td>
-          <td class="mono">${truncateHash(validatorKeyHex(b.header.validator_id), 6)}</td>
-          <td>${timeAgo(b.header.timestamp)}</td>
+          <td>${b.tx_count}</td>
+          <td class="mono">${truncateHash(b.validator_id, 12)}</td>
+          <td>${timeAgo(b.timestamp)}</td>
         `;
-        tr.addEventListener('click', () => { location.hash = `#/block/${b.header.height}`; });
+        tr.addEventListener('click', () => { location.hash = `#/block/${b.height}`; });
         tbody.appendChild(tr);
       }
 
