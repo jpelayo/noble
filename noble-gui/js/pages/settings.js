@@ -290,6 +290,20 @@ export function init(root, ctx) {
         </div>
 
         <div style="margin-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Fork Resolution</p>
+          <div id="s-fork-resolution-wrap" style="overflow-x:auto">
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">Loading...</p>
+          </div>
+        </div>
+
+        <div style="margin-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Checkpoints</p>
+          <div id="s-checkpoints-wrap" style="overflow-x:auto">
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted)">Loading...</p>
+          </div>
+        </div>
+
+        <div style="margin-top:var(--gap)">
           <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Discovered Blockchains</p>
           <div id="s-discovered-chains-wrap" style="overflow-x:auto">
             <p style="font-size:var(--font-size-xs);color:var(--text-muted)">None discovered yet</p>
@@ -1243,6 +1257,8 @@ export function init(root, ctx) {
 
   const chainInfoEl = root.querySelector('#s-chain-info');
   const forkWrap = root.querySelector('#s-fork-table-wrap');
+  const forkResolutionWrap = root.querySelector('#s-fork-resolution-wrap');
+  const checkpointsWrap = root.querySelector('#s-checkpoints-wrap');
   const discoveredChainsWrap = root.querySelector('#s-discovered-chains-wrap');
   const chainGear = root.querySelector('#s-chain-gear');
   const chainModal = root.querySelector('#s-chain-modal');
@@ -1343,6 +1359,65 @@ export function init(root, ctx) {
   loadDiscoveredChains();
   const discoveredTimer = setInterval(loadDiscoveredChains, 30000);
 
+  // --- Fork Resolution Status ---
+  async function loadForkResolution() {
+    try {
+      const data = await rpc.call('noble_getForkResolutionStatus');
+      const stratColors = { manual: 'var(--text-muted)', peer_supermajority: 'var(--accent-blue,#2196f3)', longest_chain: 'var(--accent-orange,#ff9800)' };
+      const color = stratColors[data.strategy] || 'var(--text-muted)';
+      let html = `<dl class="inline-dl" style="font-size:var(--font-size-xs)">
+        <dt>Strategy</dt><dd><span style="color:${color};font-weight:600">${data.strategy}</span></dd>
+        <dt>Delay</dt><dd>${data.delay_cycles} cycles</dd>
+        <dt>Finalized Floor</dt><dd>${data.finalized_floor}</dd>
+        <dt>Checkpoint Floor</dt><dd>${data.checkpoint_floor}</dd>`;
+      if (data.dwell_counter > 0) {
+        html += `<dt>Status</dt><dd style="color:var(--accent-orange,#ff9800);font-weight:600">Resolving in ${data.delay_cycles - data.dwell_counter} cycle(s)...</dd>`;
+      }
+      if (data.tracking_fork) {
+        html += `<dt>Tracking</dt><dd style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${data.tracking_fork.slice(0,12)}...</dd>`;
+      }
+      html += `</dl>`;
+      forkResolutionWrap.innerHTML = html;
+    } catch (e) {
+      forkResolutionWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Unavailable</p>';
+    }
+  }
+  loadForkResolution();
+  const forkResTimer = setInterval(loadForkResolution, 30000);
+
+  // --- Checkpoints ---
+  async function loadCheckpoints() {
+    try {
+      const data = await rpc.call('noble_getCheckpoints', [10]);
+      let html = `<dl class="inline-dl" style="font-size:var(--font-size-xs)">
+        <dt>Interval</dt><dd>every ${data.checkpoint_interval} blocks</dd>
+        <dt>Total</dt><dd>${data.total_checkpoints}</dd>
+        <dt>Highest Active</dt><dd>${data.highest_active_height}</dd>
+      </dl>`;
+      if (data.checkpoints && data.checkpoints.length > 0) {
+        const rows = data.checkpoints.map(cp => {
+          const status = cp.active
+            ? '<span style="color:var(--accent-green,#4caf50);font-weight:600">Active</span>'
+            : '<span style="color:var(--accent-yellow,#ffc107)">Pending</span>';
+          return `<tr>
+            <td>${cp.height}</td>
+            <td style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${cp.hash.slice(0,12)}...</td>
+            <td>${status}</td>
+          </tr>`;
+        }).join('');
+        html += `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
+          <thead><tr><th>Height</th><th>Hash</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+      }
+      checkpointsWrap.innerHTML = html;
+    } catch (e) {
+      checkpointsWrap.innerHTML = '<p style="font-size:var(--font-size-xs);color:var(--text-muted)">Unavailable</p>';
+    }
+  }
+  loadCheckpoints();
+  const cpTimer = setInterval(loadCheckpoints, 30000);
+
   // Modal open/close
   function openChainModal() {
     chainModalMsg.textContent = '';
@@ -1402,12 +1477,14 @@ export function init(root, ctx) {
   });
 
   // WS reconnect: refresh fork + discovered chains + settings
-  function onWsReconnect() { loadForks(); loadDiscoveredChains(); loadSettings(); }
+  function onWsReconnect() { loadForks(); loadForkResolution(); loadCheckpoints(); loadDiscoveredChains(); loadSettings(); }
   window.addEventListener('noble-ws-reconnect', onWsReconnect);
 
   return {
     destroy() {
       clearInterval(forkTimer);
+      clearInterval(forkResTimer);
+      clearInterval(cpTimer);
       clearInterval(discoveredTimer);
       closeChainModal();
       window.removeEventListener('noble-ws-reconnect', onWsReconnect);

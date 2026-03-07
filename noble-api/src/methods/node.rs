@@ -245,6 +245,14 @@ pub trait NodeApi {
     #[method(name = "getEvidence")]
     async fn get_evidence(&self, evidence_hash: String) -> Result<EvidenceDetailResponse, ErrorObjectOwned>;
 
+    /// Get checkpoint status: interval, active checkpoints, highest reorg floor.
+    #[method(name = "getCheckpoints")]
+    async fn get_checkpoints(&self, limit: Option<usize>) -> Result<CheckpointsResponse, ErrorObjectOwned>;
+
+    /// Get fork resolution status: strategy, dwell timer, safety floors.
+    #[method(name = "getForkResolutionStatus")]
+    async fn get_fork_resolution_status(&self) -> Result<ForkResolutionStatusResponse, ErrorObjectOwned>;
+
     /// Reset the chain to genesis and trigger re-sync from peers.
     ///
     /// This is a destructive operation used for fork recovery ("blockchain hop").
@@ -1247,6 +1255,48 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             evidence_type,
             validator,
             detail,
+        })
+    }
+
+    async fn get_checkpoints(&self, limit: Option<usize>) -> Result<CheckpointsResponse, ErrorObjectOwned> {
+        let consensus = self.consensus.read();
+        let mgr = consensus.checkpoint_manager();
+        let limit = limit.unwrap_or(20);
+        let recent = mgr.recent_checkpoints(limit);
+        let checkpoints: Vec<CheckpointEntry> = recent
+            .iter()
+            .map(|cp| CheckpointEntry {
+                height: cp.height,
+                hash: hex::encode(cp.hash.as_bytes()),
+                created_at_cycle: cp.created_at_cycle,
+                activates_at_cycle: cp.activates_at_cycle,
+                active: cp.active,
+            })
+            .collect();
+        Ok(CheckpointsResponse {
+            checkpoint_interval: mgr.interval(),
+            total_checkpoints: mgr.total(),
+            highest_active_height: mgr.highest_active_height(),
+            checkpoints,
+        })
+    }
+
+    async fn get_fork_resolution_status(&self) -> Result<ForkResolutionStatusResponse, ErrorObjectOwned> {
+        let consensus = self.consensus.read();
+        let resolver = consensus.fork_resolver();
+        let cp_mgr = consensus.checkpoint_manager();
+        let strategy = match resolver.strategy() {
+            noble_consensus::ForkResolutionStrategy::Manual => "manual",
+            noble_consensus::ForkResolutionStrategy::PeerSupermajority => "peer_supermajority",
+            noble_consensus::ForkResolutionStrategy::LongestChain => "longest_chain",
+        };
+        Ok(ForkResolutionStatusResponse {
+            strategy: strategy.to_string(),
+            delay_cycles: resolver.min_fork_duration(),
+            dwell_counter: resolver.dwell_counter(),
+            tracking_fork: resolver.tracked_fork_hash().map(|h| hex::encode(h.as_bytes())),
+            finalized_floor: consensus.finality_tracker().finalized_height,
+            checkpoint_floor: cp_mgr.highest_active_height(),
         })
     }
 

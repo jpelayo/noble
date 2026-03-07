@@ -1596,6 +1596,39 @@ impl StorageEngine for RocksDbStorage {
         Ok(result)
     }
 
+    // ── Checkpoint State ──
+
+    fn store_checkpoint(&self, height: u64, data: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        let key = format!("checkpoint:{:010}", height);
+        self.db
+            .put_cf(cf, key.as_bytes(), data)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn load_checkpoints(&self) -> Result<Vec<(u64, Vec<u8>)>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_CHAIN_STATE)?;
+        let prefix = b"checkpoint:";
+        let mut result = Vec::new();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.starts_with(prefix) {
+                // Key format: "checkpoint:0000000030" → parse height from after ":"
+                if let Ok(key_str) = std::str::from_utf8(&key[prefix.len()..]) {
+                    if let Ok(height) = key_str.parse::<u64>() {
+                        result.push((height, value.to_vec()));
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
     fn close(&mut self) -> Result<(), StorageError> {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())

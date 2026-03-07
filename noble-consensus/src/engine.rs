@@ -97,6 +97,10 @@ pub struct CycleEngine {
     badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
     /// Phase 1: Finality tracker — counts consecutive clean cycles for finality.
     finality_tracker: FinalityTracker,
+    /// Phase 3: Automatic fork resolution state machine.
+    fork_resolver: crate::fork_resolver::ForkResolver,
+    /// Phase 3: Periodic checkpoint manager.
+    checkpoint_mgr: crate::checkpoint::CheckpointManager,
 }
 
 impl CycleEngine {
@@ -118,6 +122,9 @@ impl CycleEngine {
     ) -> Self {
         let cycle_mgr = CycleManager::new(noble_core::CYCLE_DURATION_SECS, genesis_timestamp);
         let confirmation_threshold = config.confirmation_threshold;
+        let fork_strategy = config.fork_resolution_strategy;
+        let fork_delay = config.fork_resolution_delay_cycles;
+        let checkpoint_interval = config.checkpoint_interval;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -149,6 +156,14 @@ impl CycleEngine {
             badge_store: BadgeStore::new(),
             badge_proposals: std::collections::HashMap::new(),
             finality_tracker: FinalityTracker::new(confirmation_threshold),
+            fork_resolver: crate::fork_resolver::ForkResolver::new(
+                fork_strategy,
+                fork_delay,
+            ),
+            checkpoint_mgr: crate::checkpoint::CheckpointManager::new(
+                checkpoint_interval,
+                confirmation_threshold,
+            ),
         }
     }
 
@@ -182,6 +197,21 @@ impl CycleEngine {
     /// Restore finality state from storage on startup.
     pub fn restore_finality(&mut self, height: u64, hash: Hash256, cycle: u64) {
         self.finality_tracker.restore(height, hash, cycle);
+    }
+
+    /// Get fork resolver (read-only) for RPC queries.
+    pub fn fork_resolver(&self) -> &crate::fork_resolver::ForkResolver {
+        &self.fork_resolver
+    }
+
+    /// Get checkpoint manager (read-only) for RPC queries.
+    pub fn checkpoint_manager(&self) -> &crate::checkpoint::CheckpointManager {
+        &self.checkpoint_mgr
+    }
+
+    /// Restore checkpoints from storage on startup.
+    pub fn restore_checkpoints(&mut self, cps: Vec<crate::checkpoint::Checkpoint>) {
+        self.checkpoint_mgr.restore(cps);
     }
 
     /// Whether a validator key is configured.
@@ -257,11 +287,20 @@ impl CycleEngine {
     /// resetting to height 0 — the cycle epoch so the engine re-enters pre-genesis
     /// mode and waits for the new chain's block 1 to set the epoch.
     pub fn reset_tip(&mut self, height: u64, block_hash: Hash256, force: bool) -> Result<(), ConsensusError> {
-        if !force && height != 0 && height <= self.finality_tracker.finalized_height {
-            return Err(ConsensusError::ReorgPastFinality {
-                finalized: self.finality_tracker.finalized_height,
-                requested: height,
-            });
+        if !force && height != 0 {
+            if height <= self.finality_tracker.finalized_height {
+                return Err(ConsensusError::ReorgPastFinality {
+                    finalized: self.finality_tracker.finalized_height,
+                    requested: height,
+                });
+            }
+            let cp_floor = self.checkpoint_mgr.highest_active_height();
+            if cp_floor > 0 && height <= cp_floor {
+                return Err(ConsensusError::ReorgPastCheckpoint {
+                    checkpoint: cp_floor,
+                    requested: height,
+                });
+            }
         }
         self.tip_height = height;
         self.tip_hash = block_hash;
@@ -282,6 +321,11 @@ impl CycleEngine {
             self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
             self.finality_tracker.reset_full();
+            self.checkpoint_mgr.reset();
+            self.fork_resolver = crate::fork_resolver::ForkResolver::new(
+                self.config.fork_resolution_strategy,
+                self.config.fork_resolution_delay_cycles,
+            );
         } else {
             self.finality_tracker.reset();
         }
@@ -405,6 +449,12 @@ impl CycleEngine {
                 );
                 self.tracked_cycle = new_cycle;
                 outputs.extend(self.handle_cycle_boundary(completed));
+
+                // Tick checkpoint activation after cycle boundary.
+                let activated = self.checkpoint_mgr.tick_activation(new_cycle);
+                if !activated.is_empty() {
+                    outputs.push(CycleIo::CheckpointsActivated { heights: activated });
+                }
             }
 
             // Detect phase transition
@@ -536,14 +586,19 @@ impl CycleEngine {
             })
             .collect();
 
-        // Genesis protection: before block 1 is committed, require at least one
-        // Isolation guard: a node with zero connected peers must never commit
-        // blocks — not at genesis, not at any height.  Without live peers the
-        // only vote is the self-vote, which trivially wins plurality (1 >= ceil(1/3)).
-        // This prevents solo chain growth after a network partition.
-        if self.total_peers == 0 {
+        // Genesis isolation guard: before block 1 is committed (tip_height == 0),
+        // require at least one connected peer.  The Dual-Witness Rule already
+        // mandates ≥2 unique voters for block 1, but with zero peers the only
+        // vote is the self-vote — which trivially wins plurality.  This guard
+        // ensures block 1 always has live witnesses.
+        //
+        // After genesis (tip_height > 0), a solo validator CAN commit blocks
+        // using its self-vote.  If a peer disconnects after block 1, the chain
+        // must keep growing — a stuck chain is worse than a potential fork.
+        // Fork resolution (manual or automatic) handles divergence on reconnect.
+        if self.tip_height == 0 && self.total_peers == 0 {
             debug!(
-                "cycle {}: isolation guard — no connected peers, skipping consensus",
+                "cycle {}: genesis isolation guard — no connected peers, skipping consensus",
                 completed_cycle
             );
             // Re-admit all candidate txs
@@ -553,7 +608,7 @@ impl CycleEngine {
             if !all_txs.is_empty() {
                 outputs.push(CycleIo::ReadmitTransactions(all_txs));
             }
-            // Record empty cycle history and clear state
+            // Record cycle history with actual proposals/votes (not empty).
             let now_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -561,8 +616,8 @@ impl CycleEngine {
             self.last_cycle_history = Some(CycleHistoryEntry {
                 cycle_number: completed_cycle,
                 status: "isolated".to_string(),
-                proposals: Vec::new(),
-                votes: Vec::new(),
+                proposals,
+                votes: vote_entries,
                 winner: None,
                 winning_hash: None,
                 disambiguation: false,
@@ -573,7 +628,7 @@ impl CycleEngine {
             self.r1_vote_cast = false;
             self.r2_vote_cast = false;
             outputs.push(CycleIo::Log(format!(
-                "cycle {completed_cycle}: no connected peers — consensus requires live witnesses"
+                "cycle {completed_cycle}: no connected peers — genesis requires live witnesses"
             )));
             return outputs;
         }
@@ -716,6 +771,18 @@ impl CycleEngine {
                                     name: "finalized_height".to_string(),
                                     value: fh as f64,
                                 });
+                            }
+                            // Sync fork resolver's finality floor.
+                            self.fork_resolver.set_finalized_height(
+                                self.finality_tracker.finalized_height,
+                            );
+                            // Checkpoint: if height qualifies, create one.
+                            if let Some(cp) = self.checkpoint_mgr.on_block_committed(
+                                new_height,
+                                new_hash,
+                                completed_cycle,
+                            ) {
+                                outputs.push(CycleIo::PersistCheckpoint(Box::new(cp)));
                             }
                         }
                     } else {
@@ -1645,6 +1712,34 @@ impl ConsensusStateMachine for CycleEngine {
                 self.handle_vote_received(vote, from_peer)
             }
             CycleEvent::MempoolTransactions(txs) => self.handle_mempool_transactions(txs),
+            CycleEvent::ForkStatus {
+                local_height,
+                forks,
+                total_peers,
+            } => {
+                let mut outputs = Vec::new();
+                let decision = self.fork_resolver.evaluate(local_height, &forks, total_peers);
+                match decision {
+                    crate::fork_resolver::ForkDecision::Resolve {
+                        target_hash,
+                        target_height,
+                        reason,
+                    } => {
+                        outputs.push(CycleIo::RequestForkResolution {
+                            target_hash,
+                            target_height,
+                            reason,
+                        });
+                    }
+                    crate::fork_resolver::ForkDecision::Pending { cycles_remaining } => {
+                        outputs.push(CycleIo::Log(format!(
+                            "fork resolution pending: {cycles_remaining} cycle(s) remaining"
+                        )));
+                    }
+                    crate::fork_resolver::ForkDecision::NoAction => {}
+                }
+                outputs
+            }
         }
     }
 

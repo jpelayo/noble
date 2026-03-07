@@ -1292,6 +1292,36 @@ pub struct EvidenceDetailResponse {
     pub detail: serde_json::Value,
 }
 
+/// Response for `noble_getCheckpoints`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointsResponse {
+    pub checkpoint_interval: u64,
+    pub total_checkpoints: usize,
+    pub highest_active_height: u64,
+    pub checkpoints: Vec<CheckpointEntry>,
+}
+
+/// Single checkpoint entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointEntry {
+    pub height: u64,
+    pub hash: String,
+    pub created_at_cycle: u64,
+    pub activates_at_cycle: u64,
+    pub active: bool,
+}
+
+/// Response for `noble_getForkResolutionStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForkResolutionStatusResponse {
+    pub strategy: String,
+    pub delay_cycles: u32,
+    pub dwell_counter: u32,
+    pub tracking_fork: Option<String>,
+    pub finalized_floor: u64,
+    pub checkpoint_floor: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

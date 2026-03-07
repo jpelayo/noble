@@ -45,6 +45,10 @@ pub enum ConsensusError {
     #[error("cannot reorg past finalized height {finalized} (requested: {requested})")]
     ReorgPastFinality { finalized: u64, requested: u64 },
 
+    /// Cannot reorg past an active checkpoint.
+    #[error("cannot reorg past checkpoint at height {checkpoint} (requested: {requested})")]
+    ReorgPastCheckpoint { checkpoint: u64, requested: u64 },
+
     /// Catch-all internal error.
     #[error("internal: {0}")]
     Internal(String),

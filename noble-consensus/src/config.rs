@@ -5,6 +5,7 @@
 
 use noble_core::{MAX_BLOCK_SIZE, MAX_REORG_DEPTH};
 
+use crate::fork_resolver::ForkResolutionStrategy;
 use crate::strategy::VotingStrategy;
 
 /// Configuration for the consensus engine.
@@ -28,6 +29,12 @@ pub struct ConsensusConfig {
     pub confirmation_strategy: VotingStrategy,
     /// Number of consecutive clean cycles required to finalize a block (default: 3).
     pub confirmation_threshold: u32,
+    /// Fork resolution strategy (default: Manual — alert only).
+    pub fork_resolution_strategy: ForkResolutionStrategy,
+    /// Minimum cycles a fork must persist before auto-resolution (default: 3).
+    pub fork_resolution_delay_cycles: u32,
+    /// Create a checkpoint every N blocks (0 = disabled, default: 30).
+    pub checkpoint_interval: u64,
 }
 
 impl Default for ConsensusConfig {
@@ -41,6 +48,9 @@ impl Default for ConsensusConfig {
             voting_strategy: VotingStrategy::FirstValid,
             confirmation_strategy: VotingStrategy::FollowMajority,
             confirmation_threshold: 3,
+            fork_resolution_strategy: ForkResolutionStrategy::Manual,
+            fork_resolution_delay_cycles: 3,
+            checkpoint_interval: 30,
         }
     }
 }
@@ -59,5 +69,11 @@ mod tests {
         assert_eq!(cfg.min_peers_for_consensus, 2);
         assert_eq!(cfg.min_unique_voters, 2);
         assert_eq!(cfg.confirmation_threshold, 3);
+        assert_eq!(
+            cfg.fork_resolution_strategy,
+            ForkResolutionStrategy::Manual
+        );
+        assert_eq!(cfg.fork_resolution_delay_cycles, 3);
+        assert_eq!(cfg.checkpoint_interval, 30);
     }
 }

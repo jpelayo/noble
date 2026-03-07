@@ -209,6 +209,19 @@ pub trait StorageEngine {
         Ok(None) // default no-op
     }
 
+    // ── Checkpoint State ──
+
+    /// Store a checkpoint, keyed by height.
+    fn store_checkpoint(&self, height: u64, data: &[u8]) -> Result<(), StorageError> {
+        let _ = (height, data);
+        Ok(()) // default no-op
+    }
+
+    /// Load all stored checkpoints: (height, cbor_bytes).
+    fn load_checkpoints(&self) -> Result<Vec<(u64, Vec<u8>)>, StorageError> {
+        Ok(vec![]) // default no-op
+    }
+
     // ── Per-Block Vote Witness ──
 
     /// Store per-block vote witness data, keyed by block height.

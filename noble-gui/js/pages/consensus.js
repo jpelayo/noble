@@ -968,11 +968,11 @@ export function init(root, ctx) {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
         const name = t.validator || truncateHash(t.block_hash, 8);
         return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          <span style="font-weight:600;font-size:var(--font-size-xs);min-width:90px;flex-shrink:0">${name}</span>
+          <span style="font-weight:600;font-size:var(--font-size-xs);width:40%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</span>
           <div style="flex:1;min-width:40px;height:8px;background:var(--bg-tertiary);border-radius:4px">
             <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
           </div>
-          <span style="font-weight:600;flex-shrink:0;text-align:right">${t.vote_count} (${pct}%)</span>
+          <span style="font-weight:600;flex-shrink:0;text-align:right;min-width:70px">${t.vote_count} (${pct}%)</span>
         </div>`;
       }).join('');
 
@@ -1101,14 +1101,20 @@ export function init(root, ctx) {
         finalityStatus = await rpc.call('noble_getFinalityStatus', []);
       } catch (_) { /* getFinalityStatus not available */ }
 
-      renderTimeline(cycles, finalityStatus);
+      // Fetch checkpoint data for timeline markers.
+      let checkpointData = null;
+      try {
+        checkpointData = await rpc.call('noble_getCheckpoints', [50]);
+      } catch (_) { /* getCheckpoints not available */ }
+
+      renderTimeline(cycles, finalityStatus, checkpointData);
     } catch (e) {
       console.error('[consensus] load timeline:', e);
       csTimeline.innerHTML = '<div class="empty-state">Failed to load cycle history</div>';
     }
   }
 
-  function renderTimeline(cycles, finalityStatus) {
+  function renderTimeline(cycles, finalityStatus, checkpointData) {
     csTimeline.innerHTML = '';
 
     // Track all validators that participated
@@ -1223,6 +1229,17 @@ export function init(root, ctx) {
               }
             }
             label += `<div style="font-size:0.55rem;${badgeColor}">${badge}</div>`;
+            // Checkpoint marker
+            if (checkpointData && checkpointData.checkpoints && blockH > 0) {
+              const cp = checkpointData.checkpoints.find(c => c.height === blockH);
+              if (cp) {
+                const cpStyle = cp.active
+                  ? 'color:var(--accent-green,#4caf50)'
+                  : 'color:var(--accent-yellow,#ffc107);opacity:0.8';
+                const cpLabel = cp.active ? '&#9875; CP' : '&#9875; CP (pending)';
+                label += `<div style="font-size:0.5rem;${cpStyle}">${cpLabel}</div>`;
+              }
+            }
           } else if (phase.state === 'skipped') {
             label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           } else {

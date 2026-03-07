@@ -56,6 +56,8 @@ struct Inner {
     finality_state: Option<Vec<u8>>,
     /// Misbehavior evidence: evidence_hash → CBOR-encoded MisbehaviorEvidence.
     evidence: HashMap<Vec<u8>, Vec<u8>>,
+    /// Checkpoint state: height → CBOR-encoded Checkpoint.
+    checkpoints: BTreeMap<u64, Vec<u8>>,
     closed: bool,
 }
 
@@ -902,6 +904,21 @@ impl StorageEngine for MemoryStorage {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
         Ok(inner.badge_proposals.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
+    // ── Checkpoint State ──
+
+    fn store_checkpoint(&self, height: u64, data: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+        inner.checkpoints.insert(height, data.to_vec());
+        Ok(())
+    }
+
+    fn load_checkpoints(&self) -> Result<Vec<(u64, Vec<u8>)>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        Ok(inner.checkpoints.iter().map(|(&h, v)| (h, v.clone())).collect())
     }
 
     fn store_evidence(&self, evidence_hash: &[u8], evidence_cbor: &[u8]) -> Result<(), StorageError> {

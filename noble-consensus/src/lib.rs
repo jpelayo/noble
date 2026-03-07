@@ -5,12 +5,14 @@
 
 pub mod badge;
 pub mod candidate;
+pub mod checkpoint;
 pub mod config;
 pub mod cycle;
 pub mod engine;
 pub mod error;
 pub mod event;
 pub mod finality;
+pub mod fork_resolver;
 pub mod history;
 pub mod proposal;
 pub mod reputation;
@@ -18,6 +20,8 @@ pub mod strategy;
 pub mod validator;
 pub mod vote;
 
+pub use checkpoint::{Checkpoint, CheckpointManager};
+pub use fork_resolver::{ForkDecision, ForkInfo, ForkResolutionStrategy, ForkResolver};
 pub use badge::{
     BadgeProposal, BadgeProposalType, BadgeStatus, BadgeStore, RevocationReason,
     SuspensionNotice, SuspensionReason, VoteBadge, BADGE_VOTE_WINDOW_CYCLES,

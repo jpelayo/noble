@@ -71,6 +71,7 @@ impl NetworkId {
     }
 
     /// Construct the genesis block for this network.
+    #[allow(dead_code)] // Used in tests
     pub fn genesis_block(self) -> noble_core::Block {
         match self {
             Self::Mainnet => noble_core::genesis_block(),
@@ -80,6 +81,7 @@ impl NetworkId {
     }
 
     /// Compute the genesis block hash for this network.
+    #[allow(dead_code)] // Used in tests
     pub fn genesis_hash(self) -> noble_crypto::Hash256 {
         match self {
             Self::Mainnet => noble_core::genesis_hash(),
@@ -168,6 +170,15 @@ pub struct ConsensusConfig {
     /// Number of consecutive clean cycles to finalize a block (default: 3).
     #[serde(default = "default_confirmation_threshold")]
     pub confirmation_threshold: u32,
+    /// Fork resolution strategy: "manual", "peer_supermajority", "longest_chain" (default: manual).
+    #[serde(default = "default_fork_resolution_strategy")]
+    pub fork_resolution_strategy: String,
+    /// Minimum cycles a fork must persist before auto-resolution (default: 3).
+    #[serde(default = "default_fork_resolution_delay")]
+    pub fork_resolution_delay_cycles: u32,
+    /// Create a checkpoint every N blocks (0 = disabled, default: 30).
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -184,6 +195,18 @@ fn default_min_peers_for_consensus() -> usize {
 
 fn default_confirmation_threshold() -> u32 {
     3
+}
+
+fn default_fork_resolution_strategy() -> String {
+    "manual".to_string()
+}
+
+fn default_fork_resolution_delay() -> u32 {
+    3
+}
+
+fn default_checkpoint_interval() -> u64 {
+    30
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -546,6 +569,9 @@ impl Default for ConsensusConfig {
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
             confirmation_threshold: default_confirmation_threshold(),
+            fork_resolution_strategy: default_fork_resolution_strategy(),
+            fork_resolution_delay_cycles: default_fork_resolution_delay(),
+            checkpoint_interval: default_checkpoint_interval(),
         }
     }
 }
@@ -633,6 +659,9 @@ mod tests {
             voting_subset: Vec::new(),
             min_peers_for_consensus: default_min_peers_for_consensus(),
             confirmation_threshold: default_confirmation_threshold(),
+            fork_resolution_strategy: default_fork_resolution_strategy(),
+            fork_resolution_delay_cycles: default_fork_resolution_delay(),
+            checkpoint_interval: default_checkpoint_interval(),
         };
         let debug_str = format!("{config:?}");
         assert!(

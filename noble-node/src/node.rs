@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
 use noble_api::auth::TotpValidator;
-use noble_api::state::{ApiState, NodeIdentityData};
+use noble_api::state::{ApiState, NodeIdentityData, PeerInfoEntry};
 use noble_api::NetworkStats;
 use noble_consensus::{
     ConsensusConfig as CConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo,
@@ -382,6 +382,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             if let Some((height, hash, cycle)) = decode_finality_state(&data) {
                 engine.restore_finality(height, hash, cycle);
                 tracing::info!(task = "init", finalized_height = height, "restored finality state");
+            }
+        }
+        // Restore checkpoint state from storage.
+        if let Ok(entries) = storage.read().load_checkpoints() {
+            let cps: Vec<noble_consensus::Checkpoint> = entries
+                .iter()
+                .filter_map(|(_, data)| noble_codec::NobleCbor::from_cbor(data).ok())
+                .collect();
+            if !cps.is_empty() {
+                let count = cps.len();
+                engine.restore_checkpoints(cps);
+                tracing::info!(task = "init", count, "restored checkpoint(s) from storage");
             }
         }
         let consensus = Arc::new(RwLock::new(engine));
@@ -1751,6 +1763,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
+                    // Inject fork status for fork resolver evaluation.
+                    {
+                        let (tip_h, tip_hash) = self.consensus.read().chain_tip();
+                        let peers = self.peer_info.read();
+                        let fork_groups = compute_fork_groups(&peers, tip_h, tip_hash);
+                        let total_peers = peers.len();
+                        drop(peers);
+                        if !fork_groups.is_empty() {
+                            let fork_actions = {
+                                let mut engine = self.consensus.write();
+                                engine.step(noble_consensus::CycleEvent::ForkStatus {
+                                    local_height: tip_h,
+                                    forks: fork_groups,
+                                    total_peers,
+                                })
+                            };
+                            self.process_cycle_actions(fork_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
+                        }
+                    }
+
                     // H-002: Persist cycle history if a cycle boundary just occurred.
                     {
                         let mut engine = self.consensus.write();
@@ -2977,6 +3009,59 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let _ = network_cmd.try_send(cmd);
                     }
                 }
+                CycleIo::RequestForkResolution { target_hash, target_height, reason } => {
+                    tracing::warn!(
+                        task = "fork_resolution",
+                        "AUTO-RESOLVING: {reason} (target height {target_height})"
+                    );
+                    // Same path as resetChain RPC: reset storage + consensus + re-sync.
+                    {
+                        let storage = self.storage.read();
+                        if let Err(e) = storage.force_reset_to_genesis(self.chain_id) {
+                            tracing::error!(task = "fork_resolution", "storage reset failed: {e}");
+                        }
+                        if let Err(e) = storage.clear_cycle_history() {
+                            tracing::warn!(task = "fork_resolution", "clear cycle history: {e}");
+                        }
+                    }
+                    {
+                        let storage = self.storage.read();
+                        let tip = storage.get_chain_tip().ok().flatten()
+                            .unwrap_or(noble_storage::ChainTip {
+                                block_hash: noble_crypto::Hash256::ZERO,
+                                height: 0,
+                            });
+                        if let Err(e) = self.consensus.write().reset_tip(tip.height, tip.block_hash, true) {
+                            tracing::error!(task = "fork_resolution", "reset_tip failed: {e}");
+                        }
+                    }
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "fork_auto_resolved",
+                        "target_height": target_height,
+                        "target_hash": hex::encode(target_hash.as_bytes()),
+                        "reason": reason,
+                    }));
+                }
+                CycleIo::PersistCheckpoint(cp) => {
+                    let cbor = noble_codec::NobleCbor::to_cbor(&*cp).unwrap_or_default();
+                    if let Err(e) = self.storage.read().store_checkpoint(cp.height, &cbor) {
+                        tracing::warn!(task = "checkpoint", "persist failed: {e}");
+                    } else {
+                        tracing::debug!(
+                            task = "checkpoint",
+                            height = cp.height,
+                            "checkpoint persisted"
+                        );
+                    }
+                }
+                CycleIo::CheckpointsActivated { heights } => {
+                    tracing::info!(task = "checkpoint", "activated at heights: {heights:?}");
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "checkpoints_activated",
+                        "heights": heights,
+                    }));
+                }
                 other => {
                     // Emit protocol activity events for votes and bans
                     match &other {
@@ -3756,11 +3841,18 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         &config.consensus.voting_subset,
     );
 
+    let fork_resolution_strategy = parse_fork_resolution_strategy(
+        &config.consensus.fork_resolution_strategy,
+    );
+
     CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
         min_peers_for_consensus: config.consensus.min_peers_for_consensus,
         confirmation_threshold: config.consensus.confirmation_threshold,
+        fork_resolution_strategy,
+        fork_resolution_delay_cycles: config.consensus.fork_resolution_delay_cycles,
+        checkpoint_interval: config.consensus.checkpoint_interval,
         ..CConsensusConfig::default()
     }
 }
@@ -3794,6 +3886,72 @@ fn parse_voting_strategy(
             VotingStrategy::FirstValid
         }
     }
+}
+
+/// Parse a fork resolution strategy name into a `ForkResolutionStrategy`.
+fn parse_fork_resolution_strategy(name: &str) -> noble_consensus::ForkResolutionStrategy {
+    use noble_consensus::ForkResolutionStrategy;
+    match name {
+        "manual" => ForkResolutionStrategy::Manual,
+        "peer_supermajority" => ForkResolutionStrategy::PeerSupermajority,
+        "longest_chain" => ForkResolutionStrategy::LongestChain,
+        other => {
+            tracing::warn!(
+                task = "config_load",
+                "Unknown fork resolution strategy '{other}', falling back to manual"
+            );
+            ForkResolutionStrategy::Manual
+        }
+    }
+}
+
+/// Compute fork groups from connected peer chain tips for the ForkResolver.
+///
+/// Groups peers by `chain_tip_hash` (same logic as `getDetectedForks` RPC).
+/// Always includes the local chain as `is_local = true`.
+fn compute_fork_groups(
+    peers: &std::collections::HashMap<String, PeerInfoEntry>,
+    local_height: u64,
+    local_hash: noble_crypto::Hash256,
+) -> Vec<noble_consensus::ForkInfo> {
+    let local_tip_hex = hex::encode(local_hash.as_bytes());
+
+    // Group peers by chain_tip_hash.
+    let mut groups: std::collections::HashMap<String, (u64, usize)> =
+        std::collections::HashMap::new();
+    for entry in peers.values() {
+        let h = match entry.chain_tip_height { Some(h) => h, None => continue };
+        let hash = match entry.chain_tip_hash.as_ref() { Some(s) => s.clone(), None => continue };
+        let g = groups.entry(hash).or_insert((h, 0usize));
+        g.1 += 1;
+        if h > g.0 {
+            g.0 = h;
+        }
+    }
+
+    // Include local chain.
+    let local_entry = groups.entry(local_tip_hex.clone()).or_insert((local_height, 0));
+    if local_height > local_entry.0 {
+        local_entry.0 = local_height;
+    }
+
+    groups
+        .into_iter()
+        .map(|(tip_hash, (height, peer_count))| noble_consensus::ForkInfo {
+            tip_hash: {
+                let mut bytes = [0u8; 32];
+                if let Ok(decoded) = hex::decode(&tip_hash) {
+                    if decoded.len() == 32 {
+                        bytes.copy_from_slice(&decoded);
+                    }
+                }
+                noble_crypto::Hash256::from_bytes(bytes)
+            },
+            height,
+            peer_count,
+            is_local: tip_hash == local_tip_hex,
+        })
+        .collect()
 }
 
 /// Resolve the gateway key from config or wallet auto-derivation.

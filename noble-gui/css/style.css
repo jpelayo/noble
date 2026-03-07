@@ -99,6 +99,13 @@ body {
 }
 
 
+.chain-id-label {
+  color: var(--text-secondary);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .chain-id-hex {
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
