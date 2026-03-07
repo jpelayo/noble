@@ -3,8 +3,10 @@
 
 import AppKit
 import Foundation
+import NobleClientAPI
 import NobleClientCore
 import NobleClientCrypto
+import NobleClientSecurity
 import UniformTypeIdentifiers
 
 /// Routes bridge messages from the web UI to Swift services.
@@ -62,30 +64,32 @@ final class WebBridgeHandler {
             guard let address = params["address"] as? String else {
                 throw BridgeError.missingParam("address")
             }
-            let balance = try await api.getAddressBalance(address: address)
+            let balance = try await api.getBalance(address: address)
             return [
-                "balance": balance.balance,
-                "available": balance.available,
-                "pending": balance.pending,
+                "address": balance.address.wireHex,
+                "balance": balance.balance.atomic,
+                "available": balance.available.atomic,
+                "pending": balance.pending.atomic,
                 "txCount": balance.txCount,
-            ]
+            ] as [String: Any]
 
         case "getSyncStatus":
             let status = try await api.getSyncStatus()
             return [
-                "synced": status.synced,
+                "synced": status.isSynced,
                 "currentHeight": status.currentHeight,
                 "highestKnown": status.highestKnown,
-            ]
+                "progress": status.progress,
+            ] as [String: Any]
 
         case "getCycleStatus":
             let cycle = try await api.getCycleStatus()
             return [
-                "cycle": cycle.cycle,
+                "cycleNumber": cycle.cycleNumber,
                 "phase": cycle.phase,
-                "phaseProgress": cycle.phaseProgress,
-                "timeRemaining": cycle.timeRemaining,
-            ]
+                "phaseRemainingSecs": cycle.phaseRemainingSecs,
+                "cycleRemainingSecs": cycle.cycleRemainingSecs,
+            ] as [String: Any]
 
         case "getTransactionHistory":
             guard let address = params["address"] as? String else {
@@ -93,51 +97,35 @@ final class WebBridgeHandler {
             }
             let page = params["page"] as? Int ?? 0
             let limit = params["limit"] as? Int ?? 20
-            let history = try await api.getAddressHistory(address: address, page: page, limit: limit)
+            let txs = try await api.getTransactionHistory(address: address, page: page, limit: limit)
             return [
-                "transactions": history.transactions.map { tx in
-                    [
-                        "txId": tx.txId,
-                        "blockHeight": tx.blockHeight,
-                        "type": tx.type,
-                        "direction": tx.direction ?? "",
-                        "amount": tx.amount ?? 0,
-                        "fee": tx.fee,
-                        "counterparty": tx.counterparty ?? "",
-                        "timestamp": tx.timestamp,
-                        "confirmations": tx.confirmations,
-                    ] as [String: Any]
+                "transactions": txs.map { tx in
+                    txToDict(tx)
                 },
-                "total": history.total,
-                "page": history.page,
-                "limit": history.limit,
             ] as [String: Any]
 
         case "estimateFee":
             let fee = try await api.estimateFee()
             return [
-                "minFee": fee.minFee,
-                "recommendedFee": fee.recommendedFee,
-                "highPriorityFee": fee.highPriorityFee,
-            ]
+                "minFee": fee.minFee.atomic,
+                "recommendedFee": fee.recommendedFee.atomic,
+                "highPriorityFee": fee.highPriorityFee.atomic,
+            ] as [String: Any]
 
         case "verifyDocument":
             guard let checksum = params["checksum"] as? String else {
                 throw BridgeError.missingParam("checksum")
             }
             let result = try await api.verifyDocument(checksum: checksum)
-            return [
-                "checksum": result.checksum,
-                "registered": result.registered,
-                "registrations": result.registrations.map { reg in
-                    [
-                        "blockHeight": reg.blockHeight,
-                        "txId": reg.txId,
-                        "timestamp": reg.timestamp,
-                    ] as [String: Any]
-                },
-                "firstSeen": result.firstSeen as Any,
-            ] as [String: Any]
+            var dict: [String: Any] = [
+                "isRegistered": result.isRegistered,
+                "registrationCount": result.registrationCount,
+                "versions": result.versions.map { versionToDict($0) },
+            ]
+            if let reg = result.registration {
+                dict["registration"] = registrationToDict(reg)
+            }
+            return dict
 
         case "getDocumentVersions":
             guard let checksum = params["checksum"] as? String else {
@@ -146,25 +134,18 @@ final class WebBridgeHandler {
             let versions = try await api.getDocumentVersions(checksum: checksum)
             return [
                 "checksum": checksum,
-                "versions": versions.versions.map { v in
-                    [
-                        "checksum": v.checksum,
-                        "blockHeight": v.blockHeight,
-                        "timestamp": v.timestamp,
-                        "txId": v.txId,
-                    ] as [String: Any]
-                },
+                "versions": versions.map { versionToDict($0) },
             ] as [String: Any]
 
         case "submitTransaction":
-            guard let txHex = params["txHex"] as? String else {
-                throw BridgeError.missingParam("txHex")
+            guard let rawHex = params["rawHex"] as? String ?? params["txHex"] as? String else {
+                throw BridgeError.missingParam("rawHex")
             }
-            let result = try await api.submitTransaction(txHex: txHex)
+            let txId = try await api.submitTransaction(rawHex: rawHex)
             return [
-                "txId": result.txId,
-                "accepted": result.accepted,
-            ]
+                "txId": txId,
+                "accepted": true,
+            ] as [String: Any]
 
         case "getNodeInfo":
             let info = try await api.getNodeInfo()
@@ -172,27 +153,36 @@ final class WebBridgeHandler {
                 "network": info.network,
                 "version": info.version,
                 "blockHeight": info.blockHeight,
-            ]
+                "peerCount": info.peerCount,
+                "isSyncing": info.isSyncing,
+            ] as [String: Any]
 
         case "getPeers":
-            let peers = try await api.getPeerInfo()
+            let peers = try await api.getPeers()
+            let inbound = peers.filter { $0.direction == "inbound" }.count
+            let outbound = peers.filter { $0.direction == "outbound" }.count
             return [
-                "total": peers.total,
-                "inbound": peers.inbound,
-                "outbound": peers.outbound,
-            ]
+                "total": peers.count,
+                "inbound": inbound,
+                "outbound": outbound,
+                "peers": peers.map { p in
+                    [
+                        "peerId": p.peerId,
+                        "direction": p.direction,
+                        "address": p.address ?? "",
+                        "nodeName": p.nodeName ?? "",
+                        "countryCode": p.countryCode ?? "",
+                        "chainTipHeight": p.chainTipHeight as Any,
+                    ] as [String: Any]
+                },
+            ] as [String: Any]
 
         case "getTransaction":
             guard let txId = params["txId"] as? String else {
                 throw BridgeError.missingParam("txId")
             }
             let tx = try await api.getTransaction(txId: txId)
-            return [
-                "txId": tx.txId,
-                "blockHeight": tx.blockHeight as Any,
-                "confirmations": tx.confirmations,
-                "status": tx.status,
-            ] as [String: Any]
+            return txToDict(tx)
 
         case "getTransactionStatus":
             guard let txId = params["txId"] as? String else {
@@ -200,37 +190,26 @@ final class WebBridgeHandler {
             }
             let status = try await api.getTransactionStatus(txId: txId)
             return [
-                "txId": status.txId,
-                "status": status.status,
-                "blockHeight": status.blockHeight as Any,
-                "confirmations": status.confirmations as Any,
-            ] as [String: Any]
+                "status": status.rawValue,
+            ]
 
         case "lookupChecksum":
             guard let checksum = params["checksum"] as? String else {
                 throw BridgeError.missingParam("checksum")
             }
-            let result = try await api.lookupChecksum(checksum: checksum)
+            let records = try await api.lookupChecksum(checksum: checksum)
             return [
-                "found": result.found,
-                "records": result.records.map { r in
-                    [
-                        "blockHeight": r.blockHeight,
-                        "txId": r.txId,
-                        "timestamp": r.timestamp,
-                    ] as [String: Any]
-                },
+                "found": !records.isEmpty,
+                "records": records.map { registrationToDict($0) },
             ] as [String: Any]
 
         case "validateAddress":
             guard let address = params["address"] as? String else {
                 throw BridgeError.missingParam("address")
             }
-            let result = try await api.validateAddress(address: address)
+            let valid = try await api.validateAddress(address)
             return [
-                "valid": result.valid,
-                "scheme": result.scheme ?? "",
-                "publicKey": result.publicKey ?? "",
+                "valid": valid,
             ]
 
         default:
@@ -238,51 +217,95 @@ final class WebBridgeHandler {
         }
     }
 
+    // MARK: - Serialization Helpers
+
+    private func txToDict(_ tx: TransactionRecord) -> [String: Any] {
+        var dict: [String: Any] = [
+            "txId": tx.txId.hex,
+            "txType": tx.txType.label,
+            "status": tx.status.rawValue,
+            "from": tx.from.wireHex,
+            "amount": tx.amount.atomic,
+            "fee": tx.fee.atomic,
+        ]
+        if let to = tx.to { dict["to"] = to.wireHex }
+        if let h = tx.blockHeight { dict["blockHeight"] = h }
+        if let t = tx.timestamp { dict["timestamp"] = t.timeIntervalSince1970 }
+        if let c = tx.checksum { dict["checksum"] = c.hex }
+        return dict
+    }
+
+    private func registrationToDict(_ r: RegistrationRecord) -> [String: Any] {
+        [
+            "txId": r.txId.hex,
+            "checksum": r.checksum.hex,
+            "publisher": r.publisher.wireHex,
+            "blockHeight": r.blockHeight,
+            "timestamp": r.timestamp.timeIntervalSince1970,
+            "fee": r.fee.atomic,
+            "metadata": r.metadata.map { ["key": $0.key, "value": $0.value] },
+        ] as [String: Any]
+    }
+
+    private func versionToDict(_ v: VersionEntry) -> [String: Any] {
+        var dict: [String: Any] = [
+            "checksum": v.checksum.hex,
+            "txId": v.txId.hex,
+            "publisher": v.publisher.wireHex,
+            "blockHeight": v.blockHeight,
+            "timestamp": v.timestamp.timeIntervalSince1970,
+        ]
+        if let prev = v.previousChecksum { dict["previousChecksum"] = prev.hex }
+        return dict
+    }
+
     // MARK: - Crypto Handler
 
     private func handleCrypto(action: String, params: [String: Any]) async throws -> Any {
         switch action {
         case "signNotarization":
-            guard let checksum = params["checksum"] as? String else {
+            guard let checksumHex = params["checksum"] as? String,
+                  let checksum = Hash256(hex: checksumHex) else {
                 throw BridgeError.missingParam("checksum")
             }
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let fee = params["fee"] as? UInt64 ?? 2000
+            let feeAtomic = params["fee"] as? UInt64 ?? 2000
             let metadata = params["metadata"] as? [[String: String]] ?? []
-
             let metadataItems = metadata.map {
                 MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
             }
-            let previousChecksum = params["previousChecksum"] as? String
 
             let txHex = try appState.transactionSigner.signNotarization(
                 checksum: checksum,
-                fee: fee,
                 metadata: metadataItems,
-                previousChecksum: previousChecksum,
-                privateKey: privateKey
+                fee: NobleAmount(atomic: feeAtomic),
+                privateKey: privateKey,
+                chainId: NobleProtocol.mainnetChainId
             )
             return ["txHex": txHex]
 
         case "signTransfer":
-            guard let recipient = params["recipient"] as? String else {
+            guard let recipientHex = params["recipient"] as? String,
+                  let to = NobleAddress(wireHex: recipientHex) else {
                 throw BridgeError.missingParam("recipient")
             }
-            guard let amount = params["amount"] as? UInt64 else {
+            guard let amountAtomic = params["amount"] as? UInt64 else {
                 throw BridgeError.missingParam("amount")
             }
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let fee = params["fee"] as? UInt64 ?? 2000
+            let feeAtomic = params["fee"] as? UInt64 ?? 2000
 
             let txHex = try appState.transactionSigner.signTransfer(
-                recipient: recipient,
-                amount: amount,
-                fee: fee,
-                privateKey: privateKey
+                to: to,
+                amount: NobleAmount(atomic: amountAtomic),
+                fee: NobleAmount(atomic: feeAtomic),
+                privateKey: privateKey,
+                chainId: NobleProtocol.mainnetChainId,
+                sourceAddress: nil
             )
             return ["txHex": txHex]
 
@@ -301,7 +324,7 @@ final class WebBridgeHandler {
             }
             let url = URL(fileURLWithPath: filePath)
             let hash = try appState.documentHasher.hash(fileURL: url)
-            return ["hash": hash]
+            return ["hash": hash.hex]
 
         case "loadPrivateKey":
             // Security: never send the raw key to JS. Only report availability.
