@@ -16,7 +16,7 @@ struct WebContentView: NSViewRepresentable {
         let config = WKWebViewConfiguration()
 
         // Register bridge message handlers
-        let handlers = ["noble_api", "noble_crypto", "noble_security", "noble_app"]
+        let handlers = ["noble_api", "noble_crypto", "noble_security", "noble_app", "noble_storage"]
         for handler in handlers {
             config.userContentController.add(context.coordinator, name: handler)
         }

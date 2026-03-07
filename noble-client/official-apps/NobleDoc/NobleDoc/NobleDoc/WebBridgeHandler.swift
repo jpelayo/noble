@@ -35,6 +35,8 @@ final class WebBridgeHandler {
                 result = try await handleSecurity(action: action, params: params)
             case "noble_app":
                 result = try await handleApp(action: action, params: params)
+            case "noble_storage":
+                result = try await handleStorage(action: action, params: params)
             default:
                 throw BridgeError.unknownHandler(handler)
             }
@@ -355,12 +357,140 @@ final class WebBridgeHandler {
             NSPasteboard.general.setString(text, forType: .string)
             return ["ok": true]
 
+        case "saveFileDialog":
+            let suggestedName = params["filename"] as? String ?? "export.vcf"
+            let content = params["content"] as? String ?? ""
+            let ok = await saveFileDialog(suggestedName: suggestedName, content: content)
+            return ["ok": ok]
+
+        case "readFileText":
+            guard let filePath = params["filePath"] as? String else {
+                throw BridgeError.missingParam("filePath")
+            }
+            let url = URL(fileURLWithPath: filePath)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            return ["text": text]
+
+        default:
+            throw BridgeError.unknownAction(action)
+        }
+    }
+
+    // MARK: - Storage Handler
+
+    private func handleStorage(action: String, params: [String: Any]) async throws -> Any {
+        switch action {
+        case "getContacts":
+            let sorted = appState.contacts.sorted { a, b in
+                if a.isFavorite != b.isFavorite { return a.isFavorite }
+                return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
+            }
+            return [
+                "contacts": sorted.map { contactToDict($0) },
+            ] as [String: Any]
+
+        case "saveContact":
+            guard let contactDict = params["contact"] as? [String: Any] else {
+                throw BridgeError.missingParam("contact")
+            }
+            let contact = dictToContact(contactDict)
+            if let idx = appState.contacts.firstIndex(where: { $0.id == contact.id }) {
+                appState.contacts[idx] = contact
+            } else {
+                appState.contacts.append(contact)
+            }
+            return ["ok": true, "id": contact.id.uuidString]
+
+        case "deleteContact":
+            guard let idStr = params["id"] as? String, let uuid = UUID(uuidString: idStr) else {
+                throw BridgeError.missingParam("id")
+            }
+            appState.contacts.removeAll { $0.id == uuid }
+            return ["ok": true]
+
+        case "exportContactsVCF":
+            let ids = params["ids"] as? [String]
+            let selected: [Contact]
+            if let ids {
+                let uuids = Set(ids.compactMap { UUID(uuidString: $0) })
+                selected = appState.contacts.filter { uuids.contains($0.id) }
+            } else {
+                selected = appState.contacts
+            }
+            let vcf = VCardFormat.serialize(selected)
+            return ["vcf": vcf]
+
+        case "importContactsVCF":
+            guard let vcfString = params["vcf"] as? String else {
+                throw BridgeError.missingParam("vcf")
+            }
+            let parsed = VCardFormat.parse(vcfString)
+            return [
+                "contacts": parsed.map { contactToDict($0) },
+                "count": parsed.count,
+            ] as [String: Any]
+
         default:
             throw BridgeError.unknownAction(action)
         }
     }
 
     // MARK: - Helpers
+
+    private func contactToDict(_ c: Contact) -> [String: Any] {
+        [
+            "id": c.id.uuidString,
+            "firstName": c.firstName,
+            "lastName": c.lastName,
+            "company": c.company,
+            "email": c.email,
+            "noblePubkey": c.noblePubkey,
+            "bitcoinKey": c.bitcoinKey,
+            "notes": c.notes,
+            "isFavorite": c.isFavorite,
+            "displayName": c.displayName,
+            "createdAt": c.createdAt.timeIntervalSince1970,
+            "updatedAt": c.updatedAt.timeIntervalSince1970,
+        ] as [String: Any]
+    }
+
+    private func dictToContact(_ d: [String: Any]) -> Contact {
+        let id: UUID
+        if let idStr = d["id"] as? String, let uuid = UUID(uuidString: idStr) {
+            id = uuid
+        } else {
+            id = UUID()
+        }
+        return Contact(
+            id: id,
+            firstName: d["firstName"] as? String ?? "",
+            lastName: d["lastName"] as? String ?? "",
+            company: d["company"] as? String ?? "",
+            email: d["email"] as? String ?? "",
+            noblePubkey: d["noblePubkey"] as? String ?? "",
+            bitcoinKey: d["bitcoinKey"] as? String ?? "",
+            notes: d["notes"] as? String ?? "",
+            createdAt: Date(timeIntervalSince1970: d["createdAt"] as? Double ?? Date.now.timeIntervalSince1970),
+            updatedAt: .now,
+            isFavorite: d["isFavorite"] as? Bool ?? false
+        )
+    }
+
+    private func saveFileDialog(suggestedName: String, content: String) async -> Bool {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return false }
+
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     private func openFileDialog(allowMultiple: Bool) async -> [[String: Any]] {
         let panel = NSOpenPanel()

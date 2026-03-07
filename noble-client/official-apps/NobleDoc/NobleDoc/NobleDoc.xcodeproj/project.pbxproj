@@ -115,6 +115,7 @@
 				3EA5F34B2F4F1AA300E6F4A3 /* Sources */,
 				3EA5F34C2F4F1AA300E6F4A3 /* Frameworks */,
 				3EA5F34D2F4F1AA300E6F4A3 /* Resources */,
+				D1F751E0C5901798600633A8 /* Copy WebUI */,
 			);
 			buildRules = (
 			);
@@ -214,11 +215,11 @@
 			mainGroup = 3EA5F3462F4F1AA300E6F4A3;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientAPI" */,
-				3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCore" */,
-				3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientDesignSystem" */,
-				3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCrypto" */,
-				3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientSecurity" */,
+				3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "NobleClientAPI" */,
+				3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "NobleClientCore" */,
+				3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "NobleClientDesignSystem" */,
+				3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "NobleClientCrypto" */,
+				3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "NobleClientSecurity" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3EA5F3502F4F1AA300E6F4A3 /* Products */;
@@ -255,6 +256,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		D1F751E0C5901798600633A8 /* Copy WebUI */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../../../noble-client-libraries/WebUI",
+			);
+			name = "Copy WebUI";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/WebUI",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "rsync -av --delete \"${SRCROOT}/../../../noble-client-libraries/WebUI/\" \"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/WebUI/\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		3EA5F34B2F4F1AA300E6F4A3 /* Sources */ = {
@@ -602,25 +622,25 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientAPI" */ = {
+		3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "NobleClientAPI" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/NobleClientAPI;
+			relativePath = ../../../noble-client-libraries/SwiftPackages/NobleClientAPI;
 		};
-		3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCore" */ = {
+		3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "NobleClientCore" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/NobleClientCore;
+			relativePath = ../../../noble-client-libraries/SwiftPackages/NobleClientCore;
 		};
-		3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientDesignSystem" */ = {
+		3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "NobleClientDesignSystem" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/NobleClientDesignSystem;
+			relativePath = ../../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem;
 		};
-		3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientCrypto" */ = {
+		3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "NobleClientCrypto" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/NobleClientCrypto;
+			relativePath = ../../../noble-client-libraries/SwiftPackages/NobleClientCrypto;
 		};
-		3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "Packages/NobleClientSecurity" */ = {
+		3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "NobleClientSecurity" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/NobleClientSecurity;
+			relativePath = ../../../noble-client-libraries/SwiftPackages/NobleClientSecurity;
 		};
 /* End XCLocalSwiftPackageReference section */
 

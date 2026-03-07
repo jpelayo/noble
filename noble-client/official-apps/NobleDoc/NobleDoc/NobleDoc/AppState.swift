@@ -80,6 +80,11 @@ final class AppState {
     /// Display-formatted wallet balance.
     var walletBalance: String?
 
+    // MARK: - Contacts
+
+    /// In-memory contact store (SwiftData migration planned for Sprint 5).
+    var contacts: [Contact] = []
+
     // MARK: - Services
 
     /// Live API service for the connected node.
