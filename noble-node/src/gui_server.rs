@@ -371,6 +371,16 @@ pub async fn start_gui_server(
                     if setup_mode {
                         script.push_str("<script>window.NOBLE_SETUP_MODE=true;</script>");
                     }
+                    // Cache busting: append ?v=VERSION to all .css and .js asset
+                    // references in the HTML so browsers fetch fresh assets on
+                    // every version bump.  The version comes from Cargo.toml via
+                    // noble_core::SOFTWARE_VERSION — no hardcoded strings.
+                    let bust = format!("?v={}", noble_core::SOFTWARE_VERSION);
+                    let html = html
+                        .replace(".css\"", &format!(".css{bust}\""))
+                        .replace(".js\"", &format!(".js{bust}\""))
+                        .replace(".js'", &format!(".js{bust}'"));
+
                     // Inject before </head> so the variables are available when app.js loads.
                     let injected = if html.contains("</head>") {
                         html.replacen("</head>", &format!("{script}</head>"), 1)
@@ -429,7 +439,13 @@ pub async fn start_gui_server(
     app = app.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
         let origins = rpc_origins_csp.clone();
         async move {
+            // Capture request metadata for version-based cache decisions.
+            let uri_path = req.uri().path().to_string();
+            let is_versioned = req.uri().query().map_or(false, |q| q.contains("v="));
+
             let mut resp: axum::response::Response = next.run(req).await;
+
+            // ── CSP header (dynamic, reads live rpc_origins) ──
             let connect_src = {
                 let guard = origins.read();
                 if guard.is_empty() {
@@ -452,12 +468,57 @@ pub async fn start_gui_server(
                     val,
                 );
             }
-            // Prevent browser from caching JS/CSS — ensures code changes take
-            // effect immediately after a node rebuild without manual hard-refresh.
-            resp.headers_mut().insert(
-                http::header::CACHE_CONTROL,
-                http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
-            );
+
+            // ── Cache busting: rewrite import paths in JS modules ──
+            //
+            // Append ?v=VERSION to .js import specifiers so that when the
+            // version in Cargo.toml changes, every module in the import graph
+            // gets a fresh URL and the browser fetches updated code.  Only
+            // applied to files under /js/ to skip vendor libraries (echarts).
+            if uri_path.starts_with("/js/") && uri_path.ends_with(".js") && resp.status().is_success() {
+                let bust = format!("?v={}", noble_core::SOFTWARE_VERSION);
+                let (parts, body) = resp.into_parts();
+                match body.collect().await {
+                    Ok(collected) => {
+                        let bytes = collected.to_bytes();
+                        let content = String::from_utf8_lossy(&bytes);
+                        let rewritten = content
+                            .replace(".js'", &format!(".js{bust}'"))
+                            .replace(".js\"", &format!(".js{bust}\""));
+                        resp = axum::response::Response::from_parts(
+                            parts,
+                            axum::body::Body::from(rewritten),
+                        );
+                        // Content-Length changed; remove so hyper recalculates.
+                        resp.headers_mut().remove(http::header::CONTENT_LENGTH);
+                    }
+                    Err(_) => {
+                        resp = axum::response::Response::from_parts(
+                            parts,
+                            axum::body::Body::empty(),
+                        );
+                    }
+                }
+            }
+
+            // ── Version-aware Cache-Control ──
+            //
+            // Assets requested with ?v=VERSION (from the HTML/JS rewriting
+            // above) are immutable for that version — cache for 1 day, busted
+            // automatically when Cargo.toml version changes.  Everything else
+            // (HTML, API, unversioned assets) must revalidate each request.
+            if is_versioned {
+                resp.headers_mut().insert(
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("public, max-age=86400"),
+                );
+            } else {
+                resp.headers_mut().insert(
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("no-cache"),
+                );
+            }
+
             resp
         }
     }));
