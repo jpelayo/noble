@@ -10,7 +10,8 @@ use noble_consensus::{
     ConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo, CyclePhase,
     ValidatorList, VotingStrategy,
 };
-use noble_core::{Block, BlockHeader, mainnet_chain_id, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION};
+use noble_core::{Block, BlockHeader, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION};
+use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
     SCHEME_ED25519,
@@ -92,10 +93,10 @@ fn storage_only_indexes_notarization_checksums() {
         source_address: None,
     };
     let msg = notarization
-        .compute_signing_message_for_chain(mainnet_chain_id())
+        .compute_signing_message_for_chain(test_chain_id())
         .unwrap();
     notarization.publisher_sig = priv_key.sign(&msg).unwrap();
-    let notarization_id = notarization.compute_tx_id(mainnet_chain_id()).unwrap();
+    let notarization_id = notarization.compute_tx_id(test_chain_id()).unwrap();
 
     // Key rotation tx (zero checksum — should NOT be indexed)
     let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
@@ -120,10 +121,10 @@ fn storage_only_indexes_notarization_checksums() {
         source_address: None,
     };
     let msg = key_rotation
-        .compute_signing_message_for_chain(mainnet_chain_id())
+        .compute_signing_message_for_chain(test_chain_id())
         .unwrap();
     key_rotation.publisher_sig = priv_key.sign(&msg).unwrap();
-    let key_rotation_id = key_rotation.compute_tx_id(mainnet_chain_id()).unwrap();
+    let key_rotation_id = key_rotation.compute_tx_id(test_chain_id()).unwrap();
 
     // Build and commit block at height 1 (genesis height 0 has zero subsidy)
     let transactions = vec![notarization, key_rotation];
@@ -185,7 +186,7 @@ fn self_proposal_validates_before_broadcast() {
         val_list,
         0,
         Hash256::ZERO,
-        mainnet_chain_id(),
+        test_chain_id(),
         Some((priv_key, pub_key)),
         Some(noble_core::GENESIS_TIMESTAMP),
     );

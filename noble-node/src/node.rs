@@ -85,7 +85,7 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID.
     pub chain_id: u32,
-    /// Network name (e.g. "Mainnet", "Testnet").
+    /// Chain label (hex chain ID or "pre-genesis").
     pub network_name: String,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
@@ -138,8 +138,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
-        // Resolve chain_id from network config.
-        let chain_id = config.node.network.chain_id();
+        // Derive chain_id from genesis block hash in storage.
+        // If no genesis has been committed yet, chain_id is 0 (updated on first block commit).
+        let chain_id = {
+            let s = storage.read();
+            match s.get_block_hash_by_height(0) {
+                Ok(hash) => noble_core::derive_chain_id(&hash),
+                Err(_) => 0,
+            }
+        };
 
         // Create mempool.
         let mempool = Arc::new(Mutex::new(Mempool::with_defaults()));
@@ -443,7 +450,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             network_stats,
             peer_info,
             chain_id,
-            network_name: config.node.network.name().to_string(),
+            network_name: if chain_id != 0 { format!("{:08X}", chain_id) } else { "pre-genesis".to_string() },
             start_time: std::time::Instant::now(),
             pki_attestation,
             ca_store,
@@ -1519,7 +1526,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
             max_db_size_gb: config.storage.max_db_size_gb,
-            network_name: config.node.network.name().to_string(),
+            network_name: if self.chain_id != 0 { format!("{:08X}", self.chain_id) } else { "pre-genesis".to_string() },
             genesis_hash: {
                 let s = self.storage.read();
                 s.get_block_hash_by_height(0)
@@ -4302,7 +4309,8 @@ mod tests {
 
         // Node starts stateless — no genesis auto-committed.
         assert_eq!(node.chain_height(), 0);
-        assert_eq!(node.chain_id, noble_core::mainnet_chain_id());
+        // Pre-genesis: chain_id is 0 (derived from genesis block hash when available).
+        assert_eq!(node.chain_id, 0);
 
         // Mempool should be empty.
         assert_eq!(node.mempool.lock().len(), 0);
@@ -4390,28 +4398,6 @@ mod tests {
         // Rollback on an empty chain (no tip) should return an error.
         assert!(node.rollback_to_height(0).is_err());
         assert_eq!(node.chain_height(), 0);
-    }
-
-    #[test]
-    fn node_chain_id_matches_config_network() {
-        use crate::config::NetworkId;
-
-        for (network, expected_id) in [
-            (NetworkId::Mainnet, noble_core::mainnet_chain_id()),
-            (NetworkId::Testnet, noble_core::testnet_chain_id()),
-            (NetworkId::Regtest, noble_core::regtest_chain_id()),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let mut config = NodeConfig::default();
-            config.wallet.keystore_path = dir.path().join("keystore");
-            config.node.network = network;
-
-            let node = Node::init_memory(&config).unwrap();
-            assert_eq!(
-                node.chain_id, expected_id,
-                "chain_id mismatch for {network:?}"
-            );
-        }
     }
 
     #[test]

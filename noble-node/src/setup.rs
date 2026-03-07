@@ -23,7 +23,7 @@ use zeroize::Zeroize;
 
 use crate::config::{
     ApiConfig, ConsensusConfig, GatewayConfig, IdentityConfig, LoggingConfig, MetricsConfig,
-    NetworkConfig, NetworkId, NodeConfig, NodeSectionConfig, OperationalRole, SecurityConfig,
+    NetworkConfig, NodeConfig, NodeSectionConfig, OperationalRole, SecurityConfig,
     StorageConfig, TraceConfig, WalletConfig,
 };
 
@@ -38,8 +38,6 @@ const BANNER: &str = r#"
 | |\  | |_| | |_) | |___| |___
 |_| \_|\___/|____/|_____|_____|
 "#;
-
-const NETWORK_CHOICES: &[&str] = &["Mainnet", "Testnet", "Regtest"];
 
 const ROLE_CHOICES: &[&str] = &[
     "Full Node Observer    - no consensus",
@@ -201,25 +199,9 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 1: Network & Name
+    // Step 1: Node Name
     // -----------------------------------------------------------------------
-    section_header("1", "Network & Name");
-
-    let network_idx = match defaults.node.network {
-        NetworkId::Mainnet => 0,
-        NetworkId::Testnet => 1,
-        NetworkId::Regtest => 2,
-    };
-    let network_sel = Select::new()
-        .with_prompt("Select network")
-        .items(NETWORK_CHOICES)
-        .default(network_idx)
-        .interact()?;
-    let network_id = match network_sel {
-        0 => NetworkId::Mainnet,
-        1 => NetworkId::Testnet,
-        _ => NetworkId::Regtest,
-    };
+    section_header("1", "Node Name");
 
     let node_name: String = Input::new()
         .with_prompt("Node name (required, max 64 chars)")
@@ -621,7 +603,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let config = NodeConfig {
         node: NodeSectionConfig {
             role: op_role,
-            network: network_id,
+            ..Default::default()
         },
         network: NetworkConfig {
             listen_addr,
@@ -1051,7 +1033,6 @@ fn print_summary(config: &NodeConfig, config_path: &str) {
     println!("  {}", "\u{2550}".repeat(52));
     println!();
     summary_line("Config file", config_path);
-    summary_line("Network", &format!("{:?}", config.node.network));
     summary_line("Node role", &format!("{:?}", config.node.role));
     summary_line("Identity role", &config.identity.node_role);
     if !config.identity.node_name.is_empty() {

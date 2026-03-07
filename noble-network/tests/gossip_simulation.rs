@@ -19,7 +19,8 @@ use std::time::Duration;
 use noble_codec::NobleCbor;
 use noble_consensus::PorVote;
 use noble_core::node_announce::{NodeRole, OrgType};
-use noble_core::{mainnet_chain_id, Block, BlockHeader, NodeAnnounce};
+use noble_core::{Block, BlockHeader, NodeAnnounce};
+use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{ed25519, Hash256, NoblePrivateKey, NoblePublicKey};
 use noble_network::config::NetworkConfig;
 use noble_network::messages::{NetworkCommand, NetworkEvent};
@@ -69,7 +70,7 @@ fn gossip_test_config() -> NetworkConfig {
         enable_kademlia: false,
         gossipsub_heartbeat_interval_secs: 1,
         max_outbound_per_subnet: 10,
-        ..NetworkConfig::testnet()
+        ..NetworkConfig::local_test()
     }
 }
 
@@ -310,7 +311,7 @@ async fn gossip_block_announce_end_to_end() {
         Hash256::ZERO,
         1,
         now,
-        mainnet_chain_id(),
+        test_chain_id(),
         &sk,
         &pk,
         4 * 1024 * 1024,

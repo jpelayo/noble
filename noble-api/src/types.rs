@@ -448,7 +448,7 @@ pub struct NodeInfoResponse {
     pub software_version: String,
     pub protocol_version: u16,
     pub chain_id: u32,
-    /// Network name: "mainnet", "testnet", or "regtest".
+    /// Chain label (hex chain ID or empty for pre-genesis).
     pub network_name: String,
     /// Hex-encoded genesis block hash for chain identity.
     pub genesis_hash: String,
@@ -1208,7 +1208,7 @@ pub struct DiscoveredBlockchainEntry {
 pub struct DiscoveredBlockchainInfo {
     /// The chain_id of the discovered blockchain.
     pub chain_id: u32,
-    /// Human-readable network name (e.g. "Mainnet", "Testnet").
+    /// Chain label (hex chain ID).
     pub network_name: String,
     /// Peer addresses that announced this chain (multiaddr strings).
     pub peer_addresses: Vec<String>,

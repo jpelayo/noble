@@ -16,6 +16,7 @@ use noble_wallet::KeyStore;
 pub struct FaucetWallet {
     keystore: KeyStore,
     signer: NoblePublicKey,
+    chain_id: u32,
 }
 
 impl FaucetWallet {
@@ -26,6 +27,7 @@ impl FaucetWallet {
     pub fn open_or_create(
         keystore_dir: &std::path::Path,
         passphrase: &str,
+        chain_id: u32,
     ) -> Result<Self, String> {
         let mut keystore =
             KeyStore::new(keystore_dir).map_err(|e| format!("keystore init: {e}"))?;
@@ -58,7 +60,7 @@ impl FaucetWallet {
             hex::encode(signer.to_wire_bytes())
         );
 
-        Ok(Self { keystore, signer })
+        Ok(Self { keystore, signer, chain_id })
     }
 
     /// Return the hex-encoded wire public key (used as the faucet address).
@@ -88,6 +90,7 @@ impl FaucetWallet {
             fee,
             None,
             None,
+            self.chain_id,
         )
         .map_err(|e| format!("build transfer: {e}"))?;
 
@@ -103,7 +106,7 @@ mod tests {
     #[test]
     fn faucet_wallet_create_and_address() {
         let dir = tempfile::tempdir().unwrap();
-        let w = FaucetWallet::open_or_create(dir.path(), "test-pass-long").unwrap();
+        let w = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
         let addr = w.address();
         // Ed25519: 1 byte scheme + 32 bytes key = 33 bytes = 66 hex chars
         assert_eq!(addr.len(), 66, "address should be 66 hex chars");
@@ -113,11 +116,11 @@ mod tests {
     #[test]
     fn faucet_wallet_reopen_same_key() {
         let dir = tempfile::tempdir().unwrap();
-        let w1 = FaucetWallet::open_or_create(dir.path(), "test-pass-long").unwrap();
+        let w1 = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
         let addr1 = w1.address();
         drop(w1);
 
-        let w2 = FaucetWallet::open_or_create(dir.path(), "test-pass-long").unwrap();
+        let w2 = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
         assert_eq!(w2.address(), addr1, "same keystore should yield same address");
     }
 }

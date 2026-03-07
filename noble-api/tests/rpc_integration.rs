@@ -30,8 +30,8 @@ use noble_api::methods::wallet::WalletApiServer;
 use noble_api::{ApiState, NetworkStats, NodeIdentityData};
 
 use noble_consensus::{ConsensusConfig, CycleEngine, ValidatorList};
-use noble_core::{genesis_block, mainnet_chain_id};
 use noble_mempool::Mempool;
+use noble_test_utils::fixtures::{test_chain_id, test_genesis_block, test_genesis_hash};
 use noble_storage::{MemoryStorage, StorageEngine};
 use noble_wallet::{KeyStore, WalletState};
 
@@ -44,12 +44,12 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let storage = Arc::new(RwLock::new(MemoryStorage::new()));
 
     // Commit genesis block
-    let genesis = genesis_block();
+    let genesis = test_genesis_block();
     let block_hash = genesis.header.compute_block_hash().expect("genesis hash");
     let tx_ids: Vec<noble_crypto::Hash256> = genesis
         .transactions
         .iter()
-        .filter_map(|tx| tx.compute_tx_id(mainnet_chain_id()).ok())
+        .filter_map(|tx| tx.compute_tx_id(test_chain_id()).ok())
         .collect();
     storage
         .read()
@@ -63,7 +63,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         ValidatorList::new(),
         0,
         block_hash,
-        mainnet_chain_id(),
+        test_chain_id(),
         None,
         Some(noble_core::GENESIS_TIMESTAMP),
     )));
@@ -87,7 +87,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         wallet_keystore,
         wallet_state,
         network_stats,
-        chain_id: mainnet_chain_id(),
+        chain_id: test_chain_id(),
         start_time: Instant::now(),
         max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
         rate_limiter: None,   // disabled in tests
@@ -157,8 +157,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         cache_size_mb: 64,
         compression_enabled: true,
         max_db_size_gb: 0,
-        network_name: "mainnet".to_string(),
-        genesis_hash: hex::encode(noble_core::genesis_hash().as_bytes()),
+        network_name: format!("{:08X}", test_chain_id()),
+        genesis_hash: hex::encode(test_genesis_hash().as_bytes()),
         discovered_blockchains: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
     });
 
@@ -452,7 +452,7 @@ async fn get_node_info() {
         noble_core::PROTOCOL_VERSION as u64
     );
     // Chain identity always available (genesis committed at startup).
-    assert_eq!(resp["chain_id"], noble_core::mainnet_chain_id());
+    assert_eq!(resp["chain_id"], test_chain_id());
     // uptime_secs should be a small number (just started)
     assert!(resp["uptime_secs"].as_u64().unwrap() < 60);
     assert_eq!(resp["rpc_port"], 8783);
@@ -477,7 +477,7 @@ async fn get_chain_stats() {
 
     assert_eq!(resp["height"], 0);
     // Chain identity always available (genesis committed at startup).
-    assert_eq!(resp["chain_id"], noble_core::mainnet_chain_id());
+    assert_eq!(resp["chain_id"], test_chain_id());
 }
 
 // ---------------------------------------------------------------------------
@@ -678,9 +678,9 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         gateway_address: None,
         source_address: None,
     };
-    let msg = tx.compute_signing_message().unwrap();
+    let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+    let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
     // Get genesis hash for prev_block_hash
     let storage = state.storage.read();
@@ -777,12 +777,12 @@ async fn validate_address_bitcoin_p2wpkh() {
 }
 
 #[tokio::test]
-async fn validate_address_testnet_rejected() {
+async fn validate_address_bitcoin_testnet_rejected() {
     let (state, _dir) = make_test_state();
     let (url, _handle) = start_test_server(state).await;
     let client = WsClientBuilder::default().build(&url).await.unwrap();
 
-    // tb1q... should be invalid (testnet not supported)
+    // tb1q... should be invalid (Bitcoin testnet addresses not supported)
     let result: serde_json::Value = client
         .request(
             "noble_validateAddress",

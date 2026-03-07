@@ -146,7 +146,7 @@ pub enum GossipMessage {
         /// Chain ID of the blockchain this node is on.
         #[serde(default)]
         chain_id: u32,
-        /// Human-readable network name ("mainnet", "testnet", "regtest").
+        /// Human-readable chain label (hex chain ID or empty).
         #[serde(default)]
         network_name: String,
         timestamp: u64,
@@ -444,7 +444,7 @@ mod tests {
             proposed_height: Some(43),
             proposed_hash: Some(hex::encode([0xCC; 32])),
             chain_id: 0x34E9E7A4,
-            network_name: "mainnet".into(),
+            network_name: "34E9E7A4".into(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
             signature_pubkey: vec![1; 32],

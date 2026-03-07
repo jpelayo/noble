@@ -163,12 +163,12 @@ impl PartiallySignedTransaction {
         });
     }
 
-    /// Sign this PST with the given private key.
+    /// Sign this PST with the given private key and chain ID.
     ///
     /// The key's public key must match one of the signer entries that has not
     /// yet been signed. The signing message is computed from the embedded
-    /// transaction.
-    pub fn sign(&mut self, signer: &NoblePrivateKey) -> Result<(), PstError> {
+    /// transaction using the specified chain_id for replay protection.
+    pub fn sign(&mut self, signer: &NoblePrivateKey, chain_id: u32) -> Result<(), PstError> {
         let pub_key = signer.public_key();
 
         // Find the matching signer entry.
@@ -185,7 +185,7 @@ impl PartiallySignedTransaction {
         // Compute the signing message from the transaction.
         let msg = self
             .unsigned_tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(chain_id)
             .map_err(|e| PstError::Serialization(e.to_string()))?;
 
         let envelope = signer.sign(&msg)?;
@@ -272,6 +272,8 @@ mod tests {
     use crate::metadata::MetadataEntry;
     use noble_crypto::{ed25519, Hash256, SCHEME_ED25519};
 
+    const TEST_CHAIN_ID: u32 = 0x4E4F424C;
+
     /// Helper: create an unsigned test transaction and its signing keypair.
     fn make_unsigned_tx() -> (Transaction, NoblePrivateKey, NoblePublicKey) {
         let (sk, pk) = ed25519::generate_keypair();
@@ -345,7 +347,7 @@ mod tests {
         assert!(!pst.primary_signed());
 
         // Sign with primary key.
-        pst.sign(&sk).unwrap();
+        pst.sign(&sk, TEST_CHAIN_ID).unwrap();
 
         assert!(pst.is_complete());
         assert!(pst.primary_signed());
@@ -364,8 +366,8 @@ mod tests {
         pst.add_signer(pk.clone(), SignerRole::Primary);
         pst.add_signer(pk2.clone(), SignerRole::Additional);
 
-        pst.sign(&sk).unwrap();
-        pst.sign(&sk2).unwrap();
+        pst.sign(&sk, TEST_CHAIN_ID).unwrap();
+        pst.sign(&sk2, TEST_CHAIN_ID).unwrap();
 
         assert!(pst.is_complete());
 
@@ -383,7 +385,7 @@ mod tests {
         );
 
         // Verify the primary signature is valid.
-        let msg = finalized.compute_signing_message().unwrap();
+        let msg = finalized.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         pk.verify(&msg, &finalized.publisher_sig).unwrap();
     }
 
@@ -399,8 +401,8 @@ mod tests {
         pst.add_signer(pk, SignerRole::Primary);
         pst.add_signer(pk2, SignerRole::Witness);
 
-        pst.sign(&sk).unwrap();
-        pst.sign(&sk2).unwrap();
+        pst.sign(&sk, TEST_CHAIN_ID).unwrap();
+        pst.sign(&sk2, TEST_CHAIN_ID).unwrap();
 
         let bytes = pst.to_bytes().unwrap();
         assert!(!bytes.is_empty());
@@ -420,7 +422,7 @@ mod tests {
         let (unknown_sk_raw, _) = ed25519::generate_keypair();
         let unknown_sk = NoblePrivateKey::Ed25519(unknown_sk_raw);
 
-        let result = pst.sign(&unknown_sk);
+        let result = pst.sign(&unknown_sk, TEST_CHAIN_ID);
         assert!(result.is_err());
         match result.unwrap_err() {
             PstError::SignerNotFound => {} // expected

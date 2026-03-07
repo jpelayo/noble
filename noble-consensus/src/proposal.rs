@@ -80,7 +80,8 @@ pub fn propose_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::{mainnet_chain_id, MAX_BLOCK_SIZE, MIN_TX_FEE};
+    use noble_core::{MAX_BLOCK_SIZE, MIN_TX_FEE};
+    use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{ed25519, sha256, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
@@ -122,7 +123,7 @@ mod tests {
             source_address: None,
         };
         let msg = tx
-            .compute_signing_message_for_chain(mainnet_chain_id())
+            .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
         tx
@@ -136,7 +137,7 @@ mod tests {
             Hash256::ZERO,
             1,
             now_secs(),
-            mainnet_chain_id(),
+            test_chain_id(),
             &val_priv,
             &val_pub,
             MAX_BLOCK_SIZE,
@@ -161,7 +162,7 @@ mod tests {
             Hash256::ZERO,
             1,
             now_secs(),
-            mainnet_chain_id(),
+            test_chain_id(),
             &val_priv,
             &val_pub,
             MAX_BLOCK_SIZE,
@@ -186,7 +187,7 @@ mod tests {
             Hash256::ZERO,
             1,
             now_secs(),
-            mainnet_chain_id(),
+            test_chain_id(),
             &val_priv,
             &val_pub,
             tx1_size, // exactly one tx
@@ -210,7 +211,7 @@ mod tests {
             Hash256::ZERO,
             0,
             now,
-            mainnet_chain_id(),
+            test_chain_id(),
             &val_priv,
             &val_pub,
             MAX_BLOCK_SIZE,
@@ -218,7 +219,7 @@ mod tests {
         .unwrap();
 
         let ctx = noble_core::BlockValidationContext {
-            chain_id: mainnet_chain_id(),
+            chain_id: test_chain_id(),
             current_time: now,
             parent: None,
             validator_list: &[val_pub],

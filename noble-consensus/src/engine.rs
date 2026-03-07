@@ -1802,7 +1802,8 @@ impl ConsensusStateMachine for CycleEngine {
 mod tests {
     use super::*;
     use crate::strategy::VotingStrategy;
-    use noble_core::{mainnet_chain_id, BlockHeader, PROTOCOL_VERSION};
+    use noble_core::{BlockHeader, PROTOCOL_VERSION};
+    use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{ed25519, NobleSigner, SignatureEnvelope, SCHEME_ED25519};
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
@@ -1826,7 +1827,7 @@ mod tests {
             val_list,
             0,
             Hash256::ZERO,
-            mainnet_chain_id(),
+            test_chain_id(),
             validator_key,
             Some(noble_core::GENESIS_TIMESTAMP),
         );
@@ -2104,7 +2105,7 @@ mod tests {
     // --- Invalid vote sig ban ---
 
     #[test]
-    fn invalid_vote_sig_bans_peer() {
+    fn invalid_vote_sig_rejected_not_banned() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Voting;
@@ -2118,7 +2119,14 @@ mod tests {
             from_peer: b"badpeer".to_vec(),
         });
 
-        assert!(has_ban(&outputs), "invalid vote sig should ban peer");
+        // Invalid signatures are rejected but NOT banned — the relay peer may
+        // not be the vote author.  Cumulative scoring at the network layer
+        // handles repeated offenses.
+        assert!(!has_ban(&outputs), "invalid vote sig should not ban relay peer");
+        assert!(
+            outputs.iter().any(|o| matches!(o, CycleIo::Log(msg) if msg.contains("rejected invalid vote"))),
+            "should log rejection"
+        );
     }
 
     // --- Observation mode ---
@@ -2399,7 +2407,7 @@ mod tests {
             val_list,
             0,
             Hash256::ZERO,
-            mainnet_chain_id(),
+            test_chain_id(),
             Some((vp, vpub)),
             None,
         );

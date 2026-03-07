@@ -3275,6 +3275,7 @@ dependencies = [
  "hex",
  "noble-core",
  "noble-crypto",
+ "noble-test-utils",
  "rand 0.8.5",
  "serde",
  "serde_json",

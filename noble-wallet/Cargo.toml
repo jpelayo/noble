@@ -27,3 +27,4 @@ bip32.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+noble-test-utils.workspace = true

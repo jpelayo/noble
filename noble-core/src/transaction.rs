@@ -107,17 +107,7 @@ impl Transaction {
     ///
     /// The signing payload includes checksum, timestamp, fee, and sorted metadata.
     /// Fee is included for atomic commitment (no tx malleability).
-    pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
-        // AUD3-D7: Default to mainnet_chain_id for cross-chain replay protection.
-        // The blockchain has never run, so no backward compat concern.
-        self.compute_signing_message_for_chain(crate::mainnet_chain_id())
-    }
-
-    /// AUD2-H7: Compute the signing message with an explicit chain_id.
-    ///
-    /// This prevents cross-chain signature replay: the same transaction signed
-    /// on "mainnet" vs "testnet" produces different signature bytes because
-    /// the chain_id is included in the signing payload.
+    /// The chain_id prevents cross-chain signature replay.
     pub fn compute_signing_message_for_chain(
         &self,
         chain_id: u32,
@@ -185,8 +175,8 @@ mod tests {
             source_address: None,
         };
 
-        // Sign with the actual signing message
-        let msg = tx.compute_signing_message().unwrap();
+        // Sign with the actual signing message (use a test chain_id)
+        let msg = tx.compute_signing_message_for_chain(0x4E4F424C).unwrap();
         let envelope = priv_key.sign(&msg).unwrap();
         tx.publisher_sig = envelope;
         tx
@@ -203,44 +193,46 @@ mod tests {
     #[test]
     fn tx_id_differs_by_chain_id() {
         let tx = make_test_tx();
-        let mainnet_id = tx.compute_tx_id(0x4E4F424C).unwrap();
-        let testnet_id = tx.compute_tx_id(0x5453544E).unwrap();
+        let chain_a_id = tx.compute_tx_id(0x4E4F424C).unwrap();
+        let chain_b_id = tx.compute_tx_id(0x5453544E).unwrap();
         assert_ne!(
-            mainnet_id, testnet_id,
+            chain_a_id, chain_b_id,
             "tx_id must differ between chains (GAP-H2)"
         );
     }
 
+    const TEST_CHAIN_ID: u32 = 0x4E4F424C;
+
     #[test]
     fn signing_message_deterministic() {
         let tx = make_test_tx();
-        let msg1 = tx.compute_signing_message().unwrap();
-        let msg2 = tx.compute_signing_message().unwrap();
+        let msg1 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
+        let msg2 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_eq!(msg1, msg2);
     }
 
     #[test]
     fn signing_message_is_32_bytes() {
         let tx = make_test_tx();
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_eq!(msg.len(), 32);
     }
 
     #[test]
     fn signing_message_changes_with_fee() {
         let mut tx = make_test_tx();
-        let msg1 = tx.compute_signing_message().unwrap();
+        let msg1 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         tx.fee = 2_000;
-        let msg2 = tx.compute_signing_message().unwrap();
+        let msg2 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_ne!(msg1, msg2, "signing message must change when fee changes");
     }
 
     #[test]
     fn signing_message_changes_with_version() {
         let mut tx = make_test_tx();
-        let msg1 = tx.compute_signing_message().unwrap();
+        let msg1 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         tx.version = 99;
-        let msg2 = tx.compute_signing_message().unwrap();
+        let msg2 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_ne!(
             msg1, msg2,
             "signing message must change when version changes"
@@ -250,9 +242,9 @@ mod tests {
     #[test]
     fn signing_message_changes_with_checksum() {
         let mut tx = make_test_tx();
-        let msg1 = tx.compute_signing_message().unwrap();
+        let msg1 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         tx.checksum = Hash256::from_bytes([0xCD; 32]);
-        let msg2 = tx.compute_signing_message().unwrap();
+        let msg2 = tx.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_ne!(msg1, msg2);
     }
 
@@ -282,12 +274,11 @@ mod tests {
             },
         ];
 
-        // Both should produce the same signing message (metadata is pre-sorted)
         tx2.checksum = tx1.checksum;
         tx2.timestamp = tx1.timestamp;
         tx2.fee = tx1.fee;
-        let msg1 = tx1.compute_signing_message().unwrap();
-        let msg2 = tx2.compute_signing_message().unwrap();
+        let msg1 = tx1.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
+        let msg2 = tx2.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
         assert_eq!(msg1, msg2, "metadata order must not affect signing message");
     }
 
@@ -310,15 +301,14 @@ mod tests {
     #[test]
     fn signing_payload_includes_gateway_address() {
         let tx_none = make_test_tx();
-        let msg_none = tx_none.compute_signing_message().unwrap();
+        let msg_none = tx_none.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
 
         let mut tx_gw = make_test_tx();
-        // Force same checksum/timestamp/fee to isolate the gateway_address diff
         tx_gw.checksum = tx_none.checksum;
         tx_gw.timestamp = tx_none.timestamp;
         tx_gw.fee = tx_none.fee;
-        tx_gw.gateway_address = Some(vec![0x01; 33]); // 1 + 32 bytes
-        let msg_gw = tx_gw.compute_signing_message().unwrap();
+        tx_gw.gateway_address = Some(vec![0x01; 33]);
+        let msg_gw = tx_gw.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
 
         assert_ne!(
             msg_none, msg_gw,
@@ -326,39 +316,23 @@ mod tests {
         );
     }
 
-    // AUD2-H7: chain_id in signing payload
     #[test]
     fn signing_message_differs_by_chain_id() {
         let tx = make_test_tx();
-        let mainnet_msg = tx
-            .compute_signing_message_for_chain(crate::mainnet_chain_id())
+        let chain_a_msg = tx
+            .compute_signing_message_for_chain(0x4E4F424C)
             .unwrap();
-        let testnet_msg = tx
-            .compute_signing_message_for_chain(crate::testnet_chain_id())
+        let chain_b_msg = tx
+            .compute_signing_message_for_chain(0x5453544E)
             .unwrap();
         assert_ne!(
-            mainnet_msg, testnet_msg,
+            chain_a_msg, chain_b_msg,
             "signing message must differ between chains (AUD2-H7)"
         );
     }
 
     #[test]
-    fn signing_message_default_matches_mainnet() {
-        let tx = make_test_tx();
-        let default_msg = tx.compute_signing_message().unwrap();
-        let mainnet_msg = tx
-            .compute_signing_message_for_chain(crate::mainnet_chain_id())
-            .unwrap();
-        assert_eq!(
-            default_msg, mainnet_msg,
-            "default signing message should use mainnet_chain_id"
-        );
-    }
-
-    #[test]
     fn tx_without_gateway_backward_compat_cbor() {
-        // A tx with gateway_address: None should serialize/deserialize
-        // identically to the pre-gateway era (serde skip_serializing_if).
         let tx = make_test_tx();
         assert!(tx.gateway_address.is_none());
 

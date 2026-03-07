@@ -103,7 +103,7 @@ impl NobleBehaviour {
             .duplicate_cache_time(Duration::from_secs(60))
             .message_id_fn(message_id_fn)
             .max_transmit_size(crate::codec::MAX_GOSSIP_MESSAGE_SIZE)
-            // Allow small networks (2-node testnets) to form a gossipsub mesh.
+            // Allow small networks (2-node chains) to form a gossipsub mesh.
             // Defaults (mesh_n=6, mesh_n_low=4) require 4+ peers before publish works.
             .mesh_n(3)
             .mesh_n_low(1)
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn behaviour_constructs_successfully() {
         let keypair = Keypair::generate_ed25519();
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let behaviour = NobleBehaviour::new(&keypair, &config);
         assert!(behaviour.is_ok());
     }
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn behaviour_subscribes_to_all_topics() {
         let keypair = Keypair::generate_ed25519();
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let behaviour = NobleBehaviour::new(&keypair, &config).unwrap();
         // GossipSub should have 6 subscribed topics.
         let topics_list = behaviour.gossip.topics().collect::<Vec<_>>();
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn behaviour_has_kademlia() {
         let keypair = Keypair::generate_ed25519();
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let mut behaviour = NobleBehaviour::new(&keypair, &config).unwrap();
         // Kademlia should be accessible and have an empty routing table initially.
         let buckets_with_entries = behaviour
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn identify_protocol_format() {
         // Verify the identify protocol string is constructed with chain_id and protocol_version.
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let expected = format!(
             "{}/{}/v{}",
             crate::topics::IDENTIFY_PROTOCOL,
@@ -237,7 +237,7 @@ mod tests {
     fn matching_version_accepted() {
         // Verify that two nodes with the same config produce the same identify string,
         // confirming they would recognize each other as compatible.
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let identify_a = format!(
             "{}/{}/v{}",
             crate::topics::IDENTIFY_PROTOCOL,

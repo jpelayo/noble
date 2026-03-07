@@ -8,8 +8,7 @@
 # Operational role: validator, observer, or light.
 role = "observer"
 
-# Target network: mainnet, testnet, or regtest.
-network = "mainnet"
+# Legacy field (ignored). Chain identity is derived from genesis block in storage.
 
 [network]
 # Address to listen for incoming P2P connections.
@@ -64,7 +63,7 @@ confirmation_strategy = "follow_majority"
 # voting_subset = []
 
 # Minimum validators required for consensus participation (default: 2).
-# Prevents single-node "ultraforking" while allowing small testnets (2+ validators).
+# Prevents single-node "ultraforking" while allowing small chains (2+ validators).
 # The plurality floor (ceil(N/3) votes required) scales safely for any count.
 # Raise this for stricter safety on large production networks.
 # min_peers_for_consensus = 2

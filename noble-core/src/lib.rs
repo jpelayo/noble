@@ -29,11 +29,7 @@ pub use error::ValidationError;
 pub use evidence::{
     DoubleProposalEvidence, EvidenceError, MisbehaviorEvidence, VoteEquivocationEvidence,
 };
-pub use genesis::{
-    derive_chain_id, genesis_block, genesis_hash, mainnet_chain_id, regtest_chain_id,
-    regtest_genesis_block, regtest_genesis_hash, testnet_chain_id, testnet_genesis_block,
-    testnet_genesis_hash, GENESIS_TIMESTAMP,
-};
+pub use genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
 pub use merkle::{compute_merkle_root, MerkleProof};
 pub use metadata::{validate_metadata, validate_version_metadata, MetadataEntry};
 pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeRole, OrgType};

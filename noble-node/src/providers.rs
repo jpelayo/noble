@@ -161,12 +161,12 @@ mod tests {
         let storage = Arc::new(RwLock::new(MemoryStorage::new()));
 
         // Commit genesis block.
-        let genesis = noble_core::genesis_block();
+        let genesis = noble_test_utils::fixtures::test_genesis_block();
         let block_hash = genesis.header.compute_block_hash().unwrap();
         let tx_ids: Vec<Hash256> = genesis
             .transactions
             .iter()
-            .filter_map(|tx| tx.compute_tx_id(noble_core::mainnet_chain_id()).ok())
+            .filter_map(|tx| tx.compute_tx_id(noble_test_utils::fixtures::test_chain_id()).ok())
             .collect();
         {
             let s = storage.read();

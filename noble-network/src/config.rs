@@ -4,7 +4,6 @@
 //! Network configuration.
 
 use noble_core::constants::PROTOCOL_VERSION;
-use noble_core::{mainnet_chain_id, testnet_chain_id};
 
 /// Primary P2P listen port.
 pub const P2P_PORT_PRIMARY: u16 = 8780;
@@ -27,7 +26,7 @@ pub const METRICS_PORT: u16 = 8784;
 /// Dashboard GUI HTTP server port.
 pub const GUI_PORT: u16 = 8785;
 
-/// Faucet HTTP server port (testnet/mainnet onboarding).
+/// Faucet HTTP server port (token onboarding).
 pub const FAUCET_PORT: u16 = 8786;
 
 /// Legacy alias kept for backward compatibility within the crate.
@@ -70,7 +69,7 @@ pub struct NetworkConfig {
     /// How long a banned peer stays banned, in seconds.
     pub ban_duration_secs: u64,
 
-    /// Network chain identifier (e.g. `mainnet_chain_id()`).
+    /// Network chain identifier (genesis-derived, set by the node at runtime).
     pub chain_id: u32,
 
     /// Protocol version for compatibility checks.
@@ -126,7 +125,7 @@ impl Default for NetworkConfig {
             max_inbound: DEFAULT_MAX_INBOUND,
             ban_threshold: DEFAULT_BAN_THRESHOLD,
             ban_duration_secs: DEFAULT_BAN_DURATION_SECS,
-            chain_id: mainnet_chain_id(),
+            chain_id: 0,
             protocol_version: PROTOCOL_VERSION,
             enable_mdns: true,
             enable_kademlia: true,
@@ -145,11 +144,10 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Create a testnet configuration with mDNS enabled and a random port.
-    pub fn testnet() -> Self {
+    /// Create a local test configuration with mDNS enabled and a random port.
+    pub fn local_test() -> Self {
         Self {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
-            chain_id: testnet_chain_id(),
             ..Self::default()
         }
     }
@@ -171,7 +169,7 @@ mod tests {
         assert_eq!(cfg.max_inbound, 32);
         assert_eq!(cfg.ban_threshold, 100);
         assert_eq!(cfg.ban_duration_secs, 86_400);
-        assert_eq!(cfg.chain_id, mainnet_chain_id());
+        assert_eq!(cfg.chain_id, 0);
         assert_eq!(cfg.protocol_version, PROTOCOL_VERSION);
         assert!(cfg.enable_mdns);
         assert!(cfg.listen_addr.contains("8780"));
@@ -197,9 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn testnet_config() {
-        let cfg = NetworkConfig::testnet();
-        assert_eq!(cfg.chain_id, testnet_chain_id());
+    fn local_test_config() {
+        let cfg = NetworkConfig::local_test();
+        assert_eq!(cfg.chain_id, 0);
         assert!(cfg.listen_addr.contains("127.0.0.1"));
         assert!(cfg.listen_addr.contains("/tcp/0"));
     }

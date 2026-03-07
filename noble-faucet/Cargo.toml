@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Testnet faucet server for the NOBLE protocol"
+description = "Faucet server for the NOBLE protocol"
 
 [[bin]]
 name = "noble-faucet"

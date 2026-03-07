@@ -14,7 +14,7 @@ use zeroize::Zeroize;
 use noble_codec::NobleCbor;
 use noble_consensus::ValidatorList;
 use noble_core::{
-    compute_merkle_root, genesis_block, regtest_genesis_block, testnet_genesis_block, Block,
+    build_genesis, compute_merkle_root, derive_chain_id, Block, GENESIS_TIMESTAMP,
 };
 use noble_crypto::{ed25519, secp256k1, sha256, Hash256};
 use noble_storage::{RocksDbStorage, StorageEngine};
@@ -51,9 +51,9 @@ enum Commands {
         #[arg(long, default_value_os_t = default_genesis_output())]
         output: PathBuf,
 
-        /// Network variant to generate the genesis block for.
-        #[arg(long, default_value = "mainnet")]
-        network: Network,
+        /// Seed string used to derive the genesis block (different seeds produce different chains).
+        #[arg(long, default_value = "noble")]
+        seed: String,
 
         /// Also print the genesis block hash as JSON to stdout.
         #[arg(long)]
@@ -308,13 +308,6 @@ enum StorageCommand {
 }
 
 #[derive(Clone, ValueEnum)]
-enum Network {
-    Mainnet,
-    Testnet,
-    Regtest,
-}
-
-#[derive(Clone, ValueEnum)]
 enum BenchSuite {
     All,
     Crypto,
@@ -331,9 +324,9 @@ fn main() {
     match cli.command {
         Commands::Genesis {
             output,
-            network,
+            seed,
             json,
-        } => cmd_genesis(output, network, json),
+        } => cmd_genesis(output, seed, json),
         Commands::Benchmark { suite } => cmd_benchmark(suite),
         Commands::ValidateChain { data_dir } => cmd_validate_chain(data_dir),
         Commands::Wallet { action } => cmd_wallet(action),
@@ -354,12 +347,8 @@ fn main() {
 // genesis
 // ---------------------------------------------------------------------------
 
-fn cmd_genesis(output: PathBuf, network: Network, json: bool) {
-    let block = match network {
-        Network::Mainnet => genesis_block(),
-        Network::Testnet => testnet_genesis_block(),
-        Network::Regtest => regtest_genesis_block(),
-    };
+fn cmd_genesis(output: PathBuf, seed: String, json: bool) {
+    let block = build_genesis(GENESIS_TIMESTAMP, seed.as_bytes());
 
     let cbor_bytes = block
         .to_cbor()
@@ -372,12 +361,16 @@ fn cmd_genesis(output: PathBuf, network: Network, json: bool) {
         .compute_block_hash()
         .expect("failed to compute genesis block hash");
 
+    let chain_id = derive_chain_id(&block_hash);
+
     eprintln!("Wrote {} bytes to {}", cbor_bytes.len(), output.display());
     eprintln!("Genesis block hash: {block_hash}");
+    eprintln!("Chain ID: 0x{chain_id:08X}");
 
     if json {
         let obj = serde_json::json!({
             "block_hash": block_hash.to_string(),
+            "chain_id": format!("0x{chain_id:08X}"),
             "height": block.header.height,
             "timestamp": block.header.timestamp,
             "cbor_size": cbor_bytes.len(),
@@ -470,7 +463,7 @@ fn run_crypto_benchmarks(results: &mut Vec<(&str, std::time::Duration)>) {
 
 /// CBOR encode/decode a genesis block, iterated 1 000 times.
 fn run_codec_benchmarks(results: &mut Vec<(&str, std::time::Duration)>) {
-    let block = genesis_block();
+    let block = build_genesis(GENESIS_TIMESTAMP, b"noble-bench");
     let iterations = 1_000;
 
     // Encode
@@ -1837,30 +1830,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn genesis_mainnet_serializes() {
-        let block = genesis_block();
-        let bytes = block.to_cbor().expect("mainnet genesis CBOR encode");
+    fn genesis_default_seed_serializes() {
+        let block = build_genesis(GENESIS_TIMESTAMP, b"noble");
+        let bytes = block.to_cbor().expect("genesis CBOR encode");
         assert!(!bytes.is_empty());
-        let decoded = Block::from_cbor(&bytes).expect("mainnet genesis CBOR decode");
+        let decoded = Block::from_cbor(&bytes).expect("genesis CBOR decode");
         assert_eq!(block, decoded);
     }
 
     #[test]
-    fn genesis_testnet_serializes() {
-        let block = testnet_genesis_block();
-        let bytes = block.to_cbor().expect("testnet genesis CBOR encode");
-        assert!(!bytes.is_empty());
-        let decoded = Block::from_cbor(&bytes).expect("testnet genesis CBOR decode");
-        assert_eq!(block, decoded);
-    }
-
-    #[test]
-    fn genesis_regtest_serializes() {
-        let block = regtest_genesis_block();
-        let bytes = block.to_cbor().expect("regtest genesis CBOR encode");
-        assert!(!bytes.is_empty());
-        let decoded = Block::from_cbor(&bytes).expect("regtest genesis CBOR decode");
-        assert_eq!(block, decoded);
+    fn genesis_different_seeds_differ() {
+        let a = build_genesis(GENESIS_TIMESTAMP, b"seed-a");
+        let b = build_genesis(GENESIS_TIMESTAMP, b"seed-b");
+        let hash_a = a.header.compute_block_hash().unwrap();
+        let hash_b = b.header.compute_block_hash().unwrap();
+        assert_ne!(hash_a, hash_b, "different seeds must produce different chains");
+        let id_a = derive_chain_id(&hash_a);
+        let id_b = derive_chain_id(&hash_b);
+        assert_ne!(id_a, id_b, "different seeds must produce different chain IDs");
     }
 
     #[test]

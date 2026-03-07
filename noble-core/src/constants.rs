@@ -22,8 +22,7 @@ pub const MAX_METADATA_VALUE_LEN: usize = 256;
 pub const MAX_ADDITIONAL_SIGS: usize = 32;
 
 // Chain identifiers are derived from their genesis block hashes.
-// See `mainnet_chain_id()`, `testnet_chain_id()`, `regtest_chain_id()`
-// in the `genesis` module.
+// See `derive_chain_id()` in the `genesis` module.
 
 /// Minimum transaction fee in atomic units (1 atomic unit — the market decides the rest).
 pub const MIN_TX_FEE: u64 = 1;
@@ -69,11 +68,11 @@ pub const TX_TYPE_BADGE_VOTE: u8 = 0x04;
 pub const TX_TYPE_BADGE_REVOCATION: u8 = 0x05;
 
 /// Minimum presence time (seconds) before a node can be proposed for a badge.
-/// Production: 7 days = 604,800 seconds. Testnet: 2 days = 172,800 seconds.
+/// Default: 7 days = 604,800 seconds. Short-lived chains: 2 days = 172,800 seconds.
 pub const BADGE_MIN_PRESENCE_SECS: u64 = 604_800;
 
-/// Testnet minimum presence (2 days).
-pub const BADGE_MIN_PRESENCE_TESTNET_SECS: u64 = 172_800;
+/// Short-chain minimum presence (2 days).
+pub const BADGE_MIN_PRESENCE_SHORT_SECS: u64 = 172_800;
 
 /// Bootstrap mode duration in cycles (60 days at 30-min cycles = 2,880 cycles).
 pub const BOOTSTRAP_MODE_CYCLES: u64 = 2_880;
@@ -156,28 +155,25 @@ pub const SOURCE_ADDRESS_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
 /// Known-good block hashes at specific heights for fast initial sync.
 ///
-/// Height 0 is the genesis block hash, computed from the deterministic seed.
-/// Additional checkpoints will be added after mainnet launch.
-///
-/// Since the genesis hash depends on the keypair derivation at runtime,
-/// use [`is_valid_checkpoint`] which compares against `genesis_hash()`.
+/// Height 0 is validated against the chain's actual genesis hash (passed at runtime).
 pub const CHECKPOINTS: &[(u64, &str)] = &[];
 
 /// Validate a block hash against known checkpoints.
+///
+/// `expected_genesis` is the genesis block hash for the current chain.
 ///
 /// Returns:
 /// - `Some(true)` if the height is a checkpoint and the hash matches.
 /// - `Some(false)` if the height is a checkpoint but the hash does NOT match.
 /// - `None` if the height is not a checkpoint (no opinion).
-///
-/// Height 0 is always checked against the genesis block hash.
-pub fn is_valid_checkpoint(height: u64, hash: &noble_crypto::Hash256) -> Option<bool> {
-    use crate::genesis;
-
-    // Height 0: always validate against the computed genesis hash.
+pub fn is_valid_checkpoint(
+    height: u64,
+    hash: &noble_crypto::Hash256,
+    expected_genesis: &noble_crypto::Hash256,
+) -> Option<bool> {
+    // Height 0: validate against the chain's genesis hash.
     if height == 0 {
-        let genesis = genesis::genesis_hash();
-        return Some(*hash == genesis);
+        return Some(*hash == *expected_genesis);
     }
 
     // Check static checkpoints table.
@@ -229,19 +225,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chain_ids_derived_from_genesis_hashes() {
-        use crate::genesis::{
-            derive_chain_id, genesis_hash, mainnet_chain_id, regtest_chain_id,
-            testnet_chain_id, testnet_genesis_hash, regtest_genesis_hash,
-        };
-        // Each chain ID equals the first 4 bytes of its genesis hash.
-        assert_eq!(mainnet_chain_id(), derive_chain_id(&genesis_hash()));
-        assert_eq!(testnet_chain_id(), derive_chain_id(&testnet_genesis_hash()));
-        assert_eq!(regtest_chain_id(), derive_chain_id(&regtest_genesis_hash()));
-        // All three are distinct.
-        assert_ne!(mainnet_chain_id(), testnet_chain_id());
-        assert_ne!(mainnet_chain_id(), regtest_chain_id());
-        assert_ne!(testnet_chain_id(), regtest_chain_id());
+    fn chain_id_derived_from_genesis_hash() {
+        use crate::genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
+        let block = build_genesis(GENESIS_TIMESTAMP, b"noble-test-genesis");
+        let hash = block.header.compute_block_hash().unwrap();
+        let id = derive_chain_id(&hash);
+        // Chain ID equals the first 4 bytes of its genesis hash.
+        let bytes = hash.as_bytes();
+        let expected = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(id, expected);
+        // Different seeds produce different chain IDs.
+        let block2 = build_genesis(GENESIS_TIMESTAMP, b"other-seed");
+        let hash2 = block2.header.compute_block_hash().unwrap();
+        assert_ne!(derive_chain_id(&hash), derive_chain_id(&hash2));
     }
 
     #[test]
@@ -319,14 +315,17 @@ mod tests {
 
     #[test]
     fn checkpoint_genesis_hash_matches() {
-        let genesis = crate::genesis::genesis_hash();
-        assert_eq!(is_valid_checkpoint(0, &genesis), Some(true));
+        use crate::genesis::{build_genesis, GENESIS_TIMESTAMP};
+        let block = build_genesis(GENESIS_TIMESTAMP, b"noble-test-genesis");
+        let genesis = block.header.compute_block_hash().unwrap();
+        assert_eq!(is_valid_checkpoint(0, &genesis, &genesis), Some(true));
     }
 
     #[test]
     fn checkpoint_genesis_wrong_hash_rejected() {
+        let genesis = noble_crypto::Hash256::from_bytes([0x11; 32]);
         assert_eq!(
-            is_valid_checkpoint(0, &noble_crypto::Hash256::ZERO),
+            is_valid_checkpoint(0, &noble_crypto::Hash256::ZERO, &genesis),
             Some(false)
         );
     }
@@ -334,7 +333,8 @@ mod tests {
     #[test]
     fn checkpoint_unknown_height_returns_none() {
         let hash = noble_crypto::Hash256::from_bytes([0xAA; 32]);
-        assert_eq!(is_valid_checkpoint(999_999, &hash), None);
+        let genesis = noble_crypto::Hash256::from_bytes([0x11; 32]);
+        assert_eq!(is_valid_checkpoint(999_999, &hash, &genesis), None);
     }
 
     #[test]

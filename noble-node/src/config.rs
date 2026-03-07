@@ -50,65 +50,19 @@ pub enum OperationalRole {
     Light,
 }
 
-/// Network the node connects to.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkId {
-    #[default]
-    Mainnet,
-    Testnet,
-    Regtest,
-}
-
-impl NetworkId {
-    /// Return the chain ID constant for this network.
-    pub fn chain_id(self) -> u32 {
-        match self {
-            Self::Mainnet => noble_core::mainnet_chain_id(),
-            Self::Testnet => noble_core::testnet_chain_id(),
-            Self::Regtest => noble_core::regtest_chain_id(),
-        }
-    }
-
-    /// Construct the genesis block for this network.
-    #[allow(dead_code)] // Used in tests
-    pub fn genesis_block(self) -> noble_core::Block {
-        match self {
-            Self::Mainnet => noble_core::genesis_block(),
-            Self::Testnet => noble_core::testnet_genesis_block(),
-            Self::Regtest => noble_core::regtest_genesis_block(),
-        }
-    }
-
-    /// Compute the genesis block hash for this network.
-    #[allow(dead_code)] // Used in tests
-    pub fn genesis_hash(self) -> noble_crypto::Hash256 {
-        match self {
-            Self::Mainnet => noble_core::genesis_hash(),
-            Self::Testnet => noble_core::testnet_genesis_hash(),
-            Self::Regtest => noble_core::regtest_genesis_hash(),
-        }
-    }
-
-    /// Return the network name as a lowercase string.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Mainnet => "mainnet",
-            Self::Testnet => "testnet",
-            Self::Regtest => "regtest",
-        }
-    }
-}
-
-/// `[node]` section — operational mode and network selection.
+/// `[node]` section — operational mode.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct NodeSectionConfig {
     /// Operational role: validator, observer, or light.
     #[serde(default)]
     pub role: OperationalRole,
-    /// Target network: mainnet, testnet, or regtest.
-    #[serde(default)]
-    pub network: NetworkId,
+    /// Legacy field — silently discarded. Chain identity is derived from genesis block.
+    #[serde(default, deserialize_with = "ignore_any_value", skip_serializing)]
+    pub _legacy_network: (),
+}
+
+fn ignore_any_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+    serde::de::IgnoredAny::deserialize(d).map(|_| ())
 }
 
 /// P2P networking configuration.
@@ -502,7 +456,6 @@ pub fn validate_config_file(path: &str) {
         Ok(config) => {
             println!("Configuration file is valid: {path}");
             println!();
-            println!("  Network:       {:?}", config.node.network);
             println!("  Role:          {:?}", config.node.role);
             println!("  P2P listen:    {}", config.network.listen_addr);
             println!("  RPC addr:      {}", config.api.rpc_addr);
@@ -689,7 +642,6 @@ mod tests {
         let toml_str = include_str!("../../noble.toml");
         let config: NodeConfig = toml::from_str(toml_str).expect("default noble.toml must parse");
         assert_eq!(config.node.role, OperationalRole::Observer);
-        assert_eq!(config.node.network, NetworkId::Mainnet);
         assert_eq!(config.network.max_peers, 50);
         assert_eq!(config.storage.cache_size_mb, 256);
         assert!(config.storage.compression);
@@ -754,7 +706,6 @@ mod tests {
         "#;
         let config: NodeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.node.role, OperationalRole::Observer);
-        assert_eq!(config.node.network, NetworkId::Mainnet);
     }
 
     #[test]
@@ -834,20 +785,6 @@ mod tests {
     }
 
     #[test]
-    fn network_id_chain_id_and_genesis() {
-        assert_eq!(NetworkId::Mainnet.chain_id(), noble_core::mainnet_chain_id());
-        assert_eq!(NetworkId::Testnet.chain_id(), noble_core::testnet_chain_id());
-        assert_eq!(NetworkId::Regtest.chain_id(), noble_core::regtest_chain_id());
-
-        // Each network produces a distinct genesis block
-        let m = NetworkId::Mainnet.genesis_block();
-        let t = NetworkId::Testnet.genesis_block();
-        let r = NetworkId::Regtest.genesis_block();
-        assert_ne!(m.header.validator_id, t.header.validator_id);
-        assert_ne!(t.header.validator_id, r.header.validator_id);
-    }
-
-    #[test]
     fn node_section_parses_all_variants() {
         for (role_str, expected_role) in [
             ("validator", OperationalRole::Validator),
@@ -857,7 +794,6 @@ mod tests {
             let toml_str = format!(
                 r#"[node]
                 role = "{role_str}"
-                network = "testnet"
                 "#
             );
             // Parse just the node section
@@ -867,8 +803,23 @@ mod tests {
             }
             let p: Partial = toml::from_str(&toml_str).unwrap();
             assert_eq!(p.node.role, expected_role, "role={role_str}");
-            assert_eq!(p.node.network, NetworkId::Testnet);
         }
+    }
+
+    #[test]
+    fn legacy_network_field_silently_discarded() {
+        // Old TOML files with a legacy `network` field should still parse without error.
+        let toml_str = r#"
+            [node]
+            role = "validator"
+            network = "legacy-value"
+        "#;
+        #[derive(Deserialize)]
+        struct Partial {
+            node: NodeSectionConfig,
+        }
+        let p: Partial = toml::from_str(toml_str).unwrap();
+        assert_eq!(p.node.role, OperationalRole::Validator);
     }
 
     // ── TOML round-trip tests (Part E5) ──
@@ -881,7 +832,6 @@ mod tests {
             toml::from_str(&toml_str).expect("deserialize round-tripped config");
 
         assert_eq!(parsed.node.role, original.node.role);
-        assert_eq!(parsed.node.network, original.node.network);
         assert_eq!(parsed.network.listen_addr, original.network.listen_addr);
         assert_eq!(parsed.network.max_peers, original.network.max_peers);
         assert_eq!(parsed.storage.cache_size_mb, original.storage.cache_size_mb);
@@ -902,7 +852,6 @@ mod tests {
     fn node_config_with_values_round_trips() {
         let mut config = NodeConfig::default();
         config.node.role = OperationalRole::Validator;
-        config.node.network = NetworkId::Testnet;
         config.network.listen_addr = "/ip4/0.0.0.0/tcp/9999".to_string();
         config.network.max_peers = 100;
         config.network.seeds = vec![
@@ -928,7 +877,6 @@ mod tests {
         let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
 
         assert_eq!(parsed.node.role, OperationalRole::Validator);
-        assert_eq!(parsed.node.network, NetworkId::Testnet);
         assert_eq!(parsed.network.listen_addr, "/ip4/0.0.0.0/tcp/9999");
         assert_eq!(parsed.network.max_peers, 100);
         assert_eq!(parsed.network.seeds.len(), 2);
@@ -963,22 +911,6 @@ mod tests {
         assert!(toml_str.contains("[identity]"), "missing [identity]");
         assert!(toml_str.contains("[trace]"), "missing [trace]");
         assert!(toml_str.contains("[security]"), "missing [security]");
-    }
-
-    #[test]
-    fn all_network_variants_round_trip() {
-        for (variant, expected_str) in [
-            (NetworkId::Mainnet, "mainnet"),
-            (NetworkId::Testnet, "testnet"),
-            (NetworkId::Regtest, "regtest"),
-        ] {
-            let mut config = NodeConfig::default();
-            config.node.network = variant;
-            let toml_str = toml::to_string_pretty(&config).expect("serialize");
-            assert!(toml_str.contains(expected_str), "expected '{expected_str}'");
-            let parsed: NodeConfig = toml::from_str(&toml_str).expect("deserialize");
-            assert_eq!(parsed.node.network, variant);
-        }
     }
 
     #[test]

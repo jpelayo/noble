@@ -282,7 +282,7 @@ impl SyncManager {
             let hash = header
                 .compute_block_hash()
                 .map_err(|e| NetworkError::InvalidHeaderChain(e.to_string()))?;
-            if let Some(false) = noble_core::is_valid_checkpoint(header.height, &hash) {
+            if let Some(false) = noble_core::is_valid_checkpoint(header.height, &hash, &noble_crypto::Hash256::ZERO) {
                 return Err(NetworkError::InvalidHeaderChain(format!(
                     "header at height {} fails checkpoint validation (hash {})",
                     header.height, hash,

@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
         ValidatorList::new(),
         0,
         Hash256::ZERO,
-        noble_core::mainnet_chain_id(),
+        0x4E4F424C,
         None,
         Some(0),
     );

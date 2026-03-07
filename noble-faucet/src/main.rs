@@ -1,13 +1,13 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! NOBLE faucet server (mainnet + testnet).
+//! NOBLE faucet server.
 //!
 //! Serves two HTTP endpoints:
 //!   - `POST /api/faucet` — request NOBLE tokens
-//!   - `GET  /api/faucet/status` — faucet balance, network, and distribution stats
+//!   - `GET  /api/faucet/status` — faucet balance, chain info, and distribution stats
 //!
-//! Auto-detects the connected network (mainnet/testnet) via `noble_getNodeInfo`.
+//! Auto-detects the connected chain via `noble_getNodeInfo`.
 //! Rate limits: 1 request per IP per 24h, 1 request per address per 7d, daily cap.
 
 pub mod db;
@@ -66,12 +66,7 @@ impl Default for FaucetConfig {
 
 /// Derive a human-readable network label from the chain ID.
 pub fn network_label_from_chain_id(chain_id: u64) -> String {
-    match chain_id {
-        x if x == noble_core::mainnet_chain_id() as u64 => "mainnet".to_string(),
-        x if x == noble_core::testnet_chain_id() as u64 => "testnet".to_string(),
-        x if x == noble_core::regtest_chain_id() as u64 => "regtest".to_string(),
-        other => format!("unknown (0x{other:X})"),
-    }
+    format!("0x{chain_id:08X}")
 }
 
 /// Shared application state.
@@ -79,18 +74,18 @@ pub struct FaucetState {
     pub db: Arc<FaucetDb>,
     pub rpc: NodeRpcClient,
     pub config: FaucetConfig,
-    /// Detected network label (e.g. "mainnet", "testnet").
+    /// Detected chain label (hex chain ID).
     pub network: String,
     /// Independent faucet wallet (when present, signs locally instead of via node RPC).
     pub wallet: Option<wallet::FaucetWallet>,
 }
 
-/// NOBLE Faucet — token dispenser for mainnet onboarding and testnet usage.
+/// NOBLE Faucet — token dispenser for chain onboarding.
 #[derive(Parser)]
 #[command(
     name = "noble-faucet",
     version,
-    about = "NOBLE faucet server (mainnet + testnet)"
+    about = "NOBLE faucet server"
 )]
 struct Cli {
     /// Listen address (e.g. "0.0.0.0:8786").
@@ -172,7 +167,7 @@ async fn main() {
 
     // Initialize independent faucet wallet (local signing).
     let faucet_wallet = if !passphrase.is_empty() || cli.auto_unlock {
-        match wallet::FaucetWallet::open_or_create(&cli.keystore_dir, &passphrase) {
+        match wallet::FaucetWallet::open_or_create(&cli.keystore_dir, &passphrase, 0) {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
                 Some(w)
@@ -267,21 +262,14 @@ mod tests {
 
     #[test]
     fn network_label_detection() {
+        // Chain IDs are now genesis-derived; the label is always hex-formatted.
         assert_eq!(
-            network_label_from_chain_id(noble_core::mainnet_chain_id() as u64),
-            "mainnet"
-        );
-        assert_eq!(
-            network_label_from_chain_id(noble_core::testnet_chain_id() as u64),
-            "testnet"
-        );
-        assert_eq!(
-            network_label_from_chain_id(noble_core::regtest_chain_id() as u64),
-            "regtest"
+            network_label_from_chain_id(0x4E4F424C),
+            "0x4E4F424C"
         );
         assert_eq!(
             network_label_from_chain_id(0x12345678),
-            "unknown (0x12345678)"
+            "0x12345678"
         );
     }
 

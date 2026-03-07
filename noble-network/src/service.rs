@@ -2108,7 +2108,7 @@ mod tests {
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider {
             tip: (42, [0xAA; 32]),
         });
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let pp = HashMap::new();
         let response = handle_sync_request(&SyncRequest::GetStatus, &bp, &config, &pp);
         match response {
@@ -2129,7 +2129,7 @@ mod tests {
     #[test]
     fn handle_sync_request_get_block_not_found() {
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let pp = HashMap::new();
         let response =
             handle_sync_request(&SyncRequest::GetBlockByHeight { height: 999 }, &bp, &config, &pp);
@@ -2142,7 +2142,7 @@ mod tests {
     #[test]
     fn handle_sync_request_get_blocks_empty() {
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let pp = HashMap::new();
         let response = handle_sync_request(
             &SyncRequest::GetBlocks {
@@ -2160,7 +2160,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_starts_and_handles_shutdown() {
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
         let tp: Arc<dyn TxProvider> = Arc::new(MockTxProvider);
 
@@ -2180,7 +2180,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_handle_clone_sender() {
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let bp: Arc<dyn BlockProvider> = Arc::new(MockBlockProvider { tip: (0, [0; 32]) });
         let tp: Arc<dyn TxProvider> = Arc::new(MockTxProvider);
 

@@ -645,7 +645,7 @@ mod tests {
             max_inbound: 3,
             ban_threshold: 100,
             ban_duration_secs: 86_400,
-            ..NetworkConfig::testnet()
+            ..NetworkConfig::local_test()
         }
     }
 
@@ -1100,7 +1100,7 @@ mod tests {
             max_inbound: 8,
             ban_threshold: 100,
             ban_duration_secs: 86_400,
-            ..NetworkConfig::testnet()
+            ..NetworkConfig::local_test()
         };
         let mut pm = PeerManager::new(&cfg);
         let p = random_peer();
@@ -1145,7 +1145,7 @@ mod tests {
             max_inbound: 10,
             ban_threshold: 100,
             ban_duration_secs: 86_400,
-            ..NetworkConfig::testnet()
+            ..NetworkConfig::local_test()
         };
         let mut pm = PeerManager::new(&cfg);
 
@@ -1181,7 +1181,7 @@ mod tests {
             max_inbound: 10,
             ban_threshold: 100,
             ban_duration_secs: 86_400,
-            ..NetworkConfig::testnet()
+            ..NetworkConfig::local_test()
         };
         let mut pm = PeerManager::new(&cfg);
 

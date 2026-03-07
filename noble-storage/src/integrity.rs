@@ -180,7 +180,8 @@ fn add_finding(report: &mut IntegrityReport, height: u64, kind: FindingKind, det
 mod tests {
     use super::*;
     use crate::MemoryStorage;
-    use noble_core::{Block, BlockHeader, mainnet_chain_id, PROTOCOL_VERSION};
+    use noble_core::{Block, BlockHeader, PROTOCOL_VERSION};
+    use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{
         ed25519, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
         SCHEME_ED25519,
@@ -231,7 +232,7 @@ mod tests {
         let (b1, h1, ids1) = make_block(1, h0, &sk, &pk);
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
-        let report = verify_chain_integrity(&store, mainnet_chain_id(), 0, 1);
+        let report = verify_chain_integrity(&store, test_chain_id(), 0, 1);
         assert!(report.is_clean());
         assert_eq!(report.heights_checked, 2);
         assert!(report.first_corrupt_height.is_none());
@@ -245,7 +246,7 @@ mod tests {
         store.commit_block(&b0, &h0, &ids0).unwrap();
         // Skip height 1, commit height 2 (would need to force this)
         // Instead, just scan a range that includes a missing height
-        let report = verify_chain_integrity(&store, mainnet_chain_id(), 0, 2);
+        let report = verify_chain_integrity(&store, test_chain_id(), 0, 2);
         assert!(!report.is_clean());
         assert_eq!(report.first_corrupt_height, Some(1));
         assert!(report
@@ -258,7 +259,7 @@ mod tests {
     fn integrity_report_empty_range() {
         let store = MemoryStorage::new();
         // Scan range with no blocks
-        let report = verify_chain_integrity(&store, mainnet_chain_id(), 0, 0);
+        let report = verify_chain_integrity(&store, test_chain_id(), 0, 0);
         assert!(!report.is_clean()); // height 0 doesn't exist
     }
 
@@ -269,7 +270,7 @@ mod tests {
         let (b0, h0, ids0) = make_block(0, Hash256::ZERO, &sk, &pk);
         store.commit_block(&b0, &h0, &ids0).unwrap();
 
-        let report = verify_chain_integrity(&store, mainnet_chain_id(), 0, 0);
+        let report = verify_chain_integrity(&store, test_chain_id(), 0, 0);
         assert!(report.is_clean());
         assert_eq!(report.heights_checked, 1);
     }

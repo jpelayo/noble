@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn swarm_builds_and_listens() {
         let keypair = Keypair::generate_ed25519();
-        let config = NetworkConfig::testnet();
+        let config = NetworkConfig::local_test();
         let mut swarm = build_swarm(keypair, &config).unwrap();
 
         let addr: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();

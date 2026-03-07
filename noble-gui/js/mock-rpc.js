@@ -13,7 +13,7 @@
 
 // ── Constants ──
 // Mock chain ID — real value is derived from the genesis block hash at runtime.
-const MAINNET_CHAIN_ID = 0x4E4F424C;
+const MOCK_CHAIN_ID = 0x4E4F424C;
 const CYCLE_DURATION_SECS = 1200;
 const MIN_TX_FEE = 1000;
 const PROTOCOL_VERSION = 1;
@@ -268,7 +268,7 @@ const MOCK_NODE_NAMES = [
   'noble-ap-south', 'zurich-node', 'paris-witness', 'sydney-full',
   null, null, null, 'london-archive', 'noble-ca-central', null,
   'singapore-relay', 'mumbai-validator', null, null,
-  'sao-paulo-node', null, null, 'nyc-testnet', 'oslo-watcher',
+  'sao-paulo-node', null, null, 'nyc-node', 'oslo-watcher',
 ];
 
 const MOCK_COUNTRIES = [
@@ -551,7 +551,7 @@ export class MockRpcClient {
       case 'noble_getChainStats': {
         const totalTx = this.#chain.blocks.reduce((s, b) => s + b.transactions.length, 0);
         return {
-          chain_id: MAINNET_CHAIN_ID,
+          chain_id: MOCK_CHAIN_ID,
           height: this.chainHeight,
           total_transactions: totalTx,
           avg_block_interval: CYCLE_DURATION_SECS,
@@ -716,7 +716,7 @@ export class MockRpcClient {
           outbound: this.#peers.filter(p => p.direction === 'Outbound').length,
           banned: 0,
           protocol_version: PROTOCOL_VERSION,
-          chain_id: MAINNET_CHAIN_ID,
+          chain_id: MOCK_CHAIN_ID,
         };
 
       case 'noble_getSyncStatus':
@@ -971,7 +971,7 @@ export class MockRpcClient {
           version: window.NOBLE_VERSION || '0.0.0',
           software_version: window.NOBLE_VERSION || '0.0.0',
           protocol_version: PROTOCOL_VERSION,
-          chain_id: MAINNET_CHAIN_ID,
+          chain_id: MOCK_CHAIN_ID,
           genesis_hash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
           uptime_secs: 86400 * 3 + 7200 + 1800,
           storage_bytes: 256 * 1024 * 1024,

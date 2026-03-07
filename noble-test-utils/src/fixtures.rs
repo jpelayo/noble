@@ -7,12 +7,36 @@
 //! and blocks with proper cryptographic signatures.
 
 use noble_core::{
-    Block, BlockHeader, MetadataEntry, Transaction, mainnet_chain_id, PROTOCOL_VERSION,
+    Block, BlockHeader, MetadataEntry, Transaction, PROTOCOL_VERSION,
+    genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP},
 };
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
     SCHEME_ED25519,
 };
+
+/// Fixed seed used by all tests to produce a deterministic genesis block.
+const TEST_GENESIS_SEED: &[u8] = b"noble-test-genesis";
+
+/// Deterministic genesis block for tests.
+pub fn test_genesis_block() -> Block {
+    build_genesis(GENESIS_TIMESTAMP, TEST_GENESIS_SEED)
+}
+
+/// Deterministic genesis block hash for tests.
+pub fn test_genesis_hash() -> noble_crypto::Hash256 {
+    test_genesis_block()
+        .header
+        .compute_block_hash()
+        .expect("test genesis block hash computation must succeed")
+}
+
+/// Deterministic chain ID for tests — derived from the test genesis block hash.
+pub fn test_chain_id() -> u32 {
+    use std::sync::LazyLock;
+    static ID: LazyLock<u32> = LazyLock::new(|| derive_chain_id(&test_genesis_hash()));
+    *ID
+}
 
 /// A test keypair bundle for convenience.
 pub struct TestKeypair {
@@ -65,9 +89,9 @@ pub fn make_signed_tx(
         gateway_address: None,
         source_address: None,
     };
-    let msg = tx.compute_signing_message().unwrap();
+    let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+    let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -100,9 +124,9 @@ pub fn make_signed_tx_with_metadata(
         gateway_address: None,
         source_address: None,
     };
-    let msg = tx.compute_signing_message().unwrap();
+    let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+    let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -136,9 +160,9 @@ pub fn make_signed_transfer_tx(
         gateway_address: None,
         source_address: None,
     };
-    let msg = tx.compute_signing_message().unwrap();
+    let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
-    let tx_id = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+    let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
 
@@ -210,11 +234,11 @@ mod tests {
         let (tx, tx_id) = make_signed_tx(&kp, b"test_doc", MIN_TX_FEE, 1_700_000_000);
 
         // Verify signature
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
-        let recomputed = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+        let recomputed = tx.compute_tx_id(test_chain_id()).unwrap();
         assert_eq!(tx_id, recomputed);
     }
 
@@ -236,11 +260,11 @@ mod tests {
         assert_eq!(tx.checksum, Hash256::ZERO);
 
         // Verify signature
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
-        let recomputed = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+        let recomputed = tx.compute_tx_id(test_chain_id()).unwrap();
         assert_eq!(tx_id, recomputed);
     }
 

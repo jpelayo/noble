@@ -9,7 +9,18 @@
 //! 3. tx_id determinism: same tx → same tx_id
 
 use noble_codec::NobleCbor;
-use noble_core::{MetadataEntry, Transaction, mainnet_chain_id};
+use noble_core::{MetadataEntry, Transaction};
+use noble_core::genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
+
+fn test_chain_id() -> u32 {
+    use std::sync::LazyLock;
+    static ID: LazyLock<u32> = LazyLock::new(|| {
+        let block = build_genesis(GENESIS_TIMESTAMP, b"noble-test-genesis");
+        let hash = block.header.compute_block_hash().unwrap();
+        derive_chain_id(&hash)
+    });
+    *ID
+}
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
     SCHEME_ED25519,
@@ -172,8 +183,8 @@ proptest! {
 
     #[test]
     fn tx_id_deterministic(tx in arb_transaction()) {
-        let id1 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
-        let id2 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
+        let id1 = tx.compute_tx_id(test_chain_id()).unwrap();
+        let id2 = tx.compute_tx_id(test_chain_id()).unwrap();
         prop_assert_eq!(id1, id2);
     }
 }
@@ -185,8 +196,8 @@ proptest! {
 
     #[test]
     fn signing_message_deterministic(tx in arb_transaction()) {
-        let msg1 = tx.compute_signing_message().unwrap();
-        let msg2 = tx.compute_signing_message().unwrap();
+        let msg1 = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let msg2 = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         prop_assert_eq!(msg1, msg2);
     }
 }
@@ -290,7 +301,7 @@ fn signed_transaction_roundtrip_100() {
             source_address: None,
         };
 
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
         // Roundtrip through CBOR
@@ -304,8 +315,8 @@ fn signed_transaction_roundtrip_100() {
         assert_eq!(tx, decoded2);
 
         // tx_id determinism
-        let id1 = tx.compute_tx_id(mainnet_chain_id()).unwrap();
-        let id2 = decoded.compute_tx_id(mainnet_chain_id()).unwrap();
+        let id1 = tx.compute_tx_id(test_chain_id()).unwrap();
+        let id2 = decoded.compute_tx_id(test_chain_id()).unwrap();
         assert_eq!(id1, id2);
     }
 }
@@ -339,7 +350,7 @@ fn signing_message_includes_tx_type() {
         gateway_address: None,
         source_address: None,
     };
-    let msg0 = tx0.compute_signing_message().unwrap();
+    let msg0 = tx0.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
 
     // Transfer tx (same timestamp/fee but different type)
@@ -363,7 +374,7 @@ fn signing_message_includes_tx_type() {
         gateway_address: None,
         source_address: None,
     };
-    let msg1 = tx1.compute_signing_message().unwrap();
+    let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
 
     assert_ne!(msg0, msg1, "signing message must differ between tx types");
@@ -419,8 +430,8 @@ fn signing_message_includes_recipient() {
         source_address: None,
     };
 
-    let msg1 = tx1.compute_signing_message().unwrap();
-    let msg2 = tx2.compute_signing_message().unwrap();
+    let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
+    let msg2 = tx2.compute_signing_message_for_chain(test_chain_id()).unwrap();
     assert_ne!(
         msg1, msg2,
         "signing message must change when recipient changes"
@@ -477,8 +488,8 @@ fn signing_message_includes_amount() {
         source_address: None,
     };
 
-    let msg1 = tx1.compute_signing_message().unwrap();
-    let msg2 = tx2.compute_signing_message().unwrap();
+    let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
+    let msg2 = tx2.compute_signing_message_for_chain(test_chain_id()).unwrap();
     assert_ne!(
         msg1, msg2,
         "signing message must change when amount changes"

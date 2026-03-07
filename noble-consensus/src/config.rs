@@ -18,7 +18,7 @@ pub struct ConsensusConfig {
     /// Divisor for plurality floor: leader needs ≥ total/divisor votes (default: 3 → 33%).
     pub plurality_floor_divisor: u64,
     /// Minimum connected peers required for consensus participation (GAP-C6, default: 2).
-    /// Set to 2 to prevent single-node "ultraforking" while allowing small testnets.
+    /// Set to 2 to prevent single-node "ultraforking" while allowing small chains.
     pub min_peers_for_consensus: usize,
     /// Minimum number of distinct validator keys that must vote for a block
     /// before it can be committed (Dual-Witness Rule). Default: 2.

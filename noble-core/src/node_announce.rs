@@ -182,7 +182,7 @@ pub struct NodeAnnounce {
     /// Chain ID of the blockchain this node is on (from genesis hash).
     #[serde(default)]
     pub chain_id: u32,
-    /// Human-readable network name ("mainnet", "testnet", "regtest").
+    /// Human-readable chain label (hex chain ID or empty).
     #[serde(default)]
     pub network_name: String,
     pub timestamp: u64,

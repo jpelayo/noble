@@ -90,6 +90,7 @@ impl TransactionBuilder {
         checksum: Hash256,
         fee: u64,
         metadata: Vec<MetadataEntry>,
+        chain_id: u32,
     ) -> Result<Transaction, WalletError> {
         tracing::debug!(task = "wallet_build", "building notarization transaction");
         let timestamp = std::time::SystemTime::now()
@@ -119,7 +120,7 @@ impl TransactionBuilder {
         };
 
         let msg = tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
         tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
@@ -138,6 +139,7 @@ impl TransactionBuilder {
         fee: u64,
         memo: Option<String>,
         source_address: Option<noble_core::NobleAddress>,
+        chain_id: u32,
     ) -> Result<Transaction, WalletError> {
         tracing::debug!(
             task = "wallet_build",
@@ -184,7 +186,7 @@ impl TransactionBuilder {
         };
 
         let msg = tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
         tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
@@ -205,6 +207,7 @@ impl TransactionBuilder {
         url: &[u8],
         recipients: &[NoblePublicKey],
         attestations: Vec<ExternalAttestation>,
+        chain_id: u32,
     ) -> Result<Transaction, WalletError> {
         if recipients.is_empty() {
             return Err(WalletError::Crypto(
@@ -272,7 +275,7 @@ impl TransactionBuilder {
         };
 
         let msg = tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
         Ok(tx)
@@ -289,6 +292,7 @@ impl TransactionBuilder {
         checksum: Hash256,
         fee: u64,
         slots: Vec<TypedSlot>,
+        chain_id: u32,
     ) -> Result<Transaction, WalletError> {
         // Build the schema descriptor lines.  Slot 0 is always the schema
         // itself; user slots are numbered 1..=N.
@@ -314,7 +318,7 @@ impl TransactionBuilder {
             metadata.push(slot.to_metadata_entry());
         }
 
-        Self::build_notarization(keystore, signer, checksum, fee, metadata)
+        Self::build_notarization(keystore, signer, checksum, fee, metadata, chain_id)
     }
 
     /// Set the gateway address on an already-built transaction and re-sign.
@@ -327,10 +331,11 @@ impl TransactionBuilder {
         keystore: &KeyStore,
         signer: &NoblePublicKey,
         gateway: Vec<u8>,
+        chain_id: u32,
     ) -> Result<(), WalletError> {
         tx.gateway_address = Some(gateway);
         let msg = tx
-            .compute_signing_message()
+            .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
         Ok(())
@@ -347,6 +352,7 @@ impl TransactionBuilder {
 mod tests {
     use super::*;
     use noble_crypto::SCHEME_ED25519;
+    use noble_test_utils::fixtures::test_chain_id;
     use tempfile::tempdir;
 
     /// Helper: create an unlocked keystore with one Ed25519 key.
@@ -363,7 +369,7 @@ mod tests {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);
         let tx =
-            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![]).unwrap();
+            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id()).unwrap();
 
         assert_eq!(tx.version, PROTOCOL_VERSION);
         assert_eq!(tx.tx_type, TX_TYPE_NOTARIZATION);
@@ -373,7 +379,7 @@ mod tests {
         assert!(tx.amount.is_none());
 
         // Verify the signature.
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg, &tx.publisher_sig).is_ok());
     }
 
@@ -393,6 +399,7 @@ mod tests {
             MIN_TX_FEE,
             None,
             None,
+            test_chain_id(),
         )
         .unwrap();
 
@@ -402,7 +409,7 @@ mod tests {
         assert_eq!(tx.checksum, Hash256::ZERO);
 
         // Verify the signature.
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(sender.verify(&msg, &tx.publisher_sig).is_ok());
     }
 
@@ -413,7 +420,7 @@ mod tests {
         let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes));
 
         let result =
-            TransactionBuilder::build_transfer(&ks, &sender, recipient, 0, MIN_TX_FEE, None, None);
+            TransactionBuilder::build_transfer(&ks, &sender, recipient, 0, MIN_TX_FEE, None, None, test_chain_id());
         assert!(result.is_err());
         match result.unwrap_err() {
             WalletError::InvalidRecipient(msg) => {
@@ -437,6 +444,7 @@ mod tests {
             MIN_TX_FEE,
             Some("payment for services".into()),
             None,
+            test_chain_id(),
         )
         .unwrap();
 
@@ -474,7 +482,7 @@ mod tests {
         ];
 
         let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots,
+            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
         )
         .unwrap();
 
@@ -508,7 +516,7 @@ mod tests {
         ];
 
         let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots,
+            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
         )
         .unwrap();
 
@@ -539,12 +547,12 @@ mod tests {
         }];
 
         let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots,
+            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
         )
         .unwrap();
 
         // Verify the signature is valid.
-        let msg = tx.compute_signing_message().unwrap();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg, &tx.publisher_sig).is_ok());
 
         // Parse the schema back from metadata.
@@ -562,12 +570,12 @@ mod tests {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);
         let mut tx =
-            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![]).unwrap();
+            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id()).unwrap();
 
         assert!(tx.gateway_address.is_none());
 
         // Original signature is valid
-        let msg_before = tx.compute_signing_message().unwrap();
+        let msg_before = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg_before, &tx.publisher_sig).is_ok());
 
         // Set gateway
@@ -575,13 +583,13 @@ mod tests {
         let gw_key = NoblePublicKey::Ed25519(gw_pk);
         let gw_wire = gw_key.to_wire_bytes();
 
-        TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire.clone()).unwrap();
+        TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire.clone(), test_chain_id()).unwrap();
 
         // Field is set
         assert_eq!(tx.gateway_address.as_ref().unwrap(), &gw_wire);
 
         // New signature is valid (covers gateway_address)
-        let msg_after = tx.compute_signing_message().unwrap();
+        let msg_after = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg_after, &tx.publisher_sig).is_ok());
 
         // Signing messages differ (gateway changed the payload)

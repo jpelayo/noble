@@ -54,7 +54,7 @@ class MockBridge {
                 isConnected: true,
                 hasWallet: true,
                 walletAddress: addr,
-                network: 'testnet',
+                chain_id: '4E4F424C',
                 blockHeight: 1234,
                 selectedSection: 'home'
             };
@@ -118,7 +118,7 @@ class MockBridge {
                 txId: 'f6789012345678901234567890123456789012345678901234567890abcdef01', accepted: true
             };
             if (action === 'getNodeInfo') return {
-                network: 'testnet', version: '0.23.0', blockHeight: 1234
+                chain_id: '4E4F424C', version: '0.23.0', blockHeight: 1234
             };
             if (action === 'getPeers') return { total: 8, inbound: 5, outbound: 3 };
             if (action === 'getTransaction') return {
