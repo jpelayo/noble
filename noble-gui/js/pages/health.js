@@ -96,6 +96,11 @@ export function init(root, ctx) {
   }, 60_000);
   unsubs.push(() => clearInterval(uptimeInterval));
 
+  // WS reconnect: refresh all health data
+  function onWsReconnect() { loadNodeInfo(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadNodeInfo();
 
   return {

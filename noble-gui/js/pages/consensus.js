@@ -480,6 +480,7 @@ export function init(root, ctx) {
     sync_requested:     '\u21bb',  // clockwise arrow
     reconnect_attempt:  '\u21ba',  // counter-clockwise arrow
     evidence_received:  '\u26a0',  // warning triangle
+    evidence_published: '\u26a0',  // warning triangle
     blockchain_discovered: '\u2728', // sparkles
     consensus_log:      '\u2022',  // bullet
     warning:            '\u26a0',  // warning triangle
@@ -493,7 +494,8 @@ export function init(root, ctx) {
       case 'sync_complete': return 'var(--success, #22c55e)';
       case 'warning':
       case 'peer_banned':
-      case 'evidence_received': return 'var(--danger, #ef4444)';
+      case 'evidence_received':
+      case 'evidence_published': return 'var(--danger, #ef4444)';
       case 'vote_broadcast':
       case 'vote_received': return 'var(--accent, #3b82f6)';
       case 'phase_change': return '#f59e0b';
@@ -554,8 +556,14 @@ export function init(root, ctx) {
         return `Tx ${truncateHash(data.tx_id || '')} from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
-      case 'evidence_received':
-        return `Double-proposal evidence from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+      case 'evidence_received': {
+        const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
+        return `${etype} evidence from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+      }
+      case 'evidence_published': {
+        const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
+        return `${etype} evidence published (${truncateHash(data.evidence_hash || '')})`;
+      }
       case 'peer_wrong_chain':
         return `Kicked ${data.peer_name || pName(data.peer_id)} \u2014 wrong chain (${data.their_chain_id})`;
       case 'blockchain_discovered':
@@ -771,6 +779,16 @@ export function init(root, ctx) {
     setTimeout(() => seedPeers(), delay)
   );
   unsubs.push(() => seedTimers.forEach(t => clearTimeout(t)));
+
+  // ── WS reconnect recovery: refresh all panels after reconnection ──
+  // Events were missed during the disconnect window — re-fetch everything.
+  function onWsReconnect() {
+    pushActivity({ event: 'heartbeat', message: 'WebSocket reconnected — refreshing data' });
+    scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
+    seedPeers();
+  }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
 
   function updateManualVoteVisibility() {
     const panel = root.querySelector('#cs-manual-vote-panel');

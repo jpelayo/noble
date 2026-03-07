@@ -556,6 +556,11 @@ export function init(root, ctx) {
   // WS: refresh on new block (might include new subsidy)
   unsubs.push(ws.subscribe('newBlocks', () => loadWallet()));
 
+  // WS reconnect: refresh wallet data
+  function onWsReconnect() { loadWallet(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadWallet();
 
   return {

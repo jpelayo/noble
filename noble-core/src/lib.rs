@@ -26,7 +26,9 @@ pub use constants::*;
 pub use debit::{resolve_debit_address, resolve_debit_address_enforced, DebitError};
 pub use encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
 pub use error::ValidationError;
-pub use evidence::{DoubleProposalEvidence, EvidenceError};
+pub use evidence::{
+    DoubleProposalEvidence, EvidenceError, MisbehaviorEvidence, VoteEquivocationEvidence,
+};
 pub use genesis::{
     derive_chain_id, genesis_block, genesis_hash, mainnet_chain_id, regtest_chain_id,
     regtest_genesis_block, regtest_genesis_hash, testnet_chain_id, testnet_genesis_block,

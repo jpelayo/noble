@@ -237,6 +237,14 @@ pub trait NodeApi {
     #[method(name = "getFinalityStatus")]
     async fn get_finality_status(&self) -> Result<FinalityStatusResponse, ErrorObjectOwned>;
 
+    /// List all stored misbehavior evidence (double-proposal and vote equivocation).
+    #[method(name = "getEvidenceList")]
+    async fn get_evidence_list(&self) -> Result<EvidenceListResponse, ErrorObjectOwned>;
+
+    /// Get a specific evidence record by hex-encoded hash.
+    #[method(name = "getEvidence")]
+    async fn get_evidence(&self, evidence_hash: String) -> Result<EvidenceDetailResponse, ErrorObjectOwned>;
+
     /// Reset the chain to genesis and trigger re-sync from peers.
     ///
     /// This is a destructive operation used for fork recovery ("blockchain hop").
@@ -1199,6 +1207,49 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         })
     }
 
+    async fn get_evidence_list(&self) -> Result<EvidenceListResponse, ErrorObjectOwned> {
+        let entries = self
+            .storage
+            .read()
+            .list_evidence()
+            .map_err(|e| ApiError::Storage(e.to_string()))?;
+
+        let mut evidence = Vec::with_capacity(entries.len());
+        for (hash, cbor) in &entries {
+            let (evidence_type, validator) =
+                decode_evidence_summary(cbor).unwrap_or(("unknown".into(), String::new()));
+            evidence.push(EvidenceEntry {
+                evidence_hash: hex::encode(hash),
+                evidence_type,
+                validator,
+            });
+        }
+        let total = evidence.len();
+        Ok(EvidenceListResponse { evidence, total })
+    }
+
+    async fn get_evidence(&self, evidence_hash: String) -> Result<EvidenceDetailResponse, ErrorObjectOwned> {
+        let hash_bytes = hex::decode(&evidence_hash)
+            .map_err(|_| ApiError::InvalidParam("invalid hex hash".into()))?;
+
+        let cbor = self
+            .storage
+            .read()
+            .get_evidence(&hash_bytes)
+            .map_err(|e| ApiError::Storage(e.to_string()))?
+            .ok_or_else(|| ApiError::Storage("evidence not found".into()))?;
+
+        let (evidence_type, validator, detail) =
+            decode_evidence_detail(&cbor).unwrap_or(("unknown".into(), String::new(), serde_json::json!({})));
+
+        Ok(EvidenceDetailResponse {
+            evidence_hash,
+            evidence_type,
+            validator,
+            detail,
+        })
+    }
+
     async fn reset_chain(&self) -> Result<ResetChainResponse, ErrorObjectOwned> {
         // TOTP auth required (scope: All). Check via request extensions.
         // The TOTP middleware handles this at the RPC layer.
@@ -1479,4 +1530,48 @@ fn read_validator_pubkey(path: &std::path::Path, chain_meta: &[u8; 32]) -> Optio
         _ => return None,
     };
     Some(hex::encode(private_key.public_key().to_wire_bytes()))
+}
+
+/// Decode CBOR evidence into (type, validator_hex) for list display.
+fn decode_evidence_summary(cbor: &[u8]) -> Option<(String, String)> {
+    use noble_codec::NobleCbor;
+    let evidence = noble_core::MisbehaviorEvidence::from_cbor(cbor).ok()?;
+    let (ty, validator) = match &evidence {
+        noble_core::MisbehaviorEvidence::DoubleProposal(e) => {
+            ("double_proposal".to_string(), hex::encode(e.validator_id.to_wire_bytes()))
+        }
+        noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
+            ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()))
+        }
+    };
+    Some((ty, validator))
+}
+
+/// Decode CBOR evidence into (type, validator_hex, detail_json) for single-record display.
+fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Value)> {
+    use noble_codec::NobleCbor;
+    let evidence = noble_core::MisbehaviorEvidence::from_cbor(cbor).ok()?;
+    let (ty, validator, detail) = match &evidence {
+        noble_core::MisbehaviorEvidence::DoubleProposal(e) => {
+            let detail = serde_json::json!({
+                "header_a_height": e.header_a.height,
+                "header_b_height": e.header_b.height,
+                "header_a_hash": e.header_a.compute_block_hash()
+                    .map(|h| hex::encode(h.as_bytes())).unwrap_or_default(),
+                "header_b_hash": e.header_b.compute_block_hash()
+                    .map(|h| hex::encode(h.as_bytes())).unwrap_or_default(),
+            });
+            ("double_proposal".to_string(), hex::encode(e.validator_id.to_wire_bytes()), detail)
+        }
+        noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
+            let detail = serde_json::json!({
+                "cycle": e.cycle,
+                "round": e.round,
+                "candidate_a": hex::encode(e.candidate_a.as_bytes()),
+                "candidate_b": hex::encode(e.candidate_b.as_bytes()),
+            });
+            ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()), detail)
+        }
+    };
+    Some((ty, validator, detail))
 }

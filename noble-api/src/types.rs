@@ -1259,6 +1259,39 @@ pub struct BackupChainResponse {
     pub size_bytes: u64,
 }
 
+/// Response for `noble_getEvidenceList`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceListResponse {
+    /// All stored evidence entries.
+    pub evidence: Vec<EvidenceEntry>,
+    /// Total number of evidence records.
+    pub total: usize,
+}
+
+/// Summary of a single misbehavior evidence record.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceEntry {
+    /// Hex-encoded SHA-256 hash of the CBOR evidence.
+    pub evidence_hash: String,
+    /// Type of misbehavior: "double_proposal" or "vote_equivocation".
+    pub evidence_type: String,
+    /// Hex-encoded wire bytes of the misbehaving validator.
+    pub validator: String,
+}
+
+/// Response for `noble_getEvidence`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceDetailResponse {
+    /// Hex-encoded SHA-256 hash of the CBOR evidence.
+    pub evidence_hash: String,
+    /// Type of misbehavior: "double_proposal" or "vote_equivocation".
+    pub evidence_type: String,
+    /// Hex-encoded wire bytes of the misbehaving validator.
+    pub validator: String,
+    /// Full evidence details.
+    pub detail: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

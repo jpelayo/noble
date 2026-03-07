@@ -1578,18 +1578,57 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             let gui_tls = tls_config.clone();
             let gui_rpc_origins = rpc_origins.clone();
             tokio::spawn(async move {
-                if let Err(e) = crate::gui_server::start_gui_server(
-                    gui_addr,
-                    gui_path,
-                    gui_filter,
-                    gui_tls,
-                    gui_rpc_origins,
-                    rpc_port,
-                    setup_mode,
-                )
-                .await
-                {
-                    tracing::error!(task = "node_startup", "GUI server error: {e}");
+                // Bombproof restart loop: if the GUI server panics or returns an
+                // error, wait with exponential backoff and restart.  The dashboard
+                // must never stay dead — it is the operator's primary interface.
+                let mut backoff_secs: u64 = 1;
+                loop {
+                    let filter_c = gui_filter.clone();
+                    let tls_c = gui_tls.clone();
+                    let origins_c = gui_rpc_origins.clone();
+                    let path_c = gui_path.clone();
+
+                    // Catch both errors AND panics.
+                    let result = std::panic::AssertUnwindSafe(
+                        crate::gui_server::start_gui_server(
+                            gui_addr,
+                            path_c,
+                            filter_c,
+                            tls_c,
+                            origins_c,
+                            rpc_port,
+                            setup_mode,
+                        ),
+                    );
+                    match futures_util::FutureExt::catch_unwind(result).await {
+                        Ok(Ok(())) => {
+                            // Server returned cleanly (shouldn't happen — it's an infinite loop).
+                            tracing::warn!(task = "gui_server", "GUI server exited cleanly — restarting");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!(
+                                task = "gui_server",
+                                "GUI server error: {e} — restarting in {backoff_secs}s"
+                            );
+                        }
+                        Err(panic) => {
+                            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else if let Some(s) = panic.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            tracing::error!(
+                                task = "gui_server",
+                                "GUI server PANICKED: {msg} — restarting in {backoff_secs}s"
+                            );
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30); // 1, 2, 4, 8, 16, 30, 30, ...
+                    tracing::info!(task = "gui_server", "Restarting GUI server...");
                 }
             });
         } else {
@@ -2238,17 +2277,35 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 evidence,
                 peer_id,
             } => {
+                let evidence_type = match &**evidence {
+                    noble_core::MisbehaviorEvidence::DoubleProposal(_) => "double_proposal",
+                    noble_core::MisbehaviorEvidence::VoteEquivocation(_) => "vote_equivocation",
+                };
                 tracing::warn!(
                     task = "evidence",
-                    "Double-proposal evidence received from {}",
-                    hex::encode(peer_id),
+                    r#type = evidence_type,
+                    "Misbehavior evidence received from {}",
+                    hex::encode(&peer_id),
                 );
-                // TODO(year2): Slash/ban the misbehaving validator
+                // Store evidence.
+                let cbor = noble_codec::NobleCbor::to_cbor(&**evidence).unwrap_or_default();
+                let evidence_hash = noble_crypto::sha256(&cbor);
+                if let Err(e) = self.storage.read().store_evidence(evidence_hash.as_bytes(), &cbor) {
+                    tracing::warn!(task = "evidence", "failed to store evidence: {e}");
+                }
+                // Apply reputation penalty.
+                let misbehaver_wire = match &**evidence {
+                    noble_core::MisbehaviorEvidence::DoubleProposal(e) => e.validator_id.to_wire_bytes(),
+                    noble_core::MisbehaviorEvidence::VoteEquivocation(e) => e.voter_pubkey.to_wire_bytes(),
+                };
+                self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
+                // GUI event.
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "evidence_received",
-                    "peer_id": hex::encode(peer_id),
+                    "type": evidence_type,
+                    "peer_id": hex::encode(&peer_id),
+                    "evidence_hash": hex::encode(evidence_hash.as_bytes()),
                 }));
-                let _ = evidence; // Acknowledge receipt; slashing not yet implemented.
             }
             NetworkEvent::BlockAnnounced {
                 peer_id,
@@ -2880,6 +2937,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                     // S53: Re-publish announce with updated proposed_height/hash.
                     self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
+                }
+                CycleIo::PublishEvidence(evidence) => {
+                    // Store evidence locally.
+                    let cbor = noble_codec::NobleCbor::to_cbor(&*evidence).unwrap_or_default();
+                    let evidence_hash = noble_crypto::sha256(&cbor);
+                    if let Err(e) = self.storage.read().store_evidence(evidence_hash.as_bytes(), &cbor) {
+                        tracing::warn!(task = "evidence", "failed to store evidence: {e}");
+                    }
+                    // Apply reputation penalty.
+                    let misbehaver_wire = match &*evidence {
+                        noble_core::MisbehaviorEvidence::DoubleProposal(e) => e.validator_id.to_wire_bytes(),
+                        noble_core::MisbehaviorEvidence::VoteEquivocation(e) => e.voter_pubkey.to_wire_bytes(),
+                    };
+                    self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
+                    // Emit GUI event.
+                    let evidence_type = match &*evidence {
+                        noble_core::MisbehaviorEvidence::DoubleProposal(_) => "double_proposal",
+                        noble_core::MisbehaviorEvidence::VoteEquivocation(_) => "vote_equivocation",
+                    };
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "evidence_published",
+                        "type": evidence_type,
+                        "evidence_hash": hex::encode(evidence_hash.as_bytes()),
+                    }));
+                    // Forward to network via bridge.
+                    let cmds = bridge::cycle_io_to_network_commands(
+                        CycleIo::PublishEvidence(evidence),
+                    );
+                    for cmd in cmds {
+                        let _ = network_cmd.try_send(cmd);
+                    }
                 }
                 other => {
                     // Emit protocol activity events for votes and bans

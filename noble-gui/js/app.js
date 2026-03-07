@@ -34,9 +34,18 @@ import * as setupPage from './pages/setup.js';
 
 // ── Status change handler ──
 // status: 'connecting' | 'connected' | 'disconnected'
+let _wasConnected = false;
 function onStatusChange(status) {
   store.state.connectionStatus = status;
   store.state.connected = status === 'connected';
+
+  // On reconnect: refresh all global data — events were missed while disconnected.
+  if (status === 'connected' && _wasConnected) {
+    bootstrap();
+    // Notify pages so they can refresh their own data.
+    window.dispatchEvent(new CustomEvent('noble-ws-reconnect'));
+  }
+  if (status === 'connected') _wasConnected = true;
 }
 
 // ── Initialize RPC layer (real or mock) ──
@@ -350,10 +359,15 @@ async function bootstrap() {
     // null cycle_number = bootstrapping (no blocks beyond genesis).
     state.cyclePhase = cycleStatus.cycle_number == null ? 'Awaiting genesis' : cycleStatus.phase;
 
-    // Only show chain identity bar once the chain is active (has blocks beyond genesis).
-    if (cycleStatus.cycle_number != null) {
-      populateChainIdentity(nodeInfo);
-    }
+    // Force-render status bar values — the reactive store skips same-value
+    // assignments (0→0), so initial "-- " placeholders would persist.
+    kpiHeight.textContent = formatNumber(state.blockHeight);
+    kpiPeers.textContent = formatNumber(state.peerCount);
+    kpiMempool.textContent = formatNumber(state.mempoolSize);
+    kpiPhase.textContent = state.cyclePhase;
+
+    // Show chain identity bar if we have a chain_id.
+    populateChainIdentity(nodeInfo);
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();
@@ -384,6 +398,24 @@ ws.subscribe('newTransactions', () => {
 
 ws.subscribe('cyclePhaseChange', (data) => {
   if (data.phase) state.cyclePhase = data.phase;
+});
+
+// Peer count: update on peer connect/disconnect via WS (no polling needed).
+ws.subscribe('peerUpdates', () => {
+  rpc.call('noble_getNetworkInfo').then(info => {
+    state.peerCount = info.peer_count;
+  }).catch(() => {});
+});
+
+// ── Network online/offline resilience ──
+// When the browser regains network, force WS reconnect + data refresh.
+window.addEventListener('online', () => {
+  console.info('[app] network online — forcing WS reconnect');
+  ws.connect();   // WsManager handles dedup if already connected
+  bootstrap();
+});
+window.addEventListener('offline', () => {
+  console.warn('[app] network offline');
 });
 
 // ── Start ──

@@ -1,14 +1,19 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Double-proposal evidence for slashing misbehaving validators.
+//! Misbehavior evidence for slashing misbehaving validators.
 //!
 //! A [`DoubleProposalEvidence`] proves that a validator proposed two different
 //! blocks within the same consensus cycle, which is a slashable offense.
+//!
+//! A [`VoteEquivocationEvidence`] proves that a validator voted for two
+//! different candidates in the same round of the same cycle.
+//!
+//! [`MisbehaviorEvidence`] is the unified wrapper for all evidence types.
 
 use serde::{Deserialize, Serialize};
 
-use noble_crypto::NoblePublicKey;
+use noble_crypto::{sha256, Hash256, NoblePublicKey, SignatureEnvelope};
 
 use crate::BlockHeader;
 
@@ -29,7 +34,7 @@ pub struct DoubleProposalEvidence {
     pub validator_id: NoblePublicKey,
 }
 
-/// Errors when verifying double-proposal evidence.
+/// Errors when verifying misbehavior evidence.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum EvidenceError {
@@ -43,6 +48,12 @@ pub enum EvidenceError {
     InvalidSignature(String),
     /// Block hash computation failed.
     HashError(String),
+    /// The two votes reference different voter keys.
+    DifferentVoters,
+    /// The two votes reference different rounds.
+    DifferentRounds,
+    /// The two votes are for the same candidate (not equivocation).
+    SameCandidateHash,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -53,6 +64,9 @@ impl std::fmt::Display for EvidenceError {
             Self::SameBlockHash => write!(f, "headers have the same block hash"),
             Self::InvalidSignature(e) => write!(f, "invalid signature: {e}"),
             Self::HashError(e) => write!(f, "hash computation error: {e}"),
+            Self::DifferentVoters => write!(f, "votes reference different voter keys"),
+            Self::DifferentRounds => write!(f, "votes reference different rounds"),
+            Self::SameCandidateHash => write!(f, "votes are for the same candidate"),
         }
     }
 }
@@ -125,6 +139,87 @@ impl DoubleProposalEvidence {
 
         Ok(())
     }
+}
+
+/// Evidence that a validator voted for two different candidates in the same round.
+///
+/// Uses raw fields from `noble-core` (not `PorVote` from `noble-consensus`)
+/// to avoid a circular dependency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoteEquivocationEvidence {
+    /// The cycle in which equivocation occurred.
+    pub cycle: u64,
+    /// The voting round (1 = R1, 2 = R2).
+    pub round: u8,
+    /// Hash of the first candidate voted for.
+    pub candidate_a: Hash256,
+    /// Hash of the second (conflicting) candidate voted for.
+    pub candidate_b: Hash256,
+    /// The voter's public key.
+    pub voter_pubkey: NoblePublicKey,
+    /// Signature over the first vote payload.
+    pub signature_a: SignatureEnvelope,
+    /// Signature over the second vote payload.
+    pub signature_b: SignatureEnvelope,
+}
+
+/// Internal payload for vote evidence signing — must produce identical CBOR
+/// to `VoteSigningPayload` in `noble-consensus/src/vote.rs`.
+#[derive(Serialize)]
+struct VoteEvidencePayload {
+    cycle: u64,
+    candidate_hash: Hash256,
+    round: u8,
+}
+
+impl VoteEquivocationEvidence {
+    /// Verify that this evidence is valid:
+    /// 1. `candidate_a != candidate_b`
+    /// 2. Signature A verifies against the vote payload for candidate_a
+    /// 3. Signature B verifies against the vote payload for candidate_b
+    pub fn verify(&self) -> Result<(), EvidenceError> {
+        // 1. Votes must be for different candidates
+        if self.candidate_a == self.candidate_b {
+            return Err(EvidenceError::SameCandidateHash);
+        }
+
+        // 2. Verify signature A
+        let payload_a = VoteEvidencePayload {
+            cycle: self.cycle,
+            candidate_hash: self.candidate_a,
+            round: self.round,
+        };
+        let cbor_a = noble_codec::to_canonical_cbor(&payload_a)
+            .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+        let msg_a = sha256(&cbor_a).0;
+        self.voter_pubkey
+            .verify(&msg_a, &self.signature_a)
+            .map_err(|e| EvidenceError::InvalidSignature(format!("vote_a: {e}")))?;
+
+        // 3. Verify signature B
+        let payload_b = VoteEvidencePayload {
+            cycle: self.cycle,
+            candidate_hash: self.candidate_b,
+            round: self.round,
+        };
+        let cbor_b = noble_codec::to_canonical_cbor(&payload_b)
+            .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+        let msg_b = sha256(&cbor_b).0;
+        self.voter_pubkey
+            .verify(&msg_b, &self.signature_b)
+            .map_err(|e| EvidenceError::InvalidSignature(format!("vote_b: {e}")))?;
+
+        Ok(())
+    }
+}
+
+/// Unified wrapper for all types of misbehavior evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MisbehaviorEvidence {
+    /// A validator proposed two different blocks in the same cycle.
+    DoubleProposal(DoubleProposalEvidence),
+    /// A validator voted for two different candidates in the same round.
+    VoteEquivocation(VoteEquivocationEvidence),
 }
 
 #[cfg(test)]
@@ -238,5 +333,176 @@ mod tests {
         let bytes = evidence.to_cbor().unwrap();
         let decoded = DoubleProposalEvidence::from_cbor(&bytes).unwrap();
         assert_eq!(evidence, decoded);
+    }
+
+    // --- VoteEquivocationEvidence tests ---
+
+    fn make_vote_key() -> (NoblePrivateKey, NoblePublicKey) {
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+        (priv_key, pub_key)
+    }
+
+    fn sign_vote(
+        priv_key: &NoblePrivateKey,
+        cycle: u64,
+        candidate: Hash256,
+        round: u8,
+    ) -> SignatureEnvelope {
+        let payload = VoteEvidencePayload {
+            cycle,
+            candidate_hash: candidate,
+            round,
+        };
+        let cbor = noble_codec::to_canonical_cbor(&payload).unwrap();
+        let msg = noble_crypto::sha256(&cbor).0;
+        priv_key.sign(&msg).unwrap()
+    }
+
+    #[test]
+    fn valid_vote_equivocation() {
+        let (priv_key, pub_key) = make_vote_key();
+        let candidate_a = Hash256::from_bytes([0x01; 32]);
+        let candidate_b = Hash256::from_bytes([0x02; 32]);
+        let sig_a = sign_vote(&priv_key, 5, candidate_a, 1);
+        let sig_b = sign_vote(&priv_key, 5, candidate_b, 1);
+        let evidence = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a,
+            candidate_b,
+            voter_pubkey: pub_key,
+            signature_a: sig_a,
+            signature_b: sig_b,
+        };
+        assert!(evidence.verify().is_ok());
+    }
+
+    #[test]
+    fn same_candidate_rejected_vote_equivocation() {
+        let (priv_key, pub_key) = make_vote_key();
+        let candidate = Hash256::from_bytes([0x01; 32]);
+        let sig_a = sign_vote(&priv_key, 5, candidate, 1);
+        let sig_b = sign_vote(&priv_key, 5, candidate, 1);
+        let evidence = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a: candidate,
+            candidate_b: candidate,
+            voter_pubkey: pub_key,
+            signature_a: sig_a,
+            signature_b: sig_b,
+        };
+        assert_eq!(
+            evidence.verify().unwrap_err(),
+            EvidenceError::SameCandidateHash
+        );
+    }
+
+    #[test]
+    fn different_voters_rejected_vote_equivocation() {
+        let (priv_key1, pub_key1) = make_vote_key();
+        let (priv_key2, _pub_key2) = make_vote_key();
+        let candidate_a = Hash256::from_bytes([0x01; 32]);
+        let candidate_b = Hash256::from_bytes([0x02; 32]);
+        // Sign vote_a with key1, vote_b with key2 — wrong
+        let sig_a = sign_vote(&priv_key1, 5, candidate_a, 1);
+        let sig_b = sign_vote(&priv_key2, 5, candidate_b, 1);
+        let evidence = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a,
+            candidate_b,
+            voter_pubkey: pub_key1,
+            signature_a: sig_a,
+            signature_b: sig_b,
+        };
+        assert!(matches!(
+            evidence.verify().unwrap_err(),
+            EvidenceError::InvalidSignature(_)
+        ));
+    }
+
+    #[test]
+    fn tampered_vote_signature_rejected() {
+        let (priv_key, pub_key) = make_vote_key();
+        let candidate_a = Hash256::from_bytes([0x01; 32]);
+        let candidate_b = Hash256::from_bytes([0x02; 32]);
+        let sig_a = sign_vote(&priv_key, 5, candidate_a, 1);
+        let mut sig_b = sign_vote(&priv_key, 5, candidate_b, 1);
+        sig_b.signature[0] ^= 0xFF;
+        let evidence = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a,
+            candidate_b,
+            voter_pubkey: pub_key,
+            signature_a: sig_a,
+            signature_b: sig_b,
+        };
+        assert!(matches!(
+            evidence.verify().unwrap_err(),
+            EvidenceError::InvalidSignature(_)
+        ));
+    }
+
+    #[test]
+    fn vote_evidence_cbor_roundtrip() {
+        use noble_codec::NobleCbor;
+        let (priv_key, pub_key) = make_vote_key();
+        let candidate_a = Hash256::from_bytes([0x01; 32]);
+        let candidate_b = Hash256::from_bytes([0x02; 32]);
+        let sig_a = sign_vote(&priv_key, 5, candidate_a, 1);
+        let sig_b = sign_vote(&priv_key, 5, candidate_b, 1);
+        let evidence = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a,
+            candidate_b,
+            voter_pubkey: pub_key,
+            signature_a: sig_a,
+            signature_b: sig_b,
+        };
+        let bytes = evidence.to_cbor().unwrap();
+        let decoded = VoteEquivocationEvidence::from_cbor(&bytes).unwrap();
+        assert_eq!(evidence, decoded);
+    }
+
+    #[test]
+    fn misbehavior_evidence_cbor_roundtrip() {
+        use noble_codec::NobleCbor;
+        // Test double-proposal variant
+        let (priv_key, pub_key) = make_validator();
+        let h1 = make_signed_header(&priv_key, &pub_key, 10, 1_700_000_000);
+        let h2 = make_signed_header(&priv_key, &pub_key, 10, 1_700_000_001);
+        let dp = DoubleProposalEvidence::new(h1, h2);
+        let me = MisbehaviorEvidence::DoubleProposal(dp);
+        let bytes = me.to_cbor().unwrap();
+        let decoded = MisbehaviorEvidence::from_cbor(&bytes).unwrap();
+        assert!(matches!(decoded, MisbehaviorEvidence::DoubleProposal(_)));
+
+        // Test vote equivocation variant
+        let (vk, vpk) = make_vote_key();
+        let ca = Hash256::from_bytes([0x01; 32]);
+        let cb = Hash256::from_bytes([0x02; 32]);
+        let sa = sign_vote(&vk, 5, ca, 1);
+        let sb = sign_vote(&vk, 5, cb, 1);
+        let ve = VoteEquivocationEvidence {
+            cycle: 5,
+            round: 1,
+            candidate_a: ca,
+            candidate_b: cb,
+            voter_pubkey: vpk,
+            signature_a: sa,
+            signature_b: sb,
+        };
+        let me2 = MisbehaviorEvidence::VoteEquivocation(ve);
+        let bytes2 = me2.to_cbor().unwrap();
+        let decoded2 = MisbehaviorEvidence::from_cbor(&bytes2).unwrap();
+        assert!(matches!(
+            decoded2,
+            MisbehaviorEvidence::VoteEquivocation(_)
+        ));
     }
 }

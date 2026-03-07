@@ -438,6 +438,11 @@ export function init(root, ctx) {
 
   unsubs.push(() => { if (banPollInterval) clearInterval(banPollInterval); });
 
+  // WS reconnect: refresh peer table and network stats
+  function onWsReconnect() { loadNetwork(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadNetwork();
 
   return {

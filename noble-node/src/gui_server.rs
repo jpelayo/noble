@@ -246,10 +246,20 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
         format!("ws://127.0.0.1:{}", state.rpc_port)
     };
 
-    let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", state.rpc_port)).await {
-        Ok(s) => s,
-        Err(e) => {
+    // Timeout on backend connect — don't hang forever if RPC is slow/dead.
+    let tcp = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(("127.0.0.1", state.rpc_port)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             tracing::warn!(task = "ws_proxy", "TCP connect to RPC port failed: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(task = "ws_proxy", "TCP connect to RPC port timed out (5s)");
             return;
         }
     };
@@ -556,34 +566,52 @@ pub async fn start_gui_server(
             let https_port = addr.port();
 
             tokio::spawn(async move {
-                // Peek at the first byte: TLS ClientHello starts with 0x16.
-                // If a plain-HTTP client connects, send a 301 redirect to https://
-                // instead of letting them see raw TLS bytes.
-                let mut first = [0u8; 1];
-                if tcp.peek(&mut first).await.is_ok() && first[0] != 0x16 {
-                    use tokio::io::AsyncWriteExt as _;
-                    let mut tcp = tcp;
-                    let host = peer_addr.ip();
-                    let redirect = format!(
-                        "HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}:{https_port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    );
-                    let _ = tcp.write_all(redirect.as_bytes()).await;
-                    return;
-                }
-
-                let tls = match acceptor_c.accept(tcp).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::debug!(task = "gui_server", "TLS handshake failed: {e}");
+                // Panic-safe: catch_unwind ensures a single bad connection
+                // can never crash the entire accept loop.
+                let handler = std::panic::AssertUnwindSafe(async {
+                    // Peek at the first byte: TLS ClientHello starts with 0x16.
+                    // If a plain-HTTP client connects, send a 301 redirect to https://
+                    // instead of letting them see raw TLS bytes.
+                    let mut first = [0u8; 1];
+                    if tcp.peek(&mut first).await.is_ok() && first[0] != 0x16 {
+                        use tokio::io::AsyncWriteExt as _;
+                        let mut tcp = tcp;
+                        let host = peer_addr.ip();
+                        let redirect = format!(
+                            "HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}:{https_port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = tcp.write_all(redirect.as_bytes()).await;
                         return;
                     }
-                };
-                let io = hyper_util::rt::TokioIo::new(tls);
-                let svc = hyper_util::service::TowerToHyperService::new(app_c);
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(io, svc)
-                    .await
-                    .ok();
+
+                    let tls = match acceptor_c.accept(tcp).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!(task = "gui_server", "TLS handshake failed: {e}");
+                            return;
+                        }
+                    };
+                    let io = hyper_util::rt::TokioIo::new(tls);
+                    let svc = hyper_util::service::TowerToHyperService::new(app_c);
+                    hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                        .serve_connection_with_upgrades(io, svc)
+                        .await
+                        .ok();
+                });
+                if let Err(panic) = futures_util::FutureExt::catch_unwind(handler).await {
+                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown".to_string()
+                    };
+                    tracing::error!(
+                        task = "gui_server",
+                        peer = %peer_addr,
+                        "connection handler panicked: {msg}"
+                    );
+                }
             });
         }
     }

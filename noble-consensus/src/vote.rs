@@ -34,6 +34,8 @@ pub enum VoteError {
         round: u8,
         first_candidate: Hash256,
         second_candidate: Hash256,
+        /// The first vote (for evidence construction). None if vote was already cleared.
+        first_vote: Option<PorVote>,
     },
 }
 
@@ -192,6 +194,9 @@ pub struct VoteManager {
     /// Detects when the same validator votes for different candidates in the
     /// same round — a protocol violation analogous to double-proposal.
     vote_commitments: HashMap<(Vec<u8>, u8), Hash256>,
+    /// First vote per (voter_key, round) — retained for evidence construction.
+    /// Cleared on `clear()`.
+    first_votes: HashMap<(Vec<u8>, u8), PorVote>,
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
 }
@@ -204,6 +209,7 @@ impl VoteManager {
             r2_votes: HashMap::new(),
             voted_validators: HashSet::new(),
             vote_commitments: HashMap::new(),
+            first_votes: HashMap::new(),
             current_cycle: 0,
         }
     }
@@ -259,12 +265,17 @@ impl VoteManager {
                     round: vote.round,
                     first_candidate,
                     second_candidate: vote.candidate_hash,
+                    first_vote: self.first_votes.get(&dedup_key).cloned(),
                 });
             }
         }
 
         self.vote_commitments
             .insert(dedup_key.clone(), vote.candidate_hash);
+        // Store first vote for evidence construction.
+        self.first_votes
+            .entry(dedup_key.clone())
+            .or_insert_with(|| vote.clone());
         self.voted_validators.insert(dedup_key);
         let target_map = if vote.round == 2 {
             &mut self.r2_votes
@@ -495,6 +506,7 @@ impl VoteManager {
         self.r2_votes.clear();
         self.voted_validators.clear();
         self.vote_commitments.clear();
+        self.first_votes.clear();
     }
 }
 
@@ -969,5 +981,51 @@ mod tests {
             other => panic!("expected WrongCycle error, got {:?}", other),
         }
         assert_eq!(mgr.total_votes(), 0, "stale vote should not be counted");
+    }
+
+    #[test]
+    fn vote_equivocation_returns_first_vote() {
+        let mut mgr = VoteManager::new();
+        let candidate_a = hash_n(1);
+        let candidate_b = hash_n(2);
+        let (sk, _) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let pub_key = priv_key.public_key();
+
+        // First vote for candidate A
+        let v1 = PorVote::sign(0, candidate_a, &priv_key, pub_key.clone()).unwrap();
+        assert!(mgr.record_vote(b"p1", &v1).unwrap());
+
+        // Second vote for candidate B — equivocation
+        let v2 = PorVote::sign(0, candidate_b, &priv_key, pub_key).unwrap();
+        let result = mgr.record_vote(b"p1", &v2);
+        match result {
+            Err(VoteError::Equivocation {
+                first_candidate,
+                second_candidate,
+                first_vote,
+                ..
+            }) => {
+                assert_eq!(first_candidate, candidate_a);
+                assert_eq!(second_candidate, candidate_b);
+                assert!(first_vote.is_some(), "first_vote must be retained");
+                let fv = first_vote.unwrap();
+                assert_eq!(fv.candidate_hash, candidate_a);
+                assert!(fv.verify().is_ok());
+            }
+            other => panic!("expected Equivocation error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn clear_resets_first_votes() {
+        let mut mgr = VoteManager::new();
+        let candidate = hash_n(1);
+        let (vote, _) = make_vote(0, candidate);
+        mgr.record_vote(b"p1", &vote).unwrap();
+        assert!(!mgr.first_votes.is_empty());
+
+        mgr.clear();
+        assert!(mgr.first_votes.is_empty());
     }
 }

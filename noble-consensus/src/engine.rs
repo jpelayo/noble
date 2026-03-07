@@ -1196,6 +1196,9 @@ impl CycleEngine {
             return outputs;
         }
 
+        // Clone header before add_candidate (which takes ownership of block).
+        let new_header = block.header.clone();
+
         // Compute block hash
         let block_hash = match block.header.compute_block_hash() {
             Ok(h) => h,
@@ -1228,6 +1231,18 @@ impl CycleEngine {
             }
             Err(existing_hash) => {
                 // True double proposal: same validator, different block hash.
+                // Construct evidence if we still have the existing block.
+                if let Some(existing_entry) = self.candidate_tracker.get(&existing_hash) {
+                    let evidence = noble_core::DoubleProposalEvidence::new(
+                        existing_entry.block.header.clone(),
+                        new_header,
+                    );
+                    if evidence.verify().is_ok() {
+                        outputs.push(CycleIo::PublishEvidence(Box::new(
+                            noble_core::MisbehaviorEvidence::DoubleProposal(evidence),
+                        )));
+                    }
+                }
                 outputs.push(CycleIo::BanPeer {
                     peer_id: from_peer,
                     reason: format!(
@@ -1308,21 +1323,45 @@ impl CycleEngine {
                     "duplicate vote from peer (ignored)".to_string(),
                 ));
             }
-            Err(e) => {
-                // WrongCycle is a chain-disagreement error (fork peer has a
-                // different epoch), not misbehavior.  Don't ban.
-                // Crypto errors (bad signature) ARE misbehavior → ban.
-                let is_wrong_cycle = matches!(e, crate::vote::VoteError::WrongCycle { .. });
-                if is_wrong_cycle {
-                    outputs.push(CycleIo::Log(format!(
-                        "ignored vote from fork peer (cycle mismatch): {e}"
-                    )));
-                } else {
-                    outputs.push(CycleIo::BanPeer {
-                        peer_id: from_peer,
-                        reason: format!("invalid vote: {e}"),
-                    });
+            Err(crate::vote::VoteError::Equivocation {
+                round,
+                first_candidate,
+                second_candidate,
+                first_vote,
+                ..
+            }) => {
+                // Construct evidence from both votes.
+                if let Some(first) = first_vote {
+                    let evidence = noble_core::VoteEquivocationEvidence {
+                        cycle: vote.cycle,
+                        round,
+                        candidate_a: first_candidate,
+                        candidate_b: second_candidate,
+                        voter_pubkey: vote.voter_pubkey.clone(),
+                        signature_a: first.signature.clone(),
+                        signature_b: vote.signature.clone(),
+                    };
+                    if evidence.verify().is_ok() {
+                        outputs.push(CycleIo::PublishEvidence(Box::new(
+                            noble_core::MisbehaviorEvidence::VoteEquivocation(evidence),
+                        )));
+                    }
                 }
+                outputs.push(CycleIo::BanPeer {
+                    peer_id: from_peer,
+                    reason: format!("vote equivocation in round {round}"),
+                });
+            }
+            Err(crate::vote::VoteError::WrongCycle { .. }) => {
+                outputs.push(CycleIo::Log(format!(
+                    "ignored vote from fork peer (cycle mismatch)"
+                )));
+            }
+            Err(e) => {
+                outputs.push(CycleIo::BanPeer {
+                    peer_id: from_peer,
+                    reason: format!("invalid vote: {e}"),
+                });
             }
         }
 

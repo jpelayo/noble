@@ -71,13 +71,14 @@ const CF_PEER_MEMORY: &str = "peer_memory";
 const CF_VERSION_CHAIN: &str = "version_chain";
 const CF_PUBLISHER_INDEX: &str = "publisher_index";
 const CF_BADGE_STATE: &str = "badge_state";
+const CF_EVIDENCE: &str = "evidence";
 
-/// All 13 column family names, for introspection (storage stats).
+/// All 14 column family names, for introspection (storage stats).
 const ALL_CF_NAMES: &[&str] = &[
     CF_BLOCKS, CF_BLOCK_HASHES, CF_TX_INDEX, CF_CHECKSUM_INDEX,
     CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_ADDRESS_BALANCES,
     CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY, CF_VERSION_CHAIN,
-    CF_PUBLISHER_INDEX, CF_BADGE_STATE,
+    CF_PUBLISHER_INDEX, CF_BADGE_STATE, CF_EVIDENCE,
 ];
 
 // --- Chain state keys ---
@@ -148,6 +149,7 @@ impl RocksDbStorage {
             Self::cf_version_chain(config),
             Self::cf_publisher_index(config),
             Self::cf_badge_state(),
+            Self::cf_evidence(),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cfs)
@@ -247,6 +249,10 @@ impl RocksDbStorage {
 
     fn cf_badge_state() -> ColumnFamilyDescriptor {
         ColumnFamilyDescriptor::new(CF_BADGE_STATE, Options::default())
+    }
+
+    fn cf_evidence() -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor::new(CF_EVIDENCE, Options::default())
     }
 
     // --- Helpers ---
@@ -1558,6 +1564,36 @@ impl StorageEngine for RocksDbStorage {
         Ok(StorageStats {
             column_families: self.query_cf_stats(),
         })
+    }
+
+    // ── Evidence Storage ──
+
+    fn store_evidence(&self, evidence_hash: &[u8], evidence_cbor: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_EVIDENCE)?;
+        self.db
+            .put_cf(cf, evidence_hash, evidence_cbor)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn get_evidence(&self, evidence_hash: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_EVIDENCE)?;
+        self.db
+            .get_cf(cf, evidence_hash)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn list_evidence(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_EVIDENCE)?;
+        let mut result = Vec::new();
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            result.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(result)
     }
 
     fn close(&mut self) -> Result<(), StorageError> {
@@ -3307,11 +3343,11 @@ mod tests {
     // --- Storage stats tests ---
 
     #[test]
-    fn rocks_get_storage_stats_returns_all_13_cfs() {
+    fn rocks_get_storage_stats_returns_all_14_cfs() {
         let dir = tempfile::tempdir().unwrap();
         let db = RocksDbStorage::open(dir.path()).unwrap();
         let stats = db.get_storage_stats().unwrap();
-        assert_eq!(stats.column_families.len(), 13);
+        assert_eq!(stats.column_families.len(), 14);
         // Verify all CF names are present
         let names: Vec<&str> = stats.column_families.iter().map(|cf| cf.name.as_str()).collect();
         assert!(names.contains(&"blocks"));
@@ -3327,5 +3363,6 @@ mod tests {
         assert!(names.contains(&"version_chain"));
         assert!(names.contains(&"publisher_index"));
         assert!(names.contains(&"badge_state"));
+        assert!(names.contains(&"evidence"));
     }
 }

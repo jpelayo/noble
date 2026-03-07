@@ -84,9 +84,27 @@ export function init(root, ctx) {
   prevBtn.addEventListener('click', () => loadPage(currentPage - 1));
   nextBtn.addEventListener('click', () => loadPage(currentPage + 1));
 
+  // WS reconnect: refresh current page
+  function onWsReconnect() { loadPage(currentPage); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+
+  // WS: auto-refresh on new blocks
+  const { ws } = ctx;
+  const unsubs = [];
+  if (ws && ws.subscribe) {
+    unsubs.push(ws.subscribe('newBlocks', () => {
+      if (currentPage === 0) loadPage(0);  // only auto-refresh if viewing newest
+    }));
+  }
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadPage(0);
 
-  return { destroy() {} };
+  return {
+    destroy() {
+      unsubs.forEach(fn => { try { fn(); } catch {} });
+    },
+  };
 }
 
 function validatorKeyHex(validatorId) {

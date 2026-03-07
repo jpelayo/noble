@@ -77,6 +77,9 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 hash: *block_hash.as_bytes(),
             }]
         }
+        CycleIo::PublishEvidence(evidence) => {
+            vec![NetworkCommand::PublishEvidence(evidence)]
+        }
         // CommitBlock, ReadmitTransactions, SetTimer, EmitMetric, Log
         // are handled locally by the node, not sent to the network.
         _ => vec![],

@@ -769,6 +769,9 @@ async fn handle_swarm_event(
                         GossipMessage::DoubleProposalEvidence { evidence_bytes } => {
                             handle_double_proposal(&evidence_bytes, peer_bytes)
                         }
+                        GossipMessage::VoteEquivocationEvidence { evidence_bytes } => {
+                            handle_vote_equivocation(&evidence_bytes, peer_bytes)
+                        }
                     };
                     if let Some(evt) = net_event {
                         // Votes are consensus-critical — use blocking send
@@ -1288,7 +1291,7 @@ fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<
                 );
                 Some(NetworkEvent::EvidenceReceived {
                     peer_id: peer_bytes,
-                    evidence: Box::new(evidence),
+                    evidence: Box::new(noble_core::MisbehaviorEvidence::DoubleProposal(evidence)),
                 })
             }
             Err(e) => {
@@ -1298,6 +1301,32 @@ fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<
         },
         Err(e) => {
             tracing::debug!(task = "gossip_receive", %e, "failed to decode evidence CBOR");
+            None
+        }
+    }
+}
+
+/// Handle a vote equivocation evidence gossip message.
+fn handle_vote_equivocation(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
+    match ciborium::from_reader::<noble_core::VoteEquivocationEvidence, _>(evidence_bytes) {
+        Ok(evidence) => match evidence.verify() {
+            Ok(()) => {
+                tracing::warn!(
+                    task = "gossip_receive",
+                    "valid vote equivocation evidence received"
+                );
+                Some(NetworkEvent::EvidenceReceived {
+                    peer_id: peer_bytes,
+                    evidence: Box::new(noble_core::MisbehaviorEvidence::VoteEquivocation(evidence)),
+                })
+            }
+            Err(e) => {
+                tracing::debug!(task = "gossip_receive", %e, "invalid vote equivocation evidence rejected");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::debug!(task = "gossip_receive", %e, "failed to decode vote equivocation CBOR");
             None
         }
     }
@@ -1570,19 +1599,33 @@ async fn handle_command(
         }
 
         NetworkCommand::PublishEvidence(evidence) => {
-            let mut evidence_bytes = Vec::new();
-            if ciborium::into_writer(&*evidence, &mut evidence_bytes).is_ok() {
-                let msg = GossipMessage::DoubleProposalEvidence { evidence_bytes };
-                if let Ok(data) = codec::encode_gossip(&msg) {
-                    let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
-                    tracing::debug!(
-                        task = "gossip_publish",
-                        "publishing to topic: {}",
-                        topics::TOPIC_EVIDENCE
-                    );
-                    if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                        tracing::warn!(task = "gossip_publish", err = %e, "failed to publish evidence");
+            let (gossip_msg, label) = match &*evidence {
+                noble_core::MisbehaviorEvidence::DoubleProposal(e) => {
+                    let mut bytes = Vec::new();
+                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                        return false;
                     }
+                    (GossipMessage::DoubleProposalEvidence { evidence_bytes: bytes }, "double_proposal")
+                }
+                noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
+                    let mut bytes = Vec::new();
+                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                        return false;
+                    }
+                    (GossipMessage::VoteEquivocationEvidence { evidence_bytes: bytes }, "vote_equivocation")
+                }
+            };
+            if let Ok(data) = codec::encode_gossip(&gossip_msg) {
+                let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
+                tracing::debug!(
+                    task = "gossip_publish",
+                    evidence_type = label,
+                    "publishing {} evidence to topic: {}",
+                    label,
+                    topics::TOPIC_EVIDENCE
+                );
+                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                    tracing::warn!(task = "gossip_publish", err = %e, "failed to publish evidence");
                 }
             }
         }

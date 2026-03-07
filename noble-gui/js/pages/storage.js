@@ -596,6 +596,11 @@ export function init(root, ctx) {
   const refreshInterval = setInterval(loadStorage, 30_000);
   unsubs.push(() => clearInterval(refreshInterval));
 
+  // WS reconnect: refresh storage data
+  function onWsReconnect() { loadStorage(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadStorage();
 
   return {

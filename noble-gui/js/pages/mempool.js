@@ -127,19 +127,14 @@ export function init(root, ctx) {
     mpCount.textContent = formatNumber(cur + 1);
   }));
 
-  // WS: mempool stats refresh
-  unsubs.push(ws.subscribe('mempoolStats', (info) => {
-    mpCount.textContent = formatNumber(info.count);
-    mpSize.textContent = formatBytes(info.total_bytes);
-    mpMinFee.textContent = formatFee(info.min_fee);
-    mpMaxFee.textContent = formatFee(info.max_fee);
-    if (feeChart && info.fee_histogram) {
-      feeChart.setOption({
-        xAxis: { data: info.fee_histogram.map(b => b.label) },
-        series: [{ data: info.fee_histogram.map(b => b.count) }],
-      });
-    }
-  }));
+  // Periodically refresh full mempool stats (size, fees, histogram).
+  // newTransactions WS only provides per-tx updates, not full stats recalc.
+  unsubs.push(ws.subscribe('newBlocks', () => loadMempoolInfo()));
+
+  // WS reconnect: refresh mempool data
+  function onWsReconnect() { loadMempoolInfo(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
 
   loadMempoolInfo();
 

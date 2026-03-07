@@ -224,6 +224,11 @@ export function init(root, ctx) {
     loadRecentTxs();
   }));
 
+  // WS reconnect: refresh all data that may have gone stale
+  function onWsReconnect() { loadRecentBlocks(); loadRecentTxs(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
+
   loadRecentBlocks();
   loadRecentTxs();
 

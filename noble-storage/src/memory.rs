@@ -54,6 +54,8 @@ struct Inner {
     block_votes: BTreeMap<u64, Vec<u8>>,
     /// Finality state persistence.
     finality_state: Option<Vec<u8>>,
+    /// Misbehavior evidence: evidence_hash → CBOR-encoded MisbehaviorEvidence.
+    evidence: HashMap<Vec<u8>, Vec<u8>>,
     closed: bool,
 }
 
@@ -900,6 +902,31 @@ impl StorageEngine for MemoryStorage {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
         Ok(inner.badge_proposals.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    }
+
+    fn store_evidence(&self, evidence_hash: &[u8], evidence_cbor: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        if inner.closed {
+            return Err(StorageError::NotOpen);
+        }
+        inner.evidence.insert(evidence_hash.to_vec(), evidence_cbor.to_vec());
+        Ok(())
+    }
+
+    fn get_evidence(&self, evidence_hash: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        if inner.closed {
+            return Err(StorageError::NotOpen);
+        }
+        Ok(inner.evidence.get(evidence_hash).cloned())
+    }
+
+    fn list_evidence(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        if inner.closed {
+            return Err(StorageError::NotOpen);
+        }
+        Ok(inner.evidence.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 
     fn close(&mut self) -> Result<(), StorageError> {

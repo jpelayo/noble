@@ -88,4 +88,6 @@ pub enum CycleIo {
     PhaseChanged { cycle: u64, phase: CyclePhase },
     /// Persist finality state to storage.
     PersistFinalityState { height: u64, hash: Hash256, cycle: u64 },
+    /// Publish misbehavior evidence to the network and store locally.
+    PublishEvidence(Box<noble_core::MisbehaviorEvidence>),
 }

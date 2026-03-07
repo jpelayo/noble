@@ -36,6 +36,9 @@ pub struct ReputationData {
     pub total_cycles: u64,
     /// Last cycle number processed (to prevent double-counting).
     pub last_cycle: u64,
+    /// Number of misbehavior incidents (double-proposal or vote equivocation).
+    #[serde(default)]
+    pub misbehavior_count: u64,
 }
 
 impl ReputationData {
@@ -61,7 +64,13 @@ impl ReputationData {
         };
 
         let raw = W_ACCEPTANCE * acceptance + W_PARTICIPATION * participation + W_UPTIME * uptime;
-        raw.clamp(0.0, 1.0)
+        // Misbehavior penalty: each incident halves the score, capped at 10.
+        let penalty = if self.misbehavior_count > 0 {
+            0.5_f64.powi(self.misbehavior_count.min(10) as i32)
+        } else {
+            1.0
+        };
+        (raw * penalty).clamp(0.0, 1.0)
     }
 }
 
@@ -190,6 +199,12 @@ impl ReputationEngine {
 
         // Record cycle uptime
         self.record_cycle(cycle, all_validators, active_validators);
+    }
+
+    /// Record a misbehavior incident (equivocation or double-proposal).
+    pub fn record_misbehavior(&mut self, wire_bytes: &[u8]) {
+        let entry = self.data.entry(wire_bytes.to_vec()).or_default();
+        entry.misbehavior_count += 1;
     }
 
     /// Return a snapshot of all tracked data (for persistence).
@@ -363,8 +378,78 @@ mod tests {
             uptime_cycles: u64::MAX,
             total_cycles: u64::MAX,
             last_cycle: 0,
+            misbehavior_count: 0,
         };
         let score = data.score();
         assert!(score >= 0.0 && score <= 1.0);
+    }
+
+    #[test]
+    fn misbehavior_reduces_score() {
+        let mut engine = ReputationEngine::new();
+        let wire = b"validator1".to_vec();
+
+        // Perfect validator
+        for _ in 0..10 {
+            engine.record_block_accepted(&wire);
+            engine.record_vote_cast(&wire);
+        }
+        for cycle in 1..=10 {
+            engine.record_cycle(cycle, &[wire.clone()], &[wire.clone()]);
+        }
+
+        let clean_score = engine.score(&wire);
+        assert!((clean_score - 1.0).abs() < 1e-10);
+
+        // Record 1 misbehavior → 0.5× penalty
+        engine.record_misbehavior(&wire);
+        let penalized_score = engine.score(&wire);
+        assert!(
+            (penalized_score - 0.5).abs() < 1e-10,
+            "1 misbehavior should halve score, got {}",
+            penalized_score
+        );
+    }
+
+    #[test]
+    fn multiple_misbehaviors_compound() {
+        let mut engine = ReputationEngine::new();
+        let wire = b"badactor".to_vec();
+
+        for _ in 0..10 {
+            engine.record_block_accepted(&wire);
+            engine.record_vote_cast(&wire);
+        }
+        for cycle in 1..=10 {
+            engine.record_cycle(cycle, &[wire.clone()], &[wire.clone()]);
+        }
+
+        // 2 incidents → 0.25× factor
+        engine.record_misbehavior(&wire);
+        engine.record_misbehavior(&wire);
+        let score = engine.score(&wire);
+        assert!(
+            (score - 0.25).abs() < 1e-10,
+            "2 misbehaviors should quarter score, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn serialization_roundtrip_with_misbehavior() {
+        use noble_codec::NobleCbor;
+
+        let mut engine = ReputationEngine::new();
+        let wire = b"v1".to_vec();
+        engine.record_block_accepted(&wire);
+        engine.record_vote_cast(&wire);
+        engine.record_cycle(1, &[wire.clone()], &[wire.clone()]);
+        engine.record_misbehavior(&wire);
+
+        let bytes = engine.to_cbor().unwrap();
+        let restored = ReputationEngine::from_cbor(&bytes).unwrap();
+
+        assert_eq!(restored.score(&wire), engine.score(&wire));
+        assert_eq!(restored.get(&wire).unwrap().misbehavior_count, 1);
     }
 }

@@ -303,6 +303,25 @@ pub trait StorageEngine {
         Ok(Vec::new()) // default no-op
     }
 
+    // ── Evidence Storage ──
+
+    /// Store misbehavior evidence, keyed by evidence hash (SHA-256 of CBOR).
+    fn store_evidence(&self, evidence_hash: &[u8], evidence_cbor: &[u8]) -> Result<(), StorageError> {
+        let _ = (evidence_hash, evidence_cbor);
+        Ok(()) // default no-op
+    }
+
+    /// Get evidence by hash.
+    fn get_evidence(&self, evidence_hash: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let _ = evidence_hash;
+        Ok(None)
+    }
+
+    /// List all stored evidence: (evidence_hash, cbor_bytes).
+    fn list_evidence(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Close the database (for graceful shutdown). Subsequent calls should
     /// return `StorageError::NotOpen`.
     fn close(&mut self) -> Result<(), StorageError>;

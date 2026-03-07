@@ -102,7 +102,7 @@ export function isHex64(str) {
 
 /** Chain identifier as hex. Empty if no blockchain exists. */
 export function formatChainLabel(nodeInfo) {
-  if (!nodeInfo.genesis_hash || !nodeInfo.chain_id) return '';
+  if (!nodeInfo.chain_id) return '';
   return '0x' + nodeInfo.chain_id.toString(16).toUpperCase().padStart(8, '0');
 }
 

@@ -85,7 +85,7 @@ function buildCompositeRoleOptions(role, validate, vote) {
 }
 
 export function init(root, ctx) {
-  const { rpc } = ctx;
+  const { rpc, ws } = ctx;
   const unsubs = [];
 
   root.innerHTML = `
@@ -688,9 +688,15 @@ export function init(root, ctx) {
     }
   });
 
-  // Refresh peers every 30s
-  const peerInterval = setInterval(loadPeers, 30_000);
-  unsubs.push(() => clearInterval(peerInterval));
+  // WS: refresh peers on connect/disconnect events (replaces 30s polling)
+  if (ws && ws.subscribe) {
+    unsubs.push(ws.subscribe('peerUpdates', () => loadPeers()));
+  }
+
+  // WS reconnect: refresh identity and peers
+  function onWsReconnect() { loadIdentity(); loadPeers(); loadPkiStatus(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+  unsubs.push(() => window.removeEventListener('noble-ws-reconnect', onWsReconnect));
 
   return {
     destroy() {

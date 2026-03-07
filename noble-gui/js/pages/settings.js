@@ -1401,11 +1401,16 @@ export function init(root, ctx) {
     }
   });
 
+  // WS reconnect: refresh fork + discovered chains + settings
+  function onWsReconnect() { loadForks(); loadDiscoveredChains(); loadSettings(); }
+  window.addEventListener('noble-ws-reconnect', onWsReconnect);
+
   return {
     destroy() {
       clearInterval(forkTimer);
       clearInterval(discoveredTimer);
       closeChainModal();
+      window.removeEventListener('noble-ws-reconnect', onWsReconnect);
     },
   };
 }

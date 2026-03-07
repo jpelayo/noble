@@ -8,7 +8,7 @@
 //! - [`GossipMessage`]: CBOR-encoded payloads published on GossipSub topics.
 //! - [`NetworkCommand`] / [`NetworkEvent`]: channel messages between node and network service.
 
-use noble_core::{Block, BlockHeader, DoubleProposalEvidence, NodeAnnounce, Transaction};
+use noble_core::{Block, BlockHeader, MisbehaviorEvidence, NodeAnnounce, Transaction};
 use serde::{Deserialize, Serialize};
 
 fn default_round() -> u8 {
@@ -109,6 +109,11 @@ pub enum GossipMessage {
         /// CBOR-encoded `DoubleProposalEvidence`.
         evidence_bytes: Vec<u8>,
     },
+    /// Broadcast vote equivocation evidence (sent on `TOPIC_EVIDENCE`).
+    VoteEquivocationEvidence {
+        /// CBOR-encoded `VoteEquivocationEvidence`.
+        evidence_bytes: Vec<u8>,
+    },
     /// Broadcast a node identity announcement (sent on `TOPIC_NODE_ANNOUNCE`).
     NodeAnnounce {
         identity_key: Vec<u8>,
@@ -197,8 +202,8 @@ pub enum NetworkCommand {
     BanPeer(Vec<u8>),
     /// Publish a node identity announcement to the network.
     PublishNodeAnnounce(Box<NodeAnnounce>),
-    /// Publish double-proposal evidence to the network.
-    PublishEvidence(Box<DoubleProposalEvidence>),
+    /// Publish misbehavior evidence (double-proposal or vote equivocation).
+    PublishEvidence(Box<MisbehaviorEvidence>),
     /// Dial a specific peer by multiaddr (used by `noble_dialPeer` RPC).
     /// The optional oneshot sender receives `Ok(())` on connection success or
     /// `Err(reason)` on failure/timeout. When `None`, dial is fire-and-forget.
@@ -272,10 +277,10 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         announce: Box<NodeAnnounce>,
     },
-    /// Double-proposal evidence was received from a peer.
+    /// Misbehavior evidence was received from a peer.
     EvidenceReceived {
         peer_id: Vec<u8>,
-        evidence: Box<DoubleProposalEvidence>,
+        evidence: Box<MisbehaviorEvidence>,
     },
     /// A peer's chain tip was updated (from status exchange).
     PeerChainTipUpdated {
