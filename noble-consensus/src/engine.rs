@@ -189,6 +189,19 @@ impl CycleEngine {
         self.voting_enabled = enabled;
     }
 
+    /// Human-readable cycle label for log messages.
+    ///
+    /// Before genesis (`tip_height == 0`) the cycle number is derived from
+    /// `GENESIS_TIMESTAMP` and is meaningless to operators, so we display
+    /// `"pre-genesis"` instead.
+    fn cycle_label(&self) -> String {
+        if self.tip_height == 0 {
+            "pre-genesis".to_string()
+        } else {
+            self.tracked_cycle.to_string()
+        }
+    }
+
     /// Get finality tracker (read-only) for RPC queries.
     pub fn finality_tracker(&self) -> &FinalityTracker {
         &self.finality_tracker
@@ -512,6 +525,7 @@ impl CycleEngine {
 
         outputs.push(CycleIo::PhaseChanged { cycle, phase });
 
+        let cl = self.cycle_label();
         match phase {
             CyclePhase::Proposal => {
                 // New proposal phase: clear previous state
@@ -521,7 +535,7 @@ impl CycleEngine {
                 self.r1_vote_cast = false;
                 self.r2_vote_cast = false;
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {cycle}: entering Proposal phase"
+                    "cycle {cl}: entering Proposal phase"
                 )));
                 // P0.3: If we are a block-proposing validator, request mempool txs.
                 // Vote-only peers (proposals_enabled=false) skip proposal.
@@ -531,19 +545,19 @@ impl CycleEngine {
             }
             CyclePhase::Voting => {
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {cycle}: entering Voting phase"
+                    "cycle {cl}: entering Voting phase"
                 )));
                 // R1 vote casting happens in handle_tick after VOTE_CAST_DELAY
             }
             CyclePhase::Reflection => {
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {cycle}: entering Reflection phase"
+                    "cycle {cl}: entering Reflection phase"
                 )));
                 // R2 vote casting happens in handle_tick after VOTE_CAST_DELAY
             }
             CyclePhase::Propagation => {
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {cycle}: entering Propagation phase"
+                    "cycle {cl}: entering Propagation phase"
                 )));
             }
         }
@@ -553,6 +567,7 @@ impl CycleEngine {
 
     fn handle_cycle_boundary(&mut self, completed_cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        let cl = self.cycle_label();
 
         // H-002: Build proposals snapshot before clearing.
         let proposals: Vec<CycleProposal> = self
@@ -598,8 +613,7 @@ impl CycleEngine {
         // Fork resolution (manual or automatic) handles divergence on reconnect.
         if self.tip_height == 0 && self.total_peers == 0 {
             debug!(
-                "cycle {}: genesis isolation guard — no connected peers, skipping consensus",
-                completed_cycle
+                "cycle {cl}: genesis isolation guard — no connected peers, skipping consensus"
             );
             // Re-admit all candidate txs
             let all_txs: Vec<_> = self
@@ -628,7 +642,7 @@ impl CycleEngine {
             self.r1_vote_cast = false;
             self.r2_vote_cast = false;
             outputs.push(CycleIo::Log(format!(
-                "cycle {completed_cycle}: no connected peers — genesis requires live witnesses"
+                "cycle {cl}: no connected peers — genesis requires live witnesses"
             )));
             return outputs;
         }
@@ -670,8 +684,8 @@ impl CycleEngine {
                         // was running — don't commit a stale candidate.
                         if new_height != self.tip_height + 1 {
                             debug!(
-                                "cycle {}: skipping stale candidate at height {} (tip is {})",
-                                completed_cycle, new_height, self.tip_height
+                                "cycle {cl}: skipping stale candidate at height {} (tip is {})",
+                                new_height, self.tip_height
                             );
                         } else {
                             // Collect orphaned txs from losing candidates
@@ -755,7 +769,7 @@ impl CycleEngine {
                                 value: new_height as f64,
                             });
                             outputs.push(CycleIo::Log(format!(
-                                "cycle {completed_cycle}: committed block {} at height {} ({:?})",
+                                "cycle {cl}: committed block {} at height {} ({:?})",
                                 new_hash, new_height, strength
                             )));
                             // Track finality: record this commit for finality counting.
@@ -787,14 +801,13 @@ impl CycleEngine {
                         }
                     } else {
                         outputs.push(CycleIo::Log(format!(
-                            "cycle {completed_cycle}: majority voted for {} but candidate not found",
+                            "cycle {cl}: majority voted for {} but candidate not found",
                             candidate_hash
                         )));
                     }
                 } else {
                     debug!(
-                        "cycle {}: Dual-Witness not met for genesis block ({} unique voter(s) for winner {}, need {})",
-                        completed_cycle,
+                        "cycle {cl}: Dual-Witness not met for genesis block ({} unique voter(s) for winner {}, need {})",
                         self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash),
                         candidate_hash, self.config.min_unique_voters
                     );
@@ -809,8 +822,7 @@ impl CycleEngine {
             }
             MigrationResult::Indeterminate => {
                 debug!(
-                    "cycle {}: vote tally indeterminate, no block committed",
-                    completed_cycle
+                    "cycle {cl}: vote tally indeterminate, no block committed"
                 );
                 // Re-admit all candidate txs back to mempool
                 let all_txs: Vec<_> = self
@@ -829,7 +841,7 @@ impl CycleEngine {
                 }
 
                 outputs.push(CycleIo::Log(format!(
-                    "cycle {completed_cycle}: indeterminate — no block committed"
+                    "cycle {cl}: indeterminate — no block committed"
                 )));
             }
         }
@@ -931,8 +943,7 @@ impl CycleEngine {
 
             // Diagnostic tracing for reputation accounting.
             info!(
-                "cycle {} reputation: validators={}, voters={}, candidates={}, result={:?}",
-                completed_cycle,
+                "cycle {cl} reputation: validators={}, voters={}, candidates={}, result={:?}",
                 all_validators.len(),
                 voters.len(),
                 self.candidate_tracker.all_candidates().len(),
@@ -1480,7 +1491,7 @@ impl CycleEngine {
                 if let Err(e) = validate_block(&block, &ctx) {
                     outputs.push(CycleIo::Log(format!(
                         "cycle {}: self-proposed block failed validation: {e}",
-                        self.tracked_cycle
+                        self.cycle_label()
                     )));
                     // Identify which tx(s) failed validation and evict them
                     let mut bad_tx_ids = Vec::new();
@@ -1519,14 +1530,14 @@ impl CycleEngine {
                 {
                     outputs.push(CycleIo::Log(format!(
                         "cycle {}: failed to add self-proposed candidate: {e}",
-                        self.tracked_cycle
+                        self.cycle_label()
                     )));
                     return outputs;
                 }
                 outputs.push(CycleIo::BroadcastBlock(block_box));
                 outputs.push(CycleIo::Log(format!(
                     "cycle {}: proposed block {} ({} txs) at height {}",
-                    self.tracked_cycle,
+                    self.cycle_label(),
                     block_hash,
                     txs.len(),
                     self.tip_height + 1
@@ -1535,7 +1546,7 @@ impl CycleEngine {
             Err(e) => {
                 outputs.push(CycleIo::Log(format!(
                     "cycle {}: failed to propose block: {e}",
-                    self.tracked_cycle
+                    self.cycle_label()
                 )));
             }
         }
@@ -1546,6 +1557,7 @@ impl CycleEngine {
     /// Cast an R1 vote for our preferred candidate.
     fn cast_r1_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        let cl = self.cycle_label();
 
         // Propose-only nodes (voting_enabled=false) don't cast votes.
         if !self.voting_enabled {
@@ -1584,14 +1596,14 @@ impl CycleEngine {
                     let _ = self.vote_mgr.record_vote(b"self", &vote);
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
-                        "cycle {cycle}: broadcast R1 vote for candidate {} (strategy: {})",
+                        "cycle {cl}: broadcast R1 vote for candidate {} (strategy: {})",
                         candidate_hash,
                         self.config.voting_strategy.name()
                     )));
                 }
                 Err(e) => {
                     outputs.push(CycleIo::Log(format!(
-                        "cycle {cycle}: failed to sign vote: {e}"
+                        "cycle {cl}: failed to sign vote: {e}"
                     )));
                 }
             }
@@ -1601,7 +1613,7 @@ impl CycleEngine {
             // may have arrived via gossip.
             let n = self.candidate_tracker.all_candidates().len();
             outputs.push(CycleIo::Log(format!(
-                "cycle {cycle}: no candidate selected for R1 vote ({n} proposal(s) available), will retry"
+                "cycle {cl}: no candidate selected for R1 vote ({n} proposal(s) available), will retry"
             )));
         }
 
@@ -1611,6 +1623,7 @@ impl CycleEngine {
     /// P1.2: Cast an R2 confirmation vote based on R1 tallies.
     fn cast_r2_vote(&mut self, cycle: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
+        let cl = self.cycle_label();
 
         // Propose-only nodes (voting_enabled=false) don't cast votes.
         if !self.voting_enabled {
@@ -1645,14 +1658,14 @@ impl CycleEngine {
                     let _ = self.vote_mgr.record_vote(b"self", &vote);
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
-                        "cycle {cycle}: broadcast R2 confirmation vote for {} (strategy: {})",
+                        "cycle {cl}: broadcast R2 confirmation vote for {} (strategy: {})",
                         candidate_hash,
                         self.config.confirmation_strategy.name()
                     )));
                 }
                 Err(e) => {
                     outputs.push(CycleIo::Log(format!(
-                        "cycle {cycle}: failed to sign R2 vote: {e}"
+                        "cycle {cl}: failed to sign R2 vote: {e}"
                     )));
                 }
             }
@@ -1660,7 +1673,7 @@ impl CycleEngine {
             // No candidate available — allow retry on subsequent ticks.
             let r1_count = self.vote_mgr.current_tallies().len();
             outputs.push(CycleIo::Log(format!(
-                "cycle {cycle}: no candidate selected for R2 vote ({r1_count} R1 candidate(s)), will retry"
+                "cycle {cl}: no candidate selected for R2 vote ({r1_count} R1 candidate(s)), will retry"
             )));
         }
 

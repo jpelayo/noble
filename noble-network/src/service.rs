@@ -552,6 +552,15 @@ async fn handle_swarm_event(
             };
             let remote_addr = endpoint.get_remote_address().to_string();
 
+            // Duplicate connection guard: if we already track this peer (e.g. simultaneous
+            // dial from both sides), do NOT call disconnect_peer_id — that would kill ALL
+            // connections to this peer including the existing good one.  Let the redundant
+            // connection idle out naturally (120s timeout).
+            if peer_manager.get_peer(&peer_id).is_some() {
+                tracing::debug!(task = "peer_management", %peer_id, "duplicate connection — ignoring without disconnect");
+                return;
+            }
+
             // Check subnet diversity for outbound connections.
             if direction == Direction::Outbound {
                 let outbound_addrs = peer_manager.outbound_addrs();
