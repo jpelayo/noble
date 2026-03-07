@@ -1014,6 +1014,10 @@ async fn handle_swarm_event(
             ..
         })) => {
             handle_ping_event(peer_manager, &peer, rtt);
+            let _ = event_tx.try_send(NetworkEvent::PeerLatencyUpdated {
+                peer_id: peer.to_bytes().to_vec(),
+                latency_ms: rtt.as_millis() as u64,
+            });
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {

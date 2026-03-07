@@ -2022,6 +2022,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             chain_tip_hash: cthash,
                             proposed_height: None,
                             identity_key: None, // set when NodeAnnounce received
+                            latency_ms: None,
                         },
                     );
                 }
@@ -2397,6 +2398,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "Sync complete up to height {new_height}"
                 );
             }
+            NetworkEvent::PeerLatencyUpdated {
+                peer_id,
+                latency_ms,
+            } => {
+                let hex_pid = hex::encode(peer_id);
+                let mut info = self.peer_info.write();
+                if let Some(entry) = info.get_mut(&hex_pid) {
+                    entry.latency_ms = Some(*latency_ms);
+                }
+            }
+
             NetworkEvent::PeerChainTipUpdated {
                 peer_id,
                 height,
@@ -2795,10 +2807,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
+                    // Hide cycle number during pre-genesis (tip_height == 0) —
+                    // the raw number is derived from GENESIS_TIMESTAMP and is
+                    // meaningless to operators.  Matches getCycleStatus RPC.
+                    let tip_h = self.consensus.read().chain_tip().0;
+                    let cycle_val: serde_json::Value = if tip_h == 0 {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(cycle)
+                    };
                     let mut event = serde_json::json!({
                         "event": "phase_change",
                         "phase": phase_name,
-                        "cycle": cycle,
+                        "cycle": cycle_val,
                     });
                     // Enrich phase transitions with vote/candidate context.
                     match phase {

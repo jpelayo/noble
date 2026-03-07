@@ -225,7 +225,7 @@ export function init(root, ctx) {
         <span>Live Vote Tallies</span>
         <span id="cs-tally-meta" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
       </div>
-      <div class="panel-body" id="cs-tallies-body">
+      <div class="panel-body" id="cs-tallies-body" style="max-height:340px;overflow-y:auto">
         <div class="empty-state">No votes recorded for the current cycle.</div>
       </div>
     </div>
@@ -273,7 +273,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Block acceptance rate (weight 0.4)">Acceptance</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th></th></tr></thead>
+          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Block acceptance rate (weight 0.4)">Acceptance</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th title="Connection stability: stability (reconnections), uptime, and latency">Connectivity</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Drag rows to set priority order &mdash; used by Round Robin and Weighted Probability strategies.</p>
@@ -705,6 +705,8 @@ export function init(root, ctx) {
 
   // Subscribe to cyclePhaseChange + peerUpdates WS topics for the activity feed.
   // Both streams are normalized into a single scrolling list.
+  // Suppress repeated announce_received events — only show first per identity.
+  const seenAnnounceIdentities = new Set();
   if (ws && ws.subscribe) {
     unsubs.push(ws.subscribe('cyclePhaseChange', (data) => {
       // Cache peer names from announce events for display resolution.
@@ -727,6 +729,13 @@ export function init(root, ctx) {
         pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });
       } else if (data.event === 'peer_connected') {
         pushPeerEvent(data);
+      } else if (data.event === 'announce_received') {
+        // Suppress repeated announces — only log the first one per identity.
+        // Name cache update above still runs for every announce.
+        const id = data.identity || data.peer_id;
+        if (id && seenAnnounceIdentities.has(id)) return;
+        if (id) seenAnnounceIdentities.add(id);
+        pushActivity(data);
       } else {
         pushActivity(data);
       }
@@ -964,19 +973,50 @@ export function init(root, ctx) {
         return;
       }
       const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
+      const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';
       talliesBody.innerHTML = result.tallies.map(t => {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
         const name = t.validator || truncateHash(t.block_hash, 8);
+        const r2 = t.r2_vote_count ? ` <span style="color:var(--text-muted);font-size:10px">R2: ${t.r2_vote_count}</span>` : '';
+        const voteBtn = isManual
+          ? `<button class="btn btn-sm cs-inline-vote-btn" data-hash="${t.block_hash}" style="flex-shrink:0;padding:2px 8px;font-size:11px">Vote</button>`
+          : '';
         return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          <span style="font-weight:600;font-size:var(--font-size-xs);width:40%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</span>
+          <span style="font-weight:600;font-size:var(--font-size-xs);width:${isManual ? '32%' : '40%'};flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.block_hash}">${name}</span>
           <div style="flex:1;min-width:40px;height:8px;background:var(--bg-tertiary);border-radius:4px">
             <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
           </div>
-          <span style="font-weight:600;flex-shrink:0;text-align:right;min-width:70px">${t.vote_count} (${pct}%)</span>
+          <span style="font-weight:600;flex-shrink:0;text-align:right;min-width:70px">${t.vote_count} (${pct}%)${r2}</span>
+          ${voteBtn}
         </div>`;
       }).join('');
 
-      // Populate manual vote candidate dropdown
+      // Wire inline vote buttons (Manual strategy).
+      if (isManual) {
+        talliesBody.querySelectorAll('.cs-inline-vote-btn').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const hash = btn.dataset.hash;
+            btn.disabled = true;
+            btn.textContent = '...';
+            try {
+              await rpc.call('noble_castVote', [hash]);
+              btn.textContent = 'Voted';
+              btn.classList.remove('btn-sm');
+              btn.classList.add('btn-sm');
+              btn.style.background = 'var(--success)';
+              btn.style.color = '#fff';
+              setTimeout(() => loadVoteTallies(), 2000);
+            } catch (err) {
+              btn.textContent = 'Error';
+              btn.style.background = 'var(--error)';
+              btn.style.color = '#fff';
+              setTimeout(() => { btn.textContent = 'Vote'; btn.disabled = false; btn.style.background = ''; btn.style.color = ''; }, 3000);
+            }
+          });
+        });
+      }
+
+      // Populate manual vote candidate dropdown (legacy panel)
       const candidateSelect = root.querySelector('#cs-manual-candidate');
       candidateSelect.innerHTML = '<option value="">— Select candidate —</option>' +
         result.tallies.map(t => {
@@ -1044,8 +1084,12 @@ export function init(root, ctx) {
 
   async function loadTimeline() {
     try {
-      // Request more than needed so we can filter out empty indeterminate cycles.
-      const history = await rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]);
+      // Fetch history, current cycle status, and tallies in parallel.
+      const [history, cycleStatus, tallies] = await Promise.all([
+        rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]),
+        rpc.call('noble_getCycleStatus').catch(() => null),
+        rpc.call('noble_getVoteTallies').catch(() => null),
+      ]);
       let allEntries = (history.entries || history.cycles || [])
         .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0));
 
@@ -1066,6 +1110,38 @@ export function init(root, ctx) {
             }
             break;
           }
+        }
+      }
+
+      // Inject the current active cycle if it's not already in history.
+      // getCycleHistory only returns completed cycles; the live cycle must be
+      // synthesized from getCycleStatus + getVoteTallies so the timeline always
+      // shows the ongoing cycle.
+      if (cycleStatus && cycleStatus.cycle_number != null) {
+        const liveCycle = cycleStatus.cycle_number;
+        const alreadyPresent = allEntries.some(e => e.cycle_number === liveCycle);
+        if (!alreadyPresent) {
+          const liveProposals = (tallies?.tallies || []).map(t => ({
+            validator: t.validator || t.block_hash,
+            block_hash: t.block_hash,
+            tx_count: 0,
+          }));
+          const liveVotes = (tallies?.tallies || []).map(t => ({
+            block_hash: t.block_hash,
+            validator: t.validator || '',
+            vote_count: t.vote_count || 0,
+            r2_vote_count: t.r2_vote_count || 0,
+          }));
+          allEntries.unshift({
+            cycle_number: liveCycle,
+            status: 'active',
+            proposals: liveProposals,
+            votes: liveVotes,
+            winner: null,
+            winning_hash: null,
+            disambiguation: null,
+            finalized_at: null,
+          });
         }
       }
 
@@ -1482,11 +1558,12 @@ export function init(root, ctx) {
 
   async function loadValidators() {
     try {
-      const [result, nodeInfo, peerMemory, identity] = await Promise.all([
+      const [result, nodeInfo, peerMemory, identity, peerInfo] = await Promise.all([
         rpc.call('noble_getValidatorList'),
         rpc.call('noble_getNodeInfo'),
         rpc.call('noble_getPeerMemory').catch(() => []),
         rpc.call('noble_getNodeIdentity').catch(() => ({})),
+        rpc.call('noble_getPeerInfo').catch(() => []),
       ]);
       const selfKey = nodeInfo.validator_pubkey || null;
       const validators = result?.validators || [];
@@ -1538,6 +1615,85 @@ export function init(root, ctx) {
       }
       currentDisplayOrder = ordered.map(v => valKeyHex(v.public_key));
 
+      // ── Connectivity score lookups ──
+      // Map identity_key → peer memory record (connection_count, first_seen, last_seen).
+      const memByKey = new Map();
+      if (Array.isArray(peerMemory)) {
+        for (const r of peerMemory) {
+          if (r.identity_key) memByKey.set(r.identity_key, r);
+        }
+      }
+      // Map identity_key → live peer info (latency_ms, connected_at) via peer_id cross-ref.
+      const peerIdToIdentity = new Map();
+      if (Array.isArray(peerMemory)) {
+        for (const r of peerMemory) {
+          if (r.peer_id && r.identity_key) peerIdToIdentity.set(r.peer_id, r.identity_key);
+        }
+      }
+      const liveByKey = new Map();
+      if (Array.isArray(peerInfo)) {
+        for (const p of peerInfo) {
+          const ik = peerIdToIdentity.get(p.peer_id);
+          if (ik) liveByKey.set(ik, p);
+        }
+      }
+
+      /**
+       * Compute a synthetic Connectivity score (0–100) from available data.
+       *
+       *  Stability (40%): Fewer reconnections per unit time = better.
+       *    score = max(0, 1 - (reconnections / 10))
+       *
+       *  Uptime (30%): Directly from reputation breakdown.
+       *
+       *  Latency (30%): Lower is better. Perfect ≤50ms, degrades to 0 at ≥2000ms.
+       *    If latency unavailable, use freshness (alive=1, stale=0.5, unreachable=0).
+       */
+      function connectivityScore(v, keyHex) {
+        const isSelfNode = selfKey && keyHex === selfKey;
+        if (isSelfNode) return { score: 100, bars: 5, label: 'Local', latencyMs: null };
+
+        const mem = memByKey.get(keyHex);
+        const live = liveByKey.get(keyHex);
+        const br = v.reputation_breakdown;
+
+        // Stability: penalize reconnections (connection_count includes initial = 1)
+        const reconnections = mem ? Math.max(0, (mem.connection_count || 1) - 1) : 0;
+        const stability = Math.max(0, 1 - reconnections / 10);
+
+        // Uptime: from reputation breakdown
+        const uptime = br ? br.uptime : 0;
+
+        // Latency or freshness fallback
+        let latencyComponent;
+        const latencyMs = live?.latency_ms;
+        if (latencyMs != null) {
+          // 0ms→1.0, 50ms→1.0, 500ms→0.75, 2000ms→0
+          latencyComponent = Math.max(0, 1 - Math.max(0, latencyMs - 50) / 1950);
+        } else {
+          // Freshness fallback based on liveness status
+          latencyComponent = v.status === 'alive' ? 1 : v.status === 'stale' ? 0.5 : 0;
+        }
+
+        const score = Math.round((stability * 0.4 + uptime * 0.3 + latencyComponent * 0.3) * 100);
+        const bars = score >= 80 ? 5 : score >= 60 ? 4 : score >= 40 ? 3 : score >= 20 ? 2 : score > 0 ? 1 : 0;
+        const label = latencyMs != null ? `${latencyMs}ms` : null;
+        return { score, bars, label, latencyMs };
+      }
+
+      /** Render signal-strength bars (1–5). */
+      function signalBars(bars, score) {
+        const barColor = score >= 70 ? 'var(--success)' : score >= 40 ? 'var(--warning, #e6a817)' : 'var(--error)';
+        let html = '<span style="display:inline-flex;align-items:flex-end;gap:1px;height:14px" title="Connectivity: ' + score + '/100">';
+        for (let i = 1; i <= 5; i++) {
+          const h = 3 + i * 2; // heights: 5,7,9,11,13 px
+          const active = i <= bars;
+          html += `<span style="display:inline-block;width:3px;height:${h}px;border-radius:1px;background:${active ? barColor : 'var(--bg-tertiary)'}"></span>`;
+        }
+        html += '</span>';
+        return html;
+      }
+
       validatorsTbody.innerHTML = '';
       let dragSrcIdx = null;
 
@@ -1581,6 +1737,11 @@ export function init(root, ctx) {
           <td>${formatNumber(v.blocks_produced)}</td>
           <td>${v.listers_count ?? 0}</td>
           <td style="font-size:var(--font-size-xs)">${v.last_active ? (v.status === 'alive' ? timeAgo(v.last_active) : formatTimestamp(v.last_active)) : '--'}</td>
+          <td style="font-size:var(--font-size-xs);white-space:nowrap">${(() => {
+            const c = connectivityScore(v, keyHex);
+            const sub = c.label ? `<div class="mono" style="font-size:10px;color:var(--text-muted)">${c.label}</div>` : '';
+            return `<div style="display:flex;align-items:center;gap:4px">${signalBars(c.bars, c.score)}<span class="mono" style="font-size:var(--font-size-xs)">${c.score}</span></div>${sub}`;
+          })()}</td>
           ${removeCell}
         `;
 

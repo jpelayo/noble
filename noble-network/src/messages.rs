@@ -279,6 +279,11 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         announce: Box<NodeAnnounce>,
     },
+    /// A peer's latency was measured (from libp2p ping).
+    PeerLatencyUpdated {
+        peer_id: Vec<u8>,
+        latency_ms: u64,
+    },
     /// Misbehavior evidence was received from a peer.
     EvidenceReceived {
         peer_id: Vec<u8>,

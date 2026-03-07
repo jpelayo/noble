@@ -87,6 +87,8 @@ pub struct PeerInfoEntry {
     pub proposed_height: Option<u64>,
     /// Noble identity key wire bytes (from NodeAnnounce). Links PeerId to validator key.
     pub identity_key: Option<Vec<u8>>,
+    /// Round-trip latency in milliseconds (from libp2p ping). `None` if not yet measured.
+    pub latency_ms: Option<u64>,
 }
 
 /// Shared state available to all RPC method handlers.

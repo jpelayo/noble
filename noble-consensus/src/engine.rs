@@ -202,6 +202,25 @@ impl CycleEngine {
         }
     }
 
+    /// Resolve a candidate block hash to its proposer's friendly name.
+    ///
+    /// Returns the validator name from the validator list if the candidate is
+    /// tracked and the proposer is known; otherwise returns the truncated hash.
+    fn candidate_label(&self, hash: &noble_crypto::Hash256) -> String {
+        if let Some(entry) = self.candidate_tracker.get(hash) {
+            let wire = entry.block.header.validator_id.to_wire_bytes();
+            let name = self.validator_list.find_by_wire(&wire)
+                .map(|v| v.name())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        // Fallback: truncated hash.
+        let hex = hex::encode(hash.as_bytes());
+        format!("{}...{}", &hex[..6], &hex[hex.len() - 6..])
+    }
+
     /// Get finality tracker (read-only) for RPC queries.
     pub fn finality_tracker(&self) -> &FinalityTracker {
         &self.finality_tracker
@@ -1393,7 +1412,7 @@ impl CycleEngine {
             Ok(true) => {
                 outputs.push(CycleIo::Log(format!(
                     "recorded vote from peer for candidate {}",
-                    vote.candidate_hash
+                    self.candidate_label(&vote.candidate_hash)
                 )));
             }
             Ok(false) => {
@@ -1607,7 +1626,7 @@ impl CycleEngine {
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
                         "cycle {cl}: broadcast R1 vote for candidate {} (strategy: {})",
-                        candidate_hash,
+                        self.candidate_label(&candidate_hash),
                         self.config.voting_strategy.name()
                     )));
                 }
@@ -1669,7 +1688,7 @@ impl CycleEngine {
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
                         "cycle {cl}: broadcast R2 confirmation vote for {} (strategy: {})",
-                        candidate_hash,
+                        self.candidate_label(&candidate_hash),
                         self.config.confirmation_strategy.name()
                     )));
                 }

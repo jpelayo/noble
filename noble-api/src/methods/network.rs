@@ -142,6 +142,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     status: "connected".to_string(),
                     chain_tip_height: entry.chain_tip_height,
                     chain_tip_hash: entry.chain_tip_hash.clone(),
+                    latency_ms: entry.latency_ms,
                 }
             })
             .collect();
@@ -173,6 +174,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                 status: "disconnected".to_string(),
                 chain_tip_height: None,
                 chain_tip_hash: None,
+                latency_ms: None,
             });
         }
 

@@ -302,6 +302,9 @@ pub struct PeerInfoResponse {
     /// Peer's chain tip hash (from last status exchange).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_tip_hash: Option<String>,
+    /// Round-trip latency in milliseconds (from libp2p ping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 /// Response for `noble_getNetworkInfo`.
