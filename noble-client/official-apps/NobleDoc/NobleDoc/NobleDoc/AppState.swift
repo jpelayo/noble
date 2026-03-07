@@ -28,7 +28,12 @@ final class AppState {
     // MARK: - Navigation
 
     /// Currently selected sidebar section.
-    var selectedSection: SidebarSection? = .documents
+    var selectedSection: SidebarSection? = .home
+
+    // MARK: - WebView Bridge
+
+    /// Reference to the WebView coordinator for JS evaluation.
+    weak var webViewCoordinator: WebContentView.Coordinator?
 
     // MARK: - Onboarding
 
@@ -150,6 +155,15 @@ final class AppState {
             walletAddress = address.wireHex
         } catch {
             // Silently fail — address display is non-critical
+        }
+    }
+
+    /// Load the private key from Keychain. Returns nil if unavailable.
+    func loadPrivateKey() -> Data? {
+        do {
+            return try keychainService.loadKey(label: Self.privateKeyLabel)
+        } catch {
+            return nil
         }
     }
 

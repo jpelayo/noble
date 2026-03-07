@@ -1863,13 +1863,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
 
                 // Auto-reconnect: redial when connectivity is low.
-                // Threshold: fewer peers than seed count (minimum 2).
+                // Threshold: fewer peers than seed count (minimum 1).
                 _ = reconnect_interval.tick() => {
                     let current_peers = {
                         let stats = self.network_stats.read();
                         stats.peer_count
                     };
-                    let min_desired = self.seed_addrs.len().max(2);
+                    let min_desired = self.seed_addrs.len().max(1);
                     if current_peers < min_desired {
                         self.redial_known_peers(&network_cmd, &cycle_phase_tx);
                     }
@@ -2148,7 +2148,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let peer_addr = announce.host_address.clone().unwrap_or_default();
+                    // Use the announced host_address, falling back to the actual
+                    // connection address from peer_info so we always record an IP.
+                    let peer_addr = announce.host_address.clone()
+                        .filter(|a| !a.is_empty())
+                        .or_else(|| {
+                            let info = self.peer_info.read();
+                            let hex_pid = hex::encode(&peer_id);
+                            info.get(&hex_pid).map(|e| e.addr.clone())
+                        })
+                        .unwrap_or_default();
                     let chain_name = if announce.network_name.is_empty() {
                         format!("chain-{:08X}", announce.chain_id)
                     } else {
@@ -2191,8 +2200,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "peer_name": announce.node_name,
                         "peer_addr": peer_addr,
                     }));
-                    // Kick the peer — they're on a different chain.
-                    let _ = network_cmd.try_send(NetworkCommand::BanPeer(peer_id.clone()));
+                    // Graceful disconnect — they're on a different chain.
+                    // Blockchain info + peer IP are persisted above BEFORE disconnect.
+                    // No ban: different chain is not misbehavior.
+                    let _ = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone()));
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "peer_wrong_chain",
                         "peer_name": announce.node_name,

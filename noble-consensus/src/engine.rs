@@ -1436,10 +1436,13 @@ impl CycleEngine {
                 )));
             }
             Err(e) => {
-                outputs.push(CycleIo::BanPeer {
-                    peer_id: from_peer,
-                    reason: format!("invalid vote: {e}"),
-                });
+                // Log invalid votes without banning — the relay peer may not
+                // be the author, and transient issues (timing, round mismatch)
+                // are not clear misbehavior.  Cumulative scoring happens at the
+                // network layer for repeated offenses.
+                outputs.push(CycleIo::Log(format!(
+                    "rejected invalid vote from peer: {e}"
+                )));
             }
         }
 
@@ -1462,6 +1465,13 @@ impl CycleEngine {
             Some(kp) => kp,
             None => return outputs,
         };
+
+        // Guard: skip if we already proposed a block this cycle (prevents
+        // duplicate proposals from bootstrap retry or re-triggered events).
+        let our_wire = pub_key.to_wire_bytes();
+        if self.candidate_tracker.has_proposed(&our_wire) {
+            return outputs;
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

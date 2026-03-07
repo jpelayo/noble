@@ -200,6 +200,8 @@ pub enum NetworkCommand {
     RequestSync,
     /// Ban a peer by their serialized PeerId bytes.
     BanPeer(Vec<u8>),
+    /// Gracefully disconnect a peer without banning (e.g. different chain).
+    DisconnectPeer(Vec<u8>),
     /// Publish a node identity announcement to the network.
     PublishNodeAnnounce(Box<NodeAnnounce>),
     /// Publish misbehavior evidence (double-proposal or vote equivocation).

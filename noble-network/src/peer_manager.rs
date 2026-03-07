@@ -504,6 +504,14 @@ impl PeerManager {
         self.peers.values().filter_map(|s| s.addr.clone()).collect()
     }
 
+    /// Return all connected peer addresses (both inbound and outbound).
+    pub fn all_peer_addrs(&self) -> Vec<String> {
+        self.peers
+            .values()
+            .filter_map(|s| s.addr.clone())
+            .collect()
+    }
+
     /// Return outbound peer addresses.
     pub fn outbound_addrs(&self) -> Vec<String> {
         self.peers

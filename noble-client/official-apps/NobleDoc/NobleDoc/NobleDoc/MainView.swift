@@ -38,21 +38,13 @@ struct MainView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        switch appState.selectedSection {
-        case .documents:
-            DocumentsPlaceholder()
-        case .payments:
-            PaymentsPlaceholder()
-        case .contacts:
-            ContactsPlaceholder()
-        case .settings:
-            SettingsPlaceholder()
-        case nil:
-            ContentUnavailableView {
-                Label("NobleDoc", systemImage: "doc.text.fill")
-            } description: {
-                Text("Select a section from the sidebar.")
+        WebContentView(appState: appState)
+            .onChange(of: appState.selectedSection) { _, newValue in
+                if let section = newValue {
+                    appState.webViewCoordinator?.evaluateJS(
+                        "App.navigateTo('\(section.webRoute)')"
+                    )
+                }
             }
-        }
     }
 }

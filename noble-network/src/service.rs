@@ -969,20 +969,12 @@ async fn handle_swarm_event(
                             )
                         };
                         tracing::warn!(task = "sync", %peer, "{reason}");
-                        // Record misbehavior for score tracking, but disconnect
-                        // regardless of whether cumulative threshold is reached.
-                        peer_manager.record_misbehavior(
-                            &peer,
-                            BanReason::new(BanCategory::ProtocolViolation, reason.clone()),
-                        );
-                        // Force-ban: ensure the peer is in the banned set even
-                        // if the cumulative score hadn't yet crossed threshold.
-                        peer_manager.force_ban(&peer);
+                        // Different chain or protocol version: graceful disconnect
+                        // without banning.  A peer on a different chain is not
+                        // attacking — it's a misconfiguration or a legitimate
+                        // separate network.  Banning would prevent future
+                        // reconnection if the config is fixed.
                         let _ = swarm.disconnect_peer_id(peer);
-                        let _ = event_tx.try_send(NetworkEvent::PeerBanned {
-                            peer_id: peer.to_bytes().to_vec(),
-                            reason,
-                        });
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
                         // S49: Compute clock offset from sender_timestamp.
@@ -1022,6 +1014,19 @@ async fn handle_swarm_event(
             ..
         })) => {
             handle_ping_event(peer_manager, &peer, rtt);
+        }
+
+        SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {
+            peer,
+            result: Err(ref e),
+            ..
+        })) => {
+            tracing::debug!(
+                task = "ping",
+                %peer,
+                error = %e,
+                "ping failed — connection may be degraded"
+            );
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Identify(identify::Event::Received {
@@ -1715,17 +1720,35 @@ async fn handle_command(
         }
 
         NetworkCommand::DialPeer(addr, result_tx) => {
-            match swarm.dial(addr.clone()) {
-                Ok(_) => {
-                    tracing::info!(task = "network", %addr, "Dialing peer");
-                    if let Some(tx) = result_tx {
-                        pending_dials.insert(addr, tx);
-                    }
+            // Skip dialing if we're already connected to a peer at this address.
+            // Redundant dials to already-connected peers destabilize the existing
+            // connection by creating parallel Noise handshakes that can race.
+            let dial_ip_port = extract_ip_port(&addr.to_string());
+            let already_connected = if let Some(ref target) = dial_ip_port {
+                peer_manager.all_peer_addrs().iter().any(|a| {
+                    extract_ip_port(a).as_ref() == Some(target)
+                })
+            } else {
+                false
+            };
+            if already_connected {
+                tracing::debug!(task = "network", %addr, "Skipping dial — already connected to peer at this address");
+                if let Some(tx) = result_tx {
+                    let _ = tx.send(Ok(()));
                 }
-                Err(e) => {
-                    tracing::warn!(task = "network", %addr, %e, "Failed to dial peer");
-                    if let Some(tx) = result_tx {
-                        let _ = tx.send(Err(e.to_string()));
+            } else {
+                match swarm.dial(addr.clone()) {
+                    Ok(_) => {
+                        tracing::info!(task = "network", %addr, "Dialing peer");
+                        if let Some(tx) = result_tx {
+                            pending_dials.insert(addr, tx);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "network", %addr, %e, "Failed to dial peer");
+                        if let Some(tx) = result_tx {
+                            let _ = tx.send(Err(e.to_string()));
+                        }
                     }
                 }
             }
@@ -1740,6 +1763,13 @@ async fn handle_command(
                         "ban command from consensus engine",
                     ),
                 );
+                let _ = swarm.disconnect_peer_id(pid);
+            }
+        }
+
+        NetworkCommand::DisconnectPeer(peer_bytes) => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
+                tracing::info!(task = "network", %pid, "Graceful disconnect (no ban)");
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
@@ -1797,6 +1827,26 @@ pub fn extract_base_addr(multiaddr_str: &str) -> String {
         multiaddr_str[..idx].to_string()
     } else {
         multiaddr_str.to_string()
+    }
+}
+
+/// Extract the IP:port portion from a multiaddr string for address comparison.
+/// E.g. "/ip4/192.168.1.1/tcp/8780/p2p/12D3..." → "192.168.1.1:8780"
+fn extract_ip_port(addr_str: &str) -> Option<String> {
+    let parts: Vec<&str> = addr_str.split('/').collect();
+    let mut ip = None;
+    let mut port = None;
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "ip4" || *part == "ip6" {
+            ip = parts.get(i + 1).copied();
+        }
+        if *part == "tcp" {
+            port = parts.get(i + 1).copied();
+        }
+    }
+    match (ip, port) {
+        (Some(i), Some(p)) => Some(format!("{i}:{p}")),
+        _ => None,
     }
 }
 
