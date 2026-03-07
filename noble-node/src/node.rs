@@ -517,6 +517,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// Returns the integrity report.
     pub fn verify_recent_blocks(&self, count: u64) -> IntegrityReport {
         let height = self.chain_height();
+        // No blocks in storage — nothing to verify.
+        if height == 0 && self.storage.read().get_chain_tip().ok().flatten().is_none() {
+            return IntegrityReport {
+                heights_checked: 0,
+                first_corrupt_height: None,
+                findings: Vec::new(),
+            };
+        }
         let start = height.saturating_sub(count.saturating_sub(1));
         let guard = self.storage.read();
         noble_storage::verify_chain_integrity(&*guard, self.chain_id, start, height)
@@ -1878,7 +1886,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 direction,
                 chain_tip, // S55: was `..` — now explicit
             } => {
+                let hex_pid = hex::encode(peer_id);
                 let is_inbound = direction == "inbound";
+
+                // Guard: skip duplicate PeerConnected for an already-tracked peer.
+                // Prevents inflated peer_count from reconnect loops or duplicate
+                // ConnectionEstablished events from libp2p.
+                let already_tracked = self.peer_info.read().contains_key(&hex_pid);
+                if already_tracked {
+                    tracing::debug!(task = "peer_tracking", "duplicate PeerConnected for {hex_pid} — ignoring");
+                    // Still process chain_tip update if provided.
+                    if let Some((h, hash)) = chain_tip {
+                        let mut info = self.peer_info.write();
+                        if let Some(entry) = info.get_mut(&hex_pid) {
+                            entry.chain_tip_height = Some(*h);
+                            entry.chain_tip_hash = Some(hex::encode(hash));
+                        }
+                    }
+                    return;
+                }
+
                 let new_count = {
                     let mut stats = self.network_stats.write();
                     stats.peer_count += 1;
@@ -1894,8 +1921,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut engine = self.consensus.write();
                     engine.set_peer_count(new_count);
                 }
-                // H-004: Track peer info for getPeerInfo RPC.
-                let hex_pid = hex::encode(peer_id);
                 let now_ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -4002,7 +4027,7 @@ mod tests {
     use noble_consensus::ConsensusStateMachine;
 
     #[test]
-    fn init_memory_node_commits_genesis() {
+    fn init_memory_node_starts_stateless() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
@@ -4010,17 +4035,17 @@ mod tests {
 
         let node = Node::init_memory(&config).unwrap();
 
-        // Chain tip should be genesis (height 0).
+        // Node starts stateless — no genesis auto-committed.
         assert_eq!(node.chain_height(), 0);
         assert_eq!(node.chain_id, noble_core::mainnet_chain_id());
 
         // Mempool should be empty.
         assert_eq!(node.mempool.lock().len(), 0);
 
-        // Consensus engine should track genesis tip.
+        // Consensus engine tip is zero (no blocks yet).
         let (tip_height, tip_hash) = node.consensus.read().chain_tip();
         assert_eq!(tip_height, 0);
-        assert_ne!(tip_hash, Hash256::ZERO);
+        assert_eq!(tip_hash, Hash256::ZERO);
 
         // Wallet keystore should be auto-unlocked with chain_meta-derived passphrase.
         assert!(node.wallet_keystore.lock().is_unlocked());
@@ -4062,18 +4087,19 @@ mod tests {
     }
 
     #[test]
-    fn verify_recent_blocks_on_genesis() {
+    fn verify_recent_blocks_empty_chain() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
 
         let node = Node::init_memory(&config).unwrap();
+        // No blocks in storage — verify should return clean with 0 checked.
         let report = node.verify_recent_blocks(10);
         assert!(
             report.is_clean(),
-            "genesis-only chain should pass integrity check"
+            "empty chain should pass integrity check"
         );
-        assert_eq!(report.heights_checked, 1);
+        assert_eq!(report.heights_checked, 0);
     }
 
     #[test]
@@ -4083,26 +4109,22 @@ mod tests {
         config.wallet.keystore_path = dir.path().join("keystore");
 
         let node = Node::init_memory(&config).unwrap();
-        // count=0 should not panic; saturating_sub turns this into range [0, 0]
+        // count=0 should not panic
         let report = node.verify_recent_blocks(0);
         assert!(report.is_clean());
+        assert_eq!(report.heights_checked, 0);
     }
 
     #[test]
-    fn rollback_noop_at_genesis() {
+    fn rollback_empty_chain_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
 
         let node = Node::init_memory(&config).unwrap();
-        let tip = node.rollback_to_height(0).unwrap();
-        assert_eq!(tip.height, 0);
+        // Rollback on an empty chain (no tip) should return an error.
+        assert!(node.rollback_to_height(0).is_err());
         assert_eq!(node.chain_height(), 0);
-
-        // Consensus engine tip should still match
-        let (engine_height, engine_hash) = node.consensus.read().chain_tip();
-        assert_eq!(engine_height, tip.height);
-        assert_eq!(engine_hash, tip.block_hash);
     }
 
     #[test]

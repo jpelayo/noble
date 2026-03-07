@@ -537,14 +537,13 @@ impl CycleEngine {
             .collect();
 
         // Genesis protection: before block 1 is committed, require at least one
-        // live connected peer.  The Dual-Witness rule (unique_voter_count >= 2)
-        // already requires 2 distinct keys, but a stale validator_list could let
-        // compute_majority() return Adopt(Plurality) with only a self-vote.  This
-        // hard gate ensures a disconnected node can never attempt genesis — it must
-        // have real peers to even reach the majority computation.
-        if self.tip_height == 0 && self.total_peers == 0 {
+        // Isolation guard: a node with zero connected peers must never commit
+        // blocks — not at genesis, not at any height.  Without live peers the
+        // only vote is the self-vote, which trivially wins plurality (1 >= ceil(1/3)).
+        // This prevents solo chain growth after a network partition.
+        if self.total_peers == 0 {
             debug!(
-                "cycle {}: genesis guard — no connected peers, skipping consensus",
+                "cycle {}: isolation guard — no connected peers, skipping consensus",
                 completed_cycle
             );
             // Re-admit all candidate txs
@@ -561,7 +560,7 @@ impl CycleEngine {
                 .as_secs();
             self.last_cycle_history = Some(CycleHistoryEntry {
                 cycle_number: completed_cycle,
-                status: "no_peers".to_string(),
+                status: "isolated".to_string(),
                 proposals: Vec::new(),
                 votes: Vec::new(),
                 winner: None,
@@ -574,7 +573,7 @@ impl CycleEngine {
             self.r1_vote_cast = false;
             self.r2_vote_cast = false;
             outputs.push(CycleIo::Log(format!(
-                "cycle {completed_cycle}: no connected peers — genesis requires live witnesses"
+                "cycle {completed_cycle}: no connected peers — consensus requires live witnesses"
             )));
             return outputs;
         }

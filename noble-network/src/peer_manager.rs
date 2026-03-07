@@ -219,9 +219,16 @@ impl PeerManager {
     }
 
     /// Handle a new peer connection. Returns `true` if accepted, `false` if rejected
-    /// (due to connection limits or ban).
+    /// (due to connection limits, ban, or duplicate connection).
     pub fn on_connected(&mut self, peer_id: PeerId, direction: Direction) -> bool {
         if self.is_banned(&peer_id) {
+            return false;
+        }
+
+        // Deduplicate: if peer is already connected, treat as no-op to prevent
+        // inflated peer counts from reconnect loops or duplicate ConnectionEstablished events.
+        if self.peers.contains_key(&peer_id) {
+            tracing::debug!(task = "peer_connect", peer_id = %peer_id, "duplicate connection event — ignoring");
             return false;
         }
 
