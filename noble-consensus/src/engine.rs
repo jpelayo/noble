@@ -501,21 +501,22 @@ impl CycleEngine {
         const DEADLINE_SECS: u64 = 30;
         const VOTE_CAST_DELAY: u64 = 30;
 
-        // Block proposal retry: if we're in Proposal phase, we should propose,
-        // and we haven't yet — try now.  The first attempt is on first tick or
-        // phase transition; this catches cases where the node booted mid-phase,
-        // the gossip mesh wasn't ready, or the first attempt was suppressed.
-        // handle_mempool_transactions has its own has_proposed guard.
+        // Deadline safety net: if an action (proposal, R1, R2) hasn't fired
+        // and the phase is about to end (<30s left), force-retry.  The first
+        // attempt happens on first tick / phase transition; this catches
+        // mid-cycle boots, delayed peer connections, empty gossipsub mesh, etc.
+        // handle_mempool_transactions / cast_r1_vote / cast_r2_vote have their
+        // own guards so duplicates are impossible.
+
+        // Proposal deadline: <30s left in Proposal phase and haven't proposed.
         if new_phase == CyclePhase::Proposal
             && self.our_validator_key.is_some()
             && self.proposals_enabled
         {
             let our_wire = self.our_validator_key.as_ref().unwrap().1.to_wire_bytes();
-            if !self.candidate_tracker.has_proposed(&our_wire) {
-                let remaining = self.cycle_mgr.seconds_until_phase_change(now);
-                if remaining <= DEADLINE_SECS {
-                    debug!("cycle engine: deadline proposal — {remaining}s left in Proposal phase");
-                }
+            let remaining = self.cycle_mgr.seconds_until_phase_change(now);
+            if !self.candidate_tracker.has_proposed(&our_wire) && remaining <= DEADLINE_SECS {
+                debug!("cycle engine: deadline proposal — {remaining}s left in Proposal phase");
                 outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
             }
         }
@@ -524,7 +525,12 @@ impl CycleEngine {
         // Blocks had the full Proposal phase + delay to propagate before voters act.
         if new_phase == CyclePhase::Voting && !self.r1_vote_cast {
             let phase_offset = self.cycle_mgr.phase_offset(now);
+            let remaining = self.cycle_mgr.seconds_until_phase_change(now);
             if phase_offset >= VOTE_CAST_DELAY {
+                outputs.extend(self.cast_r1_vote(new_cycle));
+            } else if remaining <= DEADLINE_SECS {
+                // R1 deadline: <30s left in Voting phase and haven't voted.
+                debug!("cycle engine: deadline R1 vote — {remaining}s left in Voting phase");
                 outputs.extend(self.cast_r1_vote(new_cycle));
             }
         }
@@ -533,14 +539,18 @@ impl CycleEngine {
         // R1 votes had the rest of the Voting phase + delay to propagate.
         if new_phase == CyclePhase::Reflection && !self.r2_vote_cast {
             let phase_offset = self.cycle_mgr.phase_offset(now);
+            let remaining = self.cycle_mgr.seconds_until_phase_change(now);
             if phase_offset >= VOTE_CAST_DELAY {
+                outputs.extend(self.cast_r2_vote(new_cycle));
+            } else if remaining <= DEADLINE_SECS {
+                // R2 deadline: <30s left in Reflection phase and haven't voted.
+                debug!("cycle engine: deadline R2 vote — {remaining}s left in Reflection phase");
                 outputs.extend(self.cast_r2_vote(new_cycle));
             }
         }
 
-        // Schedule next timer.  If a vote is pending (cast attempted but no
-        // candidate was available), use a short retry interval so we re-check
-        // quickly once a block arrives via gossip.
+        // Schedule next timer.  If an action is pending (proposal not sent,
+        // vote not cast), use a short retry interval.
         let proposal_pending = new_phase == CyclePhase::Proposal
             && self.our_validator_key.is_some()
             && self.proposals_enabled
