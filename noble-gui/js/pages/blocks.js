@@ -88,7 +88,7 @@ export function init(root, ctx) {
             const gapTime = epoch + gap * CYCLE_SECS;
             gapTr.innerHTML = `
               <td style="color:var(--text-muted)">${gap}</td>
-              <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no consensus</td>
+              <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no proposals</td>
               <td></td>
               <td style="color:var(--text-muted)">${timeAgo(gapTime)}</td>
             `;

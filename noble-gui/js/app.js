@@ -10,27 +10,38 @@
  * parse weight on production.
  */
 
-import { createStore } from './state.js';
-import { Router } from './router.js';
-import { formatNumber, formatChainLabel } from './utils.js';
+// Cache-bust: append ?v=<version> to all dynamic imports.
+const _v = window.__noble_v || Date.now();
+const _m = (path) => `${path}?v=${_v}`;
 
-// ── Pages (lazy-ish, but static imports for file:// compat) ──
-import * as overviewPage from './pages/overview.js';
-import * as blocksPage from './pages/blocks.js';
-import * as blockDetailPage from './pages/block-detail.js';
-import * as transactionsPage from './pages/transactions.js';
-import * as txDetailPage from './pages/tx-detail.js';
-import * as verifyPage from './pages/verify.js';
-import * as mempoolPage from './pages/mempool.js';
-import * as networkPage from './pages/network.js';
-import * as consensusPage from './pages/consensus.js';
-import * as walletPage from './pages/wallet.js';
-import * as healthPage from './pages/health.js';
-import * as identityPage from './pages/identity.js';
-import * as tracePage from './pages/trace.js';
-import * as storagePage from './pages/storage.js';
-import * as settingsPage from './pages/settings.js';
-import * as setupPage from './pages/setup.js';
+const { createStore } = await import(_m('./state.js'));
+const { Router } = await import(_m('./router.js'));
+const { formatNumber, formatChainLabel } = await import(_m('./utils.js'));
+
+// ── Pages (dynamic imports with cache busting) ──
+const [
+  overviewPage, blocksPage, blockDetailPage, transactionsPage,
+  txDetailPage, verifyPage, mempoolPage, networkPage,
+  consensusPage, walletPage, healthPage, identityPage,
+  tracePage, storagePage, settingsPage, setupPage,
+] = await Promise.all([
+  import(_m('./pages/overview.js')),
+  import(_m('./pages/blocks.js')),
+  import(_m('./pages/block-detail.js')),
+  import(_m('./pages/transactions.js')),
+  import(_m('./pages/tx-detail.js')),
+  import(_m('./pages/verify.js')),
+  import(_m('./pages/mempool.js')),
+  import(_m('./pages/network.js')),
+  import(_m('./pages/consensus.js')),
+  import(_m('./pages/wallet.js')),
+  import(_m('./pages/health.js')),
+  import(_m('./pages/identity.js')),
+  import(_m('./pages/trace.js')),
+  import(_m('./pages/storage.js')),
+  import(_m('./pages/settings.js')),
+  import(_m('./pages/setup.js')),
+]);
 
 // ── Status change handler ──
 // status: 'connecting' | 'connected' | 'disconnected'

@@ -7,6 +7,11 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/themes.css">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Cache-bust: timestamp appended to all dynamic module imports.
+    // Cost: one Date.now() at page load. Every page refresh gets fresh files.
+    window.__v = Date.now();
+  </script>
 </head>
 <body>
   <a href="#content" class="skip-to-content">Skip to content</a>
@@ -70,6 +75,10 @@
 
   <!-- ECharts (vendored, loaded before app) -->
   <script src="vendor/echarts.min.js"></script>
-  <script type="module" src="js/app.js"></script>
+  <!-- Boot: dynamically load app.js with cache-bust version -->
+  <script type="module">
+    import(_v('./js/app.js'));
+    function _v(p) { return p + '?v=' + window.__v; }
+  </script>
 </body>
 </html>

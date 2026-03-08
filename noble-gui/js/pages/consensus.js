@@ -1068,14 +1068,14 @@ export function init(root, ctx) {
         },
         {
           name: 'Reflection',
-          state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
+          state: hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
           winner: entry.winner,
           winning_hash: entry.winning_hash,
           disambiguation: entry.disambiguation,
         },
         {
           name: 'Propagation',
-          state: indeterminate ? 'skipped' : hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
+          state: hasWinner ? 'complete' : isCurrent ? 'pending' : 'complete',
           finalized: hasWinner,
           block_hash: entry.winning_hash,
         },

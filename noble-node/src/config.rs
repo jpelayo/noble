@@ -124,7 +124,8 @@ pub struct ConsensusConfig {
     /// Number of consecutive clean cycles to finalize a block (default: 3).
     #[serde(default = "default_confirmation_threshold")]
     pub confirmation_threshold: u32,
-    /// Fork resolution strategy: "manual", "peer_supermajority", "longest_chain" (default: manual).
+    /// Fork resolution strategy: "manual", "peer_supermajority", "longest_chain",
+    /// "longest_most_legitimate" (default: longest_most_legitimate).
     #[serde(default = "default_fork_resolution_strategy")]
     pub fork_resolution_strategy: String,
     /// Minimum cycles a fork must persist before auto-resolution (default: 3).
@@ -152,7 +153,7 @@ fn default_confirmation_threshold() -> u32 {
 }
 
 fn default_fork_resolution_strategy() -> String {
-    "manual".to_string()
+    "longest_most_legitimate".to_string()
 }
 
 fn default_fork_resolution_delay() -> u32 {
