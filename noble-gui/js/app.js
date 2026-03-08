@@ -487,11 +487,23 @@ ws.subscribe('cyclePhaseChange', (data) => {
   if (data.phase) state.cyclePhase = data.phase;
 });
 
+// ── Global connectivity log (survives page navigation) ──
+const CONN_LOG_MAX = 200;
+window._connLog = window._connLog || [];
+
 // Peer count: update on peer connect/disconnect via WS (no polling needed).
-ws.subscribe('peerUpdates', () => {
+ws.subscribe('peerUpdates', (data) => {
   rpc.call('noble_getNetworkInfo').then(info => {
     state.peerCount = info.peer_count;
   }).catch(() => {});
+  // Accumulate connectivity events globally so they're never lost.
+  if (data && data.event) {
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    window._connLog.push({ time, ...data });
+    if (window._connLog.length > CONN_LOG_MAX) window._connLog.shift();
+    // Notify network page if it's mounted.
+    window.dispatchEvent(new CustomEvent('noble-conn-log'));
+  }
   // Peer topology changed — fork picture may differ now.
   updateForkStatus();
 });
