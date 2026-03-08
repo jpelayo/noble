@@ -1163,6 +1163,46 @@ impl StorageEngine for RocksDbStorage {
         })
     }
 
+    fn wipe_all_chain_data(&self) -> Result<(), StorageError> {
+        self.check_open()?;
+
+        tracing::warn!("wipe_all_chain_data: clearing ALL column families (cross-chain adoption)");
+
+        // Clear every column family completely.
+        let all_cfs = [
+            CF_BLOCKS,
+            CF_BLOCK_HASHES,
+            CF_TX_INDEX,
+            CF_CHECKSUM_INDEX,
+            CF_CHAIN_STATE,
+            CF_VALIDATOR_STATE,
+            CF_ADDRESS_BALANCES,
+            CF_ADDRESS_HISTORY,
+            CF_BANS,
+            CF_PEER_MEMORY,
+            CF_VERSION_CHAIN,
+            CF_PUBLISHER_INDEX,
+            CF_BADGE_STATE,
+            CF_EVIDENCE,
+        ];
+
+        for cf_name in all_cfs {
+            let cf = self.cf(cf_name)?;
+            let mut batch = WriteBatch::default();
+            let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+            for item in iter {
+                let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+                batch.delete_cf(cf, &key);
+            }
+            self.db
+                .write(batch)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+        }
+
+        tracing::warn!("wipe_all_chain_data: all data cleared — node is in pre-genesis state");
+        Ok(())
+    }
+
     fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
         self.check_open()?;
         let tip = match self.get_chain_tip()? {

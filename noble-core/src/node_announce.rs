@@ -185,6 +185,9 @@ pub struct NodeAnnounce {
     /// Human-readable chain label (hex chain ID or empty).
     #[serde(default)]
     pub network_name: String,
+    /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_vote_weight: Option<u64>,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
     /// Optional PKI identity attestation — an external signature (PKCS#7/CMS)
@@ -221,6 +224,7 @@ struct AnnounceSigningPayload<'a> {
     proposed_hash: &'a Option<[u8; 32]>,
     chain_id: u32,
     network_name: &'a str,
+    chain_vote_weight: &'a Option<u64>,
     timestamp: u64,
 }
 
@@ -268,6 +272,7 @@ impl NodeAnnounce {
             proposed_hash: &self.proposed_hash,
             chain_id: self.chain_id,
             network_name: &self.network_name,
+            chain_vote_weight: &self.chain_vote_weight,
             timestamp: self.timestamp,
         };
         let cbor = to_canonical_cbor(&payload)?;
@@ -323,6 +328,7 @@ impl NodeAnnounce {
             None,
             chain_id,
             network_name,
+            None, // chain_vote_weight
             timestamp,
             signer,
             None,
@@ -349,6 +355,7 @@ impl NodeAnnounce {
         proposed_hash: Option<[u8; 32]>,
         chain_id: u32,
         network_name: String,
+        chain_vote_weight: Option<u64>,
         timestamp: u64,
         signer: &impl NobleSigner,
         identity_attestation: Option<ExternalAttestation>,
@@ -375,6 +382,7 @@ impl NodeAnnounce {
             proposed_hash,
             chain_id,
             network_name,
+            chain_vote_weight,
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,
@@ -772,6 +780,7 @@ mod tests {
             None,
             0,
             String::new(),
+            None, // chain_vote_weight
             1_700_000_000,
             &sk,
             Some(att.clone()),
@@ -824,6 +833,7 @@ mod tests {
             None,
             0,
             String::new(),
+            None, // chain_vote_weight
             1_700_000_000,
             &sk,
             Some(att),
@@ -859,6 +869,7 @@ mod tests {
             None,
             0,
             String::new(),
+            None, // chain_vote_weight
             1_700_000_000,
             &sk,
             Some(att),
@@ -891,6 +902,7 @@ mod tests {
             None,
             0,
             String::new(),
+            None, // chain_vote_weight
             1_700_000_000,
             &sk,
             Some(att),

@@ -146,6 +146,9 @@ pub enum GossipMessage {
         /// Chain ID of the blockchain this node is on.
         #[serde(default)]
         chain_id: u32,
+        /// Decay-weighted cumulative vote weight for chain legitimacy comparison.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_vote_weight: Option<u64>,
         /// Human-readable chain label (hex chain ID or empty).
         #[serde(default)]
         network_name: String,
@@ -222,6 +225,9 @@ pub enum NetworkCommand {
     ListBannedPeers(
         tokio::sync::oneshot::Sender<Vec<BannedPeerEntry>>,
     ),
+    /// Update the local chain_id in network config (cross-chain adoption).
+    /// Also clears the mismatch cooldown map so peers can reconnect immediately.
+    UpdateChainId(u32),
     /// Shut down the network service.
     Shutdown,
 }
@@ -449,6 +455,7 @@ mod tests {
             proposed_height: Some(43),
             proposed_hash: Some(hex::encode([0xCC; 32])),
             chain_id: 0x34E9E7A4,
+            chain_vote_weight: Some(42_000),
             network_name: "34E9E7A4".into(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
@@ -485,6 +492,7 @@ mod tests {
             proposed_height: None,
             proposed_hash: None,
             chain_id: 0,
+            chain_vote_weight: None,
             network_name: String::new(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x01,

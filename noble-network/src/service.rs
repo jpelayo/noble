@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libp2p::gossipsub::{self, IdentTopic};
 use libp2p::kad;
@@ -36,6 +36,10 @@ const CHANNEL_BUFFER: usize = 256;
 
 /// Interval for periodic maintenance tasks (ban cleanup, outbound connections).
 const MAINTENANCE_INTERVAL_SECS: u64 = 60;
+
+/// Cooldown after chain_id/protocol mismatch disconnect (5 minutes).
+/// Prevents rapid connect→mismatch→disconnect→redial loops.
+const MISMATCH_COOLDOWN_SECS: u64 = 300;
 
 /// Handle to the running network service.
 ///
@@ -363,7 +367,7 @@ fn save_p2p_keypair(
 #[allow(clippy::too_many_lines)]
 async fn run_event_loop(
     mut swarm: Swarm<NobleBehaviour>,
-    config: NetworkConfig,
+    mut config: NetworkConfig,
     mut peer_manager: PeerManager,
     block_provider: Arc<dyn BlockProvider>,
     tx_provider: Arc<dyn TxProvider>,
@@ -403,6 +407,13 @@ async fn run_event_loop(
     // Entries older than CYCLE_DURATION_SECS are evicted during maintenance.
     let mut pending_proposals: HashMap<[u8; 32], (noble_core::Block, u64)> = HashMap::new();
 
+    // Mismatch cooldown: peers disconnected for chain_id or protocol_version
+    // mismatch are suppressed for 5 minutes.  Without this, the node enters a
+    // rapid connect → mismatch → disconnect → redial loop (thousands of cycles
+    // per minute) because the disconnect is graceful (no ban) and the node-level
+    // reconnection logic immediately redials the same peer.
+    let mut mismatch_cooldown: HashMap<PeerId, Instant> = HashMap::new();
+
     loop {
         tokio::select! {
             // --- Swarm events ---
@@ -421,12 +432,13 @@ async fn run_event_loop(
                     &mut tx_rate_limiter,
                     &mut pending_dials,
                     &mut pending_proposals,
+                    &mut mismatch_cooldown,
                 ).await;
             }
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &config, &mut pending_dials, &mut pending_proposals).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -452,6 +464,11 @@ async fn run_event_loop(
                         .as_secs();
                     let cycle_secs = noble_core::CYCLE_DURATION_SECS;
                     pending_proposals.retain(|_, (_, ts)| now_secs.saturating_sub(*ts) < cycle_secs);
+                }
+                // Evict expired mismatch cooldown entries.
+                {
+                    let now = Instant::now();
+                    mismatch_cooldown.retain(|_, expires| *expires > now);
                 }
             }
 
@@ -540,6 +557,7 @@ async fn handle_swarm_event(
     tx_rate_limiter: &mut TxRateLimiter,
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
+    mismatch_cooldown: &mut HashMap<PeerId, Instant>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -551,6 +569,23 @@ async fn handle_swarm_event(
                 Direction::Inbound
             };
             let remote_addr = endpoint.get_remote_address().to_string();
+
+            // Mismatch cooldown guard: if this peer was recently disconnected for
+            // chain_id or protocol mismatch, suppress immediately to prevent the
+            // rapid connect→mismatch→disconnect→redial loop (thousands of cycles/min).
+            if let Some(&cooldown_until) = mismatch_cooldown.get(&peer_id) {
+                if Instant::now() < cooldown_until {
+                    tracing::debug!(
+                        task = "peer_management",
+                        %peer_id,
+                        "suppressing connection — chain/protocol mismatch cooldown active"
+                    );
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return;
+                } else {
+                    mismatch_cooldown.remove(&peer_id);
+                }
+            }
 
             // Duplicate connection guard: if we already track this peer (e.g. simultaneous
             // dial from both sides), do NOT call disconnect_peer_id — that would kill ALL
@@ -737,6 +772,7 @@ async fn handle_swarm_event(
                             proposed_height,
                             proposed_hash,
                             chain_id,
+                            chain_vote_weight,
                             network_name,
                             timestamp,
                             signature_scheme,
@@ -765,6 +801,7 @@ async fn handle_swarm_event(
                                 proposed_height,
                                 proposed_hash.as_deref(),
                                 chain_id,
+                                chain_vote_weight,
                                 &network_name,
                                 timestamp,
                                 signature_scheme,
@@ -948,8 +985,13 @@ async fn handle_swarm_event(
                     // A mismatch is definitive proof the peer is on a different
                     // blockchain or running an incompatible protocol. No tolerance
                     // needed — legitimate peers ALWAYS match on both values.
-                    // Disconnect + ban immediately on first occurrence.
-                    let chain_mismatch = chain_id != config.chain_id;
+                    //
+                    // Exception: pre-genesis nodes (chain_id == 0) have not committed
+                    // genesis yet — they NEED peers to sync from, so chain_id
+                    // mismatches are expected and must be tolerated.  Without this
+                    // exception the node enters a rapid connect→mismatch→disconnect
+                    // loop with thousands of reconnection attempts per minute.
+                    let chain_mismatch = chain_id != config.chain_id && config.chain_id != 0;
                     let proto_mismatch = protocol_version != config.protocol_version;
                     if chain_mismatch || proto_mismatch {
                         let reason = if chain_mismatch && proto_mismatch {
@@ -974,6 +1016,15 @@ async fn handle_swarm_event(
                         // attacking — it's a misconfiguration or a legitimate
                         // separate network.  Banning would prevent future
                         // reconnection if the config is fixed.
+                        //
+                        // Add to mismatch cooldown to prevent rapid reconnection
+                        // loop — the node-level reconnect timer would immediately
+                        // redial this peer, causing thousands of connect/disconnect
+                        // cycles per minute without this guard.
+                        mismatch_cooldown.insert(
+                            peer,
+                            Instant::now() + Duration::from_secs(MISMATCH_COOLDOWN_SECS),
+                        );
                         let _ = swarm.disconnect_peer_id(peer);
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
@@ -1504,9 +1555,10 @@ async fn handle_command(
     cmd: NetworkCommand,
     swarm: &mut Swarm<NobleBehaviour>,
     peer_manager: &mut PeerManager,
-    config: &NetworkConfig,
+    config: &mut NetworkConfig,
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
+    mismatch_cooldown: &mut HashMap<PeerId, Instant>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -1635,6 +1687,7 @@ async fn handle_command(
                 proposed_height: announce.proposed_height,
                 proposed_hash: announce.proposed_hash.map(|h| hex::encode(h)),
                 chain_id: announce.chain_id,
+                chain_vote_weight: announce.chain_vote_weight,
                 network_name: announce.network_name.clone(),
                 timestamp: announce.timestamp,
                 signature_scheme: announce.signature.scheme_id,
@@ -1800,6 +1853,17 @@ async fn handle_command(
             let _ = reply_tx.send(entries);
         }
 
+        NetworkCommand::UpdateChainId(new_chain_id) => {
+            tracing::info!(
+                task = "network",
+                "updating chain_id to {:#010X} (cross-chain adoption)",
+                new_chain_id
+            );
+            config.chain_id = new_chain_id;
+            // Clear mismatch cooldown so peers on the target chain can reconnect immediately.
+            mismatch_cooldown.clear();
+        }
+
         NetworkCommand::Shutdown => {
             return true;
         }
@@ -1953,6 +2017,7 @@ fn convert_and_validate_announce(
     proposed_height: Option<u64>,
     proposed_hash_hex: Option<&str>,
     chain_id: u32,
+    chain_vote_weight: Option<u64>,
     network_name: &str,
     timestamp: u64,
     signature_scheme: u8,
@@ -2044,6 +2109,7 @@ fn convert_and_validate_announce(
         proposed_height,
         proposed_hash,
         chain_id,
+        chain_vote_weight,
         network_name: network_name.to_string(),
         timestamp,
         signature: noble_crypto::SignatureEnvelope {

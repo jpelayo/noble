@@ -1782,6 +1782,40 @@ impl ConsensusStateMachine for CycleEngine {
                 }
                 outputs
             }
+            CycleEvent::CrossChainStatus {
+                local_chain_id,
+                local_height,
+                local_vote_weight,
+                same_chain_peer_count,
+                cross_chain_forks,
+            } => {
+                let mut outputs = Vec::new();
+                let decision = self.fork_resolver.evaluate_cross_chain(
+                    local_chain_id,
+                    local_height,
+                    local_vote_weight,
+                    same_chain_peer_count,
+                    &cross_chain_forks,
+                );
+                match decision {
+                    crate::fork_resolver::CrossChainDecision::Adopt {
+                        target_chain_id,
+                        reason,
+                    } => {
+                        outputs.push(CycleIo::RequestChainAdoption {
+                            target_chain_id,
+                            reason,
+                        });
+                    }
+                    crate::fork_resolver::CrossChainDecision::Pending { cycles_remaining } => {
+                        outputs.push(CycleIo::Log(format!(
+                            "cross-chain adoption pending: {cycles_remaining} cycle(s) remaining"
+                        )));
+                    }
+                    crate::fork_resolver::CrossChainDecision::NoAction => {}
+                }
+                outputs
+            }
         }
     }
 

@@ -83,8 +83,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub network_stats: Arc<RwLock<NetworkStats>>,
     /// Live connected peer info (H-004). **Lock order: 6 (PeerInfo).**
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
-    /// Active chain ID.
-    pub chain_id: u32,
+    /// Active chain ID (mutable via AtomicU32 for cross-chain adoption).
+    pub chain_id: std::sync::atomic::AtomicU32,
     /// Chain label (hex chain ID or "pre-genesis").
     pub network_name: String,
     /// Timestamp when the node was started.
@@ -116,6 +116,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub discovered_blockchains: Arc<Mutex<std::collections::HashMap<u32, noble_api::types::DiscoveredBlockchainInfo>>>,
     /// Path for persisting discovered blockchains CBOR.
     pub discovered_blockchains_path: Option<std::path::PathBuf>,
+    /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
+    /// Incremented each time a block is committed with its voter count.
+    pub chain_vote_weight: std::sync::atomic::AtomicU64,
 }
 
 impl Node<MemoryStorage> {
@@ -138,13 +141,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
-        // Derive chain_id from genesis block hash in storage.
-        // If no genesis has been committed yet, chain_id is 0 (updated on first block commit).
+        // Derive chain_id from the earliest block hash in storage.
+        // Genesis-imported chains have block 0; consensus-bootstrapped chains start at block 1.
+        // If no blocks exist, chain_id is 0 (updated on first block commit).
         let chain_id = {
             let s = storage.read();
             match s.get_block_hash_by_height(0) {
                 Ok(hash) => noble_core::derive_chain_id(&hash),
-                Err(_) => 0,
+                Err(_) => match s.get_block_hash_by_height(1) {
+                    Ok(hash) => noble_core::derive_chain_id(&hash),
+                    Err(_) => 0,
+                },
             }
         };
 
@@ -449,7 +456,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             wallet_state,
             network_stats,
             peer_info,
-            chain_id,
+            chain_id: std::sync::atomic::AtomicU32::new(chain_id),
             network_name: if chain_id != 0 { format!("{:08X}", chain_id) } else { "pre-genesis".to_string() },
             start_time: std::time::Instant::now(),
             pki_attestation,
@@ -462,7 +469,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             seed_addrs: config.network.seeds.clone(),
             discovered_blockchains: Arc::new(Mutex::new(discovered_blockchains)),
             discovered_blockchains_path: Some(discovered_path),
+            chain_vote_weight: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Read the current chain_id (lock-free atomic load).
+    #[inline]
+    pub fn get_chain_id(&self) -> u32 {
+        self.chain_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Return the current chain tip height.
@@ -546,7 +560,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
         let start = height.saturating_sub(count.saturating_sub(1));
         let guard = self.storage.read();
-        noble_storage::verify_chain_integrity(&*guard, self.chain_id, start, height)
+        noble_storage::verify_chain_integrity(&*guard, self.get_chain_id(), start, height)
     }
 
     /// Rollback the chain to the given height, recalculating balances.
@@ -557,7 +571,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         target_height: u64,
     ) -> Result<noble_storage::ChainTip, Box<dyn std::error::Error>> {
         let storage = self.storage.read();
-        let tip = storage.rollback_to_height(target_height, self.chain_id)?;
+        let tip = storage.rollback_to_height(target_height, self.get_chain_id())?;
         // Update consensus engine tip
         {
             let mut engine = self.consensus.write();
@@ -640,8 +654,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             chain_tip_hash,
             proposed_height,
             proposed_hash,
-            self.chain_id,
+            self.get_chain_id(),
             self.network_name.clone(),
+            {
+                let w = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                if w > 0 { Some(w) } else { None }
+            },
             now,
             sk,
             self.pki_attestation.clone(),
@@ -894,7 +912,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         net_config.max_inbound =
             (config.network.max_peers as usize).saturating_sub(net_config.max_outbound);
         net_config.ban_threshold = config.network.ban_threshold;
-        net_config.chain_id = self.chain_id;
+        net_config.chain_id = self.get_chain_id();
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
         net_config.chain_meta = Some(self.chain_meta);
@@ -1448,7 +1466,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             wallet_keystore: self.wallet_keystore.clone(),
             wallet_state: self.wallet_state.clone(),
             network_stats: self.network_stats.clone(),
-            chain_id: self.chain_id,
+            chain_id: self.get_chain_id(),
             start_time: self.start_time,
             max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
             rate_limiter: Some(Arc::new(noble_api::rate_limit::RpcRateLimiter::new(
@@ -1526,7 +1544,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
             max_db_size_gb: config.storage.max_db_size_gb,
-            network_name: if self.chain_id != 0 { format!("{:08X}", self.chain_id) } else { "pre-genesis".to_string() },
+            network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "pre-genesis".to_string() } },
             genesis_hash: {
                 let s = self.storage.read();
                 s.get_block_hash_by_height(0)
@@ -1787,6 +1805,57 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 })
                             };
                             self.process_cycle_actions(fork_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
+                        }
+                    }
+
+                    // Inject cross-chain fork status for cross-chain adoption evaluation.
+                    {
+                        let local_chain_id = self.get_chain_id();
+                        let (tip_h, _) = self.consensus.read().chain_tip();
+                        let local_vote_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                        let discovered = self.discovered_blockchains.lock();
+                        // Count same-chain peers (excluding our own chain entry).
+                        let peers = self.peer_info.read();
+                        let same_chain_peer_count = peers.values()
+                            .filter(|p| p.chain_tip_height.is_some())
+                            .count();
+                        drop(peers);
+                        // Build cross-chain fork info from discovered blockchains.
+                        // Use a staleness threshold: entries not seen for 2 cycles
+                        // (2400s) are treated as having 0 live peers, preventing
+                        // phantom adoption targets from stale peer_addresses.
+                        let now_ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        const STALE_THRESHOLD_SECS: u64 = 2400; // 2 cycles
+                        let cross_chain_forks: Vec<noble_consensus::CrossChainForkInfo> = discovered
+                            .iter()
+                            .filter(|(&cid, _)| cid != local_chain_id && cid != 0)
+                            .map(|(&cid, info)| {
+                                let is_stale = now_ts.saturating_sub(info.last_seen) > STALE_THRESHOLD_SECS;
+                                noble_consensus::CrossChainForkInfo {
+                                    chain_id: cid,
+                                    peer_count: if is_stale { 0 } else { info.peer_addresses.len() },
+                                    chain_tip_height: info.chain_tip_height,
+                                    chain_vote_weight: info.chain_vote_weight,
+                                    last_seen: info.last_seen,
+                                }
+                            })
+                            .collect();
+                        drop(discovered);
+                        if !cross_chain_forks.is_empty() {
+                            let cc_actions = {
+                                let mut engine = self.consensus.write();
+                                engine.step(noble_consensus::CycleEvent::CrossChainStatus {
+                                    local_chain_id,
+                                    local_height: tip_h,
+                                    local_vote_weight,
+                                    same_chain_peer_count,
+                                    cross_chain_forks,
+                                })
+                            };
+                            self.process_cycle_actions(cc_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
                         }
                     }
 
@@ -2151,7 +2220,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // --- Chain ID mismatch: blockchain discovery ---
                 // If the peer announces a different chain_id (and it's not 0 = unknown),
                 // record the discovered blockchain and kick the peer if we already have a chain.
-                if announce.chain_id != 0 && announce.chain_id != self.chain_id {
+                if announce.chain_id != 0 && self.get_chain_id() != 0 && announce.chain_id != self.get_chain_id() {
                     let now_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -2181,9 +2250,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 peer_addresses: Vec::new(),
                                 first_seen: now_ts,
                                 last_seen: now_ts,
+                                chain_tip_height: None,
+                                chain_vote_weight: None,
                             }
                         });
                         entry.last_seen = now_ts;
+                        // Update chain tip height from announce (take the max seen).
+                        if let Some(h) = announce.chain_tip_height {
+                            entry.chain_tip_height = Some(
+                                entry.chain_tip_height.map_or(h, |prev| prev.max(h))
+                            );
+                        }
+                        // Update vote weight if announced.
+                        if let Some(w) = announce.chain_vote_weight {
+                            entry.chain_vote_weight = Some(
+                                entry.chain_vote_weight.map_or(w, |prev| prev.max(w))
+                            );
+                        }
                         if !chain_name.is_empty() {
                             entry.network_name = chain_name.clone();
                         }
@@ -2628,7 +2711,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let tx_ids: Vec<_> = block
                         .transactions
                         .iter()
-                        .filter_map(|tx| tx.compute_tx_id(self.chain_id).ok())
+                        .filter_map(|tx| tx.compute_tx_id(self.get_chain_id()).ok())
                         .collect();
 
                     {
@@ -2653,6 +2736,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     {
                         let mut engine = self.consensus.write();
                         engine.update_tip_with_header(block.header.clone());
+                    }
+
+                    // Auto-update chain_id after first block commit (fixes pre-genesis → real chain).
+                    // Consensus-bootstrapped chains have no block 0 — the first committed block
+                    // is height 1.  We derive chain_id from whatever the first block's hash is.
+                    if self.get_chain_id() == 0 {
+                        let new_chain_id = noble_core::derive_chain_id(&block_hash);
+                        self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            task = "block_commit",
+                            "chain_id updated to {:#010X} after block {} commit",
+                            new_chain_id,
+                            block.header.height,
+                        );
                     }
 
                     // Remove committed txs from mempool
@@ -2766,6 +2863,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
                 CycleIo::StoreBlockVotes { height, votes } => {
+                    // Decay-weighted vote accumulation for chain legitimacy tracking.
+                    // Recent blocks' votes count more than older ones (exponential decay).
+                    {
+                        let old = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                        let new = noble_consensus::decay_vote_weight(old, votes.voter_count as u64);
+                        self.chain_vote_weight.store(new, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*votes) {
                         let storage = self.storage.read();
                         if let Err(e) = storage.store_block_votes(height, &bytes) {
@@ -3056,7 +3160,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Same path as resetChain RPC: reset storage + consensus + re-sync.
                     {
                         let storage = self.storage.read();
-                        if let Err(e) = storage.force_reset_to_genesis(self.chain_id) {
+                        if let Err(e) = storage.force_reset_to_genesis(self.get_chain_id()) {
                             tracing::error!(task = "fork_resolution", "storage reset failed: {e}");
                         }
                         if let Err(e) = storage.clear_cycle_history() {
@@ -3099,6 +3203,46 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "checkpoints_activated",
                         "heights": heights,
+                    }));
+                }
+                CycleIo::RequestChainAdoption { target_chain_id, reason } => {
+                    tracing::warn!(
+                        task = "chain_adoption",
+                        "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
+                        target_chain_id
+                    );
+                    // 1. Wipe ALL chain data (including genesis) — true clean slate.
+                    {
+                        let storage = self.storage.read();
+                        if let Err(e) = storage.wipe_all_chain_data() {
+                            tracing::error!(task = "chain_adoption", "wipe_all_chain_data failed: {e}");
+                        }
+                        if let Err(e) = storage.clear_cycle_history() {
+                            tracing::warn!(task = "chain_adoption", "clear_cycle_history: {e}");
+                        }
+                    }
+                    // 2. Reset chain_id to 0 (pre-genesis state) so we accept any chain.
+                    self.chain_id.store(0, std::sync::atomic::Ordering::Relaxed);
+                    self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
+                    // 2b. Clear discovered blockchains to prevent ping-pong adoption
+                    // between the old chain and the new one from stale entries.
+                    {
+                        let mut discovered = self.discovered_blockchains.lock();
+                        discovered.clear();
+                    }
+                    self.persist_discovered_blockchains();
+                    // 3. Tell network service to update its config chain_id + clear cooldowns.
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0));
+                    // 4. Reset consensus engine to height 0, no chain tip.
+                    {
+                        let _ = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true);
+                    }
+                    // 5. Request sync — will discover peers on the target chain and bootstrap.
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "chain_adoption_started",
+                        "target_chain_id": format!("{:#010X}", target_chain_id),
+                        "reason": reason,
                     }));
                 }
                 other => {
@@ -3220,7 +3364,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         drop(engine);
 
         let ctx = noble_core::BlockValidationContext {
-            chain_id: self.chain_id,
+            chain_id: self.get_chain_id(),
             current_time,
             parent: parent_header.as_ref(),
             validator_list: &val_list,
@@ -3261,7 +3405,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let tx_ids: Vec<noble_crypto::Hash256> = block
             .transactions
             .iter()
-            .filter_map(|tx| tx.compute_tx_id(self.chain_id).ok())
+            .filter_map(|tx| tx.compute_tx_id(self.get_chain_id()).ok())
             .collect();
 
         if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
@@ -3278,6 +3422,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         {
             let mut engine = self.consensus.write();
             engine.update_tip_with_header(block.header.clone());
+        }
+
+        // Decay-weighted vote accumulation during sync import.
+        // We don't have the full vote tally for historical blocks, but each
+        // committed block had at least 1 voter (the proposer).  Applying decay
+        // with 1 vote keeps the accumulator from stagnating at 0 for synced nodes.
+        {
+            let old = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+            let new = noble_consensus::decay_vote_weight(old, 1);
+            self.chain_vote_weight.store(new, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Auto-update chain_id after first sync-import (same as CommitBlock handler).
+        // Consensus-bootstrapped chains start at height 1 (no block 0), so we
+        // derive chain_id from the first block we successfully import, any height.
+        if self.get_chain_id() == 0 {
+            let new_chain_id = noble_core::derive_chain_id(&block_hash);
+            self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                task = "sync_import",
+                "chain_id updated to {:#010X} after block {} sync-import",
+                new_chain_id,
+                block.header.height,
+            );
         }
 
         // Remove committed txs from mempool.
@@ -3934,6 +4102,7 @@ fn parse_fork_resolution_strategy(name: &str) -> noble_consensus::ForkResolution
         "manual" => ForkResolutionStrategy::Manual,
         "peer_supermajority" => ForkResolutionStrategy::PeerSupermajority,
         "longest_chain" => ForkResolutionStrategy::LongestChain,
+        "longest_most_legitimate" => ForkResolutionStrategy::LongestMostLegitimate,
         other => {
             tracing::warn!(
                 task = "config_load",
@@ -4331,7 +4500,7 @@ mod tests {
         // Node starts stateless — no genesis auto-committed.
         assert_eq!(node.chain_height(), 0);
         // Pre-genesis: chain_id is 0 (derived from genesis block hash when available).
-        assert_eq!(node.chain_id, 0);
+        assert_eq!(node.get_chain_id(), 0);
 
         // Mempool should be empty.
         assert_eq!(node.mempool.lock().len(), 0);

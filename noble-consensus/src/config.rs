@@ -29,7 +29,8 @@ pub struct ConsensusConfig {
     pub confirmation_strategy: VotingStrategy,
     /// Number of consecutive clean cycles required to finalize a block (default: 3).
     pub confirmation_threshold: u32,
-    /// Fork resolution strategy (default: Manual — alert only).
+    /// Fork resolution strategy (default: LongestChain — auto-resolve when
+    /// a peer's fork is >3 blocks ahead, after a dwell period).
     pub fork_resolution_strategy: ForkResolutionStrategy,
     /// Minimum cycles a fork must persist before auto-resolution (default: 3).
     pub fork_resolution_delay_cycles: u32,
@@ -48,7 +49,7 @@ impl Default for ConsensusConfig {
             voting_strategy: VotingStrategy::FirstValid,
             confirmation_strategy: VotingStrategy::FollowMajority,
             confirmation_threshold: 3,
-            fork_resolution_strategy: ForkResolutionStrategy::Manual,
+            fork_resolution_strategy: ForkResolutionStrategy::LongestChain,
             fork_resolution_delay_cycles: 3,
             checkpoint_interval: 30,
         }
@@ -71,7 +72,7 @@ mod tests {
         assert_eq!(cfg.confirmation_threshold, 3);
         assert_eq!(
             cfg.fork_resolution_strategy,
-            ForkResolutionStrategy::Manual
+            ForkResolutionStrategy::LongestChain
         );
         assert_eq!(cfg.fork_resolution_delay_cycles, 3);
         assert_eq!(cfg.checkpoint_interval, 30);

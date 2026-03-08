@@ -1219,6 +1219,12 @@ pub struct DiscoveredBlockchainInfo {
     pub first_seen: u64,
     /// Timestamp of most recent announcement.
     pub last_seen: u64,
+    /// Committed chain tip height reported by peers on this chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tip_height: Option<u64>,
+    /// Cumulative vote weight across all blocks (legitimacy indicator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_vote_weight: Option<u64>,
 }
 
 /// Response for `noble_getWalletTransactions`.

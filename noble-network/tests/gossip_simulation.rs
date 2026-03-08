@@ -173,6 +173,7 @@ fn make_signed_announce(
         proposed_hash,
         0,
         String::new(),
+        None, // chain_vote_weight
         now,
         sk,
         None,

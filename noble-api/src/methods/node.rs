@@ -1289,12 +1289,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             noble_consensus::ForkResolutionStrategy::Manual => "manual",
             noble_consensus::ForkResolutionStrategy::PeerSupermajority => "peer_supermajority",
             noble_consensus::ForkResolutionStrategy::LongestChain => "longest_chain",
+            noble_consensus::ForkResolutionStrategy::LongestMostLegitimate => "longest_most_legitimate",
         };
         Ok(ForkResolutionStatusResponse {
             strategy: strategy.to_string(),
             delay_cycles: resolver.min_fork_duration(),
             dwell_counter: resolver.dwell_counter(),
-            tracking_fork: resolver.tracked_fork_hash().map(|h| hex::encode(h.as_bytes())),
+            tracking_fork: resolver.tracked_fork_height().map(|h| format!("height:{h}")),
             finalized_floor: consensus.finality_tracker().finalized_height,
             checkpoint_floor: cp_mgr.highest_active_height(),
         })

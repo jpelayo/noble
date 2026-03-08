@@ -34,6 +34,14 @@ pub enum CycleEvent {
         forks: Vec<crate::fork_resolver::ForkInfo>,
         total_peers: usize,
     },
+    /// Cross-chain fork status from discovered_blockchains.
+    CrossChainStatus {
+        local_chain_id: u32,
+        local_height: u64,
+        local_vote_weight: u64,
+        same_chain_peer_count: usize,
+        cross_chain_forks: Vec<crate::fork_resolver::CrossChainForkInfo>,
+    },
 }
 
 /// Output actions emitted by the consensus engine.
@@ -106,4 +114,9 @@ pub enum CycleIo {
     PersistCheckpoint(Box<crate::checkpoint::Checkpoint>),
     /// Notify that checkpoints have activated.
     CheckpointsActivated { heights: Vec<u64> },
+    /// Request cross-chain adoption: wipe all data and re-sync from a different chain.
+    RequestChainAdoption {
+        target_chain_id: u32,
+        reason: String,
+    },
 }

@@ -21,7 +21,10 @@ pub mod validator;
 pub mod vote;
 
 pub use checkpoint::{Checkpoint, CheckpointManager};
-pub use fork_resolver::{ForkDecision, ForkInfo, ForkResolutionStrategy, ForkResolver};
+pub use fork_resolver::{
+    CrossChainDecision, CrossChainForkInfo, ForkDecision, ForkInfo,
+    ForkResolutionStrategy, ForkResolver, decay_vote_weight,
+};
 pub use badge::{
     BadgeProposal, BadgeProposalType, BadgeStatus, BadgeStore, RevocationReason,
     SuspensionNotice, SuspensionReason, VoteBadge, BADGE_VOTE_WINDOW_CYCLES,

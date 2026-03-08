@@ -641,6 +641,36 @@ impl StorageEngine for MemoryStorage {
         }
     }
 
+    fn wipe_all_chain_data(&self) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        Self::check_open(&inner)?;
+
+        tracing::warn!("wipe_all_chain_data: clearing ALL in-memory storage (cross-chain adoption)");
+
+        inner.blocks.clear();
+        inner.block_heights.clear();
+        inner.transactions.clear();
+        inner.checksum_index.clear();
+        inner.tx_locations.clear();
+        inner.chain_tip = None;
+        inner.balances.clear();
+        inner.address_history.clear();
+        inner.bans.clear();
+        inner.key_rotations.clear();
+        inner.peer_records.clear();
+        inner.cycle_history.clear();
+        inner.version_chain.clear();
+        inner.publisher_index.clear();
+        inner.badges.clear();
+        inner.badge_proposals.clear();
+        inner.block_votes.clear();
+        inner.finality_state = None;
+        inner.evidence.clear();
+        inner.checkpoints.clear();
+
+        Ok(())
+    }
+
     fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;

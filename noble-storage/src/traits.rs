@@ -127,6 +127,11 @@ pub trait StorageEngine {
     /// Used for fork recovery ("blockchain hop") when the node needs to re-sync.
     fn force_reset_to_genesis(&self, chain_id: u32) -> Result<ChainTip, StorageError>;
 
+    /// Wipe ALL chain data including genesis block. Used for cross-chain adoption
+    /// when the node must abandon its current chain entirely and re-sync from scratch.
+    /// After this call, the storage is in a clean pre-genesis state (no chain tip).
+    fn wipe_all_chain_data(&self) -> Result<(), StorageError>;
+
     /// Store a pending key rotation.
     ///
     /// Key: old_key wire bytes, Value: CBOR(new_key_wire, rotation_cycle).
