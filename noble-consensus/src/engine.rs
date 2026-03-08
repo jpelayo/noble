@@ -496,9 +496,32 @@ impl CycleEngine {
             }
         }
 
+        // Deadline safety net: seconds before a phase ends to force-retry
+        // any action that should have happened but didn't (proposal, R1, R2).
+        const DEADLINE_SECS: u64 = 30;
+        const VOTE_CAST_DELAY: u64 = 30;
+
+        // Block proposal retry: if we're in Proposal phase, we should propose,
+        // and we haven't yet — try now.  The first attempt is on first tick or
+        // phase transition; this catches cases where the node booted mid-phase,
+        // the gossip mesh wasn't ready, or the first attempt was suppressed.
+        // handle_mempool_transactions has its own has_proposed guard.
+        if new_phase == CyclePhase::Proposal
+            && self.our_validator_key.is_some()
+            && self.proposals_enabled
+        {
+            let our_wire = self.our_validator_key.as_ref().unwrap().1.to_wire_bytes();
+            if !self.candidate_tracker.has_proposed(&our_wire) {
+                let remaining = self.cycle_mgr.seconds_until_phase_change(now);
+                if remaining <= DEADLINE_SECS {
+                    debug!("cycle engine: deadline proposal — {remaining}s left in Proposal phase");
+                }
+                outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+            }
+        }
+
         // Cast R1 vote after VOTE_CAST_DELAY seconds into the Voting phase.
         // Blocks had the full Proposal phase + delay to propagate before voters act.
-        const VOTE_CAST_DELAY: u64 = 30;
         if new_phase == CyclePhase::Voting && !self.r1_vote_cast {
             let phase_offset = self.cycle_mgr.phase_offset(now);
             if phase_offset >= VOTE_CAST_DELAY {
@@ -518,8 +541,15 @@ impl CycleEngine {
         // Schedule next timer.  If a vote is pending (cast attempted but no
         // candidate was available), use a short retry interval so we re-check
         // quickly once a block arrives via gossip.
+        let proposal_pending = new_phase == CyclePhase::Proposal
+            && self.our_validator_key.is_some()
+            && self.proposals_enabled
+            && !self.candidate_tracker.has_proposed(
+                &self.our_validator_key.as_ref().unwrap().1.to_wire_bytes(),
+            );
         let vote_pending = (new_phase == CyclePhase::Voting && !self.r1_vote_cast)
-            || (new_phase == CyclePhase::Reflection && !self.r2_vote_cast);
+            || (new_phase == CyclePhase::Reflection && !self.r2_vote_cast)
+            || proposal_pending;
         let next_timer = if vote_pending {
             5 // retry every 5s until candidate appears
         } else {

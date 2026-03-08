@@ -5,6 +5,7 @@
 import { formatNumber, truncateHash, timeAgo } from '../utils.js';
 
 const PAGE_SIZE = 50;
+const CYCLE_SECS = 1200; // 4 × 300s phases
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -19,6 +20,7 @@ export function init(root, ctx) {
         <table class="data-table">
           <thead>
             <tr>
+              <th>Cycle</th>
               <th>Height</th>
               <th>Block Hash</th>
               <th>Transactions</th>
@@ -43,6 +45,11 @@ export function init(root, ctx) {
   const nextBtn = root.querySelector('#blocks-next');
   const pageInfo = root.querySelector('#blocks-page-info');
 
+  /** Compute cycle number from a block timestamp and the genesis epoch. */
+  function blockCycle(ts, epoch) {
+    return Math.floor((ts - epoch) / CYCLE_SECS);
+  }
+
   async function loadPage(page) {
     try {
       const count = await rpc.call('noble_getBlockCount');
@@ -58,11 +65,41 @@ export function init(root, ctx) {
       const rangeSize = endHeight - startHeight + 1;
       const blocks = await rpc.call('noble_getBlockRange', [startHeight, rangeSize]);
 
+      // Use block 1's timestamp as the genesis epoch (cycle engine resets
+      // epoch to block 1's timestamp after the first commit).
+      const epoch = blocks.length > 0 ? blocks[0].timestamp : 0;
+
+      // Blocks come in ascending order; reverse for newest-first display.
+      const desc = blocks.reverse();
+
       tbody.innerHTML = '';
-      for (const b of blocks.reverse()) {
+      for (let i = 0; i < desc.length; i++) {
+        const b = desc[i];
+        const cycle = blockCycle(b.timestamp, epoch);
+
+        // Insert empty-cycle rows for any gap between this block and the next
+        // (next = lower height, older). If the previous block's cycle is more
+        // than 1 ahead, cycles in between produced no block.
+        if (i > 0) {
+          const prevCycle = blockCycle(desc[i - 1].timestamp, epoch);
+          for (let gap = prevCycle - 1; gap > cycle; gap--) {
+            const gapTr = document.createElement('tr');
+            gapTr.style.cssText = 'opacity:0.45';
+            const gapTime = epoch + gap * CYCLE_SECS;
+            gapTr.innerHTML = `
+              <td style="color:var(--text-muted)">${gap}</td>
+              <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no consensus</td>
+              <td></td>
+              <td style="color:var(--text-muted)">${timeAgo(gapTime)}</td>
+            `;
+            tbody.appendChild(gapTr);
+          }
+        }
+
         const tr = document.createElement('tr');
         tr.className = 'clickable';
         tr.innerHTML = `
+          <td>${cycle}</td>
           <td>${formatNumber(b.height)}</td>
           <td class="mono">${truncateHash(b.hash)}</td>
           <td>${b.tx_count}</td>
@@ -78,7 +115,7 @@ export function init(root, ctx) {
       pageInfo.textContent = `Page ${currentPage + 1} of ${totalPages}`;
     } catch (e) {
       console.error('[blocks] loadPage:', e);
-      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load blocks</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load blocks</td></tr>';
     }
   }
 

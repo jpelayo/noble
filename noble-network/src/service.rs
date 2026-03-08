@@ -674,6 +674,35 @@ async fn handle_swarm_event(
                         "event channel full: PeerConnected dropped"
                     );
                 }
+
+                // Re-announce pending block proposals to the newly connected
+                // peer.  When a node proposes during the Proposal phase before
+                // any peers are connected, the gossipsub publish has 0 mesh
+                // members and the message is silently dropped.  Re-publishing
+                // after the first peer connects ensures the block reaches the
+                // network.
+                for (hash, (block, _ts)) in pending_proposals.iter() {
+                    let msg = GossipMessage::BlockAnnounce {
+                        block_hash: *hash,
+                        height: block.header.height,
+                    };
+                    if let Ok(data) = codec::encode_gossip(&msg) {
+                        let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
+                        if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                            tracing::debug!(
+                                task = "gossip_publish",
+                                "re-announce pending proposal (height {}): {e}",
+                                block.header.height,
+                            );
+                        } else {
+                            tracing::debug!(
+                                task = "gossip_publish",
+                                "re-announced pending proposal (height {}) to new peer",
+                                block.header.height,
+                            );
+                        }
+                    }
+                }
             } else {
                 tracing::debug!(task = "peer_management", %peer_id, "peer rejected (limit or banned)");
                 let _ = event_tx.try_send(NetworkEvent::PeerRejected {
