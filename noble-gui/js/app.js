@@ -342,6 +342,89 @@ function populateChainIdentity(nodeInfo) {
   bar.style.display = '';
 }
 
+// ── Fork status indicator ──
+// Self-referential: "Is THIS node on the longest legitimate chain?"
+async function updateForkStatus() {
+  const bar = document.getElementById('fork-status-bar');
+  if (!bar) return;
+  try {
+    const [forkData, syncData] = await Promise.all([
+      rpc.call('noble_getDetectedForks').catch(() => null),
+      rpc.call('noble_getSyncStatus').catch(() => null),
+    ]);
+    if (!forkData) { bar.style.display = 'none'; return; }
+
+    const label = document.getElementById('fork-status-label');
+    const detail = document.getElementById('fork-status-detail');
+    const isSyncing = syncData && syncData.state && syncData.state !== 'Complete';
+    const myHeight = forkData.local_height;
+    const highestKnown = syncData ? (syncData.highest_known || myHeight) : myHeight;
+
+    // Find the longest chain tip among all known forks (peers + self).
+    let longestHeight = myHeight;
+    let onMajorityFork = true;
+    const nonLocalForks = forkData.forks.filter(f => !f.is_local);
+    for (const fork of nonLocalForks) {
+      if (fork.height > longestHeight) longestHeight = fork.height;
+    }
+    // Also consider highest_known from sync status (may be higher than any fork entry).
+    if (highestKnown > longestHeight) longestHeight = highestKnown;
+
+    // Am I on a different fork than the majority of peers?
+    // If any non-local fork exists at my height with a different tip, I'm diverged.
+    for (const fork of nonLocalForks) {
+      if (fork.height >= myHeight && fork.tip_hash !== forkData.local_tip) {
+        onMajorityFork = false;
+        break;
+      }
+    }
+
+    const behind = longestHeight - myHeight;
+    let severity, statusText, detailText;
+
+    if (isSyncing) {
+      // Actively catching up.
+      severity = 'syncing';
+      const pct = syncData.progress ? syncData.progress.toFixed(1) + '%' : '';
+      statusText = `<span class="fork-sync-spinner"></span>Syncing`;
+      detailText = pct
+        ? `block ${syncData.current_height} / ${syncData.highest_known} (${pct})`
+        : `${behind} block${behind !== 1 ? 's' : ''} behind`;
+    } else if (!onMajorityFork) {
+      // On a minority fork — different tip than peers at same or higher height.
+      severity = 'high';
+      statusText = 'Diverged';
+      detailText = behind > 0
+        ? `wrong fork, ${behind} block${behind !== 1 ? 's' : ''} behind`
+        : 'wrong fork';
+    } else if (behind === 0) {
+      // On the longest chain, fully caught up.
+      severity = 'zero';
+      statusText = 'Aligned';
+      detailText = `height ${myHeight}`;
+    } else if (behind <= 3) {
+      severity = 'low';
+      statusText = 'Behind';
+      detailText = `${behind} block${behind !== 1 ? 's' : ''} behind`;
+    } else if (behind <= 10) {
+      severity = 'medium';
+      statusText = 'Drifting';
+      detailText = `${behind} blocks behind`;
+    } else {
+      severity = 'high';
+      statusText = 'Drifting';
+      detailText = `${behind} blocks behind`;
+    }
+
+    bar.dataset.severity = severity;
+    label.innerHTML = statusText;
+    detail.textContent = detailText;
+    bar.style.display = '';
+  } catch (e) {
+    bar.style.display = 'none';
+  }
+}
+
 // ── Fetch initial data ──
 async function bootstrap() {
   try {
@@ -368,6 +451,8 @@ async function bootstrap() {
 
     // Show chain identity bar if we have a chain_id.
     populateChainIdentity(nodeInfo);
+    // Fork status — initial load.
+    updateForkStatus();
   } catch (e) {
     if (e.code === -32012) {
       showAuthPrompt();
@@ -386,6 +471,8 @@ ws.subscribe('newBlocks', (block) => {
   if (wasBootstrap && block.height > 0) {
     rpc.call('noble_getNodeInfo').then(populateChainIdentity).catch(() => {});
   }
+  // Refresh fork status on every new block.
+  updateForkStatus();
 });
 
 // New-transaction notifications: { tx_id }
@@ -405,6 +492,8 @@ ws.subscribe('peerUpdates', () => {
   rpc.call('noble_getNetworkInfo').then(info => {
     state.peerCount = info.peer_count;
   }).catch(() => {});
+  // Peer topology changed — fork picture may differ now.
+  updateForkStatus();
 });
 
 // ── Network online/offline resilience ──

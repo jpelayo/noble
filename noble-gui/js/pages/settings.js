@@ -1301,7 +1301,7 @@ export function init(root, ctx) {
     }).join('');
 
     const radioHeader = withRadio ? '<th style="width:30px"></th>' : '';
-    container.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+    container.innerHTML = `<table class="data-table" style="width:100%;font-size:var(--font-size-sm)">
       <thead><tr>${radioHeader}<th>Chain</th><th>Height</th><th>Peers</th><th>Status</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -1348,7 +1348,7 @@ export function init(root, ctx) {
           <td>${lastSeen}</td>
         </tr>`;
       }).join('');
-      discoveredChainsWrap.innerHTML = `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm)">
+      discoveredChainsWrap.innerHTML = `<table class="data-table" style="width:100%;font-size:var(--font-size-sm)">
         <thead><tr><th>Chain ID</th><th>Peer Addresses</th><th>Last Seen</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -1365,7 +1365,7 @@ export function init(root, ctx) {
       const data = await rpc.call('noble_getForkResolutionStatus');
       const stratColors = { manual: 'var(--text-muted)', peer_supermajority: 'var(--accent-blue,#2196f3)', longest_chain: 'var(--accent-orange,#ff9800)' };
       const color = stratColors[data.strategy] || 'var(--text-muted)';
-      let html = `<dl class="inline-dl" style="font-size:var(--font-size-xs)">
+      let html = `<dl class="detail-grid" style="margin-bottom:0">
         <dt>Strategy</dt><dd><span style="color:${color};font-weight:600">${data.strategy}</span></dd>
         <dt>Delay</dt><dd>${data.delay_cycles} cycles</dd>
         <dt>Finalized Floor</dt><dd>${data.finalized_floor}</dd>
@@ -1374,7 +1374,7 @@ export function init(root, ctx) {
         html += `<dt>Status</dt><dd style="color:var(--accent-orange,#ff9800);font-weight:600">Resolving in ${data.delay_cycles - data.dwell_counter} cycle(s)...</dd>`;
       }
       if (data.tracking_fork) {
-        html += `<dt>Tracking</dt><dd style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${data.tracking_fork.slice(0,12)}...</dd>`;
+        html += `<dt>Tracking</dt><dd>${data.tracking_fork.slice(0,12)}...</dd>`;
       }
       html += `</dl>`;
       forkResolutionWrap.innerHTML = html;
@@ -1389,7 +1389,7 @@ export function init(root, ctx) {
   async function loadCheckpoints() {
     try {
       const data = await rpc.call('noble_getCheckpoints', [10]);
-      let html = `<dl class="inline-dl" style="font-size:var(--font-size-xs)">
+      let html = `<dl class="detail-grid" style="margin-bottom:0">
         <dt>Interval</dt><dd>every ${data.checkpoint_interval} blocks</dd>
         <dt>Total</dt><dd>${data.total_checkpoints}</dd>
         <dt>Highest Active</dt><dd>${data.highest_active_height}</dd>
@@ -1405,7 +1405,7 @@ export function init(root, ctx) {
             <td>${status}</td>
           </tr>`;
         }).join('');
-        html += `<table class="mini-table" style="width:100%;font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
+        html += `<table class="data-table" style="width:100%;font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
           <thead><tr><th>Height</th><th>Hash</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
