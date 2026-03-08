@@ -116,10 +116,10 @@ export function init(root, ctx) {
 
   async function startSession() {
     try {
-      const result = await rpc.call('noble_setTraceFilter', {
+      const result = await rpc.call('noble_setTraceFilter', [{
         filter: filterInput.value || 'trace',
         duration_minutes: parseInt(durationSelect.value, 10),
-      });
+      }]);
       startBtn.style.display = 'none';
       stopBtn.style.display = 'inline-block';
       sessionInfo.style.display = 'block';
@@ -135,10 +135,10 @@ export function init(root, ctx) {
 
   async function stopSession() {
     try {
-      await rpc.call('noble_setTraceFilter', {
+      await rpc.call('noble_setTraceFilter', [{
         filter: 'off',
         duration_minutes: null,
-      });
+      }]);
     } catch (e) {
       console.error('[trace] stop:', e);
     }
@@ -204,7 +204,7 @@ export function init(root, ctx) {
       const level = levelFilter.value;
       if (level) params.level = level;
 
-      const result = await rpc.call('noble_getTraceBuffer', params);
+      const result = await rpc.call('noble_getTraceBuffer', [params]);
       renderEntries(result.entries || []);
       bufferInfo.textContent = `Buffer: ${result.total_in_buffer} / ${result.capacity}`;
     } catch (e) {

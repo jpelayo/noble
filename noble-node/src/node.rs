@@ -116,6 +116,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub discovered_blockchains: Arc<Mutex<std::collections::HashMap<u32, noble_api::types::DiscoveredBlockchainInfo>>>,
     /// Path for persisting discovered blockchains CBOR.
     pub discovered_blockchains_path: Option<std::path::PathBuf>,
+    /// Cooldown: last time redial_known_peers was called (epoch secs). Prevents tight
+    /// reconnect loops when the only known peer has a chain_id mismatch.
+    pub last_redial_at: std::sync::atomic::AtomicU64,
     /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
     /// Incremented each time a block is committed with its voter count.
     pub chain_vote_weight: std::sync::atomic::AtomicU64,
@@ -469,6 +472,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             seed_addrs: config.network.seeds.clone(),
             discovered_blockchains: Arc::new(Mutex::new(discovered_blockchains)),
             discovered_blockchains_path: Some(discovered_path),
+            last_redial_at: std::sync::atomic::AtomicU64::new(0),
             chain_vote_weight: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -686,6 +690,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         cmd: &mpsc::Sender<NetworkCommand>,
         activity_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
     ) {
+        // Stamp cooldown
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_redial_at.store(now_ts, std::sync::atomic::Ordering::Relaxed);
+
         let mut dialed = 0u32;
         let mut seen = std::collections::HashSet::<String>::new();
 
@@ -1395,17 +1406,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mut cors_origins_vec: Vec<String> = vec![
             format!("{gui_scheme_cors}://127.0.0.1:{gui_port}"),
             format!("{gui_scheme_cors}://localhost:{gui_port}"),
-            format!("{gui_scheme_cors}://[::1]:{gui_port}"),
         ];
         // Build RPC origins list for CSP (http(s):// + ws(s)://).
         let ws_scheme = if tls_config.is_some() { "wss" } else { "ws" };
         let mut rpc_origins_vec: Vec<String> = vec![
             format!("{rpc_scheme}://127.0.0.1:{rpc_port}"),
             format!("{rpc_scheme}://localhost:{rpc_port}"),
-            format!("{rpc_scheme}://[::1]:{rpc_port}"),
             format!("{ws_scheme}://127.0.0.1:{rpc_port}"),
             format!("{ws_scheme}://localhost:{rpc_port}"),
-            format!("{ws_scheme}://[::1]:{rpc_port}"),
         ];
         // Add LAN IPs (from setup-mode detection or tls_san config).
         for san in &extra_sans {
@@ -2190,8 +2198,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "node_name": disc_name,
                 }));
                 // Auto-reconnect: immediately try to redial when last peer disconnects.
+                // Cooldown: skip if we redialed within the last 60s to prevent tight
+                // connect/disconnect loops (e.g. chain_id mismatch).
                 if new_count == 0 {
-                    self.redial_known_peers(network_cmd, cycle_phase_tx);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let last = self.last_redial_at.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) >= 60 {
+                        self.redial_known_peers(network_cmd, cycle_phase_tx);
+                    }
                 }
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
@@ -2646,18 +2663,60 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Emit protocol activity for VoteReceived before routing to engine
                 if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
                     // Resolve voter name and candidate proposer name for GUI display.
+                    // Priority: validator_list → peer records → self identity.
                     let (voter_name, candidate_name) = {
                         let engine = self.consensus.read();
+                        let our_wire = engine.our_validator_wire_bytes();
+
+                        // Resolve voter name: validator_list → peer records → self identity
                         let vn = engine.validator_list().find_by_wire(voter_id)
                             .map(|ve| ve.name())
                             .filter(|n| !n.is_empty())
+                            .or_else(|| {
+                                self.storage.read()
+                                    .list_peer_records()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .find(|r| r.identity_key == *voter_id)
+                                    .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                                    .filter(|n| !n.is_empty())
+                            })
+                            .or_else(|| {
+                                if our_wire.as_deref() == Some(voter_id) {
+                                    let id = shared_identity.read();
+                                    if !id.node_name.is_empty() {
+                                        return Some(id.node_name.clone());
+                                    }
+                                }
+                                None
+                            })
                             .unwrap_or_default();
+
+                        // Resolve candidate proposer name: validator_list → peer records → self identity
                         let cn = engine.candidate_tracker().get(&noble_crypto::Hash256(*candidate_hash))
                             .and_then(|entry| {
                                 let wire = entry.block.header.validator_id.to_wire_bytes();
                                 engine.validator_list().find_by_wire(&wire)
                                     .map(|ve| ve.name())
                                     .filter(|n| !n.is_empty())
+                                    .or_else(|| {
+                                        self.storage.read()
+                                            .list_peer_records()
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .find(|r| r.identity_key == wire)
+                                            .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                                            .filter(|n| !n.is_empty())
+                                    })
+                                    .or_else(|| {
+                                        if our_wire.as_deref() == Some(&wire) {
+                                            let id = shared_identity.read();
+                                            if !id.node_name.is_empty() {
+                                                return Some(id.node_name.clone());
+                                            }
+                                        }
+                                        None
+                                    })
                             })
                             .unwrap_or_default();
                         (vn, cn)

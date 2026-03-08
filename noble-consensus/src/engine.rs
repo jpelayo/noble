@@ -216,9 +216,9 @@ impl CycleEngine {
                 return name;
             }
         }
-        // Fallback: truncated hash.
+        // Fallback: truncated hash wrapped in {} to denote raw identifier.
         let hex = hex::encode(hash.as_bytes());
-        format!("{}...{}", &hex[..6], &hex[hex.len() - 6..])
+        format!("{{{}...{}}}", &hex[..6], &hex[hex.len() - 6..])
     }
 
     /// Get finality tracker (read-only) for RPC queries.

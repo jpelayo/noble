@@ -76,7 +76,7 @@ export function init(root, ctx) {
       <div class="panel-header">
         <span>Cycle Superposition Timeline</span>
         <span id="cs-chain-badge" style="font-weight:500;font-size:var(--font-size-xs);padding:2px 8px;border-radius:9999px;background:var(--bg-tertiary);color:var(--text-secondary)"></span>
-        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted);margin-left:auto">Last 3 cycles</span>
+        <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted);margin-left:auto">Recent cycles</span>
       </div>
       <div class="panel-body">
         <!-- Phase pipeline -->
@@ -539,6 +539,9 @@ export function init(root, ctx) {
     }
   }
 
+  // Wrap a raw hash in {} to denote it's a non-friendly identifier.
+  function hashLabel(id, len = 6) { return `{${truncateHash(id || '', len)}}`; }
+
   function formatActivityMessage(data) {
     // Enriched events carry a pre-formatted message.
     if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast')) return data.message;
@@ -552,44 +555,44 @@ export function init(root, ctx) {
       case 'block_proposed':
         return `Proposed block #${data.height}`;
       case 'block_received': {
-        const from = data.proposer_name || vName(data.proposer) || pName(data.peer_id);
+        const from = data.proposer_name || vName(data.proposer) || hashLabel(data.peer_id);
         return `Block #${data.height} received from ${from}`;
       }
       case 'block_announced':
-        return `Block #${data.height} announced by ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+        return `Block #${data.height} announced by ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       case 'block_requested':
-        return `Requested block ${truncateHash(data.hash || '')}`;
+        return `Requested block {${truncateHash(data.hash || '')}}`;
       case 'vote_broadcast':
-        return `Vote broadcast R${data.round} \u2192 ${truncateHash(data.block_hash || '')}`;
+        return `Vote broadcast R${data.round} \u2192 ${data.candidate_name || hashLabel(data.block_hash)}`;
       case 'vote_received': {
-        const voter = data.voter_name || vName(data.voter_id);
-        const candidate = data.candidate_name || truncateHash(data.candidate_hash || '', 6);
+        const voter = data.voter_name || vName(data.voter_id) || hashLabel(data.voter_id);
+        const candidate = data.candidate_name || hashLabel(data.candidate_hash);
         return `Vote R${data.round} received from ${voter} \u2192 ${candidate}`;
       }
       case 'peer_connected':
-        return `Peer connected: ${data.node_name || peerIdToName.get(data.peer_id) || pName(data.peer_id)} (${data.direction || ''})`;
+        return `Peer connected: ${data.node_name || peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} (${data.direction || ''})`;
       case 'peer_disconnected':
-        return `Peer disconnected: ${data.node_name || peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+        return `Peer disconnected: ${data.node_name || peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       case 'peer_banned':
-        return `Peer banned: ${peerIdToName.get(data.peer_id) || pName(data.peer_id)} \u2014 ${data.reason}`;
+        return `Peer banned: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
       case 'peer_status':
-        return `Peer ${peerIdToName.get(data.peer_id) || pName(data.peer_id)} at height ${data.height}`;
+        return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
       case 'announce_received':
-        return `${data.node_name || pName(data.identity)} v${data.software_version || '?'}${data.wants_to_validate ? ' \u2022 validator' : ''}${data.wants_to_vote ? ' \u2022 voter' : ''} \u2014 ${data.connected ? 'connected' : 'via gossip'}`;
+        return `${data.node_name || hashLabel(data.identity)} v${data.software_version || '?'}${data.wants_to_validate ? ' \u2022 validator' : ''}${data.wants_to_vote ? ' \u2022 voter' : ''} \u2014 ${data.connected ? 'connected' : 'via gossip'}`;
       case 'tx_announced':
-        return `Tx ${truncateHash(data.tx_id || '')} from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+        return `Tx {${truncateHash(data.tx_id || '')}} from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received': {
         const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
-        return `${etype} evidence from ${peerIdToName.get(data.peer_id) || pName(data.peer_id)}`;
+        return `${etype} evidence from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       }
       case 'evidence_published': {
         const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
-        return `${etype} evidence published (${truncateHash(data.evidence_hash || '')})`;
+        return `${etype} evidence published ({${truncateHash(data.evidence_hash || '')}})`;
       }
       case 'peer_wrong_chain':
-        return `Kicked ${data.peer_name || pName(data.peer_id)} \u2014 wrong chain (${data.their_chain_id})`;
+        return `Kicked ${data.peer_name || hashLabel(data.peer_id)} \u2014 wrong chain (${data.their_chain_id})`;
       case 'blockchain_discovered':
         return `Blockchain discovered: ${data.chain_id} from ${data.peer_name || 'unknown peer'}`;
       case 'consensus_log':
@@ -725,7 +728,7 @@ export function init(root, ctx) {
       if (data.event === 'block_proposed' && data.hash) {
         pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height || '?'} (${truncateHash(data.hash)})` });
       } else if (data.event === 'vote_broadcast') {
-        const target = data.candidate_name || truncateHash(data.block_hash || '', 6);
+        const target = data.candidate_name || hashLabel(data.block_hash || '');
         pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });
       } else if (data.event === 'peer_connected') {
         pushPeerEvent(data);
@@ -1090,8 +1093,7 @@ export function init(root, ctx) {
         rpc.call('noble_getCycleStatus').catch(() => null),
         rpc.call('noble_getVoteTallies').catch(() => null),
       ]);
-      let allEntries = (history.entries || history.cycles || [])
-        .filter(e => e.status !== 'indeterminate' || (e.proposals && e.proposals.length > 0) || (e.votes && e.votes.length > 0));
+      let allEntries = (history.entries || history.cycles || []);
 
       // Filter stale entries from previous chains: entries arrive newest-first.
       // If a gap > 20 appears between consecutive entries, the older group is the
@@ -1285,13 +1287,12 @@ export function init(root, ctx) {
           if (phase.finalized) {
             let badge = '&#10003; sealed';
             let badgeColor = 'opacity:0.85';
+            let blockH = 0;
             if (finalityStatus && finalityStatus.finalized_height > 0) {
-              // Estimate block depth from cycle position within the displayed list.
-              // Cycles are ordered newest-first; cycleIdx counts from 0 (most recent).
               const cycleIdx = cycles.indexOf(cycle);
               const tipH = finalityStatus.latest_height;
-              const depth = cycleIdx; // approximate: each cycle = 1 block deeper
-              const blockH = tipH - depth;
+              const depth = cycleIdx;
+              blockH = tipH - depth;
               if (blockH > 0 && blockH <= finalityStatus.finalized_height) {
                 badge = '&#9989; finalized';
                 badgeColor = 'color:var(--accent-green,#4caf50)';
@@ -1305,7 +1306,6 @@ export function init(root, ctx) {
               }
             }
             label += `<div style="font-size:0.55rem;${badgeColor}">${badge}</div>`;
-            // Checkpoint marker
             if (checkpointData && checkpointData.checkpoints && blockH > 0) {
               const cp = checkpointData.checkpoints.find(c => c.height === blockH);
               if (cp) {
