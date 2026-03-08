@@ -87,6 +87,26 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <div class="panel">
+      <div class="panel-header">
+        <span>Connectivity Log</span>
+        <button class="btn btn-sm" id="net-log-clear">Clear</button>
+      </div>
+      <div class="panel-body" style="padding:0;max-height:260px;overflow-y:auto">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:70px">Time</th>
+              <th style="width:80px">Event</th>
+              <th>Peer</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="net-conn-log"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Ban Management Modal -->
     <div id="net-ban-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
       <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:900px;width:95%;max-height:80vh;overflow-y:auto;padding:var(--gap-lg)">
@@ -283,8 +303,64 @@ export function init(root, ctx) {
     unsubs.push(() => { ro.disconnect(); peerChart?.dispose(); });
   }
 
-  // WS: peer updates
-  unsubs.push(ws.subscribe('peerUpdates', async () => {
+  // ── Connectivity log ──
+  const connLogBody = root.querySelector('#net-conn-log');
+  const LOG_MAX = 100;
+  let connLogEntries = [];
+
+  function appendLogEntry(ev) {
+    const now = new Date();
+    const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    connLogEntries.push({ time, ...ev });
+    if (connLogEntries.length > LOG_MAX) connLogEntries.shift();
+    renderConnLog();
+  }
+
+  function renderConnLog() {
+    if (connLogEntries.length === 0) {
+      connLogBody.innerHTML = '<tr><td colspan="4" class="empty-state">No connectivity events yet</td></tr>';
+      return;
+    }
+    connLogBody.innerHTML = connLogEntries.slice().reverse().map(e => {
+      const evColor = e.event === 'connected' ? 'var(--success,#34d399)'
+        : e.event === 'rejected' ? 'var(--warning,#fbbf24)'
+        : 'var(--error,#f87171)';
+      const name = e.node_name || '';
+      const pid = e.peer_id ? e.peer_id.slice(0, 12) + '...' : '';
+      const peer = name || pid || '—';
+      // Build verbose detail: direction, address, reason — all available fields.
+      const parts = [];
+      if (e.direction) parts.push(e.direction);
+      if (e.addr) parts.push(e.addr);
+      if (e.reason) parts.push(e.reason);
+      // For connect events with no reason, say so explicitly.
+      if (e.event === 'connected' && parts.length === 0) parts.push('session established');
+      if (e.event === 'disconnected' && !e.reason) parts.push('connection closed (no reason given)');
+      const detail = parts.join(' · ');
+      return `<tr>
+        <td class="mono" style="font-size:0.75rem">${e.time}</td>
+        <td><span style="color:${evColor};font-weight:600;font-size:0.75rem">${e.event}</span></td>
+        <td style="font-size:0.8rem" title="${esc(pid)}">${esc(peer)}</td>
+        <td style="font-size:0.8rem;color:var(--text-secondary)">${esc(detail)}</td>
+      </tr>`;
+    }).join('');
+    // Auto-scroll to top (newest first)
+    connLogBody.parentElement.scrollTop = 0;
+  }
+
+  root.querySelector('#net-log-clear').addEventListener('click', () => {
+    connLogEntries = [];
+    renderConnLog();
+  });
+
+  renderConnLog();
+
+  // WS: peer updates — refresh table + log connectivity events
+  unsubs.push(ws.subscribe('peerUpdates', async (data) => {
+    // Log the event
+    if (data && data.event) {
+      appendLogEntry(data);
+    }
     try {
       const peers = await rpc.call('noble_getPeerInfo');
       renderPeerTable(peers);
@@ -450,4 +526,11 @@ export function init(root, ctx) {
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }

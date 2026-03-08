@@ -277,7 +277,9 @@ pub enum NetworkEvent {
         chain_tip: Option<(u64, [u8; 32])>,
     },
     /// A peer disconnected.
-    PeerDisconnected { peer_id: Vec<u8> },
+    PeerDisconnected { peer_id: Vec<u8>, reason: String },
+    /// A connection was rejected before the peer was tracked (silent disconnect).
+    PeerRejected { peer_id: Vec<u8>, addr: String, reason: String },
     /// A peer was banned for misbehavior.
     PeerBanned { peer_id: Vec<u8>, reason: String },
     /// A node identity announcement was received from a peer.

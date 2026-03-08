@@ -2139,7 +2139,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                 tracing::debug!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
-            NetworkEvent::PeerDisconnected { peer_id } => {
+            NetworkEvent::PeerDisconnected { peer_id, reason } => {
                 // Look up direction before removing so we can decrement the right counter.
                 let hex_pid = hex::encode(peer_id);
                 let was_inbound = {
@@ -2191,11 +2191,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "event": "disconnected",
                     "peer_id": hex_pid,
                     "node_name": disc_name,
+                    "reason": reason,
                 }));
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_disconnected",
                     "peer_id": hex_pid,
                     "node_name": disc_name,
+                    "reason": reason,
                 }));
                 // Auto-reconnect: immediately try to redial when last peer disconnects.
                 // Cooldown: skip if we redialed within the last 60s to prevent tight
@@ -2210,6 +2212,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         self.redial_known_peers(network_cmd, cycle_phase_tx);
                     }
                 }
+            }
+            NetworkEvent::PeerRejected { peer_id, addr, reason } => {
+                let hex_pid = hex::encode(peer_id);
+                tracing::debug!(
+                    task = "peer_tracking",
+                    "Connection rejected: {hex_pid} at {addr} — {reason}",
+                );
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "rejected",
+                    "peer_id": hex_pid,
+                    "addr": addr,
+                    "reason": reason,
+                }));
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
                 let hex_pid = hex::encode(peer_id);
@@ -2988,17 +3003,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     match phase {
                         noble_consensus::CyclePhase::Reflection => {
                             // Reflection start: R1 votes are in — show current leader.
-                            let engine = self.consensus.read();
-                            let tallies = engine.vote_tallies(); // R1
-                            let total_votes: usize = tallies.values().sum();
-                            if let Some((best_hash, best_count)) = tallies.iter().max_by_key(|e| e.1) {
-                                let pct = if total_votes > 0 { (*best_count * 100) / total_votes } else { 0 };
-                                let name = engine.candidate_tracker().get(best_hash)
-                                    .and_then(|entry| {
-                                        let wire = entry.block.header.validator_id.to_wire_bytes();
-                                        let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
-                                        if n.is_empty() { None } else { Some(n) }
-                                    });
+                            let (tallies_data, validator_wire) = {
+                                let engine = self.consensus.read();
+                                let tallies = engine.vote_tallies(); // R1
+                                let total_votes: usize = tallies.values().sum();
+                                let best = tallies.iter().max_by_key(|e| e.1).map(|(h, c)| (*h, *c));
+                                let wire = best.and_then(|(hash, _)| {
+                                    engine.candidate_tracker().get(&hash).map(|entry| {
+                                        entry.block.header.validator_id.to_wire_bytes()
+                                    })
+                                });
+                                let name_from_list = wire.as_ref().and_then(|w| {
+                                    let n = engine.validator_list().find_by_wire(w).map(|v| v.name()).unwrap_or_default();
+                                    if n.is_empty() { None } else { Some(n) }
+                                });
+                                ((total_votes, best, name_from_list), wire)
+                            }; // consensus lock released
+                            let (total_votes, best, name_from_list) = tallies_data;
+                            if let Some((best_hash, best_count)) = best {
+                                let pct = if total_votes > 0 { (best_count * 100) / total_votes } else { 0 };
+                                // Resolve name: validator list first, then peer records fallback.
+                                let name = name_from_list.or_else(|| {
+                                    validator_wire.and_then(|wire| {
+                                        let storage = self.storage.read();
+                                        storage.list_peer_records().ok().and_then(|records| {
+                                            records.into_iter()
+                                                .find(|r| r.peer_id_bytes == wire)
+                                                .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                                                .filter(|n| !n.is_empty())
+                                        })
+                                    })
+                                });
                                 event["leader_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["leader_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
                                 event["leader_pct"] = serde_json::json!(pct);
@@ -3007,31 +3042,42 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                         noble_consensus::CyclePhase::Propagation => {
                             // Propagation start: R2 votes are in — show winner.
-                            let engine = self.consensus.read();
-                            let r2 = engine.r2_tallies();
-                            let total_r2: usize = r2.values().sum();
-                            if let Some((best_hash, _)) = r2.iter().max_by_key(|e| e.1) {
-                                let name = engine.candidate_tracker().get(best_hash)
-                                    .and_then(|entry| {
-                                        let wire = entry.block.header.validator_id.to_wire_bytes();
-                                        let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
-                                        if n.is_empty() { None } else { Some(n) }
-                                    });
+                            let (best_info, wire_bytes) = {
+                                let engine = self.consensus.read();
+                                let r2 = engine.r2_tallies();
+                                let total_r2: usize = r2.values().sum();
+                                let (source_tallies, label) = if total_r2 > 0 {
+                                    (r2, "r2")
+                                } else {
+                                    (engine.vote_tallies(), "r1_fallback")
+                                };
+                                let best = source_tallies.iter().max_by_key(|e| e.1).map(|(h, _)| *h);
+                                let wire = best.and_then(|hash| {
+                                    engine.candidate_tracker().get(&hash).map(|entry| {
+                                        entry.block.header.validator_id.to_wire_bytes()
+                                    })
+                                });
+                                let name_from_list = wire.as_ref().and_then(|w| {
+                                    let n = engine.validator_list().find_by_wire(w).map(|v| v.name()).unwrap_or_default();
+                                    if n.is_empty() { None } else { Some(n) }
+                                });
+                                ((best, name_from_list, label), wire)
+                            }; // consensus lock released
+                            let (best, name_from_list, _label) = best_info;
+                            if let Some(best_hash) = best {
+                                let name = name_from_list.or_else(|| {
+                                    wire_bytes.and_then(|wire| {
+                                        let storage = self.storage.read();
+                                        storage.list_peer_records().ok().and_then(|records| {
+                                            records.into_iter()
+                                                .find(|r| r.peer_id_bytes == wire)
+                                                .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
+                                                .filter(|n| !n.is_empty())
+                                        })
+                                    })
+                                });
                                 event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
-                            } else if total_r2 == 0 {
-                                // Fall back to R1 tallies if no R2 votes yet.
-                                let r1 = engine.vote_tallies();
-                                if let Some((best_hash, _)) = r1.iter().max_by_key(|e| e.1) {
-                                    let name = engine.candidate_tracker().get(best_hash)
-                                        .and_then(|entry| {
-                                            let wire = entry.block.header.validator_id.to_wire_bytes();
-                                            let n = engine.validator_list().find_by_wire(&wire).map(|v| v.name()).unwrap_or_default();
-                                            if n.is_empty() { None } else { Some(n) }
-                                        });
-                                    event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
-                                    event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
-                                }
                             }
                         }
                         _ => {}
@@ -4805,6 +4851,7 @@ mod tests {
         // Disconnect the inbound peer — should decrement inbound_count
         let disconnect_event = NetworkEvent::PeerDisconnected {
             peer_id: vec![1, 2, 3],
+            reason: "test disconnect".to_string(),
         };
         node.handle_network_event(
             &disconnect_event,
@@ -4826,6 +4873,7 @@ mod tests {
         // Disconnect the outbound peer
         let disconnect_out = NetworkEvent::PeerDisconnected {
             peer_id: vec![4, 5, 6],
+            reason: "test disconnect".to_string(),
         };
         node.handle_network_event(&disconnect_out, &tx, &block_tx, &tx_tx, &peer_tx, &cycle_tx, &None, &test_identity);
         {

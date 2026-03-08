@@ -413,6 +413,9 @@ async fn run_event_loop(
     // per minute) because the disconnect is graceful (no ban) and the node-level
     // reconnection logic immediately redials the same peer.
     let mut mismatch_cooldown: HashMap<PeerId, Instant> = HashMap::new();
+    // Tracks the reason for programmatic disconnects so ConnectionClosed can
+    // include it in the PeerDisconnected event sent to the GUI.
+    let mut disconnect_reasons: HashMap<PeerId, String> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -433,6 +436,7 @@ async fn run_event_loop(
                     &mut pending_dials,
                     &mut pending_proposals,
                     &mut mismatch_cooldown,
+                    &mut disconnect_reasons,
                 ).await;
             }
 
@@ -558,6 +562,7 @@ async fn handle_swarm_event(
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
+    disconnect_reasons: &mut HashMap<PeerId, String>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -580,6 +585,11 @@ async fn handle_swarm_event(
                         %peer_id,
                         "suppressing connection — chain/protocol mismatch cooldown active"
                     );
+                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                        peer_id: peer_id.to_bytes().to_vec(),
+                        addr: remote_addr.clone(),
+                        reason: "chain/protocol mismatch cooldown".to_string(),
+                    });
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 } else {
@@ -605,6 +615,11 @@ async fn handle_swarm_event(
                     config.max_outbound_per_subnet,
                 ) {
                     tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting outbound: subnet diversity");
+                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                        peer_id: peer_id.to_bytes().to_vec(),
+                        addr: remote_addr.clone(),
+                        reason: "outbound subnet diversity limit".to_string(),
+                    });
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -619,6 +634,11 @@ async fn handle_swarm_event(
                     diversity::MAX_INBOUND_PER_SUBNET,
                 ) {
                     tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting inbound: subnet diversity (>4 from same /16)");
+                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                        peer_id: peer_id.to_bytes().to_vec(),
+                        addr: remote_addr.clone(),
+                        reason: "inbound subnet diversity limit".to_string(),
+                    });
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -656,6 +676,11 @@ async fn handle_swarm_event(
                 }
             } else {
                 tracing::debug!(task = "peer_management", %peer_id, "peer rejected (limit or banned)");
+                let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                    peer_id: peer_id.to_bytes().to_vec(),
+                    addr: remote_addr,
+                    reason: "peer limit reached or banned".to_string(),
+                });
                 let _ = swarm.disconnect_peer_id(peer_id);
             }
         }
@@ -663,6 +688,7 @@ async fn handle_swarm_event(
         SwarmEvent::ConnectionClosed {
             peer_id,
             num_established,
+            cause,
             ..
         } => {
             // Only fire PeerDisconnected when the LAST connection to this peer
@@ -671,6 +697,14 @@ async fn handle_swarm_event(
             if num_established == 0 {
                 let was_tracked = peer_manager.on_disconnected(&peer_id);
                 tx_rate_limiter.remove_peer(&peer_id);
+                // Resolve disconnect reason: explicit reason (chain mismatch, ban)
+                // takes priority over the libp2p cause.
+                let reason = disconnect_reasons.remove(&peer_id).unwrap_or_else(|| {
+                    match &cause {
+                        Some(e) => format!("{e}"),
+                        None => "connection closed".to_string(),
+                    }
+                });
                 // Only emit PeerDisconnected if this peer was actually accepted
                 // and tracked.  Peers rejected at connection time (subnet
                 // diversity, limit, banned) cause a ConnectionClosed but were
@@ -680,6 +714,7 @@ async fn handle_swarm_event(
                     if event_tx
                         .try_send(NetworkEvent::PeerDisconnected {
                             peer_id: peer_id.to_bytes().to_vec(),
+                            reason,
                         })
                         .is_err()
                     {
@@ -1025,6 +1060,7 @@ async fn handle_swarm_event(
                             peer,
                             Instant::now() + Duration::from_secs(MISMATCH_COOLDOWN_SECS),
                         );
+                        disconnect_reasons.insert(peer, reason.clone());
                         let _ = swarm.disconnect_peer_id(peer);
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
