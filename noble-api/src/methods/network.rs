@@ -431,6 +431,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                             banned_until: e.banned_until,
                             reason_category: e.reason_category,
                             reason_subject: e.reason_subject,
+                            reason_codes: e.reason_codes,
                             node_name: name_map.get(&pid_hex).cloned(),
                         }
                     })
@@ -468,7 +469,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let banned_until = now + dur;
         {
             let storage = self.storage.read();
-            let _ = storage.store_ban(&peer_bytes, banned_until);
+            let _ = storage.store_ban(&peer_bytes, banned_until, 0x0C); // ManualBan
         }
 
         Ok(serde_json::json!({ "success": true, "banned_until": banned_until }))

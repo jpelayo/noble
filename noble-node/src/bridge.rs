@@ -65,8 +65,22 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 hash: *block_hash.as_bytes(),
             }]
         }
-        CycleIo::BanPeer { peer_id, .. } => {
-            vec![NetworkCommand::BanPeer(peer_id)]
+        CycleIo::BanPeer { peer_id, reason } => {
+            // Derive the correct BanCategory from the reason string.
+            // The consensus engine emits:
+            //   "invalid block: ..." → InvalidBlock (0x01)
+            //   "double proposal: ..." → DuplicateProposal (0x04)
+            //   "vote equivocation ..." → InvalidVote (0x07)
+            let category = if reason.starts_with("invalid block") {
+                0x01 // InvalidBlock
+            } else if reason.starts_with("double proposal") {
+                0x04 // DuplicateProposal
+            } else if reason.starts_with("vote equivocation") {
+                0x07 // InvalidVote
+            } else {
+                0x03 // ProtocolViolation (fallback)
+            };
+            vec![NetworkCommand::BanPeer { peer_id, category, reason }]
         }
         CycleIo::RequestBlock {
             peer_id,
@@ -222,7 +236,7 @@ mod tests {
             reason: "misbehavior".to_string(),
         });
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], NetworkCommand::BanPeer(_)));
+        assert!(matches!(cmds[0], NetworkCommand::BanPeer { .. }));
     }
 
     #[test]

@@ -201,8 +201,13 @@ pub enum NetworkCommand {
     RequestBlockByHeight { peer_id: Vec<u8>, height: u64 },
     /// Trigger a chain sync check.
     RequestSync,
-    /// Ban a peer by their serialized PeerId bytes.
-    BanPeer(Vec<u8>),
+    /// Ban a peer by their serialized PeerId bytes with a category code and reason.
+    BanPeer {
+        peer_id: Vec<u8>,
+        /// BanCategory discriminant (0x01..0x0C). See `peer_manager::BanCategory`.
+        category: u8,
+        reason: String,
+    },
     /// Gracefully disconnect a peer without banning (e.g. different chain).
     DisconnectPeer(Vec<u8>),
     /// Publish a node identity announcement to the network.
@@ -240,6 +245,8 @@ pub struct BannedPeerEntry {
     pub banned_until: u64,
     pub reason_category: String,
     pub reason_subject: String,
+    /// All misbehavior category codes that contributed to this ban (e.g. [0x01, 0x07]).
+    pub reason_codes: Vec<u8>,
 }
 
 /// Events emitted from the network service to the node.

@@ -716,11 +716,11 @@ async fn handle_swarm_event(
                     }
                 }
                 Err(reason) => {
-                    tracing::debug!(task = "peer_management", %peer_id, reason, "peer rejected");
+                    tracing::debug!(task = "peer_management", %peer_id, %reason, "peer rejected");
                     let _ = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr,
-                        reason: reason.to_string(),
+                        reason,
                     });
                     let _ = swarm.disconnect_peer_id(peer_id);
                 }
@@ -1889,14 +1889,13 @@ async fn handle_command(
             }
         }
 
-        NetworkCommand::BanPeer(peer_bytes) => {
-            if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
+        NetworkCommand::BanPeer { peer_id, category, reason } => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_id) {
+                let ban_cat = BanCategory::from_u8(category)
+                    .unwrap_or(BanCategory::ProtocolViolation);
                 peer_manager.record_misbehavior(
                     &pid,
-                    BanReason::new(
-                        BanCategory::DuplicateProposal,
-                        "ban command from consensus engine",
-                    ),
+                    BanReason::new(ban_cat, reason),
                 );
                 let _ = swarm.disconnect_peer_id(pid);
             }

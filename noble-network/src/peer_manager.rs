@@ -63,6 +63,25 @@ pub enum BanCategory {
 }
 
 impl BanCategory {
+    /// Decode a category from its wire byte. Returns `None` for unknown codes.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::InvalidBlock),
+            0x02 => Some(Self::InvalidTransaction),
+            0x03 => Some(Self::ProtocolViolation),
+            0x04 => Some(Self::DuplicateProposal),
+            0x05 => Some(Self::ExcessiveConnections),
+            0x06 => Some(Self::Unresponsive),
+            0x07 => Some(Self::InvalidVote),
+            0x08 => Some(Self::InvalidAnnounce),
+            0x09 => Some(Self::TxFlood),
+            0x0A => Some(Self::EvidenceReceived),
+            0x0B => Some(Self::Misrepresentation),
+            0x0C => Some(Self::ManualBan),
+            _ => None,
+        }
+    }
+
     /// Returns the ban score penalty for this category.
     pub fn penalty(self) -> u32 {
         match self {
@@ -137,6 +156,8 @@ pub struct PeerState {
     pub last_misbehavior: Option<Instant>,
     /// Last ban reason (set when ban threshold reached, surfaced via RPC/GUI).
     pub last_ban_reason: Option<BanReason>,
+    /// All misbehavior categories recorded for this peer (in order).
+    pub misbehavior_categories: Vec<BanCategory>,
     /// Clock offset in milliseconds (positive = peer ahead of us). `None` if not yet sampled.
     pub clock_offset_ms: Option<i64>,
 }
@@ -183,10 +204,22 @@ const RATE_LIMIT_WINDOW_MAX: u32 = 50;
 /// Duration of mass-ban cooldown in seconds (5 minutes).
 const MASS_BAN_COOLDOWN_SECS: u64 = 300;
 
+/// Stored state for a banned peer (in-memory).
+#[derive(Debug, Clone)]
+pub struct BanEntry {
+    pub banned_at: Instant,
+    /// All misbehavior categories that contributed to this ban (in order).
+    pub categories: Vec<BanCategory>,
+    /// Final cumulative ban score at the time of banning.
+    pub score: u32,
+    /// Free-text subject from the triggering offense (capped at 256 chars).
+    pub subject: String,
+}
+
 /// Manages connected peers, enforces connection limits, and tracks ban scores.
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerState>,
-    banned: HashMap<PeerId, Instant>,
+    banned: HashMap<PeerId, BanEntry>,
     max_outbound: usize,
     max_inbound: usize,
     ban_threshold: u32,
@@ -219,17 +252,22 @@ impl PeerManager {
     }
 
     /// Handle a new peer connection. Returns `Ok(())` if accepted, or
-    /// `Err(reason)` with a specific rejection reason.
-    pub fn on_connected(&mut self, peer_id: PeerId, direction: Direction) -> Result<(), &'static str> {
-        if self.is_banned(&peer_id) {
-            return Err("peer is banned");
+    /// `Err(reason)` with a specific rejection reason including ban category.
+    pub fn on_connected(&mut self, peer_id: PeerId, direction: Direction) -> Result<(), String> {
+        if let Some(entry) = self.banned.get(&peer_id) {
+            if entry.banned_at.elapsed() < self.ban_duration {
+                let codes: Vec<String> = entry.categories.iter()
+                    .map(|c| format!("{:#04X}", *c as u8))
+                    .collect();
+                return Err(format!("peer is banned [{}]", codes.join(",")));
+            }
         }
 
         // Deduplicate: if peer is already connected, treat as no-op to prevent
         // inflated peer counts from reconnect loops or duplicate ConnectionEstablished events.
         if self.peers.contains_key(&peer_id) {
             tracing::debug!(task = "peer_connect", peer_id = %peer_id, "duplicate connection event — ignoring");
-            return Err("duplicate connection");
+            return Err("duplicate connection".to_string());
         }
 
         let (current, max) = match direction {
@@ -239,9 +277,9 @@ impl PeerManager {
 
         if current >= max {
             return Err(if direction == Direction::Inbound {
-                "inbound peer limit reached"
+                "inbound peer limit reached".to_string()
             } else {
-                "outbound peer limit reached"
+                "outbound peer limit reached".to_string()
             });
         }
 
@@ -261,6 +299,7 @@ impl PeerManager {
                 misbehavior_window: VecDeque::new(),
                 last_misbehavior: None,
                 last_ban_reason: None,
+                misbehavior_categories: Vec::new(),
                 clock_offset_ms: None,
             },
         );
@@ -285,9 +324,19 @@ impl PeerManager {
     /// Immediately ban a peer regardless of cumulative score.
     /// Used for definitive violations like chain_id mismatch where the first
     /// occurrence is sufficient evidence.
-    pub fn force_ban(&mut self, peer_id: &PeerId) {
+    pub fn force_ban(&mut self, peer_id: &PeerId, reason: BanReason) {
+        let score = self.peers.get(peer_id).map(|s| s.ban_score).unwrap_or(0);
+        let mut categories = self.peers.get(peer_id)
+            .map(|s| s.misbehavior_categories.clone())
+            .unwrap_or_default();
+        categories.push(reason.category);
         self.peers.remove(peer_id);
-        self.banned.insert(*peer_id, Instant::now());
+        self.banned.insert(*peer_id, BanEntry {
+            banned_at: Instant::now(),
+            categories,
+            score,
+            subject: reason.subject,
+        });
         self.banned_count += 1;
         tracing::info!(task = "peer_ban", %peer_id, "peer force-banned");
     }
@@ -337,6 +386,7 @@ impl PeerManager {
             // Accumulate penalty to ban_score.
             state.ban_score = state.ban_score.saturating_add(penalty);
             state.last_misbehavior = Some(now);
+            state.misbehavior_categories.push(reason.category);
             state.last_ban_reason = Some(reason);
 
             tracing::debug!(
@@ -361,7 +411,17 @@ impl PeerManager {
                     self.ban_cooldown = None;
                 }
 
-                self.banned.insert(*peer_id, now);
+                let final_score = state.ban_score;
+                let categories = state.misbehavior_categories.clone();
+                let subject = state.last_ban_reason.as_ref()
+                    .map(|r| r.subject.clone())
+                    .unwrap_or_default();
+                self.banned.insert(*peer_id, BanEntry {
+                    banned_at: now,
+                    categories,
+                    score: final_score,
+                    subject,
+                });
                 self.peers.remove(peer_id);
                 self.banned_count += 1;
 
@@ -395,26 +455,31 @@ impl PeerManager {
 
     /// Get the Unix timestamp at which a peer's ban expires (if banned).
     pub fn get_ban_expiry(&self, peer_id: &PeerId) -> Option<u64> {
-        self.banned.get(peer_id).map(|banned_at| {
+        self.banned.get(peer_id).map(|entry| {
             let now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let elapsed = banned_at.elapsed().as_secs();
+            let elapsed = entry.banned_at.elapsed().as_secs();
             now_unix + self.ban_duration.as_secs().saturating_sub(elapsed)
         })
     }
 
+    /// Get the ban entry for a peer (if banned and not expired).
+    pub fn get_ban_entry(&self, peer_id: &PeerId) -> Option<&BanEntry> {
+        self.banned.get(peer_id).filter(|e| e.banned_at.elapsed() < self.ban_duration)
+    }
+
     /// Load persisted bans from storage at startup.
     ///
-    /// `bans` is a list of (peer_id_bytes, banned_until_unix) from storage.
+    /// `bans` is a list of (peer_id_bytes, banned_until_unix, category_code) from storage.
     /// Only non-expired bans are imported.
-    pub fn load_persisted_bans(&mut self, bans: Vec<(Vec<u8>, u64)>) {
+    pub fn load_persisted_bans(&mut self, bans: Vec<(Vec<u8>, u64, u8)>) {
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        for (peer_bytes, banned_until) in bans {
+        for (peer_bytes, banned_until, cat_code) in bans {
             if banned_until > now_unix {
                 if let Ok(peer_id) = PeerId::from_bytes(&peer_bytes) {
                     // Compute the Instant when this ban was placed.
@@ -422,7 +487,14 @@ impl PeerManager {
                     let ban_duration_secs = self.ban_duration.as_secs();
                     let elapsed_secs = ban_duration_secs.saturating_sub(remaining_secs);
                     let banned_at = Instant::now() - Duration::from_secs(elapsed_secs);
-                    self.banned.insert(peer_id, banned_at);
+                    let category = BanCategory::from_u8(cat_code)
+                        .unwrap_or(BanCategory::ManualBan);
+                    self.banned.insert(peer_id, BanEntry {
+                        banned_at,
+                        categories: vec![category],
+                        score: category.penalty(),
+                        subject: String::new(),
+                    });
                 }
             }
         }
@@ -552,8 +624,8 @@ impl PeerManager {
 
     /// Check if a peer is currently banned.
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
-        if let Some(banned_at) = self.banned.get(peer_id) {
-            banned_at.elapsed() < self.ban_duration
+        if let Some(entry) = self.banned.get(peer_id) {
+            entry.banned_at.elapsed() < self.ban_duration
         } else {
             false
         }
@@ -587,28 +659,29 @@ impl PeerManager {
     /// List all currently banned peers with metadata for the RPC response.
     pub fn list_banned_entries(&self) -> Vec<crate::messages::BannedPeerEntry> {
         let mut entries = Vec::new();
-        for (pid, banned_at) in &self.banned {
-            if banned_at.elapsed() >= self.ban_duration {
+        for (pid, entry) in &self.banned {
+            if entry.banned_at.elapsed() >= self.ban_duration {
                 continue; // expired
             }
             let now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let remaining = self.ban_duration.as_secs().saturating_sub(banned_at.elapsed().as_secs());
+            let remaining = self.ban_duration.as_secs().saturating_sub(entry.banned_at.elapsed().as_secs());
             let banned_until = now_unix + remaining;
 
-            // Try to get last ban reason from peer state (may be disconnected already)
-            let (category, subject, score) = self.peers.get(pid).and_then(|s| {
-                s.last_ban_reason.as_ref().map(|r| (r.category.as_str().to_string(), r.subject.clone(), s.ban_score))
-            }).unwrap_or_else(|| ("manual_ban".to_string(), String::new(), 100));
+            // Primary category = last in the list (the triggering offense).
+            let primary_category = entry.categories.last()
+                .map(|c| c.as_str())
+                .unwrap_or("unknown");
 
             entries.push(crate::messages::BannedPeerEntry {
                 peer_id_bytes: pid.to_bytes(),
-                ban_score: score,
+                ban_score: entry.score,
                 banned_until,
-                reason_category: category,
-                reason_subject: subject,
+                reason_category: primary_category.to_string(),
+                reason_subject: entry.subject.clone(),
+                reason_codes: entry.categories.iter().map(|c| *c as u8).collect(),
             });
         }
         entries
@@ -618,7 +691,7 @@ impl PeerManager {
     pub fn cleanup_expired_bans(&mut self) -> usize {
         let before = self.banned.len();
         self.banned
-            .retain(|_, banned_at| banned_at.elapsed() < self.ban_duration);
+            .retain(|_, entry| entry.banned_at.elapsed() < self.ban_duration);
         let removed = before - self.banned.len();
         self.banned_count = self.banned_count.saturating_sub(removed);
         removed
@@ -739,7 +812,29 @@ mod tests {
         pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
 
         // Try to reconnect — should be rejected.
-        assert!(pm.on_connected(p, Direction::Inbound).is_err());
+        let err = pm.on_connected(p, Direction::Inbound).unwrap_err();
+        assert!(err.contains("peer is banned"), "expected 'peer is banned', got: {err}");
+        assert!(err.contains("0x04"), "expected category code 0x04 (DuplicateProposal), got: {err}");
+    }
+
+    #[test]
+    fn ban_entry_tracks_accumulated_categories() {
+        let mut pm = PeerManager::new(&test_config());
+        let p = random_peer();
+        pm.on_connected(p, Direction::Outbound);
+
+        // DuplicateProposal = 100 = instant ban (within 50-pt rate limit window
+        // because first offense has window_total=0)
+        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "double block")));
+        assert!(pm.is_banned(&p));
+
+        let entry = pm.get_ban_entry(&p).unwrap();
+        assert_eq!(entry.categories, vec![BanCategory::DuplicateProposal]);
+        assert_eq!(entry.score, 100);
+
+        // Verify the rejection message includes the category code
+        let err = pm.on_connected(p, Direction::Inbound).unwrap_err();
+        assert!(err.contains("0x04"), "expected code 0x04, got: {err}");
     }
 
     #[test]
@@ -864,8 +959,11 @@ mod tests {
             .as_secs();
         let banned_until = now_unix + 3600; // 1 hour from now
 
-        pm.load_persisted_bans(vec![(peer_bytes, banned_until)]);
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04)]);
         assert!(pm.is_banned(&p));
+        // Verify the category was restored
+        let entry = pm.get_ban_entry(&p).unwrap();
+        assert_eq!(entry.categories, vec![BanCategory::DuplicateProposal]);
     }
 
     #[test]
@@ -881,7 +979,7 @@ mod tests {
             .as_secs();
         let banned_until = now_unix.saturating_sub(100); // 100s ago
 
-        pm.load_persisted_bans(vec![(peer_bytes, banned_until)]);
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04)]);
         assert!(!pm.is_banned(&p));
     }
 

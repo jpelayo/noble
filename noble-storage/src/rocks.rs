@@ -1222,11 +1222,15 @@ impl StorageEngine for RocksDbStorage {
         Ok(timestamps)
     }
 
-    fn store_ban(&self, peer_id: &[u8], banned_until: u64) -> Result<(), StorageError> {
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8) -> Result<(), StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_BANS)?;
+        // Value: 8 bytes banned_until (BE) + 1 byte category_code
+        let mut value = [0u8; 9];
+        value[..8].copy_from_slice(&banned_until.to_be_bytes());
+        value[8] = category_code;
         self.db
-            .put_cf(cf, peer_id, banned_until.to_be_bytes())
+            .put_cf(cf, peer_id, value)
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 
@@ -1238,7 +1242,7 @@ impl StorageEngine for RocksDbStorage {
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 
-    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError> {
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8)>, StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_BANS)?;
         let now = std::time::SystemTime::now()
@@ -1249,10 +1253,12 @@ impl StorageEngine for RocksDbStorage {
         let iter = self.db.iterator_cf(cf, IteratorMode::Start);
         for item in iter {
             let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            if value.len() == 8 {
+            if value.len() >= 8 {
                 let banned_until = u64::from_be_bytes(value[..8].try_into().unwrap());
+                // Category code: byte 9 if present, else 0x0C (ManualBan) for legacy 8-byte entries.
+                let category_code = if value.len() >= 9 { value[8] } else { 0x0C };
                 if banned_until > now {
-                    bans.push((key.to_vec(), banned_until));
+                    bans.push((key.to_vec(), banned_until, category_code));
                 }
             }
         }

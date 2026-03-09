@@ -1127,6 +1127,8 @@ pub struct BannedPeerResponse {
     pub banned_until: u64,
     pub reason_category: String,
     pub reason_subject: String,
+    /// All misbehavior category codes that contributed to this ban (e.g. [1, 7]).
+    pub reason_codes: Vec<u8>,
     pub node_name: Option<String>,
 }
 
