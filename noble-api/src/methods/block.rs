@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+use noble_consensus::ConsensusStateMachine;
 
 use noble_storage::StorageEngine;
 
@@ -133,6 +134,8 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             .into());
         };
 
+        let cycle = self.consensus.read().cycle_for_timestamp(header.timestamp);
+
         Ok(BlockHeaderResponse {
             height: header.height,
             hash: hash_to_hex(&block_hash),
@@ -141,6 +144,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             timestamp: header.timestamp,
             tx_count: header.tx_count,
             validator_id: hex::encode(header.validator_id.to_wire_bytes()),
+            cycle,
         })
     }
 
@@ -151,12 +155,14 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
     ) -> Result<Vec<BlockHeaderResponse>, ErrorObjectOwned> {
         let count = count.min(MAX_BLOCK_RANGE);
         let storage = self.storage.read();
+        let consensus = self.consensus.read();
         let mut headers = Vec::with_capacity(count as usize);
 
         for h in start_height..start_height.saturating_add(count) {
             match storage.get_block_hash_by_height(h) {
                 Ok(bh) => match storage.get_block_header(&bh) {
                     Ok(header) => {
+                        let cycle = consensus.cycle_for_timestamp(header.timestamp);
                         headers.push(BlockHeaderResponse {
                             height: header.height,
                             hash: hash_to_hex(&bh),
@@ -165,6 +171,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
                             timestamp: header.timestamp,
                             tx_count: header.tx_count,
                             validator_id: hex::encode(header.validator_id.to_wire_bytes()),
+                            cycle,
                         });
                     }
                     Err(_) => continue,

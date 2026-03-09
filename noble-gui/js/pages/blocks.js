@@ -5,7 +5,7 @@
 import { formatNumber, truncateHash, timeAgo } from '../utils.js';
 
 const PAGE_SIZE = 50;
-const CYCLE_SECS = 1200; // 4 × 300s phases
+const CYCLE_SECS = 1200; // 4 × 300s phases (used only for gap-cycle time estimate)
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -45,11 +45,6 @@ export function init(root, ctx) {
   const nextBtn = root.querySelector('#blocks-next');
   const pageInfo = root.querySelector('#blocks-page-info');
 
-  /** Compute cycle number from a block timestamp and the genesis epoch. */
-  function blockCycle(ts, epoch) {
-    return Math.floor((ts - epoch) / CYCLE_SECS);
-  }
-
   async function loadPage(page) {
     try {
       const count = await rpc.call('noble_getBlockCount');
@@ -65,32 +60,27 @@ export function init(root, ctx) {
       const rangeSize = endHeight - startHeight + 1;
       const blocks = await rpc.call('noble_getBlockRange', [startHeight, rangeSize]);
 
-      // Use block 1's timestamp as the genesis epoch (cycle engine resets
-      // epoch to block 1's timestamp after the first commit).
-      const epoch = blocks.length > 0 ? blocks[0].timestamp : 0;
-
       // Blocks come in ascending order; reverse for newest-first display.
       const desc = blocks.reverse();
 
       tbody.innerHTML = '';
       for (let i = 0; i < desc.length; i++) {
         const b = desc[i];
-        const cycle = blockCycle(b.timestamp, epoch);
+        const cycle = b.cycle != null ? b.cycle : '—';
 
         // Insert empty-cycle rows for any gap between this block and the next
         // (next = lower height, older). If the previous block's cycle is more
         // than 1 ahead, cycles in between produced no block.
-        if (i > 0) {
-          const prevCycle = blockCycle(desc[i - 1].timestamp, epoch);
-          for (let gap = prevCycle - 1; gap > cycle; gap--) {
+        if (i > 0 && desc[i - 1].cycle != null && b.cycle != null) {
+          const prevCycle = desc[i - 1].cycle;
+          for (let gap = prevCycle - 1; gap > b.cycle; gap--) {
             const gapTr = document.createElement('tr');
             gapTr.style.cssText = 'opacity:0.45';
-            const gapTime = epoch + gap * CYCLE_SECS;
             gapTr.innerHTML = `
               <td style="color:var(--text-muted)">${gap}</td>
               <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no proposals</td>
               <td></td>
-              <td style="color:var(--text-muted)">${timeAgo(gapTime)}</td>
+              <td></td>
             `;
             tbody.appendChild(gapTr);
           }
@@ -143,14 +133,4 @@ export function init(root, ctx) {
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };
-}
-
-function validatorKeyHex(validatorId) {
-  if (validatorId?.Ed25519) {
-    return validatorId.Ed25519.map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  if (validatorId?.Secp256k1) {
-    return validatorId.Secp256k1.map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return '?';
 }

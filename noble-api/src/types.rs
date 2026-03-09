@@ -191,6 +191,9 @@ pub struct BlockHeaderResponse {
     pub timestamp: u64,
     pub tx_count: u32,
     pub validator_id: String,
+    /// Cycle number this block was committed in (computed from genesis epoch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<u64>,
 }
 
 /// Transaction response used in blocks and standalone queries.
@@ -401,6 +404,9 @@ pub struct CycleStatusResponse {
     pub phase_index: u8,
     pub phase_remaining_secs: u64,
     pub cycle_remaining_secs: u64,
+    /// Genesis epoch (block 1 timestamp). `null` before first block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genesis_timestamp: Option<u64>,
 }
 
 /// Response for `noble_getAddressBalance`.

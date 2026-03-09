@@ -537,6 +537,7 @@ export class MockRpcClient {
         const start = Array.isArray(params) ? (params[0] ?? 0) : (params.start ?? 0);
         const count = Array.isArray(params) ? (params[1] ?? 50) : ((params.end ?? start + 49) - start + 1);
         const end = Math.min(start + count - 1, this.chainHeight);
+        const epoch = this.#chain.blocks.length > 1 ? this.#chain.blocks[1].header.timestamp : 0;
         return this.#chain.blocks.slice(start, end + 1).map(b => ({
           height: b.header.height,
           hash: b._hash,
@@ -545,6 +546,7 @@ export class MockRpcClient {
           timestamp: b.header.timestamp,
           tx_count: b.header.tx_count,
           validator_id: b.header.validator_id,
+          cycle: epoch ? Math.floor((b.header.timestamp - epoch) / 1200) : null,
         }));
       }
 
@@ -805,12 +807,14 @@ export class MockRpcClient {
         const phases = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
         const remaining = phaseLen - (elapsed % phaseLen);
         const cycleRemaining = CYCLE_DURATION_SECS - elapsed;
+        const epoch = this.#chain.blocks.length > 1 ? this.#chain.blocks[1].header.timestamp : now;
         return {
           phase: phases[phaseIndex],
           phase_index: phaseIndex,
           phase_remaining_secs: remaining,
           cycle_remaining_secs: cycleRemaining,
-          cycle_number: Math.floor(now / CYCLE_DURATION_SECS),
+          cycle_number: Math.floor((now - epoch) / CYCLE_DURATION_SECS),
+          genesis_timestamp: epoch,
           current_validator: this.#validators[0].public_key,
         };
       }

@@ -43,6 +43,10 @@ pub trait ConsensusStateMachine {
     /// Return phase timing: (phase_index, phase_remaining_secs, cycle_remaining_secs).
     /// phase_index: 0 = Proposal, 1 = Voting, 2 = Reflection, 3 = Propagation.
     fn phase_timing(&self) -> (u8, u64, u64);
+    /// Return the genesis timestamp (block 1's timestamp), or `None` if not set.
+    fn genesis_timestamp(&self) -> Option<u64>;
+    /// Return the cycle number for a given block timestamp.
+    fn cycle_for_timestamp(&self, ts: u64) -> Option<u64>;
 }
 
 /// The NOBLE PoR consensus engine.
@@ -1888,6 +1892,22 @@ impl ConsensusStateMachine for CycleEngine {
         let phase_remaining = self.cycle_mgr.seconds_until_phase_change(now);
         let cycle_remaining = self.cycle_mgr.seconds_until_cycle_boundary(now);
         (phase_idx, phase_remaining, cycle_remaining)
+    }
+
+    fn genesis_timestamp(&self) -> Option<u64> {
+        if self.cycle_mgr.has_genesis() {
+            Some(self.cycle_mgr.genesis_ts())
+        } else {
+            None
+        }
+    }
+
+    fn cycle_for_timestamp(&self, ts: u64) -> Option<u64> {
+        if self.cycle_mgr.has_genesis() {
+            Some(self.cycle_mgr.current_cycle(ts))
+        } else {
+            None
+        }
     }
 }
 

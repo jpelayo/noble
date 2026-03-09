@@ -493,6 +493,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // The engine IS running full consensus during bootstrap (proposals, votes,
         // phase transitions) — the GUI needs the real phase_index to show the
         // pipeline progression and log phase change events.
+        let genesis_ts = consensus.genesis_timestamp();
+
         if tip_height == 0 {
             return Ok(CycleStatusResponse {
                 cycle_number: None,
@@ -500,6 +502,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 phase_index,
                 phase_remaining_secs: engine_phase_remaining,
                 cycle_remaining_secs: cycle_remaining,
+                genesis_timestamp: genesis_ts,
             });
         }
 
@@ -511,6 +514,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             phase_index,
             phase_remaining_secs: engine_phase_remaining,
             cycle_remaining_secs: cycle_remaining,
+            genesis_timestamp: genesis_ts,
         })
     }
 

@@ -56,6 +56,11 @@ impl CycleManager {
         self.genesis_timestamp != u64::MAX
     }
 
+    /// Return the genesis timestamp (only valid when `has_genesis()` is true).
+    pub fn genesis_ts(&self) -> u64 {
+        self.genesis_timestamp
+    }
+
     /// Elapsed seconds since genesis (saturating — returns 0 before genesis).
     fn elapsed(&self, now: u64) -> u64 {
         now.saturating_sub(self.genesis_timestamp)

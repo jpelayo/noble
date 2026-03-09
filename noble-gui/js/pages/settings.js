@@ -1309,9 +1309,10 @@ export function init(root, ctx) {
   async function loadForks() {
     try {
       // Fetch fork data, sync status, and node info in parallel (await nodeInfo to fix race)
-      const [data, sync] = await Promise.all([
+      const [data, sync, cycleStatus] = await Promise.all([
         rpc.call('noble_getDetectedForks'),
         rpc.call('noble_getSyncStatus').catch(() => null),
+        rpc.call('noble_getCycleStatus').catch(() => null),
       ]);
       if (!cachedNodeInfo) await nodeInfoPromise;
       latestForkData = data;
@@ -1341,8 +1342,11 @@ export function init(root, ctx) {
         }
       }
 
+      const cycleNum = cycleStatus && cycleStatus.cycle_number != null ? cycleStatus.cycle_number : null;
+
       chainInfoEl.innerHTML = `
         <dt>Chain</dt><dd>${chainLabel || '\u2014'}</dd>
+        ${cycleNum != null ? `<dt>Cycle</dt><dd>${cycleNum}</dd>` : ''}
         <dt>Height</dt><dd>${localHeight}</dd>
         ${sync ? `<dt>Network Height</dt><dd>${networkHeight}</dd>` : ''}
         ${alignHtml ? `<dt>Status</dt><dd>${alignHtml}</dd>` : ''}
