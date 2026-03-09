@@ -66,7 +66,7 @@ export class RpcClient {
   }
 
   #buildHeaders() {
-    const h = { 'Content-Type': 'application/json' };
+    const h = { 'Content-Type': 'application/json', 'Gatekeeper': 'noble' };
     if (this.#authToken) h['Authorization'] = `Bearer ${this.#authToken}`;
     return h;
   }

@@ -24,6 +24,7 @@ pub const PEER_NOT_FOUND: i32 = -32012;
 pub const VALIDATOR_NOT_FOUND: i32 = -32013;
 pub const UNKNOWN_TOPIC: i32 = -32014;
 pub const ACCESS_DENIED: i32 = -32015;
+pub const GATEKEEPER_REJECTED: i32 = -32016;
 
 /// API error variants.
 #[derive(Debug, Error)]

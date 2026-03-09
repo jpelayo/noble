@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod gatekeeper;
 pub mod ip_filter;
 pub mod middleware;
 pub mod rate_limit;

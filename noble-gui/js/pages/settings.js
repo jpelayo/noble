@@ -161,6 +161,24 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Max Connected Peers -->
+    <div class="panel">
+      <div class="panel-header">Max Connected Peers</div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
+          Maximum number of simultaneous P2P connections (inbound + outbound).
+          Changes are persisted to <code>noble.toml</code> and take effect on restart.
+        </p>
+        <div style="display:flex;gap:var(--gap-sm);align-items:center">
+          <input id="s-max-peers" type="number" min="2" max="500" step="1"
+            style="width:100px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm);text-align:center">
+          <span id="s-max-peers-current" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+          <button id="s-max-peers-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+          <span id="s-max-peers-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- Node Ports -->
     <div class="panel">
       <div class="panel-header">Port Configuration</div>
@@ -404,6 +422,12 @@ export function init(root, ctx) {
   const addSeedBtn = root.querySelector('#s-add-seed');
   const seedError = root.querySelector('#s-seed-error');
   const seedMsg = root.querySelector('#s-seed-msg');
+
+  // Max peers refs
+  const maxPeersInput = root.querySelector('#s-max-peers');
+  const maxPeersCurrent = root.querySelector('#s-max-peers-current');
+  const maxPeersSave = root.querySelector('#s-max-peers-save');
+  const maxPeersMsg = root.querySelector('#s-max-peers-msg');
 
   let allowedIps = [];
   let currentEncMode = 'automatic';
@@ -893,6 +917,39 @@ export function init(root, ctx) {
     }
   }
 
+  async function loadMaxPeers() {
+    try {
+      const info = await rpc.call('noble_getNetworkInfo');
+      const v = info.max_peers ?? 50;
+      maxPeersInput.value = v;
+      maxPeersCurrent.textContent = `current: ${v}`;
+    } catch {
+      maxPeersCurrent.textContent = 'unable to load';
+    }
+  }
+
+  maxPeersSave.addEventListener('click', async () => {
+    const val = parseInt(maxPeersInput.value, 10);
+    if (isNaN(val) || val < 2 || val > 500) {
+      maxPeersMsg.style.color = 'var(--error)';
+      maxPeersMsg.textContent = 'Value must be 2–500';
+      return;
+    }
+    maxPeersSave.disabled = true;
+    maxPeersMsg.textContent = '';
+    try {
+      const result = await rpc.call('noble_setConfigValue', { section: 'network', key: 'max_peers', value: String(val) });
+      maxPeersMsg.style.color = 'var(--success)';
+      maxPeersMsg.textContent = result.restart_required ? 'Saved — restart to apply' : 'Saved';
+      maxPeersCurrent.textContent = `current: ${val}`;
+    } catch (e) {
+      maxPeersMsg.style.color = 'var(--error)';
+      maxPeersMsg.textContent = e.message || 'Save failed';
+    } finally {
+      maxPeersSave.disabled = false;
+    }
+  });
+
   function showKeyManageModal(pubkey, scheme) {
     const short = pubkey.slice(0, 8) + '...' + pubkey.slice(-8);
     wkModal.innerHTML = `
@@ -1124,6 +1181,7 @@ export function init(root, ctx) {
     loadTlsCert();
     loadEncryptionStatus();
     loadSeeds();
+    loadMaxPeers();
     loadWalletKeys();
     loadRewardAddress();
 

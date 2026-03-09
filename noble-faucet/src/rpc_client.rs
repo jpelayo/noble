@@ -287,6 +287,8 @@ impl NodeRpcClient {
             "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
             body.len()
         );
+        // Gatekeeper header — required by the RPC server middleware.
+        http_req.push_str("Gatekeeper: noble\r\n");
         if let Some(ref code) = self.totp_code {
             use sha2::{Digest, Sha256};
             let hash = Sha256::digest(code.as_bytes());

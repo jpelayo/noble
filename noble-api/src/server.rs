@@ -31,6 +31,7 @@ use crate::methods::subscriptions::SubscriptionApiServer;
 use crate::methods::trace::TraceApiServer;
 use crate::methods::transaction::TransactionApiServer;
 use crate::methods::wallet::WalletApiServer;
+use crate::gatekeeper::GatekeeperLayer;
 use crate::middleware::AuthLayer;
 use crate::rate_limit::RateLimitLayer;
 use crate::rpc_metrics::MetricsMiddleware;
@@ -127,7 +128,11 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
                 },
             ))
             .allow_methods([http::Method::GET, http::Method::POST, http::Method::OPTIONS])
-            .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+            .allow_headers([
+                http::header::CONTENT_TYPE,
+                http::header::AUTHORIZATION,
+                http::HeaderName::from_static(crate::gatekeeper::GATEKEEPER_HEADER),
+            ])
     };
 
     // S18-B: API version header on all responses.
@@ -137,13 +142,15 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
     );
 
     // HTTP middleware stack (applied in order):
-    //   1. CORS — browser origin control
-    //   2. API version header — X-Noble-API-Version on all responses
-    //   3. IP filter — allow-list access control
-    //   4. Rate limiter — per-IP token bucket
-    //   5. Auth — TOTP bearer token validation
+    //   1. CORS — browser origin control (must be outermost for preflight)
+    //   2. Gatekeeper — reject if `Gatekeeper: noble` header missing (fast reject)
+    //   3. API version header — X-Noble-API-Version on all responses
+    //   4. IP filter — allow-list access control
+    //   5. Rate limiter — per-IP token bucket
+    //   6. Auth — TOTP bearer token validation
     let http_middleware = tower::ServiceBuilder::new()
         .layer(cors)
+        .layer(GatekeeperLayer)
         .layer(api_version_layer)
         .layer(ip_filter_layer)
         .layer(rate_limit_layer)

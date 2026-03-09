@@ -212,6 +212,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// in `identity.json`). Affects CORS policy and GUI navigation guard.
     pub setup_mode: bool,
 
+    /// Configured maximum connected peers. Updated at runtime by `setConfigValue`.
+    pub max_peers: std::sync::atomic::AtomicU32,
+
     /// Allowed CORS origins for the RPC server (e.g. "https://127.0.0.1:8785").
     /// Built at startup from localhost defaults plus any LAN IPs in TLS SANs or allowed_ips.
     /// Wrapped in Arc<RwLock> so `setAllowedIps` can update origins at runtime.

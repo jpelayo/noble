@@ -252,6 +252,8 @@ fn rpc_call(
         body_str.len()
     );
 
+    // Gatekeeper header — required by the RPC server middleware.
+    headers.push_str("Gatekeeper: noble\r\n");
     if let Some(code) = totp {
         // NOBLE API expects Authorization: Bearer <sha256(code)>
         use sha2::{Digest, Sha256};

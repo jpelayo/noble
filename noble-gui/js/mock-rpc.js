@@ -717,6 +717,7 @@ export class MockRpcClient {
           inbound: this.#peers.filter(p => p.direction === 'Inbound').length,
           outbound: this.#peers.filter(p => p.direction === 'Outbound').length,
           banned: 0,
+          max_peers: 50,
           protocol_version: PROTOCOL_VERSION,
           chain_id: MOCK_CHAIN_ID,
         };

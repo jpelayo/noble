@@ -41,6 +41,7 @@ use tower_http::services::ServeDir;
 
 use axum::extract::ws::{Message as AxumWsMsg, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use noble_api::gatekeeper::{GATEKEEPER_HEADER, GATEKEEPER_VALUE};
 use noble_api::ip_filter::IpFilter;
 
 // ── NoCertVerifier ─────────────────────────────────────────────────────────
@@ -135,6 +136,9 @@ async fn proxy_to_rpc(
     if let Some(auth) = headers.get(http::header::AUTHORIZATION) {
         req_builder = req_builder.header(http::header::AUTHORIZATION, auth.clone());
     }
+
+    // Inject gatekeeper header so the RPC server accepts proxied requests.
+    req_builder = req_builder.header(GATEKEEPER_HEADER, GATEKEEPER_VALUE);
 
     let req = match req_builder.body(Full::new(body)) {
         Ok(r) => r,
@@ -304,6 +308,25 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
         }};
     }
 
+    // Build a WebSocket upgrade request with the gatekeeper header so the
+    // WS-only server (which runs the same middleware stack) accepts the proxy
+    // connection.  `tokio_tungstenite::client_async` accepts `Into<Request>`.
+    let ws_req = || {
+        tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(&url)
+            .header("Host", format!("127.0.0.1:{}", state.ws_port))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .header(GATEKEEPER_HEADER, GATEKEEPER_VALUE)
+            .body(())
+            .expect("ws request must build")
+    };
+
     if let Some(connector) = &state.tls_connector {
         let server_name = rustls_pki_types::ServerName::try_from("localhost")
             .unwrap()
@@ -315,7 +338,7 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
                 return;
             }
         };
-        let (ws, _) = match tokio_tungstenite::client_async(&url, tls_stream).await {
+        let (ws, _) = match tokio_tungstenite::client_async(ws_req(), tls_stream).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(task = "ws_proxy", "WS handshake (TLS) failed: {e}");
@@ -324,7 +347,7 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
         };
         run_bridge!(ws);
     } else {
-        let (ws, _) = match tokio_tungstenite::client_async(&url, tcp).await {
+        let (ws, _) = match tokio_tungstenite::client_async(ws_req(), tcp).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(task = "ws_proxy", "WS handshake failed: {e}");

@@ -1090,6 +1090,7 @@ fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> Result<se
     let resp = agent
         .post(rpc_url)
         .set("Content-Type", "application/json")
+        .set("Gatekeeper", "noble")
         .send_string(&body.to_string())
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 

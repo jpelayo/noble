@@ -160,6 +160,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         network_name: format!("{:08X}", test_chain_id()),
         genesis_hash: hex::encode(test_genesis_hash().as_bytes()),
         discovered_blockchains: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        max_peers: std::sync::atomic::AtomicU32::new(50),
     });
 
     (state, dir)

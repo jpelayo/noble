@@ -1509,6 +1509,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tls_regenerate,
             tls_upload,
             setup_mode,
+            max_peers: std::sync::atomic::AtomicU32::new(config.network.max_peers),
             allowed_cors_origins: allowed_cors_origins.clone(),
             rpc_origins: rpc_origins.clone(),
             cors_scheme: rpc_scheme.to_string(),

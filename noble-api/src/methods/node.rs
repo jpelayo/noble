@@ -940,6 +940,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let restart_required = set_fn(&section, &key, &value)
             .map_err(|e| ApiError::Internal(format!("update config: {e}")))?;
 
+        // Update in-memory state for fields that support hot-reload.
+        if section == "network" && key == "max_peers" {
+            if let Ok(v) = value.parse::<u32>() {
+                self.max_peers.store(v, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         tracing::info!(
             task = "config",
             "Config value {section}.{key} updated. Restart required: {restart_required}"
