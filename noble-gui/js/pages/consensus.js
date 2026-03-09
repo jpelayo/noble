@@ -481,6 +481,9 @@ export function init(root, ctx) {
       return `${e}:${data.peer_id || ''}`;
     if (e === 'sync_requested')
       return e;
+    if (e === 'chain_tip_updated') return `${e}:${data.peer_id || ''}`;
+    if (e === 'score_updated') return `${e}:${data.peer_id || ''}`;
+    if (e === 'fork_alignment_pending') return e;
     // All other events: no dedup (they carry unique data)
     return null;
   }
@@ -510,6 +513,14 @@ export function init(root, ctx) {
     warning:            '\u26a0',  // warning triangle
     phase_change:       '\u25cf',  // filled circle
     heartbeat:          '\u25cf',  // filled circle
+    chain_tip_updated:      '\u2195',  // up-down arrow (alignment)
+    fork_auto_resolved:     '\u21c4',  // right-left arrows
+    fork_alignment_pending: '\u21c4',  // right-left arrows
+    fork_alignment_clear:   '\u2713',  // checkmark
+    chain_adoption_started: '\u21c4',  // right-left arrows
+    checkpoints_activated:  '\u2713',  // checkmark
+    rejected:               '\u00d7',  // multiplication sign
+    score_updated:          '\u26a0',  // warning triangle
   };
 
   function activityColor(evt) {
@@ -535,6 +546,14 @@ export function init(root, ctx) {
       case 'blockchain_discovered': return '#c084fc';
       case 'sync_requested': return '#94a3b8';
       case 'heartbeat': return '#6ee7b7';
+      case 'chain_tip_updated': return '#94a3b8';
+      case 'fork_auto_resolved': return 'var(--danger, #ef4444)';
+      case 'fork_alignment_pending': return '#f59e0b';
+      case 'fork_alignment_clear': return 'var(--success, #22c55e)';
+      case 'chain_adoption_started': return 'var(--danger, #ef4444)';
+      case 'checkpoints_activated': return 'var(--success, #22c55e)';
+      case 'rejected': return '#f87171';
+      case 'score_updated': return '#fbbf24';
       default: return 'var(--text-muted)';
     }
   }
@@ -611,6 +630,22 @@ export function init(root, ctx) {
         return 'Sync requested \u2014 polling peer chain tips';
       case 'heartbeat':
         return data.message;
+      case 'chain_tip_updated':
+        return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
+      case 'fork_auto_resolved':
+        return `Fork auto-resolved \u2192 height ${data.target_height} (${data.reason})`;
+      case 'fork_alignment_pending':
+        return `Fork alignment: ${data.cycles_remaining} cycle(s) to resolution`;
+      case 'fork_alignment_clear':
+        return `Fork alignment cleared \u2014 no dominant fork`;
+      case 'chain_adoption_started':
+        return `Chain adoption \u2192 ${data.target_chain_id} (${data.reason})`;
+      case 'checkpoints_activated':
+        return `Checkpoints activated at heights ${(data.heights || []).join(', ')}`;
+      case 'rejected':
+        return `Connection rejected: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
+      case 'score_updated':
+        return `Ban score: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2192 ${data.ban_score}`;
       default:
         return JSON.stringify(data);
     }
@@ -773,6 +808,7 @@ export function init(root, ctx) {
       const normalized = { ...data };
       if (data.event === 'connected') normalized.event = 'peer_connected';
       else if (data.event === 'disconnected') normalized.event = 'peer_disconnected';
+      else if (data.event === 'banned') normalized.event = 'peer_banned';
       // Defer peer_connected until name is known (max 3s wait for announce).
       if (normalized.event === 'peer_connected') {
         pushPeerEvent(normalized);

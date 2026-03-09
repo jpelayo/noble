@@ -1826,6 +1826,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let total_peers = peers.len();
                         drop(peers);
                         if !fork_groups.is_empty() {
+                            let dwell_before = self.consensus.read().fork_resolver().dwell_counter();
                             let fork_actions = {
                                 let mut engine = self.consensus.write();
                                 engine.step(noble_consensus::CycleEvent::ForkStatus {
@@ -1835,6 +1836,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 })
                             };
                             self.process_cycle_actions(fork_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
+
+                            // Emit fork alignment status to GUI.
+                            let dwell_after = self.consensus.read().fork_resolver().dwell_counter();
+                            if dwell_after > 0 {
+                                let engine = self.consensus.read();
+                                let resolver = engine.fork_resolver();
+                                let remaining = resolver.min_fork_duration().saturating_sub(dwell_after);
+                                let tracked = resolver.tracked_fork_height();
+                                drop(engine);
+                                let _ = cycle_phase_tx.send(serde_json::json!({
+                                    "event": "fork_alignment_pending",
+                                    "cycles_remaining": remaining,
+                                    "dwell_counter": dwell_after,
+                                    "tracked_height": tracked,
+                                }));
+                            } else if dwell_before > 0 {
+                                // Dwell went from >0 to 0 — fork disappeared or was resolved.
+                                // (fork_auto_resolved is emitted separately by process_cycle_actions
+                                // when RequestForkResolution fires.)
+                                let _ = cycle_phase_tx.send(serde_json::json!({
+                                    "event": "fork_alignment_clear",
+                                }));
+                            }
                         }
                     }
 
