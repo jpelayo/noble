@@ -59,45 +59,39 @@ function onStatusChange(status) {
   if (status === 'connected') _wasConnected = true;
 }
 
-// ── Initialize RPC layer (real or mock) ──
+// ── Initialize RPC layer ──
 const params = new URLSearchParams(window.location.search);
 let rpcUrl = params.get('rpc');
 let wsUrl = params.get('ws');
 
-// Auto-detect RPC endpoint when served over HTTP(S) (not file://).
+// Auto-detect RPC endpoint when served over HTTP(S).
 // Use the same-origin /rpc proxy route (served by the GUI server on port 8785)
 // so the browser never directly connects to ports 8783/8784.  This avoids the
 // cross-port TLS cert trust issue where the user would need to manually accept
 // the self-signed cert for each port separately from port 8785.
-// Pass ?mock to force mock mode over HTTP (for development).
-if (!rpcUrl && window.location.protocol.startsWith('http') && !params.has('mock')) {
+if (!rpcUrl && window.location.protocol.startsWith('http')) {
   rpcUrl = '/rpc';
 }
 
-let rpc, ws;
-if (rpcUrl) {
-  // PRODUCTION PATH — rpc-client.js and ws-manager.js only.
-  // mock-rpc.js is never fetched, parsed, or held in memory.
-  const { RpcClient } = await import('./rpc-client.js');
-  const { WsManager } = await import('./ws-manager.js');
-  rpc = new RpcClient(rpcUrl);
-  // WS proxied through the GUI server's /ws route (same origin, same cert).
-  // This avoids self-signed cert rejection when the browser has only
-  // accepted the cert for port 8785 (GUI) but not 8784 (WS).
-  if (!wsUrl) {
-    const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    wsUrl = `${wsProto}://${window.location.host}/ws`;
-  }
-  ws = new WsManager(wsUrl, { onStatusChange });
-  console.info(`[app] Using RPC proxy: ${rpcUrl}, WS: ${wsUrl}`);
-} else {
-  // MOCK PATH (file:// dev mode only) — mock-rpc.js loaded lazily here.
-  // Bugs or parse errors in mock code cannot affect the production branch.
-  const { MockRpcClient, MockWsManager } = await import('./mock-rpc.js');
-  rpc = new MockRpcClient();
-  ws = new MockWsManager(rpc, { onStatusChange });
-  console.info('[app] Using mock RPC layer');
+// When served by the node (HTTP/HTTPS), rpcUrl is always set.
+// file:// access is not a supported runtime — show a clear error.
+if (!rpcUrl) {
+  document.body.innerHTML = '<div style="padding:2rem;color:#f87171;font-family:monospace">'
+    + 'Dashboard must be served by a Noble node (HTTPS on port 8785).<br>'
+    + 'Open <code>https://127.0.0.1:8785</code> instead of opening the file directly.</div>';
+  throw new Error('Dashboard requires a Noble node server — file:// access is not supported.');
 }
+
+const { RpcClient } = await import('./rpc-client.js');
+const { WsManager } = await import('./ws-manager.js');
+const rpc = new RpcClient(rpcUrl);
+
+if (!wsUrl) {
+  const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  wsUrl = `${wsProto}://${window.location.host}/ws`;
+}
+const ws = new WsManager(wsUrl, { onStatusChange });
+console.info(`[app] RPC: ${rpcUrl}, WS: ${wsUrl}`);
 
 // ── Version footer — populated from window.NOBLE_VERSION injected by the server ──
 const versionEl = document.getElementById('noble-version-footer');
@@ -353,63 +347,58 @@ function populateChainIdentity(nodeInfo) {
   bar.style.display = '';
 }
 
-// ── Fork status indicator ──
-// Self-referential: "Is THIS node on the longest legitimate chain?"
+// ── Fork / alignment status indicator ──
+// Continuous self-assessment: "Is THIS node aligned with its peers?"
+// Driven by: newBlocks, peerUpdates (including chain_tip_updated), bootstrap.
 async function updateForkStatus() {
   const bar = document.getElementById('fork-status-bar');
   if (!bar) return;
   try {
-    const [forkData, syncData] = await Promise.all([
-      rpc.call('noble_getDetectedForks').catch(() => null),
-      rpc.call('noble_getSyncStatus').catch(() => null),
-    ]);
+    const forkData = await rpc.call('noble_getDetectedForks').catch(() => null);
     if (!forkData) { bar.style.display = 'none'; return; }
 
     const label = document.getElementById('fork-status-label');
     const detail = document.getElementById('fork-status-detail');
-    const isSyncing = syncData && syncData.state && syncData.state !== 'Complete';
     const myHeight = forkData.local_height;
-    const highestKnown = syncData ? (syncData.highest_known || myHeight) : myHeight;
+    const peerCount = forkData.peer_count || 0;
+    const highestKnown = forkData.highest_known || myHeight;
+    const behind = highestKnown - myHeight;
 
-    // Find the longest chain tip among all known forks (peers + self).
-    let longestHeight = myHeight;
-    let onMajorityFork = true;
+    // Check for divergence: any non-local fork that definitively disagrees
+    // with our local chain (agrees_with_local === false).
     const nonLocalForks = forkData.forks.filter(f => !f.is_local);
+    let diverged = false;
     for (const fork of nonLocalForks) {
-      if (fork.height > longestHeight) longestHeight = fork.height;
-    }
-    // Also consider highest_known from sync status (may be higher than any fork entry).
-    if (highestKnown > longestHeight) longestHeight = highestKnown;
-
-    // Am I on a different fork than the majority of peers?
-    // If any non-local fork exists at my height with a different tip, I'm diverged.
-    for (const fork of nonLocalForks) {
-      if (fork.height >= myHeight && fork.tip_hash !== forkData.local_tip) {
-        onMajorityFork = false;
+      if (fork.agrees_with_local === false) {
+        diverged = true;
         break;
       }
     }
 
-    const behind = longestHeight - myHeight;
     let severity, statusText, detailText;
 
-    if (isSyncing) {
-      // Actively catching up.
+    if (peerCount === 0) {
+      // No peers reporting chain data — cannot assess alignment.
+      severity = 'high';
+      statusText = 'Isolated';
+      detailText = `height ${myHeight} \u00b7 no peers`;
+    } else if (behind > 0 && behind > 10) {
+      // Far behind — actively syncing or severely lagging.
       severity = 'syncing';
-      const pct = syncData.progress ? syncData.progress.toFixed(1) + '%' : '';
+      const pct = highestKnown > 0 ? (myHeight / highestKnown * 100).toFixed(1) + '%' : '';
       statusText = `<span class="fork-sync-spinner"></span>Syncing`;
       detailText = pct
-        ? `block ${syncData.current_height} / ${syncData.highest_known} (${pct})`
-        : `${behind} block${behind !== 1 ? 's' : ''} behind`;
-    } else if (!onMajorityFork) {
-      // On a minority fork — different tip than peers at same or higher height.
+        ? `block ${myHeight} / ${highestKnown} (${pct})`
+        : `${behind} blocks behind`;
+    } else if (diverged) {
+      // On a different chain than one or more peers (verified by block hash comparison).
       severity = 'high';
       statusText = 'Diverged';
       detailText = behind > 0
         ? `wrong fork, ${behind} block${behind !== 1 ? 's' : ''} behind`
         : 'wrong fork';
     } else if (behind === 0) {
-      // On the longest chain, fully caught up.
+      // On the same chain as peers, fully caught up.
       severity = 'zero';
       statusText = 'Aligned';
       detailText = `height ${myHeight}`;
@@ -417,12 +406,9 @@ async function updateForkStatus() {
       severity = 'low';
       statusText = 'Behind';
       detailText = `${behind} block${behind !== 1 ? 's' : ''} behind`;
-    } else if (behind <= 10) {
-      severity = 'medium';
-      statusText = 'Drifting';
-      detailText = `${behind} blocks behind`;
     } else {
-      severity = 'high';
+      // 4-10 blocks behind.
+      severity = 'medium';
       statusText = 'Drifting';
       detailText = `${behind} blocks behind`;
     }

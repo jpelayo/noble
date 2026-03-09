@@ -67,6 +67,22 @@ class MockBridge {
                 ]
             };
             if (action === 'shareText') return { ok: true };
+            if (action === 'getSettings') return {
+                nodeURL: 'https://localhost:8783',
+                authMode: 'none',
+                tlsFingerprint: 'AB:CD:EF:12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A',
+                appVersion: '1.0.0',
+                autoConnect: true
+            };
+            if (action === 'getSecuritySettings') return {
+                appLockEnabled: false,
+                lockTimeout: 300,
+                reAuthForSends: true
+            };
+            if (action === 'saveSettings') return { ok: true };
+            if (action === 'saveSecuritySettings') return { ok: true };
+            if (action === 'testConnection') return { ok: true };
+            if (action === 'disconnectNode') return { ok: true };
         }
 
         if (handler === 'noble_api') {
@@ -118,8 +134,10 @@ class MockBridge {
                 txId: 'f6789012345678901234567890123456789012345678901234567890abcdef01', accepted: true
             };
             if (action === 'getNodeInfo') return {
-                chain_id: '4E4F424C', version: '0.23.0', blockHeight: 1234
+                chain_id: '4E4F424C', version: '0.28.0', blockHeight: 1234
             };
+            if (action === 'getBlockCount') return { height: 1234, block_hash: '00ab1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab' };
+            if (action === 'getNetworkInfo') return { peer_count: 8, inbound: 5, outbound: 3, clock_offset_ms: 0 };
             if (action === 'getPeers') return { total: 8, inbound: 5, outbound: 3 };
             if (action === 'getTransaction') return {
                 txId: params.txId, blockHeight: 1230, confirmations: 4, status: 'confirmed'

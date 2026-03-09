@@ -214,8 +214,18 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     async fn get_sync_status(&self) -> Result<SyncStatusResponse, ErrorObjectOwned> {
         let consensus = self.consensus.read();
         let (height, _hash) = consensus.chain_tip();
-        // Until sync manager tracks highest known, report current as highest
-        let highest_known = height;
+        drop(consensus); // Release lock before acquiring peer_info (lock order).
+
+        // Compute highest_known from connected peers' chain tips.
+        let highest_known = {
+            let info = self.peer_info.read();
+            info.values()
+                .filter_map(|entry| entry.chain_tip_height)
+                .max()
+                .unwrap_or(height)
+                .max(height)
+        };
+
         let progress = if highest_known == 0 {
             1.0
         } else {

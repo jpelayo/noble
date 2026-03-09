@@ -1681,6 +1681,15 @@ async fn handle_command(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            // Evict any previous proposal from the same validator.  Without
+            // this, stale proposals from prior cycles linger in the cache and
+            // get re-announced on PeerConnected, causing the receiving node to
+            // see two different blocks from the same validator and trigger a
+            // false DuplicateProposal (0x04) ban.
+            let validator_wire = block.header.validator_id.to_wire_bytes();
+            pending_proposals.retain(|_, (b, _)| {
+                b.header.validator_id.to_wire_bytes() != validator_wire
+            });
             pending_proposals.insert(block_hash, (block.clone(), now_secs));
         }
 

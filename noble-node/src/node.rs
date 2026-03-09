@@ -2609,6 +2609,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         entry.chain_tip_hash = Some(hex::encode(tip_hash));
                     }
                 }
+                // Notify GUI — chain tip changed for a peer (alignment may differ).
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "chain_tip_updated",
+                    "peer_id": hex_pid,
+                    "height": height,
+                    "tip_hash": hex::encode(tip_hash),
+                }));
                 // S49: Update network-level clock offset.
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;

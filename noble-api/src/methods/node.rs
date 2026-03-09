@@ -1142,6 +1142,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 })
                 .collect()
         };
+        let peer_count = peer_tips.len();
 
         // Group by tip_hash.
         let mut groups: std::collections::HashMap<String, (u64, usize)> =
@@ -1162,13 +1163,41 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             local_entry.0 = local_height;
         }
 
+        // Highest known height across all peers.
+        let highest_known = peer_tips.iter().map(|(_, h, _)| *h).max().unwrap_or(local_height).max(local_height);
+
+        // For each non-local fork, check if its tip agrees with our local chain
+        // at that height.  This distinguishes "behind on same chain" from "diverged".
+        let storage = self.storage.read();
         let mut forks: Vec<ForkEntry> = groups
             .into_iter()
-            .map(|(tip_hash, (height, peers))| ForkEntry {
-                is_local: tip_hash == local_tip,
-                tip_hash,
-                height,
-                peers,
+            .map(|(tip_hash, (height, peers))| {
+                let is_local = tip_hash == local_tip;
+                let agrees_with_local = if is_local {
+                    Some(true)
+                } else if height > local_height {
+                    // Peer is ahead — we can't verify (we don't have their block).
+                    None
+                } else {
+                    // Peer is at or below our height — check if their tip matches
+                    // our block at their height.
+                    match noble_crypto::Hash256::from_hex(&tip_hash) {
+                        Ok(peer_hash) => {
+                            match storage.get_block_hash_by_height(height) {
+                                Ok(our_hash) => Some(our_hash == peer_hash),
+                                Err(_) => None,
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                };
+                ForkEntry {
+                    is_local,
+                    tip_hash,
+                    height,
+                    peers,
+                    agrees_with_local,
+                }
             })
             .collect();
 
@@ -1178,6 +1207,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(DetectedForksResponse {
             local_height,
             local_tip,
+            peer_count,
+            highest_known,
             forks,
         })
     }

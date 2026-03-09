@@ -1731,9 +1731,11 @@ export class MockRpcClient {
         return {
           local_height: 42,
           local_tip: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+          peer_count: 5,
+          highest_known: 58,
           forks: [
-            { tip_hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890', height: 42, peers: 3, is_local: true },
-            { tip_hash: '9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba', height: 58, peers: 2, is_local: false },
+            { tip_hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890', height: 42, peers: 3, is_local: true, agrees_with_local: true },
+            { tip_hash: '9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba', height: 58, peers: 2, is_local: false, agrees_with_local: null },
           ],
         };
 

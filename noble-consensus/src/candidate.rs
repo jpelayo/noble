@@ -34,6 +34,13 @@ pub struct CandidateTracker {
     by_validator: HashMap<Vec<u8>, Hash256>,
     /// Monotonic counter for insertion order.
     next_order: usize,
+    /// Block hashes from the previous cycle.  Used to detect stale
+    /// re-deliveries that arrive after the tracker was cleared at a cycle
+    /// boundary.  Without this, a delayed block from cycle N arriving in
+    /// cycle N+1 (at the same height after an empty cycle) would collide
+    /// with the validator's new proposal and trigger a false 0x04
+    /// DuplicateProposal ban.
+    previous_hashes: HashSet<Hash256>,
 }
 
 impl CandidateTracker {
@@ -43,6 +50,7 @@ impl CandidateTracker {
             candidates: HashMap::new(),
             by_validator: HashMap::new(),
             next_order: 0,
+            previous_hashes: HashSet::new(),
         }
     }
 
@@ -50,15 +58,34 @@ impl CandidateTracker {
     ///
     /// Returns `Err` with the validator's existing block hash if the validator
     /// already proposed a block this cycle (double-proposal).
+    ///
+    /// Stale re-deliveries (blocks from a previous cycle arriving after the
+    /// tracker was cleared) are detected via `previous_hashes` and returned as
+    /// `Err(block_hash)` — the caller's duplicate-delivery guard handles them
+    /// without banning.
     pub fn add_candidate(
         &mut self,
         block: Box<Block>,
         block_hash: Hash256,
         received_at: u64,
     ) -> Result<(), Hash256> {
+        // Stale re-delivery: this block was tracked in the previous cycle.
+        // Return Err(block_hash) so the caller treats it as a duplicate
+        // delivery (same hash) rather than a double proposal.
+        if self.previous_hashes.contains(&block_hash) {
+            debug!(
+                "stale block {} from previous cycle — treating as duplicate",
+                block_hash
+            );
+            return Err(block_hash);
+        }
+
         let validator_wire = block.header.validator_id.to_wire_bytes();
 
-        // Enforce one block per validator per cycle
+        // Enforce one block per validator per cycle.
+        // Only triggers for blocks NOT in previous_hashes (true current-cycle
+        // conflicts), so delayed re-deliveries from prior cycles cannot cause
+        // a false double-proposal ban.
         if let Some(existing) = self.by_validator.get(&validator_wire) {
             return Err(*existing);
         }
@@ -166,9 +193,31 @@ impl CandidateTracker {
     }
 
     /// Clear all state for a new cycle.
+    ///
+    /// Saves current candidate hashes into `previous_hashes` so that stale
+    /// re-deliveries arriving after the clear can be detected and ignored
+    /// (instead of triggering false double-proposal bans).
     pub fn clear(&mut self) {
+        // Only replace previous_hashes when there are actual candidates.
+        // Both `handle_cycle_boundary` and `handle_phase_transition(Proposal)`
+        // call clear() in sequence — the second call would see an empty
+        // candidates map and must not wipe the hashes saved by the first call.
+        if !self.candidates.is_empty() {
+            self.previous_hashes = self.candidates.keys().cloned().collect();
+        }
         self.candidates.clear();
         self.by_validator.clear();
+        self.next_order = 0;
+    }
+
+    /// Clear all state including stale hash memory.
+    ///
+    /// Used for hard resets (e.g., blockchain hop) where previous-cycle
+    /// context is no longer valid.
+    pub fn clear_all(&mut self) {
+        self.candidates.clear();
+        self.by_validator.clear();
+        self.previous_hashes.clear();
         self.next_order = 0;
     }
 }
@@ -294,6 +343,154 @@ mod tests {
         tracker.clear();
         assert!(tracker.is_empty());
         assert!(tracker.preferred_candidate().is_none());
+    }
+
+    /// Helper: create a block with a specific timestamp (produces a different hash).
+    fn make_candidate_block_at(
+        val_pub: &NoblePublicKey,
+        val_priv: &NoblePrivateKey,
+        timestamp: u64,
+    ) -> (Box<Block>, Hash256) {
+        let merkle_root = noble_core::compute_merkle_root(&[]);
+        let mut header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_block_hash: Hash256::ZERO,
+            merkle_root,
+            timestamp,
+            height: 1,
+            tx_count: 0,
+            validator_id: val_pub.clone(),
+            validator_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: val_pub.key_bytes().to_vec(),
+                signature: vec![],
+            },
+        };
+        let msg = header.compute_signing_message().unwrap();
+        header.validator_sig = val_priv.sign(&msg).unwrap();
+        let block_hash = header.compute_block_hash().unwrap();
+        (
+            Box::new(Block {
+                header,
+                transactions: vec![],
+            }),
+            block_hash,
+        )
+    }
+
+    #[test]
+    fn stale_block_detected_after_clear() {
+        // Simulate: cycle N has a proposal, cycle boundary clears tracker,
+        // then the same block re-arrives in cycle N+1.
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+        let (block1, hash1) = make_candidate_block(&pub_key, &priv_key, vec![]);
+
+        // Cycle N: add block
+        tracker.add_candidate(block1, hash1, 1000).unwrap();
+        assert_eq!(tracker.len(), 1);
+
+        // Cycle boundary: clear
+        tracker.clear();
+        assert!(tracker.is_empty());
+
+        // Cycle N+1: same block re-arrives (stale delivery)
+        let (block1_copy, _) = make_candidate_block(&pub_key, &priv_key, vec![]);
+        let err = tracker.add_candidate(block1_copy, hash1, 2000).unwrap_err();
+        // Returns same hash → caller treats as duplicate delivery, no ban
+        assert_eq!(err, hash1);
+        assert!(tracker.is_empty(), "stale block should not be added");
+    }
+
+    #[test]
+    fn stale_then_new_proposal_accepted() {
+        // Stale block arrives first, then the validator's new proposal.
+        // The new proposal should be accepted without triggering double-proposal.
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+
+        // Cycle N: propose at timestamp T1
+        let (block_old, hash_old) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        tracker.add_candidate(block_old, hash_old, 1000).unwrap();
+
+        // Cycle boundary
+        tracker.clear();
+
+        // Cycle N+1: stale block arrives first
+        let (block_old_copy, _) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let err = tracker
+            .add_candidate(block_old_copy, hash_old, 2000)
+            .unwrap_err();
+        assert_eq!(err, hash_old, "stale delivery returns same hash");
+
+        // New proposal from same validator (different timestamp → different hash)
+        let (block_new, hash_new) = make_candidate_block_at(&pub_key, &priv_key, 1_700_001_200);
+        assert_ne!(hash_old, hash_new);
+        tracker
+            .add_candidate(block_new, hash_new, 2001)
+            .unwrap();
+        assert_eq!(tracker.len(), 1);
+    }
+
+    #[test]
+    fn new_then_stale_no_ban() {
+        // New proposal arrives first, then stale block from previous cycle.
+        // The stale block should be detected and ignored.
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+
+        // Cycle N: propose at timestamp T1
+        let (block_old, hash_old) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        tracker.add_candidate(block_old, hash_old, 1000).unwrap();
+
+        // Cycle boundary
+        tracker.clear();
+
+        // Cycle N+1: new proposal arrives first
+        let (block_new, hash_new) = make_candidate_block_at(&pub_key, &priv_key, 1_700_001_200);
+        tracker.add_candidate(block_new, hash_new, 2000).unwrap();
+        assert_eq!(tracker.len(), 1);
+
+        // Stale block from cycle N arrives late
+        let (block_old_copy, _) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let err = tracker
+            .add_candidate(block_old_copy, hash_old, 2001)
+            .unwrap_err();
+        // Returns hash_old (same hash) → duplicate delivery, NOT double proposal
+        assert_eq!(err, hash_old, "stale delivery returns its own hash");
+        assert_eq!(tracker.len(), 1, "tracker unchanged");
+    }
+
+    #[test]
+    fn true_double_proposal_still_detected() {
+        // Same cycle, same validator, two different blocks → real double proposal.
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+
+        let (block1, hash1) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let (block2, hash2) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_001);
+        assert_ne!(hash1, hash2);
+
+        tracker.add_candidate(block1, hash1, 1000).unwrap();
+        let err = tracker.add_candidate(block2, hash2, 1001).unwrap_err();
+        // Returns the EXISTING hash (different from new) → double proposal → ban
+        assert_eq!(err, hash1);
+        assert_ne!(err, hash2, "double proposal: existing != new");
+        assert_eq!(tracker.len(), 1);
+    }
+
+    #[test]
+    fn clear_all_wipes_stale_hashes() {
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+        let (block, hash) = make_candidate_block(&pub_key, &priv_key, vec![]);
+
+        tracker.add_candidate(block, hash, 1000).unwrap();
+        tracker.clear();
+        assert!(tracker.previous_hashes.contains(&hash));
+
+        tracker.clear_all();
+        assert!(tracker.previous_hashes.is_empty());
     }
 
     #[test]

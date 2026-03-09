@@ -16,12 +16,16 @@ public struct LiveNobleAPIService: NobleAPIService {
 
     public func getNodeInfo() async throws -> NodeInfo {
         let dto = try await client.call(method: "noble_getNodeInfo", expecting: NodeInfoDTO.self)
+        // Fetch supplementary data from separate RPCs — use try? for graceful degradation
+        let blockCount = try? await client.call(method: "noble_getBlockCount", expecting: BlockCountDTO.self)
+        let networkInfo = try? await client.call(method: "noble_getNetworkInfo", expecting: NetworkInfoDTO.self)
+        let syncStatus = try? await client.call(method: "noble_getSyncStatus", expecting: SyncStatusDTO.self)
         return NodeInfo(
             version: dto.version ?? dto.software_version ?? "unknown",
             network: dto.network_name ?? "unknown",
-            blockHeight: 0, // fetched separately via getBlockCount
-            peerCount: 0,
-            isSyncing: false
+            blockHeight: UInt64(blockCount?.height ?? 0),
+            peerCount: networkInfo?.peer_count ?? 0,
+            isSyncing: !(syncStatus?.synced ?? true)
         )
     }
 
@@ -246,6 +250,21 @@ public struct LiveNobleAPIService: NobleAPIService {
             blockHeight: receipt?.block_height,
             timestamp: timestamp,
             checksum: checksum
+        )
+    }
+
+    // MARK: - Capability Detection
+
+    /// Probe the node to discover which optional RPCs are available.
+    public func detectCapabilities() async -> NodeCapabilities {
+        async let hasCycle = (try? await getCycleStatus()) != nil
+        async let hasSync = (try? await getSyncStatus()) != nil
+        async let hasPeers = (try? await getPeers()) != nil
+
+        return await NodeCapabilities(
+            cycleStatus: hasCycle,
+            syncStatus: hasSync,
+            peerInfo: hasPeers
         )
     }
 

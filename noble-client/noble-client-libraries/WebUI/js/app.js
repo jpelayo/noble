@@ -6,6 +6,7 @@ import { init as initDocuments } from './pages/documents.js';
 import { init as initVerify } from './pages/verify.js';
 import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
+import { init as initSettings } from './pages/settings.js';
 
 const pages = {
     home:      initHome,
@@ -13,6 +14,7 @@ const pages = {
     verify:    initVerify,
     payments:  initPayments,
     contacts:  initContacts,
+    settings:  initSettings,
 };
 
 let currentPage = null;
@@ -58,6 +60,13 @@ const App = {
     /** Get current app state. */
     getState() {
         return { ...appState };
+    },
+
+    /** Handle an event pushed from Swift (poll timer, state change). */
+    handleEvent(type, data) {
+        if (type === 'stateUpdate') {
+            App.updateState(data);
+        }
     }
 };
 

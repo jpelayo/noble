@@ -94,6 +94,7 @@ public actor JSONRPCClient {
         var urlRequest = URLRequest(url: baseURL)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("noble", forHTTPHeaderField: "Gatekeeper")
 
         if let token = bearerToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

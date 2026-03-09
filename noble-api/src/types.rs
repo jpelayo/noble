@@ -1171,6 +1171,10 @@ pub struct DetectedForksResponse {
     pub local_height: u64,
     /// Local chain tip hash (hex).
     pub local_tip: String,
+    /// Number of connected peers reporting chain tip data.
+    pub peer_count: usize,
+    /// Highest chain height known from any peer.
+    pub highest_known: u64,
     /// Detected fork groups from connected peers.
     pub forks: Vec<ForkEntry>,
 }
@@ -1186,6 +1190,11 @@ pub struct ForkEntry {
     pub peers: usize,
     /// Whether this matches the local chain's tip.
     pub is_local: bool,
+    /// Whether this fork's tip agrees with the local chain at the same height.
+    /// `true` = same block hash at this height (same chain, just behind/ahead).
+    /// `false` = different block hash (diverged chain).
+    /// `None` = cannot verify (height beyond local chain, or lookup error).
+    pub agrees_with_local: Option<bool>,
 }
 
 /// Response for `noble_resetChain`.

@@ -82,8 +82,30 @@ final class AppState {
 
     // MARK: - Contacts
 
-    /// In-memory contact store (SwiftData migration planned for Sprint 5).
+    /// Contact store with UserDefaults persistence.
     var contacts: [Contact] = []
+
+    // MARK: - Polling
+
+    /// RPC poll timer for live data refresh (30s interval).
+    private var pollTimer: Timer?
+
+    /// Consecutive poll failures — disconnect after 3.
+    private var pollFailureCount = 0
+
+    // MARK: - Security Settings
+
+    /// Whether biometric/PIN app lock is enabled.
+    var appLockEnabled = false
+
+    /// Lock timeout in seconds (0 = never).
+    var lockTimeout = 300
+
+    /// Whether re-authentication is required for send operations.
+    var reAuthForSends = true
+
+    /// Whether to auto-connect to saved node on launch.
+    var autoConnect = true
 
     // MARK: - Services
 
@@ -108,6 +130,14 @@ final class AppState {
     static let mnemonicLabel = "nobledoc.wallet.mnemonic"
     static let nodeURLLabel = "nobledoc.settings.nodeurl"
 
+    // MARK: - UserDefaults Keys
+
+    private static let contactsKey = "nobledoc.contacts"
+    private static let appLockEnabledKey = "nobledoc.settings.appLockEnabled"
+    private static let lockTimeoutKey = "nobledoc.settings.lockTimeout"
+    private static let reAuthForSendsKey = "nobledoc.settings.reAuthForSends"
+    private static let autoConnectKey = "nobledoc.settings.autoConnect"
+
     // MARK: - Lifecycle
 
     /// Check if a wallet already exists on launch.
@@ -121,6 +151,15 @@ final class AppState {
             }
         } catch {
             hasWallet = false
+        }
+        loadContactsFromDefaults()
+        loadSecuritySettings()
+
+        // Auto-connect if enabled and node URL is saved
+        if autoConnect && !nodeURL.isEmpty && hasWallet {
+            Task {
+                await connectToNode()
+            }
         }
     }
 
@@ -212,19 +251,165 @@ final class AppState {
             networkLabel = nodeInfo.network
             blockHeight = nodeInfo.blockHeight
             saveNodeURL(nodeURL)
+            startPolling()
         } catch {
             isConnected = false
             connectionError = error.localizedDescription
         }
     }
 
+    /// Test connection to a specific URL without changing state.
+    func testConnection(url: String) async throws {
+        guard let nodeURL = URL(string: url) else {
+            throw RPCClientError.connectionFailed(underlying: "Invalid URL")
+        }
+        let rpcClient = JSONRPCClient(baseURL: nodeURL)
+        let service = LiveNobleAPIService(client: rpcClient)
+        _ = try await service.getNodeInfo()
+    }
+
     /// Disconnect from the current node.
     func disconnect() {
+        stopPolling()
         apiService = nil
         isConnected = false
         networkLabel = ""
         blockHeight = 0
         connectionError = nil
+    }
+
+    // MARK: - RPC Polling
+
+    /// Start the 30-second poll timer for live data refresh.
+    func startPolling() {
+        stopPolling()
+        pollFailureCount = 0
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.pollTick()
+            }
+        }
+    }
+
+    /// Stop the poll timer.
+    func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    /// Single poll tick — fetches node info + balance and pushes to WebView.
+    private func pollTick() async {
+        guard let service = apiService else { return }
+
+        do {
+            let nodeInfo = try await service.getNodeInfo()
+            let syncStatus = try? await service.getSyncStatus()
+            let cycleStatus = try? await service.getCycleStatus()
+
+            // Update local state
+            blockHeight = nodeInfo.blockHeight
+            networkLabel = nodeInfo.network
+            pollFailureCount = 0
+
+            // Build state update for WebView
+            var stateUpdate: [String: Any] = [
+                "isConnected": true,
+                "blockHeight": nodeInfo.blockHeight,
+                "network": nodeInfo.network,
+                "peerCount": nodeInfo.peerCount,
+                "isSyncing": nodeInfo.isSyncing,
+            ]
+
+            if let sync = syncStatus {
+                stateUpdate["syncStatus"] = [
+                    "synced": sync.isSynced,
+                    "currentHeight": sync.currentHeight,
+                    "highestKnown": sync.highestKnown,
+                ]
+            }
+
+            if let cycle = cycleStatus {
+                stateUpdate["cycleStatus"] = [
+                    "cycleNumber": cycle.cycleNumber,
+                    "phase": cycle.phase,
+                    "phaseRemainingSecs": cycle.phaseRemainingSecs,
+                ]
+            }
+
+            // Fetch balance if wallet exists
+            if let address = walletAddress {
+                if let balance = try? await service.getBalance(address: address) {
+                    walletBalance = balance.balance.displayString
+                    stateUpdate["walletBalance"] = balance.balance.atomic
+                    stateUpdate["walletAvailable"] = balance.available.atomic
+                }
+            }
+
+            // Push to WebView
+            pushStateToWebView(stateUpdate)
+
+        } catch {
+            pollFailureCount += 1
+            if pollFailureCount >= 3 {
+                disconnect()
+                pushStateToWebView(["isConnected": false])
+            }
+        }
+    }
+
+    /// Push a state dictionary to the WebView via evaluateJavaScript.
+    private func pushStateToWebView(_ state: [String: Any]) {
+        guard let coordinator = webViewCoordinator else { return }
+        if let jsonData = try? JSONSerialization.data(withJSONObject: state),
+           let jsonString = String(data: jsonData, encoding: .utf8)
+        {
+            coordinator.evaluateJS("App.handleEvent('stateUpdate', \(jsonString))")
+        }
+    }
+
+    // MARK: - Contact Persistence
+
+    /// Save contacts to UserDefaults.
+    func saveContactsToDefaults() {
+        if let data = try? JSONEncoder().encode(contacts) {
+            UserDefaults.standard.set(data, forKey: Self.contactsKey)
+        }
+    }
+
+    /// Load contacts from UserDefaults.
+    func loadContactsFromDefaults() {
+        guard let data = UserDefaults.standard.data(forKey: Self.contactsKey),
+              let saved = try? JSONDecoder().decode([Contact].self, from: data)
+        else { return }
+        contacts = saved
+    }
+
+    // MARK: - Security Settings Persistence
+
+    /// Save security settings to UserDefaults.
+    func saveSecuritySettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(appLockEnabled, forKey: Self.appLockEnabledKey)
+        defaults.set(lockTimeout, forKey: Self.lockTimeoutKey)
+        defaults.set(reAuthForSends, forKey: Self.reAuthForSendsKey)
+        defaults.set(autoConnect, forKey: Self.autoConnectKey)
+    }
+
+    /// Load security settings from UserDefaults.
+    private func loadSecuritySettings() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.appLockEnabledKey) != nil {
+            appLockEnabled = defaults.bool(forKey: Self.appLockEnabledKey)
+        }
+        if defaults.object(forKey: Self.lockTimeoutKey) != nil {
+            lockTimeout = defaults.integer(forKey: Self.lockTimeoutKey)
+        }
+        if defaults.object(forKey: Self.reAuthForSendsKey) != nil {
+            reAuthForSends = defaults.bool(forKey: Self.reAuthForSendsKey)
+        }
+        if defaults.object(forKey: Self.autoConnectKey) != nil {
+            autoConnect = defaults.bool(forKey: Self.autoConnectKey)
+        }
     }
 
     /// Complete onboarding and transition to main app.

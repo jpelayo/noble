@@ -1368,9 +1368,18 @@ impl CycleEngine {
                 )));
             }
             Err(existing_hash) => {
-                // True double proposal: same validator, different block hash.
-                // Construct evidence if we still have the existing block.
+                // Potential double proposal: same validator, different block hash.
+                // Only ban if we have cryptographically verified evidence — both
+                // block headers with valid signatures from the same validator key.
+                // This prevents trigger-happy bans from edge cases not caught by
+                // the stale-delivery guard (e.g., clock skew, relay races).
+                let new_ts = new_header.timestamp;
+                let new_validator = hex::encode(new_header.validator_id.to_wire_bytes());
+                let mut evidence_verified = false;
+                let mut existing_ts = 0u64;
+
                 if let Some(existing_entry) = self.candidate_tracker.get(&existing_hash) {
+                    existing_ts = existing_entry.block.header.timestamp;
                     let evidence = noble_core::DoubleProposalEvidence::new(
                         existing_entry.block.header.clone(),
                         new_header,
@@ -1379,19 +1388,35 @@ impl CycleEngine {
                         outputs.push(CycleIo::PublishEvidence(Box::new(
                             noble_core::MisbehaviorEvidence::DoubleProposal(evidence),
                         )));
+                        evidence_verified = true;
                     }
                 }
-                outputs.push(CycleIo::BanPeer {
-                    peer_id: from_peer,
-                    reason: format!(
-                        "double proposal: validator already proposed {}",
-                        existing_hash
-                    ),
-                });
-                outputs.push(CycleIo::Log(format!(
-                    "banned peer for double proposal (existing: {}, new: {})",
-                    existing_hash, block_hash
-                )));
+
+                if evidence_verified {
+                    outputs.push(CycleIo::BanPeer {
+                        peer_id: from_peer,
+                        reason: format!(
+                            "double proposal (evidence verified): existing {} (ts {}), \
+                             new {} (ts {}), validator {}",
+                            existing_hash, existing_ts, block_hash, new_ts, new_validator,
+                        ),
+                    });
+                    outputs.push(CycleIo::Log(format!(
+                        "banned peer for verified double proposal \
+                         (existing: {}, new: {}, validator: {})",
+                        existing_hash, block_hash, new_validator,
+                    )));
+                } else {
+                    // Insufficient evidence — could be a stale delivery edge case,
+                    // relay race, or tracker state inconsistency.  Reject the block
+                    // but do NOT ban the peer.  Log with full forensic detail so
+                    // operators can investigate.
+                    outputs.push(CycleIo::Log(format!(
+                        "WARNING: rejected potential double proposal without verified \
+                         evidence — NOT banning (existing: {}, new: {}, validator: {})",
+                        existing_hash, block_hash, new_validator,
+                    )));
+                }
             }
         }
 

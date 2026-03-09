@@ -157,6 +157,23 @@ final class WebBridgeHandler {
                 "isSyncing": info.isSyncing,
             ] as [String: Any]
 
+        case "getBlockCount":
+            let info = try await api.getNodeInfo()
+            return [
+                "height": info.blockHeight,
+            ] as [String: Any]
+
+        case "getNetworkInfo":
+            let peers = try await api.getPeers()
+            let inbound = peers.filter { $0.direction == "inbound" }.count
+            let outbound = peers.filter { $0.direction == "outbound" }.count
+            return [
+                "peer_count": peers.count,
+                "inbound": inbound,
+                "outbound": outbound,
+                "clock_offset_ms": 0,
+            ] as [String: Any]
+
         case "getPeers":
             let peers = try await api.getPeers()
             let inbound = peers.filter { $0.direction == "inbound" }.count
@@ -394,6 +411,57 @@ final class WebBridgeHandler {
             let text = try String(contentsOf: url, encoding: .utf8)
             return ["text": text]
 
+        case "getSettings":
+            let rpcClient = appState.apiService as? LiveNobleAPIService
+            return [
+                "nodeURL": appState.nodeURL,
+                "authMode": "none",
+                "tlsFingerprint": "",
+                "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0",
+                "autoConnect": appState.autoConnect,
+            ] as [String: Any]
+
+        case "saveSettings":
+            if let url = params["nodeURL"] as? String {
+                appState.saveNodeURL(url)
+            }
+            if let auto = params["autoConnect"] as? Bool {
+                appState.autoConnect = auto
+            }
+            appState.saveSecuritySettings()
+            return ["ok": true]
+
+        case "getSecuritySettings":
+            return [
+                "appLockEnabled": appState.appLockEnabled,
+                "lockTimeout": appState.lockTimeout,
+                "reAuthForSends": appState.reAuthForSends,
+            ] as [String: Any]
+
+        case "saveSecuritySettings":
+            if let enabled = params["appLockEnabled"] as? Bool {
+                appState.appLockEnabled = enabled
+            }
+            if let timeout = params["lockTimeout"] as? Int {
+                appState.lockTimeout = timeout
+            }
+            if let reAuth = params["reAuthForSends"] as? Bool {
+                appState.reAuthForSends = reAuth
+            }
+            appState.saveSecuritySettings()
+            return ["ok": true]
+
+        case "testConnection":
+            guard let url = params["url"] as? String else {
+                throw BridgeError.missingParam("url")
+            }
+            try await appState.testConnection(url: url)
+            return ["ok": true]
+
+        case "disconnectNode":
+            appState.disconnect()
+            return ["ok": true]
+
         default:
             throw BridgeError.unknownAction(action)
         }
@@ -422,6 +490,7 @@ final class WebBridgeHandler {
             } else {
                 appState.contacts.append(contact)
             }
+            appState.saveContactsToDefaults()
             return ["ok": true, "id": contact.id.uuidString]
 
         case "deleteContact":
@@ -429,6 +498,7 @@ final class WebBridgeHandler {
                 throw BridgeError.missingParam("id")
             }
             appState.contacts.removeAll { $0.id == uuid }
+            appState.saveContactsToDefaults()
             return ["ok": true]
 
         case "exportContactsVCF":
