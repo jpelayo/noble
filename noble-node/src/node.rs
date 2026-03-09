@@ -850,8 +850,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     ) -> Result<(), NodeError> {
         // --- Parse port numbers from config addresses ---
         let rpc_port = parse_port(&config.api.rpc_addr).unwrap_or(8783);
-        // WS is served on the RPC port by jsonrpsee; ws_addr config is informational only.
-        let ws_port = rpc_port;
+        let ws_port = parse_port(&config.api.ws_addr).unwrap_or(8784);
 
         // --- Load node identity (before network so we can use its preferred port) ---
         let node_identity = load_identity(config);
@@ -1412,8 +1411,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mut rpc_origins_vec: Vec<String> = vec![
             format!("{rpc_scheme}://127.0.0.1:{rpc_port}"),
             format!("{rpc_scheme}://localhost:{rpc_port}"),
-            format!("{ws_scheme}://127.0.0.1:{rpc_port}"),
-            format!("{ws_scheme}://localhost:{rpc_port}"),
+            format!("{ws_scheme}://127.0.0.1:{ws_port}"),
+            format!("{ws_scheme}://localhost:{ws_port}"),
         ];
         // Add LAN IPs (from setup-mode detection or tls_san config).
         for san in &extra_sans {
@@ -1423,7 +1422,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     cors_origins_vec.push(gui_origin);
                 }
                 let rpc_http = format!("{rpc_scheme}://{san}:{rpc_port}");
-                let rpc_ws = format!("{ws_scheme}://{san}:{rpc_port}");
+                let rpc_ws = format!("{ws_scheme}://{san}:{ws_port}");
                 if !rpc_origins_vec.contains(&rpc_http) {
                     rpc_origins_vec.push(rpc_http);
                 }
@@ -1443,7 +1442,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 cors_origins_vec.push(gui_origin);
             }
             let rpc_http = format!("{rpc_scheme}://{ip}:{rpc_port}");
-            let rpc_ws = format!("{ws_scheme}://{ip}:{rpc_port}");
+            let rpc_ws = format!("{ws_scheme}://{ip}:{ws_port}");
             if !rpc_origins_vec.contains(&rpc_http) {
                 rpc_origins_vec.push(rpc_http);
             }
@@ -1562,24 +1561,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             discovered_blockchains: self.discovered_blockchains.clone(),
         });
 
-        // --- Determine RPC bind address ---
+        // --- Determine bind addresses ---
         // When remote access is enabled, bind to 0.0.0.0 instead of 127.0.0.1.
         let rpc_bind_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
             config.api.rpc_addr.replace("127.0.0.1", "0.0.0.0")
         } else {
             config.api.rpc_addr.clone()
         };
+        let ws_bind_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
+            config.api.ws_addr.replace("127.0.0.1", "0.0.0.0")
+        } else {
+            config.api.ws_addr.clone()
+        };
 
         // Clone rate limiter reference before api_state is consumed.
         let rate_limiter_ref = api_state.rate_limiter.clone();
 
-        // --- Start RPC server ---
+        // --- Start RPC (HTTP-only) + WS (WS-only) servers ---
         let rpc_histogram = metrics
             .as_ref()
             .map(|m| std::sync::Arc::new(m.rpc_request_duration.clone()));
-        let rpc_handle = noble_api::server::start_server(
+        let server_handles = noble_api::server::start_server(
             api_state,
             &rpc_bind_addr,
+            &ws_bind_addr,
             rpc_histogram,
             tls_config.clone(),
             config.api.max_connections,
@@ -1589,8 +1594,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         tracing::info!(
             task = "node_startup",
-            "JSON-RPC server listening on {}",
-            rpc_bind_addr
+            "RPC (HTTP-only) listening on {}, WS listening on {}",
+            rpc_bind_addr, ws_bind_addr
         );
 
         // --- Start embedded GUI server ---
@@ -1642,6 +1647,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             tls_c,
                             origins_c,
                             rpc_port,
+                            ws_port,
                             setup_mode,
                         ),
                     );
@@ -2014,9 +2020,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
 
         let _ = network_cmd.try_send(NetworkCommand::Shutdown);
-        rpc_handle
+        server_handles
+            .rpc_handle
             .stop()
             .map_err(|e| NodeError::Api(format!("RPC stop: {e}")))?;
+        server_handles
+            .ws_handle
+            .stop()
+            .map_err(|e| NodeError::Api(format!("WS stop: {e}")))?;
         tracing::info!(task = "node_shutdown", "Node shutdown complete");
         Ok(())
     }
@@ -2232,6 +2243,48 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     task = "peer_tracking",
                     "Peer banned: {hex_pid} — {reason}",
                 );
+                // Clean up node-level state — record_misbehavior removes the
+                // peer from peer_manager.peers BEFORE disconnect, so the
+                // subsequent ConnectionClosed → on_disconnected returns false
+                // and PeerDisconnected is never emitted.  We must do the
+                // cleanup here to prevent ghost entries and inflated counts.
+                let was_inbound = {
+                    let info = self.peer_info.read();
+                    match info.get(&hex_pid) {
+                        Some(e) => e.direction == "inbound",
+                        None => {
+                            // Already cleaned up or never tracked — skip.
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "peer_banned",
+                                "peer_id": hex_pid,
+                                "reason": reason,
+                            }));
+                            return;
+                        }
+                    }
+                };
+                {
+                    let mut stats = self.network_stats.write();
+                    stats.peer_count = stats.peer_count.saturating_sub(1);
+                    if was_inbound {
+                        stats.inbound_count = stats.inbound_count.saturating_sub(1);
+                    } else {
+                        stats.outbound_count = stats.outbound_count.saturating_sub(1);
+                    }
+                    let new_count = stats.peer_count;
+                    drop(stats);
+                    let mut engine = self.consensus.write();
+                    engine.set_peer_count(new_count);
+                }
+                {
+                    let mut info = self.peer_info.write();
+                    info.remove(&hex_pid);
+                }
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "banned",
+                    "peer_id": hex_pid,
+                    "reason": reason,
+                }));
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_banned",
                     "peer_id": hex_pid,

@@ -18,7 +18,7 @@ pub mod server;
 
 pub use error::ApiError;
 pub use rate_limit::RpcRateLimiter;
-pub use server::start_server;
+pub use server::{start_server, ServerHandles};
 pub use state::{ApiState, NetworkStats, NodeIdentityData};
 
 /// API version string, included in the `X-Noble-API-Version` response header

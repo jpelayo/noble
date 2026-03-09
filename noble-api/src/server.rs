@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! JSON-RPC 2.0 server startup and module registration.
+//!
+//! The RPC server is split into two listeners:
+//! - **HTTP-only** on `rpc_addr` (default 8783) — handles JSON-RPC POST requests.
+//! - **WS-only** on `ws_addr` (default 8784) — handles WebSocket subscriptions.
+//!
+//! Both share the same `RpcModule`, middleware stack, and TLS configuration.
 
 use std::sync::Arc;
 
@@ -30,31 +36,73 @@ use crate::rate_limit::RateLimitLayer;
 use crate::rpc_metrics::MetricsMiddleware;
 use crate::state::ApiState;
 
-/// Start the JSON-RPC server on the given address (e.g. "127.0.0.1:8783").
+/// Handles for both the HTTP-only RPC server and the WS-only server.
+pub struct ServerHandles {
+    pub rpc_handle: jsonrpsee::server::ServerHandle,
+    pub ws_handle: jsonrpsee::server::ServerHandle,
+}
+
+/// Start the JSON-RPC HTTP-only server on `rpc_addr` and a WS-only server on `ws_addr`.
 ///
-/// When `ApiState.totp_validator` is `Some`, all requests require a valid
-/// `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
-/// CORS headers allow requests from the dashboard GUI on port 8785.
+/// Both servers share the same `RpcModule`, middleware, TLS config, and auth layer.
 ///
-/// If `rpc_histogram` is provided, per-method request durations are recorded
-/// in the Prometheus histogram (label: `method`).
-///
-/// When `tls_config` is `Some`, a custom TCP accept loop is used with
-/// tokio-rustls TLS termination so that Tauri client apps (which run in a
-/// secure context) can connect over HTTPS/WSS without mixed-content errors.
-/// The same port handles both HTTP JSON-RPC requests and WebSocket upgrades.
-///
-/// `max_connections` limits how many concurrent connections the server accepts.
-/// In the plain-HTTP path this is enforced by jsonrpsee; in the TLS path a
-/// tokio Semaphore provides the same guarantee.
-///
-/// Returns a `ServerHandle` that can be used for graceful shutdown.
+/// When `tls_config` is `Some`, custom TCP accept loops with tokio-rustls TLS
+/// termination are used so that Tauri client apps (secure context) can connect
+/// over HTTPS/WSS without mixed-content errors.
 pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
+    state: Arc<ApiState<S>>,
+    rpc_addr: &str,
+    ws_addr: &str,
+    rpc_histogram: Option<Arc<prometheus::HistogramVec>>,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    max_connections: u32,
+) -> Result<ServerHandles, ApiError> {
+    // Build shared middleware and module once.
+    let module = build_rpc_module(state.clone())?;
+
+    let rpc_handle = start_single_server(
+        state.clone(),
+        rpc_addr,
+        rpc_histogram.clone(),
+        tls_config.clone(),
+        max_connections,
+        module.clone(),
+        ServerMode::HttpOnly,
+    )
+    .await?;
+
+    let ws_handle = start_single_server(
+        state,
+        ws_addr,
+        rpc_histogram,
+        tls_config,
+        max_connections,
+        module,
+        ServerMode::WsOnly,
+    )
+    .await?;
+
+    Ok(ServerHandles {
+        rpc_handle,
+        ws_handle,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ServerMode {
+    HttpOnly,
+    WsOnly,
+}
+
+/// Start a single jsonrpsee server in the given mode (HTTP-only or WS-only).
+async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
     state: Arc<ApiState<S>>,
     addr: &str,
     rpc_histogram: Option<Arc<prometheus::HistogramVec>>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     max_connections: u32,
+    module: RpcModule<()>,
+    mode: ServerMode,
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
     let auth_layer = AuthLayer::new(state.totp_validator.clone(), state.totp_scope);
 
@@ -106,22 +154,29 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
     let rpc_middleware = jsonrpsee::server::middleware::rpc::RpcServiceBuilder::new()
         .layer_fn(move |service| MetricsMiddleware::new(service, rpc_histogram.clone()));
 
-    // Build and merge all RPC method modules.
-    let module = build_rpc_module(state)?;
+    let mode_label = match mode {
+        ServerMode::HttpOnly => "HTTP-only RPC",
+        ServerMode::WsOnly => "WS-only",
+    };
 
     // ── TLS path: custom accept loop with tokio-rustls ──────────────────────
     if let Some(tls_cfg) = tls_config {
         let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
 
-        let svc_builder = Server::builder()
-            .max_request_body_size(2 * 1024 * 1024)
+        let mut builder = Server::builder()
+            .max_request_body_size(2 * 1024 * 1024);
+        builder = match mode {
+            ServerMode::HttpOnly => builder.http_only(),
+            ServerMode::WsOnly => builder.ws_only(),
+        };
+        let svc_builder = builder
             .set_http_middleware(http_middleware)
             .set_rpc_middleware(rpc_middleware)
             .to_service_builder();
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .map_err(|e| ApiError::Internal(format!("failed to bind TLS RPC server: {e}")))?;
+            .map_err(|e| ApiError::Internal(format!("failed to bind TLS {mode_label} server: {e}")))?;
 
         let acceptor = tokio_rustls::TlsAcceptor::from(tls_cfg);
 
@@ -183,31 +238,32 @@ pub async fn start_server<S: StorageEngine + Send + Sync + 'static>(
 
         tracing::info!(
             task = "rpc_server",
-            "RPC+WS server (TLS) listening on {} (max_connections={})",
+            "{mode_label} server (TLS) listening on {} (max_connections={})",
             addr, max_connections
         );
         return Ok(server_handle);
     }
 
     // ── Plain HTTP path ──────────────────────────────────────────────────────
-    let server = Server::builder()
-        // Explicit body size limit (2 MB). The largest valid RPC payload is a
-        // max-size CBOR transaction (~64 KB per T1); 2 MB provides headroom while
-        // preventing large-payload DoS. Overrides the jsonrpsee 10 MB default.
+    let mut builder = Server::builder()
         .max_request_body_size(2 * 1024 * 1024)
-        // F4: enforce the configured connection limit.
-        .max_connections(max_connections as u32)
+        .max_connections(max_connections as u32);
+    builder = match mode {
+        ServerMode::HttpOnly => builder.http_only(),
+        ServerMode::WsOnly => builder.ws_only(),
+    };
+    let server = builder
         .set_http_middleware(http_middleware)
         .set_rpc_middleware(rpc_middleware)
         .build(addr)
         .await
-        .map_err(|e| ApiError::Internal(format!("failed to bind server: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("failed to bind {mode_label} server: {e}")))?;
 
     let handle = server.start(module);
 
     tracing::info!(
         task = "rpc_server",
-        "RPC server starting on {} (max_connections={})",
+        "{mode_label} server starting on {} (max_connections={})",
         addr, max_connections
     );
 

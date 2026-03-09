@@ -96,8 +96,8 @@ export function init(root, ctx) {
         <table class="data-table">
           <thead>
             <tr>
-              <th style="width:70px">Time</th>
-              <th style="width:80px">Event</th>
+              <th style="width:80px;white-space:nowrap">Time</th>
+              <th style="width:100px;white-space:nowrap">Event</th>
               <th>Peer</th>
               <th>Detail</th>
             </tr>
@@ -327,8 +327,8 @@ export function init(root, ctx) {
       if (e.event === 'disconnected' && !e.reason) parts.push('connection closed (no reason given)');
       const detail = parts.join(' \u00b7 ');
       return `<tr>
-        <td class="mono" style="font-size:var(--font-size-xs)">${e.time}</td>
-        <td><span style="color:${evColor};font-weight:600;font-size:var(--font-size-xs);text-transform:uppercase">${e.event}</span></td>
+        <td class="mono" style="font-size:var(--font-size-xs);white-space:nowrap">${e.time}</td>
+        <td style="white-space:nowrap"><span style="color:${evColor};font-weight:600;font-size:var(--font-size-xs);text-transform:uppercase">${e.event}</span></td>
         <td style="font-size:var(--font-size-sm)" title="${esc(pid)}">${esc(peer)}</td>
         <td style="font-size:var(--font-size-sm);color:var(--text-secondary)">${esc(detail)}</td>
       </tr>`;

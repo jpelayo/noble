@@ -11,20 +11,22 @@
 //! tokio-rustls so Tauri client apps (running in a secure context) are not
 //! blocked by mixed-content policy when they open the dashboard.
 //!
-//! ## RPC Proxy (`/rpc`)
+//! ## RPC Proxy (`/rpc`) and WS Proxy (`/ws`)
 //!
-//! The GUI and the JSON-RPC server run on different ports (8785 and 8783).
-//! Each port has its own TLS certificate acceptance in the browser, so making
-//! cross-port requests to 8783 from the 8785 page fails with a NetworkError
-//! until the user manually accepts the cert for port 8783.
+//! The GUI (8785), JSON-RPC (8783), and WebSocket (8784) servers run on
+//! different ports.  Each port has its own TLS certificate acceptance in
+//! the browser, so cross-port requests fail with a NetworkError until the
+//! user manually accepts the cert for each port.
 //!
-//! To avoid this, the GUI server exposes a `/rpc` POST endpoint that proxies
-//! the request body to the RPC server over a loopback connection.  The browser
-//! sends one request to `https://localhost:8785/rpc` (same origin, already
-//! trusted) and never touches port 8783 directly.
+//! To avoid this, the GUI server exposes:
+//! - `/rpc` POST endpoint — proxies to the HTTP-only RPC server (8783)
+//! - `/ws` WebSocket endpoint — proxies to the WS-only server (8784)
 //!
-//! The proxy uses a `NoCertVerifier` for its outbound TLS connection to the
-//! RPC server.  This is safe: the connection never leaves localhost.
+//! The browser sends all requests to `https://localhost:8785` (same origin,
+//! already trusted) and never touches ports 8783/8784 directly.
+//!
+//! The proxy uses a `NoCertVerifier` for its outbound TLS connections to the
+//! RPC and WS servers.  This is safe: the connections never leave localhost.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -222,8 +224,8 @@ async fn proxy_to_rpc(
 
 // ── WebSocket proxy ─────────────────────────────────────────────────────
 
-/// Proxy a WebSocket connection from the browser (port 8785) to the RPC
-/// server (port 8783) over localhost.  Bidirectionally forwards all frames.
+/// Proxy a WebSocket connection from the browser (port 8785) to the WS-only
+/// server (port 8784) over localhost.  Bidirectionally forwards all frames.
 async fn ws_proxy_handler(
     ws: axum::extract::WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<WsProxyState>,
@@ -233,7 +235,7 @@ async fn ws_proxy_handler(
 
 #[derive(Clone)]
 struct WsProxyState {
-    rpc_port: u16,
+    ws_port: u16,
     tls_connector: Option<tokio_rustls::TlsConnector>,
 }
 
@@ -241,15 +243,15 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
     use tokio_tungstenite::tungstenite::Message as TungMsg;
 
     let url = if state.tls_connector.is_some() {
-        format!("wss://127.0.0.1:{}", state.rpc_port)
+        format!("wss://127.0.0.1:{}", state.ws_port)
     } else {
-        format!("ws://127.0.0.1:{}", state.rpc_port)
+        format!("ws://127.0.0.1:{}", state.ws_port)
     };
 
-    // Timeout on backend connect — don't hang forever if RPC is slow/dead.
+    // Timeout on backend connect — don't hang forever if WS server is slow/dead.
     let tcp = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::net::TcpStream::connect(("127.0.0.1", state.rpc_port)),
+        tokio::net::TcpStream::connect(("127.0.0.1", state.ws_port)),
     )
     .await
     {
@@ -337,15 +339,18 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
 ///
 /// Serves all files under `gui_dir` with `index.html` as the SPA fallback.
 /// Adds a Content-Security-Policy header that restricts `connect-src` to the
-/// RPC port (both HTTP JSON-RPC and WebSocket are served on 8783 by jsonrpsee).
+/// RPC port (8783, HTTP JSON-RPC) and the WS port (8784, WebSocket subscriptions).
 ///
 /// `rpc_origins` is the live list of allowed RPC endpoints (e.g.
-/// `["https://127.0.0.1:8783", "wss://127.0.0.1:8783"]`), wrapped in
+/// `["https://127.0.0.1:8783", "wss://127.0.0.1:8784"]`), wrapped in
 /// `Arc<RwLock>` so `setAllowedIps` can update it at runtime without restart.
 /// The CSP header is computed on each request from the live list.
 ///
 /// `rpc_port` is injected into the `/` route as `window.NOBLE_RPC_PORT` so
 /// that `app.js` always connects to the correct port even when non-default.
+///
+/// `ws_port` is the dedicated WebSocket server port (default 8784), used by
+/// the `/ws` proxy route to connect to the WS-only backend.
 ///
 /// When `tls_config` is `Some`, a custom tokio-rustls accept loop is used in
 /// place of `axum::serve`.  IP filtering is applied at the TCP accept level so
@@ -357,6 +362,7 @@ pub async fn start_gui_server(
     tls_config: Option<Arc<rustls::ServerConfig>>,
     rpc_origins: Arc<parking_lot::RwLock<Vec<String>>>,
     rpc_port: u16,
+    ws_port: u16,
     setup_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let serve_dir = ServeDir::new(&gui_dir);
@@ -425,10 +431,10 @@ pub async fn start_gui_server(
         },
     );
 
-    // /ws proxy — WebSocket upgrade handler that proxies to the RPC server.
-    // Same-origin connection (port 8785) avoids self-signed cert rejection.
+    // /ws proxy — WebSocket upgrade handler that proxies to the WS-only server
+    // on ws_port (8784).  Same-origin connection avoids self-signed cert rejection.
     let ws_proxy_state = WsProxyState {
-        rpc_port,
+        ws_port,
         tls_connector: if tls_config.is_some() {
             Some(build_client_tls_connector())
         } else {
@@ -459,7 +465,7 @@ pub async fn start_gui_server(
             let connect_src = {
                 let guard = origins.read();
                 if guard.is_empty() {
-                    "'self' http://127.0.0.1:8783 http://localhost:8783 ws://127.0.0.1:8783 ws://localhost:8783"
+                    "'self' http://127.0.0.1:8783 http://localhost:8783 ws://127.0.0.1:8784 ws://localhost:8784"
                         .to_string()
                 } else {
                     format!("'self' {}", guard.join(" "))

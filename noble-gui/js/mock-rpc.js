@@ -977,7 +977,7 @@ export class MockRpcClient {
           storage_bytes: 256 * 1024 * 1024,
           storage_capacity_bytes: 1024 * 1024 * 1024,
           rpc_port: 8783,
-          ws_port: 8783,
+          ws_port: 8784,
           p2p_port: 8780,
           data_dir: '/var/noble/data',
           totp_enabled: this.#authEnabled,

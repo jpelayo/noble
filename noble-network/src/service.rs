@@ -474,6 +474,15 @@ async fn run_event_loop(
                     let now = Instant::now();
                     mismatch_cooldown.retain(|_, expires| *expires > now);
                 }
+                // Evict stale disconnect_reasons entries.  Normally consumed by
+                // ConnectionClosed, but if disconnect_peer_id fails to produce
+                // a ConnectionClosed (exotic edge case), the entry would leak.
+                // Cap: entries older than the cooldown period are orphans.
+                {
+                    let connected: std::collections::HashSet<PeerId> =
+                        swarm.connected_peers().cloned().collect();
+                    disconnect_reasons.retain(|pid, _| connected.contains(pid));
+                }
             }
 
             // --- Kademlia random walk for peer discovery ---
@@ -566,7 +575,7 @@ async fn handle_swarm_event(
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
-            peer_id, endpoint, ..
+            peer_id, endpoint, connection_id, ..
         } => {
             let direction = if endpoint.is_dialer() {
                 Direction::Outbound
@@ -598,11 +607,12 @@ async fn handle_swarm_event(
             }
 
             // Duplicate connection guard: if we already track this peer (e.g. simultaneous
-            // dial from both sides), do NOT call disconnect_peer_id — that would kill ALL
-            // connections to this peer including the existing good one.  Let the redundant
-            // connection idle out naturally (120s timeout).
+            // dial from both sides), close THIS specific connection.  We must NOT call
+            // disconnect_peer_id — that kills ALL connections including the good one.
+            // Closing by connection_id only kills the redundant connection.
             if peer_manager.get_peer(&peer_id).is_some() {
-                tracing::debug!(task = "peer_management", %peer_id, "duplicate connection — ignoring without disconnect");
+                tracing::debug!(task = "peer_management", %peer_id, "duplicate connection — closing redundant connection_id");
+                let _ = swarm.close_connection(connection_id);
                 return;
             }
 
@@ -644,73 +654,76 @@ async fn handle_swarm_event(
                 }
             }
 
-            if peer_manager.on_connected(peer_id, direction) {
-                peer_manager.update_addr(&peer_id, remote_addr.clone());
-                tracing::debug!(task = "peer_management", %peer_id, ?direction, "peer connected");
+            match peer_manager.on_connected(peer_id, direction) {
+                Ok(()) => {
+                    peer_manager.update_addr(&peer_id, remote_addr.clone());
+                    tracing::debug!(task = "peer_management", %peer_id, ?direction, "peer connected");
 
-                // Resolve pending dial(s) whose addr matches this connection.
-                if direction == Direction::Outbound {
-                    let dial_addr = endpoint.get_remote_address().clone();
-                    if let Some(tx) = pending_dials.remove(&dial_addr) {
-                        let _ = tx.send(Ok(()));
+                    // Resolve pending dial(s) whose addr matches this connection.
+                    if direction == Direction::Outbound {
+                        let dial_addr = endpoint.get_remote_address().clone();
+                        if let Some(tx) = pending_dials.remove(&dial_addr) {
+                            let _ = tx.send(Ok(()));
+                        }
                     }
-                }
 
-                let dir_str = match direction {
-                    Direction::Inbound => "inbound",
-                    Direction::Outbound => "outbound",
-                };
-                if event_tx
-                    .try_send(NetworkEvent::PeerConnected {
-                        peer_id: peer_id.to_bytes().to_vec(),
-                        addr: remote_addr,
-                        direction: dir_str.to_string(),
-                        chain_tip: None,
-                    })
-                    .is_err()
-                {
-                    tracing::warn!(
-                        task = "event_channel",
-                        "event channel full: PeerConnected dropped"
-                    );
-                }
-
-                // Re-announce pending block proposals to the newly connected
-                // peer.  When a node proposes during the Proposal phase before
-                // any peers are connected, the gossipsub publish has 0 mesh
-                // members and the message is silently dropped.  Re-publishing
-                // after the first peer connects ensures the block reaches the
-                // network.
-                for (hash, (block, _ts)) in pending_proposals.iter() {
-                    let msg = GossipMessage::BlockAnnounce {
-                        block_hash: *hash,
-                        height: block.header.height,
+                    let dir_str = match direction {
+                        Direction::Inbound => "inbound",
+                        Direction::Outbound => "outbound",
                     };
-                    if let Ok(data) = codec::encode_gossip(&msg) {
-                        let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
-                        if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
-                            tracing::debug!(
-                                task = "gossip_publish",
-                                "re-announce pending proposal (height {}): {e}",
-                                block.header.height,
-                            );
-                        } else {
-                            tracing::debug!(
-                                task = "gossip_publish",
-                                "re-announced pending proposal (height {}) to new peer",
-                                block.header.height,
-                            );
+                    if event_tx
+                        .try_send(NetworkEvent::PeerConnected {
+                            peer_id: peer_id.to_bytes().to_vec(),
+                            addr: remote_addr,
+                            direction: dir_str.to_string(),
+                            chain_tip: None,
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            task = "event_channel",
+                            "event channel full: PeerConnected dropped"
+                        );
+                    }
+
+                    // Re-announce pending block proposals to the newly connected
+                    // peer.  When a node proposes during the Proposal phase before
+                    // any peers are connected, the gossipsub publish has 0 mesh
+                    // members and the message is silently dropped.  Re-publishing
+                    // after the first peer connects ensures the block reaches the
+                    // network.
+                    for (hash, (block, _ts)) in pending_proposals.iter() {
+                        let msg = GossipMessage::BlockAnnounce {
+                            block_hash: *hash,
+                            height: block.header.height,
+                        };
+                        if let Ok(data) = codec::encode_gossip(&msg) {
+                            let topic = IdentTopic::new(topics::TOPIC_BLOCK_ANNOUNCE);
+                            if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                                tracing::debug!(
+                                    task = "gossip_publish",
+                                    "re-announce pending proposal (height {}): {e}",
+                                    block.header.height,
+                                );
+                            } else {
+                                tracing::debug!(
+                                    task = "gossip_publish",
+                                    "re-announced pending proposal (height {}) to new peer",
+                                    block.header.height,
+                                );
+                            }
                         }
                     }
                 }
-            } else {
-                tracing::debug!(task = "peer_management", %peer_id, "peer rejected (limit or banned)");
-                let _ = event_tx.try_send(NetworkEvent::PeerRejected {
-                    peer_id: peer_id.to_bytes().to_vec(),
-                    addr: remote_addr,
-                    reason: "peer limit reached or banned".to_string(),
-                });
-                let _ = swarm.disconnect_peer_id(peer_id);
+                Err(reason) => {
+                    tracing::debug!(task = "peer_management", %peer_id, reason, "peer rejected");
+                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                        peer_id: peer_id.to_bytes().to_vec(),
+                        addr: remote_addr,
+                        reason: reason.to_string(),
+                    });
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                }
             }
         }
 

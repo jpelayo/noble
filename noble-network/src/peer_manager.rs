@@ -218,18 +218,18 @@ impl PeerManager {
         }
     }
 
-    /// Handle a new peer connection. Returns `true` if accepted, `false` if rejected
-    /// (due to connection limits, ban, or duplicate connection).
-    pub fn on_connected(&mut self, peer_id: PeerId, direction: Direction) -> bool {
+    /// Handle a new peer connection. Returns `Ok(())` if accepted, or
+    /// `Err(reason)` with a specific rejection reason.
+    pub fn on_connected(&mut self, peer_id: PeerId, direction: Direction) -> Result<(), &'static str> {
         if self.is_banned(&peer_id) {
-            return false;
+            return Err("peer is banned");
         }
 
         // Deduplicate: if peer is already connected, treat as no-op to prevent
         // inflated peer counts from reconnect loops or duplicate ConnectionEstablished events.
         if self.peers.contains_key(&peer_id) {
             tracing::debug!(task = "peer_connect", peer_id = %peer_id, "duplicate connection event — ignoring");
-            return false;
+            return Err("duplicate connection");
         }
 
         let (current, max) = match direction {
@@ -238,7 +238,11 @@ impl PeerManager {
         };
 
         if current >= max {
-            return false;
+            return Err(if direction == Direction::Inbound {
+                "inbound peer limit reached"
+            } else {
+                "outbound peer limit reached"
+            });
         }
 
         let now = Instant::now();
@@ -261,7 +265,7 @@ impl PeerManager {
             },
         );
         tracing::info!(task = "peer_connect", peer_id = %peer_id, "peer connected");
-        true
+        Ok(())
     }
 
     /// Handle a peer disconnection.  Returns `true` if the peer was tracked
@@ -657,27 +661,27 @@ mod tests {
     fn accept_peer_within_limits() {
         let mut pm = PeerManager::new(&test_config());
         let p = random_peer();
-        assert!(pm.on_connected(p, Direction::Outbound));
+        assert!(pm.on_connected(p, Direction::Outbound).is_ok());
         assert_eq!(pm.total_peers(), 1);
     }
 
     #[test]
     fn reject_peer_over_outbound_limit() {
         let mut pm = PeerManager::new(&test_config());
-        assert!(pm.on_connected(random_peer(), Direction::Outbound));
-        assert!(pm.on_connected(random_peer(), Direction::Outbound));
+        assert!(pm.on_connected(random_peer(), Direction::Outbound).is_ok());
+        assert!(pm.on_connected(random_peer(), Direction::Outbound).is_ok());
         // Third outbound should be rejected (max=2).
-        assert!(!pm.on_connected(random_peer(), Direction::Outbound));
+        assert!(pm.on_connected(random_peer(), Direction::Outbound).is_err());
     }
 
     #[test]
     fn reject_peer_over_inbound_limit() {
         let mut pm = PeerManager::new(&test_config());
-        assert!(pm.on_connected(random_peer(), Direction::Inbound));
-        assert!(pm.on_connected(random_peer(), Direction::Inbound));
-        assert!(pm.on_connected(random_peer(), Direction::Inbound));
+        assert!(pm.on_connected(random_peer(), Direction::Inbound).is_ok());
+        assert!(pm.on_connected(random_peer(), Direction::Inbound).is_ok());
+        assert!(pm.on_connected(random_peer(), Direction::Inbound).is_ok());
         // Fourth inbound should be rejected (max=3).
-        assert!(!pm.on_connected(random_peer(), Direction::Inbound));
+        assert!(pm.on_connected(random_peer(), Direction::Inbound).is_err());
     }
 
     #[test]
@@ -735,7 +739,7 @@ mod tests {
         pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
 
         // Try to reconnect — should be rejected.
-        assert!(!pm.on_connected(p, Direction::Inbound));
+        assert!(pm.on_connected(p, Direction::Inbound).is_err());
     }
 
     #[test]

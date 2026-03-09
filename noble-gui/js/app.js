@@ -2,7 +2,7 @@
  * NOBLE Dashboard — Application Entry Point
  *
  * RPC endpoint is configurable via URL parameter:
- *   ?rpc=https://localhost:8783&ws=wss://localhost:8783
+ *   ?rpc=https://localhost:8783&ws=wss://localhost:8784
  *
  * If no ?rpc parameter is provided and served over file://, the mock layer is
  * used. mock-rpc.js is never loaded on deployed nodes — it is imported
@@ -66,9 +66,9 @@ let wsUrl = params.get('ws');
 
 // Auto-detect RPC endpoint when served over HTTP(S) (not file://).
 // Use the same-origin /rpc proxy route (served by the GUI server on port 8785)
-// so the browser never directly connects to port 8783.  This avoids the
+// so the browser never directly connects to ports 8783/8784.  This avoids the
 // cross-port TLS cert trust issue where the user would need to manually accept
-// the self-signed cert for port 8783 separately from port 8785.
+// the self-signed cert for each port separately from port 8785.
 // Pass ?mock to force mock mode over HTTP (for development).
 if (!rpcUrl && window.location.protocol.startsWith('http') && !params.has('mock')) {
   rpcUrl = '/rpc';
@@ -83,7 +83,7 @@ if (rpcUrl) {
   rpc = new RpcClient(rpcUrl);
   // WS proxied through the GUI server's /ws route (same origin, same cert).
   // This avoids self-signed cert rejection when the browser has only
-  // accepted the cert for port 8785 (GUI) but not 8783 (RPC).
+  // accepted the cert for port 8785 (GUI) but not 8784 (WS).
   if (!wsUrl) {
     const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     wsUrl = `${wsProto}://${window.location.host}/ws`;

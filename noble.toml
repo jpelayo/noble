@@ -69,12 +69,12 @@ confirmation_strategy = "follow_majority"
 # min_peers_for_consensus = 2
 
 [api]
-# JSON-RPC HTTP server bind address.
+# JSON-RPC HTTP-only server bind address.
 rpc_addr = "127.0.0.1:8783"
 
-# WebSocket server bind address (DEPRECATED — WebSocket is served on rpc_addr port 8783 by jsonrpsee).
-# Kept for backward-compatible config parsing; field is ignored at runtime.
-# ws_addr = "127.0.0.1:8784"
+# WebSocket-only server bind address.
+# Separated from rpc_addr — WS subscriptions run on a dedicated port.
+ws_addr = "127.0.0.1:8784"
 
 # Maximum concurrent RPC connections.
 max_connections = 100
@@ -104,12 +104,10 @@ gui_addr = "127.0.0.1:8785"
 # Examples: ["192.168.1.0/24"] or ["10.0.0.5", "172.16.0.0/12"]
 allowed_ips = []
 
-# Enable TLS (HTTPS/WSS) on the RPC (port 8783) and GUI (port 8785) servers.
+# Enable TLS (HTTPS/WSS) on the RPC (8783), WS (8784), and GUI (8785) servers.
 # A self-signed certificate is auto-generated on first start and saved to the
 # data directory.  Required for Tauri client apps, which run in a secure context
 # and cannot connect to plain HTTP/WS endpoints without TLS.
-# The WebSocket subscription endpoint is served on the same port as RPC (8783).
-# Note: ws_addr below is informational only — jsonrpsee handles HTTP+WS on one port.
 tls_enabled = true
 
 # Extra Subject Alternative Names for the self-signed TLS certificate.
@@ -152,7 +150,7 @@ rotation = "daily"
 
 [metrics]
 # Prometheus metrics endpoint bind address.
-prometheus_addr = "127.0.0.1:8784"
+prometheus_addr = "127.0.0.1:8787"
 
 # Enable or disable metrics collection and the /metrics HTTP endpoint.
 # Disabled by default — enable via CLI setup wizard or dashboard settings.

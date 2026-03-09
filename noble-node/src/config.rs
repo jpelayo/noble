@@ -172,9 +172,11 @@ fn default_ws_addr() -> String {
 /// JSON-RPC and WebSocket API configuration.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ApiConfig {
+    /// JSON-RPC HTTP-only server bind address (default 127.0.0.1:8783).
     pub rpc_addr: String,
-    /// Deprecated: WebSocket is served on the same port as JSON-RPC (rpc_addr).
-    /// Kept for backward-compatible config parsing; field is ignored at runtime.
+    /// WebSocket-only server bind address (default 127.0.0.1:8784).
+    /// Separated from rpc_addr to reduce attack surface — WS subscriptions
+    /// (real-time chain data) run on a dedicated port.
     #[serde(default = "default_ws_addr")]
     pub ws_addr: String,
     pub max_connections: u32,
@@ -552,7 +554,7 @@ impl Default for LoggingConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            prometheus_addr: "127.0.0.1:8784".to_string(),
+            prometheus_addr: "127.0.0.1:8787".to_string(),
             enabled: false,
         }
     }
@@ -670,7 +672,7 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:8784"
+            prometheus_addr = "127.0.0.1:8787"
             enabled = false
 
             [identity]
@@ -694,7 +696,7 @@ mod tests {
         assert_eq!(config.gui_addr, "127.0.0.1:8785");
 
         let metrics = MetricsConfig::default();
-        assert_eq!(metrics.prometheus_addr, "127.0.0.1:8784");
+        assert_eq!(metrics.prometheus_addr, "127.0.0.1:8787");
         assert!(!metrics.enabled, "metrics should be disabled by default");
 
         let net = NetworkConfig::default();
@@ -744,7 +746,7 @@ mod tests {
             rotation = "daily"
 
             [metrics]
-            prometheus_addr = "127.0.0.1:8784"
+            prometheus_addr = "127.0.0.1:8787"
             enabled = false
 
             [identity]
