@@ -44,7 +44,7 @@ pub use config::{
 };
 pub use error::NetworkError;
 pub use messages::{BannedPeerEntry, NetworkCommand, NetworkEvent};
-pub use peer_manager::{BanCategory, BanEntry, BanReason, Direction, PeerManager};
+pub use peer_manager::{BanCategory, BanEntry, BanReason, Direction, MisbehaviorOutcome, PeerManager};
 pub use service::{start_network, NetworkHandle};
 pub use sync_manager::{SyncAction, SyncManager, SyncState};
 pub use traits::{BlockProvider, TxProvider};

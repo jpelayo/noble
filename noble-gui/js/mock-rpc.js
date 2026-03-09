@@ -863,7 +863,9 @@ export class MockRpcClient {
           // Winner is the one with most votes
           votes.sort((a, b) => b.vote_count - a.vote_count);
           const winner = votes[0];
-          const disambiguation = proposals.length > 1;
+          // Simulate an indeterminate cycle every 5th historical cycle
+          const isIndeterminate = !isCurrent && (i % 5 === 3);
+          const disambiguation = false; // Always false (v0.28.0: no hash tiebreaker)
 
           // Build phase states for the cycle (4 phases)
           const phaseNames = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
@@ -895,14 +897,14 @@ export class MockRpcClient {
               phaseData.votes = state !== 'pending' ? votes : [];
               phaseData.total_voters = state !== 'pending' ? 23 : 0;
             } else if (ph === 2) {
-              // Reflection: winner determined
-              phaseData.winner = state !== 'pending' ? winner.validator : null;
-              phaseData.winning_hash = state !== 'pending' ? winner.block_hash : null;
+              // Reflection: winner determined (null for indeterminate cycles)
+              phaseData.winner = (!isIndeterminate && state !== 'pending') ? winner.validator : null;
+              phaseData.winning_hash = (!isIndeterminate && state !== 'pending') ? winner.block_hash : null;
               phaseData.disambiguation = disambiguation;
             } else {
-              // Propagation: finalization
-              phaseData.finalized = state === 'complete';
-              phaseData.block_hash = state === 'complete' ? winner.block_hash : null;
+              // Propagation: finalization (false for indeterminate cycles)
+              phaseData.finalized = !isIndeterminate && state === 'complete';
+              phaseData.block_hash = (!isIndeterminate && state === 'complete') ? winner.block_hash : null;
             }
 
             phaseStates.push(phaseData);
@@ -911,12 +913,12 @@ export class MockRpcClient {
           cycles.push({
             cycle_number: cn,
             is_current: isCurrent,
-            status: isCurrent ? 'active' : 'finalized',
+            status: isIndeterminate ? 'indeterminate' : (isCurrent ? 'active' : 'finalized'),
             phases: phaseStates,
             proposals_count: proposals.length,
             disambiguation,
-            winner: isCurrent && currentPhaseIndex < 2 ? null : winner.validator,
-            winning_hash: isCurrent && currentPhaseIndex < 2 ? null : winner.block_hash,
+            winner: isIndeterminate ? null : (isCurrent && currentPhaseIndex < 2 ? null : winner.validator),
+            winning_hash: isIndeterminate ? null : (isCurrent && currentPhaseIndex < 2 ? null : winner.block_hash),
           });
         }
 

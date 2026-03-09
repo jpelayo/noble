@@ -204,6 +204,27 @@ const RATE_LIMIT_WINDOW_MAX: u32 = 50;
 /// Duration of mass-ban cooldown in seconds (5 minutes).
 const MASS_BAN_COOLDOWN_SECS: u64 = 300;
 
+/// Outcome of a [`PeerManager::record_misbehavior`] call.
+#[derive(Debug)]
+pub enum MisbehaviorOutcome {
+    /// Peer was banned (score exceeded threshold).
+    Banned,
+    /// Score increased but peer not yet banned.
+    ScoreUpdated {
+        ban_score: u32,
+        categories: Vec<u8>,
+    },
+    /// Penalty was suppressed (rate-limit or peer not found).
+    Suppressed,
+}
+
+impl MisbehaviorOutcome {
+    /// Returns `true` if the peer was banned.
+    pub fn is_banned(&self) -> bool {
+        matches!(self, Self::Banned)
+    }
+}
+
 /// Stored state for a banned peer (in-memory).
 #[derive(Debug, Clone)]
 pub struct BanEntry {
@@ -341,14 +362,19 @@ impl PeerManager {
         tracing::info!(task = "peer_ban", %peer_id, "peer force-banned");
     }
 
-    /// Record a misbehavior for a peer. Returns `true` if the peer's cumulative
-    /// score has reached the ban threshold and should be banned.
+    /// Record a misbehavior for a peer.
+    ///
+    /// Returns [`MisbehaviorOutcome::Banned`] when the peer's cumulative score
+    /// has reached the ban threshold, [`MisbehaviorOutcome::ScoreUpdated`] when
+    /// the score increased but the peer is not yet banned, or
+    /// [`MisbehaviorOutcome::Suppressed`] when rate-limiting or cooldown
+    /// prevented the penalty from applying.
     ///
     /// Includes three hardening mechanisms:
     /// - **AUD-H2**: Rate-limits penalty accumulation to max 50 points per 60-second window.
     /// - **AUD2-H5**: Decays existing ban_score by 1 point per minute since last misbehavior.
     /// - **AUD-L2**: Detects mass-ban conditions and pauses banning during cooldown.
-    pub fn record_misbehavior(&mut self, peer_id: &PeerId, reason: BanReason) -> bool {
+    pub fn record_misbehavior(&mut self, peer_id: &PeerId, reason: BanReason) -> MisbehaviorOutcome {
         let penalty = reason.category.penalty();
         let now = Instant::now();
 
@@ -380,7 +406,7 @@ impl PeerManager {
                 );
                 // Update last_misbehavior timestamp even if suppressed.
                 state.last_misbehavior = Some(now);
-                return false;
+                return MisbehaviorOutcome::Suppressed;
             }
 
             // Accumulate penalty to ban_score.
@@ -389,14 +415,20 @@ impl PeerManager {
             state.misbehavior_categories.push(reason.category);
             state.last_ban_reason = Some(reason);
 
+            let current_score = state.ban_score;
+            let current_categories: Vec<u8> = state.misbehavior_categories
+                .iter()
+                .map(|c| *c as u8)
+                .collect();
+
             tracing::debug!(
                 task = "peer_ban",
                 "ban score updated for peer: +{} (total: {})",
                 penalty,
-                state.ban_score,
+                current_score,
             );
 
-            if state.ban_score >= self.ban_threshold {
+            if current_score >= self.ban_threshold {
                 // AUD-L2: Check for mass-ban cooldown before banning.
                 if let Some(cooldown_until) = self.ban_cooldown {
                     if now < cooldown_until {
@@ -405,13 +437,15 @@ impl PeerManager {
                             %peer_id,
                             "mass-ban cooldown active — ban suppressed",
                         );
-                        return false;
+                        return MisbehaviorOutcome::ScoreUpdated {
+                            ban_score: current_score,
+                            categories: current_categories,
+                        };
                     }
                     // Cooldown expired — clear it.
                     self.ban_cooldown = None;
                 }
 
-                let final_score = state.ban_score;
                 let categories = state.misbehavior_categories.clone();
                 let subject = state.last_ban_reason.as_ref()
                     .map(|r| r.subject.clone())
@@ -419,7 +453,7 @@ impl PeerManager {
                 self.banned.insert(*peer_id, BanEntry {
                     banned_at: now,
                     categories,
-                    score: final_score,
+                    score: current_score,
                     subject,
                 });
                 self.peers.remove(peer_id);
@@ -429,10 +463,15 @@ impl PeerManager {
                 if self.check_mass_ban() {
                     self.ban_cooldown = Some(now + Duration::from_secs(MASS_BAN_COOLDOWN_SECS));
                 }
-                return true;
+                return MisbehaviorOutcome::Banned;
             }
+
+            return MisbehaviorOutcome::ScoreUpdated {
+                ban_score: current_score,
+                categories: current_categories,
+            };
         }
-        false
+        MisbehaviorOutcome::Suppressed
     }
 
     /// AUD-L2: Check whether we've banned more than half of all peers ever seen.
@@ -774,8 +813,8 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
 
         // InvalidTransaction = 20, twice = 40, under threshold.
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidTransaction, "test")));
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidTransaction, "test")));
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidTransaction, "test")).is_banned());
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidTransaction, "test")).is_banned());
         assert_eq!(pm.get_peer(&p).unwrap().ban_score, 40);
     }
 
@@ -786,8 +825,8 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
 
         // InvalidBlock(50) + InvalidBlock(50) = 100 = threshold.
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")));
-        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")));
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")).is_banned());
+        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")).is_banned());
 
         assert!(pm.is_banned(&p));
         assert_eq!(pm.total_peers(), 0);
@@ -800,7 +839,7 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
 
         // DuplicateProposal = 100 = instant ban.
-        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test")));
+        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test")).is_banned());
         assert!(pm.is_banned(&p));
     }
 
@@ -825,7 +864,7 @@ mod tests {
 
         // DuplicateProposal = 100 = instant ban (within 50-pt rate limit window
         // because first offense has window_total=0)
-        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "double block")));
+        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "double block")).is_banned());
         assert!(pm.is_banned(&p));
 
         let entry = pm.get_ban_entry(&p).unwrap();
@@ -1209,14 +1248,14 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
 
         // Unresponsive(10) x 2 = 20. Window total stays under 50.
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::Unresponsive, "test")));
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::Unresponsive, "test")));
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::Unresponsive, "test")).is_banned());
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::Unresponsive, "test")).is_banned());
         assert_eq!(pm.get_peer(&p).unwrap().ban_score, 20);
 
         // Then InvalidBlock(50) = window total would be 30 (20+10=30 before this call).
         // Wait — window has 10, 10 = 20, plus 50 = 70 after. But check is *before* adding,
         // so window_total = 20 <= 50, so it accumulates.
-        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")));
+        assert!(!pm.record_misbehavior(&p, BanReason::new(BanCategory::InvalidBlock, "test")).is_banned());
         assert_eq!(pm.get_peer(&p).unwrap().ban_score, 70);
     }
 
@@ -1308,11 +1347,11 @@ mod tests {
         );
 
         // 4th peer: DuplicateProposal should be suppressed by cooldown
-        let banned = pm.record_misbehavior(
+        let outcome = pm.record_misbehavior(
             &peers[3],
             BanReason::new(BanCategory::DuplicateProposal, "test"),
         );
-        assert!(!banned, "ban should be suppressed during mass-ban cooldown");
+        assert!(!outcome.is_banned(), "ban should be suppressed during mass-ban cooldown");
         // Peer should still be connected (not banned)
         assert!(!pm.is_banned(&peers[3]));
     }
@@ -1349,9 +1388,9 @@ mod tests {
         pm.on_connected(p, Direction::Outbound);
 
         // DuplicateProposal = 100 = instant ban. No time for decay.
-        let banned =
+        let outcome =
             pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
-        assert!(banned, "instant ban should still work with decay enabled");
+        assert!(outcome.is_banned(), "instant ban should still work with decay enabled");
         assert!(pm.is_banned(&p));
     }
 }

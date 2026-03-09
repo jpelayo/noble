@@ -321,7 +321,7 @@ impl VoteManager {
     /// - Otherwise use R1 tallies:
     ///   - Tier 1: leader > 50% → Adopt(Strong).
     ///   - Tier 2: leader ≥ ceil(total_voters / divisor) → Adopt(Plurality).
-    /// - Tiebreaker: lower candidate_hash wins (lexicographic).
+    /// - Ties → Indeterminate (empty cycle — incentivizes voting).
     /// - Otherwise → Indeterminate.
     ///
     /// C-004: `total_voters` should be the validator set size (not the peer count).
@@ -347,27 +347,32 @@ impl VoteManager {
             return MigrationResult::Indeterminate;
         }
 
-        // Find the leader (most votes). Tiebreaker: lower candidate_hash.
+        // Find the leader (most votes).
         let mut candidates: Vec<(Hash256, usize)> = self
             .votes
             .iter()
             .map(|(hash, peers)| (*hash, peers.len()))
             .collect();
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
         let (leader_hash, leader_count) = candidates[0];
 
-        // Handle ties: if multiple candidates have the same top count,
-        // pick the one with the lexicographically lower hash.
-        let tied: Vec<_> = candidates
+        // Ties → Indeterminate.  No automatic tiebreaker — if votes are
+        // split evenly the cycle is empty.  This incentivizes nodes to
+        // converge via R2 FollowMajority rather than relying on a
+        // deterministic fallback that makes voting pointless.
+        let tied_count = candidates
             .iter()
             .filter(|(_, count)| *count == leader_count)
-            .collect();
-        let winner_hash = if tied.len() > 1 {
-            tied.iter().map(|(h, _)| *h).min().unwrap()
-        } else {
-            leader_hash
-        };
+            .count();
+        if tied_count > 1 {
+            debug!(
+                "vote tally tie: {} candidates with {} votes each → indeterminate",
+                tied_count, leader_count
+            );
+            return MigrationResult::Indeterminate;
+        }
+        let winner_hash = leader_hash;
 
         // Tier 1: Strong majority (> 50%)
         if leader_count * 2 > total_voters {
@@ -414,23 +419,21 @@ impl VoteManager {
         if candidates.is_empty() {
             return None;
         }
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
         let (leader_hash, leader_count) = candidates[0];
 
-        // R2 override only if >50% (Strong majority)
+        // R2 override only if >50% (Strong majority) AND no tie.
         if leader_count * 2 > total_voters {
-            // Handle ties
-            let tied: Vec<_> = candidates
+            let tied_count = candidates
                 .iter()
                 .filter(|(_, count)| *count == leader_count)
-                .collect();
-            let winner = if tied.len() > 1 {
-                tied.iter().map(|(h, _)| *h).min().unwrap()
-            } else {
-                leader_hash
-            };
+                .count();
+            if tied_count > 1 {
+                // Tied R2 votes — no automatic resolution.
+                return None;
+            }
             Some(MigrationResult::Adopt {
-                candidate_hash: winner,
+                candidate_hash: leader_hash,
                 strength: ConsensusStrength::Strong,
             })
         } else {
@@ -704,11 +707,11 @@ mod tests {
     }
 
     #[test]
-    fn tiebreaker_lower_hash_wins() {
+    fn tied_votes_produce_indeterminate() {
         let mut mgr = VoteManager::new();
         let low = Hash256::from_bytes([0x01; 32]);
         let high = Hash256::from_bytes([0xFF; 32]);
-        // 2 votes for high, 2 for low → tie → lower hash wins
+        // 2 votes for high, 2 for low → tie → indeterminate (no hash tiebreaker)
         let (v1, _) = make_vote(0, high);
         let (v2, _) = make_vote(0, high);
         let (v3, _) = make_vote(0, low);
@@ -719,12 +722,11 @@ mod tests {
         mgr.record_vote(b"p4", &v4).unwrap();
 
         let result = mgr.compute_majority(5, &default_config());
-        match result {
-            MigrationResult::Adopt { candidate_hash, .. } => {
-                assert_eq!(candidate_hash, low, "lower hash should win tiebreaker")
-            }
-            other => panic!("expected Adopt, got {:?}", other),
-        }
+        assert_eq!(
+            result,
+            MigrationResult::Indeterminate,
+            "tied votes must produce indeterminate — no automatic tiebreaker"
+        );
     }
 
     #[test]

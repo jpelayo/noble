@@ -79,6 +79,8 @@ pub struct PeerInfoEntry {
     pub connected_at: u64,
     /// Accumulated ban score.
     pub ban_score: u32,
+    /// Misbehavior category codes accumulated by this peer.
+    pub misbehavior_categories: Vec<u8>,
     /// Peer's chain tip height (from last status exchange). `None` if unknown.
     pub chain_tip_height: Option<u64>,
     /// Peer's chain tip hash (from last status exchange). `None` if unknown.

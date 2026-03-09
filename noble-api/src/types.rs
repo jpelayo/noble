@@ -296,6 +296,9 @@ pub struct PeerInfoResponse {
     pub country_code: Option<String>,
     pub connected_at: u64,
     pub ban_score: u32,
+    /// Accumulated misbehavior category codes (wire-stable IDs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub misbehavior_categories: Vec<String>,
     pub last_ban_reason: Option<BanReasonResponse>,
     /// Connection status: "connected" or "disconnected".
     pub status: String,

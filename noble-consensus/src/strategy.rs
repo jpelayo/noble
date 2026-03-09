@@ -154,7 +154,7 @@ pub fn select_candidate(
         }
 
         VotingStrategy::WeightedReputation => {
-            // Sort candidates by validator weight (highest first), tie-break by lower hash.
+            // Sort candidates by validator weight (highest first).
             let mut scored: Vec<(Hash256, u64)> = all
                 .iter()
                 .map(|e| {
@@ -164,17 +164,19 @@ pub fn select_candidate(
                     (e.block_hash, weight)
                 })
                 .collect();
-            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            // If top candidates have equal weight, pick the first seen (stable sort).
             scored.first().map(|(h, _)| *h)
         }
 
         VotingStrategy::FollowMajority => {
             if let Some(tallies) = vote_tallies {
                 if !tallies.is_empty() {
-                    // Pick candidate with most votes; tie-break by lower hash.
+                    // Pick candidate with most votes.
                     let mut sorted: Vec<(Hash256, usize)> =
                         tallies.iter().map(|(h, c)| (*h, *c)).collect();
-                    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                    // If tied, pick the first (arbitrary but no hash-based tiebreaker).
                     return sorted.first().map(|(h, _)| *h);
                 }
             }

@@ -924,16 +924,13 @@ impl CycleEngine {
                     .candidate_tracker
                     .get(candidate_hash)
                     .map(|e| hex::encode(e.block.header.validator_id.to_wire_bytes()));
-                let disamb = tallies
-                    .values()
-                    .filter(|&&c| c == tallies.values().copied().max().unwrap_or(0))
-                    .count()
-                    > 1;
+                // disambiguation is always false: ties return
+                // Indeterminate before reaching this Adopt arm.
                 (
                     format!("finalized_{:?}", strength).to_lowercase(),
                     winner_name,
                     Some(*candidate_hash),
-                    disamb,
+                    false,
                 )
             }
             MigrationResult::Indeterminate => ("indeterminate".to_string(), None, None, false),

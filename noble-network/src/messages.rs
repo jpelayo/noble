@@ -287,6 +287,12 @@ pub enum NetworkEvent {
     PeerDisconnected { peer_id: Vec<u8>, reason: String },
     /// A connection was rejected before the peer was tracked (silent disconnect).
     PeerRejected { peer_id: Vec<u8>, addr: String, reason: String },
+    /// A peer's ban score was updated after misbehavior.
+    PeerScoreUpdated {
+        peer_id: Vec<u8>,
+        ban_score: u32,
+        categories: Vec<u8>,
+    },
     /// A peer was banned for misbehavior.
     PeerBanned { peer_id: Vec<u8>, reason: String },
     /// A node identity announcement was received from a peer.

@@ -130,6 +130,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     Some(entry.addr.clone())
                 };
 
+                let cat_names: Vec<String> = entry.misbehavior_categories.iter()
+                    .filter_map(|&code| {
+                        noble_network::BanCategory::from_u8(code)
+                            .map(|c| c.as_str().to_string())
+                    })
+                    .collect();
+
                 PeerInfoResponse {
                     peer_id: entry.peer_id.clone(),
                     direction: entry.direction.clone(),
@@ -138,6 +145,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     country_code: announce.and_then(|a| a.country_code.clone()),
                     connected_at: entry.connected_at,
                     ban_score: entry.ban_score,
+                    misbehavior_categories: cat_names,
                     last_ban_reason: None,
                     status: "connected".to_string(),
                     chain_tip_height: entry.chain_tip_height,
@@ -170,6 +178,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                 country_code: announce.and_then(|a| a.country_code.clone()),
                 connected_at: 0,
                 ban_score: 0,
+                misbehavior_categories: Vec::new(),
                 last_ban_reason: None,
                 status: "disconnected".to_string(),
                 chain_tip_height: None,

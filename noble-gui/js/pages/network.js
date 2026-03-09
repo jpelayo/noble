@@ -258,8 +258,9 @@ export function init(root, ctx) {
       const country = peer.country_code || '<span style="color:var(--text-muted)">&mdash;</span>';
       const banScore = peer.ban_score || 0;
       const banScoreColor = banScore > 50 ? 'var(--error)' : banScore > 0 ? 'var(--warning)' : 'var(--text-muted)';
-      const banTitle = peer.last_ban_reason
-        ? ` title="${peer.last_ban_reason.category}: ${peer.last_ban_reason.subject || ''}"`
+      const cats = peer.misbehavior_categories || [];
+      const banTitle = cats.length > 0
+        ? ` title="${cats.join(', ')}"`
         : '';
       const isConnected = peer.status === 'connected';
       const statusBadge = isConnected
@@ -345,7 +346,14 @@ export function init(root, ctx) {
   renderConnLog();
 
   // Re-render when new events arrive from app.js global handler.
-  const onNewLog = () => renderConnLog();
+  // Also refresh the peer table so ban scores update in real time.
+  const onNewLog = async () => {
+    renderConnLog();
+    try {
+      const peers = await rpc.call('noble_getPeerInfo');
+      renderPeerTable(peers);
+    } catch { /* ignore */ }
+  };
   window.addEventListener('noble-conn-log', onNewLog);
   unsubs.push(() => window.removeEventListener('noble-conn-log', onNewLog));
 

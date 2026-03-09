@@ -2106,6 +2106,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             addr: addr.clone(),
                             connected_at: now_ts,
                             ban_score: 0,
+                            misbehavior_categories: Vec::new(),
                             chain_tip_height: cth,
                             chain_tip_hash: cthash,
                             proposed_height: None,
@@ -2235,6 +2236,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "addr": addr,
                     "reason": reason,
+                }));
+            }
+            NetworkEvent::PeerScoreUpdated { peer_id, ban_score, categories } => {
+                let hex_pid = hex::encode(peer_id);
+                {
+                    let mut info = self.peer_info.write();
+                    if let Some(entry) = info.get_mut(&hex_pid) {
+                        entry.ban_score = *ban_score;
+                        entry.misbehavior_categories = categories.clone();
+                    }
+                }
+                let _ = peer_update_tx.send(serde_json::json!({
+                    "event": "score_updated",
+                    "peer_id": hex_pid,
+                    "ban_score": ban_score,
+                    "categories": categories,
                 }));
             }
             NetworkEvent::PeerBanned { peer_id, reason } => {
@@ -3094,7 +3111,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             }
                         }
                         noble_consensus::CyclePhase::Propagation => {
-                            // Propagation start: R2 votes are in — show winner.
+                            // Propagation start: R2 votes are in — show winner
+                            // only when there is a clear (non-tied) leader.
                             let (best_info, wire_bytes) = {
                                 let engine = self.consensus.read();
                                 let r2 = engine.r2_tallies();
@@ -3104,7 +3122,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 } else {
                                     (engine.vote_tallies(), "r1_fallback")
                                 };
-                                let best = source_tallies.iter().max_by_key(|e| e.1).map(|(h, _)| *h);
+                                // Check for ties: only emit winner when one
+                                // candidate has strictly more votes than all others.
+                                let max_count = source_tallies.values().copied().max().unwrap_or(0);
+                                let tied = source_tallies.values().filter(|&&c| c == max_count).count() > 1;
+                                let best = if tied {
+                                    None
+                                } else {
+                                    source_tallies.iter().max_by_key(|e| e.1).map(|(h, _)| *h)
+                                };
                                 let wire = best.and_then(|hash| {
                                     engine.candidate_tracker().get(&hash).map(|entry| {
                                         entry.block.header.validator_id.to_wire_bytes()

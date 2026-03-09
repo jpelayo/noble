@@ -24,7 +24,7 @@ use crate::error::NetworkError;
 use crate::messages::{
     GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxRequest, TxResponse,
 };
-use crate::peer_manager::{BanCategory, BanReason, Direction, PeerManager};
+use crate::peer_manager::{BanCategory, BanReason, Direction, MisbehaviorOutcome, PeerManager};
 use crate::rate_limiter::TxRateLimiter;
 use crate::seen_cache::{self, SeenCache};
 use crate::topics;
@@ -442,7 +442,7 @@ async fn run_event_loop(
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &event_tx).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -950,19 +950,16 @@ async fn handle_swarm_event(
                 Err(e) => {
                     tracing::warn!(task = "gossip_receive", %propagation_source, err = %e, "invalid gossip message");
                     let reason_text = format!("malformed gossip: {e}");
-                    let banned = peer_manager.record_misbehavior(
+                    let outcome = peer_manager.record_misbehavior(
                         &propagation_source,
                         BanReason::new(
                             BanCategory::ProtocolViolation,
                             reason_text.clone(),
                         ),
                     );
-                    if banned {
+                    emit_misbehavior_event(&outcome, &propagation_source, &reason_text, &event_tx);
+                    if outcome.is_banned() {
                         let _ = swarm.disconnect_peer_id(propagation_source);
-                        let _ = event_tx.try_send(NetworkEvent::PeerBanned {
-                            peer_id: propagation_source.to_bytes().to_vec(),
-                            reason: reason_text,
-                        });
                     }
                     let _ = swarm
                         .behaviour_mut()
@@ -1287,16 +1284,11 @@ fn handle_tx_announce(
 ) -> Option<NetworkEvent> {
     if !tx_rate_limiter.try_consume(source) {
         let reason = "tx relay rate limit exceeded".to_string();
-        let banned = peer_manager.record_misbehavior(
+        let outcome = peer_manager.record_misbehavior(
             source,
             BanReason::new(BanCategory::TxFlood, reason.clone()),
         );
-        if banned {
-            let _ = event_tx.try_send(NetworkEvent::PeerBanned {
-                peer_id: source.to_bytes().to_vec(),
-                reason,
-            });
-        }
+        emit_misbehavior_event(&outcome, source, &reason, event_tx);
         None
     } else if !seen_txs.insert_if_new(tx_id) {
         None
@@ -1451,21 +1443,42 @@ fn handle_gossip_node_announce(
         Err(reason) => {
             tracing::warn!(task = "gossip_receive", %source, %reason, "invalid node announce");
             let reason_text = format!("invalid announce: {reason}");
-            let banned = peer_manager.record_misbehavior(
+            let outcome = peer_manager.record_misbehavior(
                 source,
                 BanReason::new(
                     BanCategory::InvalidAnnounce,
                     reason_text.clone(),
                 ),
             );
-            if banned {
-                let _ = event_tx.try_send(NetworkEvent::PeerBanned {
-                    peer_id: source.to_bytes().to_vec(),
-                    reason: reason_text,
-                });
-            }
+            emit_misbehavior_event(&outcome, source, &reason_text, event_tx);
             None
         }
+    }
+}
+
+/// Emit the appropriate `NetworkEvent` after a misbehavior recording.
+fn emit_misbehavior_event(
+    outcome: &MisbehaviorOutcome,
+    peer_id: &PeerId,
+    reason: &str,
+    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+) {
+    let peer_bytes = peer_id.to_bytes().to_vec();
+    match outcome {
+        MisbehaviorOutcome::Banned => {
+            let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+                peer_id: peer_bytes,
+                reason: reason.to_string(),
+            });
+        }
+        MisbehaviorOutcome::ScoreUpdated { ban_score, categories } => {
+            let _ = event_tx.try_send(NetworkEvent::PeerScoreUpdated {
+                peer_id: peer_bytes,
+                ban_score: *ban_score,
+                categories: categories.clone(),
+            });
+        }
+        MisbehaviorOutcome::Suppressed => {}
     }
 }
 
@@ -1637,6 +1650,7 @@ async fn handle_command(
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
+    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -1893,10 +1907,12 @@ async fn handle_command(
             if let Ok(pid) = PeerId::from_bytes(&peer_id) {
                 let ban_cat = BanCategory::from_u8(category)
                     .unwrap_or(BanCategory::ProtocolViolation);
-                peer_manager.record_misbehavior(
+                let reason_clone = reason.clone();
+                let outcome = peer_manager.record_misbehavior(
                     &pid,
                     BanReason::new(ban_cat, reason),
                 );
+                emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
@@ -1910,10 +1926,12 @@ async fn handle_command(
 
         NetworkCommand::ManualBanPeer { peer_id, reason, duration_secs: _ } => {
             if let Ok(pid) = PeerId::from_bytes(&peer_id) {
-                peer_manager.record_misbehavior(
+                let reason_clone = reason.clone();
+                let outcome = peer_manager.record_misbehavior(
                     &pid,
                     BanReason::new(BanCategory::ManualBan, reason),
                 );
+                emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }

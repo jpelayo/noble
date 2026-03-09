@@ -23,7 +23,9 @@ pub struct CycleHistoryEntry {
     pub winner: Option<String>,
     /// Hash of the winning block (if any).
     pub winning_hash: Option<Hash256>,
-    /// Whether disambiguation (tiebreaker) was needed.
+    /// Whether multiple candidates shared the top vote count.
+    /// Always `false` for adopted blocks (ties produce indeterminate cycles).
+    /// Kept for serialization backward compatibility.
     pub disambiguation: bool,
     /// Unix timestamp when the cycle was finalized.
     pub finalized_at: u64,
