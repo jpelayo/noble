@@ -1251,9 +1251,8 @@ export function init(root, ctx) {
 
   // --- Chain Management ---
   let cachedNodeInfo = null;
-  // Pre-fetch nodeInfo for chain label (also fetched inside loadSettings, but we
-  // need it accessible in the chain management scope).
-  rpc.call('noble_getNodeInfo').then(ni => { cachedNodeInfo = ni; }).catch(() => {});
+  // Pre-fetch nodeInfo for chain label (awaited inside loadForks to avoid race).
+  const nodeInfoPromise = rpc.call('noble_getNodeInfo').then(ni => { cachedNodeInfo = ni; return ni; }).catch(() => null);
 
   const chainInfoEl = root.querySelector('#s-chain-info');
   const forkWrap = root.querySelector('#s-fork-table-wrap');
@@ -1309,19 +1308,44 @@ export function init(root, ctx) {
 
   async function loadForks() {
     try {
-      const data = await rpc.call('noble_getDetectedForks');
+      // Fetch fork data, sync status, and node info in parallel (await nodeInfo to fix race)
+      const [data, sync] = await Promise.all([
+        rpc.call('noble_getDetectedForks'),
+        rpc.call('noble_getSyncStatus').catch(() => null),
+      ]);
+      if (!cachedNodeInfo) await nodeInfoPromise;
       latestForkData = data;
+
       // No blocks committed — show clear "waiting" state
       if (data.local_height === 0) {
         chainInfoEl.innerHTML = '<dt style="grid-column:1/-1;color:var(--text-muted)">No blocks committed \u2014 waiting for genesis</dt>';
         forkWrap.innerHTML = '';
         return;
       }
-      // Render chain info
+
+      // Chain label (now guaranteed cachedNodeInfo is resolved)
       const chainLabel = cachedNodeInfo ? formatChainLabel(cachedNodeInfo) : '';
+
+      // Alignment & discrepancy from sync status
+      const networkHeight = sync ? sync.highest_known : 0;
+      const localHeight = data.local_height;
+      const diff = networkHeight - localHeight;
+      let alignHtml = '';
+      if (sync) {
+        if (sync.synced || diff === 0) {
+          alignHtml = '<span style="color:var(--success)">\u2714 Synced</span>';
+        } else if (diff > 0) {
+          alignHtml = `<span style="color:var(--warning)">\u26A0 Behind by ${diff} block${diff !== 1 ? 's' : ''}</span>`;
+        } else {
+          alignHtml = `<span style="color:var(--accent)">Ahead by ${Math.abs(diff)} block${Math.abs(diff) !== 1 ? 's' : ''}</span>`;
+        }
+      }
+
       chainInfoEl.innerHTML = `
         <dt>Chain</dt><dd>${chainLabel || '\u2014'}</dd>
-        <dt>Height</dt><dd>${data.local_height}</dd>
+        <dt>Height</dt><dd>${localHeight}</dd>
+        ${sync ? `<dt>Network Height</dt><dd>${networkHeight}</dd>` : ''}
+        ${alignHtml ? `<dt>Status</dt><dd>${alignHtml}</dd>` : ''}
       `;
       renderForkTable(data, forkWrap, false);
     } catch (e) {

@@ -75,7 +75,7 @@ export function init(root, ctx) {
     <div class="panel">
       <div class="panel-header">
         <span>Cycle Superposition Timeline</span>
-        <span id="cs-chain-badge" style="font-weight:500;font-size:var(--font-size-xs);padding:2px 8px;border-radius:9999px;background:var(--bg-tertiary);color:var(--text-secondary)"></span>
+        <span id="cs-chain-badge" style="font-weight:500;font-size:var(--font-size-xs);padding:2px 8px;border-radius:9999px;background:var(--bg-tertiary);color:var(--text-secondary);margin-left:var(--gap-sm)"></span>
         <span style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted);margin-left:auto">Recent cycles</span>
       </div>
       <div class="panel-body">
