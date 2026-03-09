@@ -20,14 +20,18 @@ pub enum ForkResolutionStrategy {
     Manual,
     /// Resolve when >66% of peers are on a different fork.
     PeerSupermajority,
-    /// Resolve when a fork is >3 blocks ahead of the local chain.
-    LongestChain,
-    /// Resolve using height as primary factor and decay-weighted vote
-    /// legitimacy as tiebreaker when heights are within 3 blocks.
-    /// A chain with strong recent validator participation is preferred over
-    /// one that peaked early and lost validators.
+    /// Resolve using height as primary factor, chain owner edge as secondary,
+    /// and decay-weighted vote legitimacy as tiebreaker for cross-chain.
+    /// The chain owner (block 1 proposer) gets a virtual height bonus of
+    /// `CHAIN_OWNER_EDGE_BLOCKS`, making their fork win at equal height
+    /// and resist switching when slightly behind.
     LongestMostLegitimate,
 }
+
+/// Chain owner (block 1 validator) edge in virtual blocks.
+/// The owner's chain is treated as this many blocks taller in fork evaluation.
+/// Protocol constant — not configurable via TOML.
+pub const CHAIN_OWNER_EDGE_BLOCKS: u64 = 5;
 
 /// Fork info fed from node.rs (same data as `getDetectedForks` RPC).
 #[derive(Debug, Clone)]
@@ -36,6 +40,8 @@ pub struct ForkInfo {
     pub height: u64,
     pub peer_count: usize,
     pub is_local: bool,
+    /// Whether the chain owner (block 1's validator) is on this fork.
+    pub has_chain_owner: bool,
 }
 
 /// Cross-chain fork info derived from `discovered_blockchains`.
@@ -183,10 +189,19 @@ impl ForkResolver {
                 // >66%: dominant_peers * 3 > total_peers * 2
                 dominant.peer_count * 3 > total_peers * 2
             }
-            ForkResolutionStrategy::LongestChain
-            | ForkResolutionStrategy::LongestMostLegitimate => {
-                // Fork is >3 blocks ahead (saturating to prevent overflow).
-                dominant.height > local_height.saturating_add(3)
+            ForkResolutionStrategy::LongestMostLegitimate => {
+                // Virtual height model: chain owner gets CHAIN_OWNER_EDGE_BLOCKS bonus.
+                let local_has_owner = forks.iter()
+                    .any(|f| f.is_local && f.has_chain_owner);
+                let dominant_effective = dominant.height
+                    .saturating_add(if dominant.has_chain_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                let local_effective = local_height
+                    .saturating_add(if local_has_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                // Strict > preserves original 4+ block lead requirement when no owner info.
+                // With owner edge (5 blocks), equal actual height becomes 15 > 13 = true.
+                // Owner 2 behind: 13 > 13 = false → does NOT switch (tight bound).
+                // Owner 1 behind: 14 > 13 = true → switches.
+                dominant_effective > local_effective.saturating_add(3)
             }
             ForkResolutionStrategy::Manual => false,
         };
@@ -233,13 +248,23 @@ impl ForkResolver {
                 "peer supermajority ({}/{} peers) on fork at height {}",
                 dominant.peer_count, total_peers, dominant.height
             ),
-            ForkResolutionStrategy::LongestChain
-            | ForkResolutionStrategy::LongestMostLegitimate => format!(
-                "fork {} blocks ahead (local={}, fork={})",
-                dominant.height.saturating_sub(local_height),
-                local_height,
-                dominant.height
-            ),
+            ForkResolutionStrategy::LongestMostLegitimate => {
+                let local_has_owner = forks.iter()
+                    .any(|f| f.is_local && f.has_chain_owner);
+                let dominant_effective = dominant.height
+                    .saturating_add(if dominant.has_chain_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                let local_effective = local_height
+                    .saturating_add(if local_has_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
+                let owner_note = match (local_has_owner, dominant.has_chain_owner) {
+                    (false, true) => " (chain owner on dominant fork)",
+                    (true, false) => " (chain owner on local fork)",
+                    _ => "",
+                };
+                format!(
+                    "fork resolution{}: dominant effective={} vs local effective={} (actual: local={}, fork={})",
+                    owner_note, dominant_effective, local_effective, local_height, dominant.height
+                )
+            }
             ForkResolutionStrategy::Manual => unreachable!(),
         };
 
@@ -268,6 +293,7 @@ impl ForkResolver {
         local_vote_weight: u64,
         same_chain_peer_count: usize,
         cross_chain_forks: &[CrossChainForkInfo],
+        is_local_chain_owner: bool,
     ) -> CrossChainDecision {
         // Manual strategy never auto-adopts.
         if self.strategy == ForkResolutionStrategy::Manual {
@@ -292,13 +318,14 @@ impl ForkResolver {
         }
 
         // Find the best candidate using a composite score.
-        let local_score = Self::chain_score(local_height, local_vote_weight, self.strategy);
+        let local_score = Self::chain_score(local_height, local_vote_weight, is_local_chain_owner);
         let best = candidates
             .iter()
             .filter_map(|c| {
                 let remote_height = c.chain_tip_height.unwrap_or(0);
                 let remote_weight = c.chain_vote_weight.unwrap_or(0);
-                let remote_score = Self::chain_score(remote_height, remote_weight, self.strategy);
+                // We don't know who owns remote chains, so no owner bonus.
+                let remote_score = Self::chain_score(remote_height, remote_weight, false);
 
                 // The remote chain must be strictly better, or equal with lower chain_id.
                 let is_better = remote_score > local_score
@@ -364,20 +391,19 @@ impl ForkResolver {
     /// Compute a composite chain score for cross-chain comparison.
     ///
     /// - Height is the primary factor (multiplied by 10_000).
-    /// - For `LongestMostLegitimate`, the decay-weighted vote weight is a
-    ///   secondary factor. Average votes per block (vote_weight / max(height,1))
-    ///   is used so longer chains aren't penalized just for accumulating decay.
-    ///   The secondary factor is capped at 9_999 so it can never override
-    ///   a 1-block height difference.
-    fn chain_score(height: u64, vote_weight: u64, strategy: ForkResolutionStrategy) -> u64 {
+    /// - Decay-weighted vote weight is a secondary factor. Average votes per
+    ///   block (vote_weight / max(height,1)) is used so longer chains aren't
+    ///   penalized just for accumulating decay. Capped at 9_999.
+    /// - Chain owner bonus: `CHAIN_OWNER_EDGE_BLOCKS * 10_000` when the local
+    ///   node is the chain owner (equivalent to treating the chain as 5 blocks
+    ///   taller). Only applies to the local chain; remote chains don't get bonus
+    ///   since we don't know their ownership.
+    fn chain_score(height: u64, vote_weight: u64, is_chain_owner: bool) -> u64 {
+        let owner_bonus = if is_chain_owner { CHAIN_OWNER_EDGE_BLOCKS.saturating_mul(10_000) } else { 0 };
         let primary = height.saturating_mul(10_000);
-        let secondary = if strategy == ForkResolutionStrategy::LongestMostLegitimate {
-            let avg = vote_weight / height.max(1);
-            avg.min(9_999)
-        } else {
-            0
-        };
-        primary.saturating_add(secondary)
+        let avg = vote_weight / height.max(1);
+        let secondary = avg.min(9_999);
+        primary.saturating_add(secondary).saturating_add(owner_bonus)
     }
 
     fn reset_tracking(&mut self) {
@@ -447,6 +473,17 @@ mod tests {
             height,
             peer_count: 1,
             is_local: true,
+            has_chain_owner: false,
+        }
+    }
+
+    fn local_fork_owner(height: u64) -> ForkInfo {
+        ForkInfo {
+            tip_hash: hash(0),
+            height,
+            peer_count: 1,
+            is_local: true,
+            has_chain_owner: true,
         }
     }
 
@@ -456,6 +493,17 @@ mod tests {
             height,
             peer_count,
             is_local: false,
+            has_chain_owner: false,
+        }
+    }
+
+    fn remote_fork_owner(id: u8, height: u64, peer_count: usize) -> ForkInfo {
+        ForkInfo {
+            tip_hash: hash(id),
+            height,
+            peer_count,
+            is_local: false,
+            has_chain_owner: true,
         }
     }
 
@@ -487,9 +535,9 @@ mod tests {
     }
 
     #[test]
-    fn longest_chain_triggers() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
-        // Fork 4 blocks ahead (local=5, fork=9, diff=4 > 3)
+    fn longest_most_legitimate_triggers() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        // Fork 4 blocks ahead (local=5, fork=9, diff=4 > 3), no owner info
         let forks = vec![local_fork(5), remote_fork(1, 9, 2)];
         let result = fr.evaluate(5, &forks, 3);
         match result {
@@ -499,16 +547,16 @@ mod tests {
     }
 
     #[test]
-    fn longest_chain_below_threshold() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
-        // Fork 2 blocks ahead (local=5, fork=7, diff=2 <= 3)
+    fn longest_most_legitimate_below_threshold() {
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
+        // Fork 2 blocks ahead (local=5, fork=7, diff=2 <= 3), no owner info
         let forks = vec![local_fork(5), remote_fork(1, 7, 2)];
         assert_eq!(fr.evaluate(5, &forks, 3), ForkDecision::NoAction);
     }
 
     #[test]
     fn dwell_timer_delays_resolution() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
         let forks = vec![local_fork(5), remote_fork(1, 20, 2)];
 
         // First evaluation: dwell starts
@@ -534,7 +582,7 @@ mod tests {
 
     #[test]
     fn fork_shrink_resets_dwell() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
 
         // Fork A at height 20 — accumulate 2 dwell ticks
         let forks_a = vec![local_fork(5), remote_fork(1, 20, 2)];
@@ -562,7 +610,7 @@ mod tests {
 
     #[test]
     fn fork_growth_keeps_dwell() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
 
         // Fork at height 20 — first dwell tick
         let forks_1 = vec![local_fork(5), remote_fork(1, 20, 2)];
@@ -590,7 +638,7 @@ mod tests {
 
     #[test]
     fn never_resolves_past_finality() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         fr.set_finalized_height(10);
         // Fork at height 8 — below finalized
         let forks = vec![local_fork(5), remote_fork(1, 8, 5)];
@@ -606,7 +654,7 @@ mod tests {
 
     #[test]
     fn strategy_change_resets_state() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
         let forks = vec![local_fork(5), remote_fork(1, 20, 2)];
         fr.evaluate(5, &forks, 3);
         assert_eq!(fr.dwell_counter(), 1);
@@ -633,28 +681,28 @@ mod tests {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::Manual, 1);
         let forks = vec![cross_chain(0xBBBB, 100, 50_000, 3)];
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks, false),
             CrossChainDecision::NoAction,
         );
     }
 
     #[test]
     fn cross_chain_with_same_chain_peers_no_adopt() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![cross_chain(0xBBBB, 100, 50_000, 3)];
         // 1 same-chain peer → not alone → no adoption
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 1, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 1, &forks, false),
             CrossChainDecision::NoAction,
         );
     }
 
     #[test]
     fn cross_chain_longer_chain_adopts() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![cross_chain(0xBBBB, 20, 10_000, 1)];
         // Local height=5, remote height=20 → remote is better
-        let result = fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks);
+        let result = fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks, false);
         match result {
             CrossChainDecision::Adopt { target_chain_id, .. } => {
                 assert_eq!(target_chain_id, 0xBBBB);
@@ -665,21 +713,21 @@ mod tests {
 
     #[test]
     fn cross_chain_shorter_chain_no_adopt() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![cross_chain(0xBBBB, 3, 1_000, 1)];
         // Local height=10, remote height=3 → local is better
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 10, 5_000, 0, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 10, 5_000, 0, &forks, false),
             CrossChainDecision::NoAction,
         );
     }
 
     #[test]
     fn cross_chain_equal_height_lower_chain_id_wins() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         // Equal height (10), remote chain_id=0x1000 < local chain_id=0x2000
         let forks = vec![cross_chain(0x1000, 10, 5_000, 1)];
-        let result = fr.evaluate_cross_chain(0x2000, 10, 5_000, 0, &forks);
+        let result = fr.evaluate_cross_chain(0x2000, 10, 5_000, 0, &forks, false);
         match result {
             CrossChainDecision::Adopt { target_chain_id, .. } => {
                 assert_eq!(target_chain_id, 0x1000);
@@ -690,11 +738,11 @@ mod tests {
 
     #[test]
     fn cross_chain_equal_height_higher_chain_id_no_adopt() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 1);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         // Equal height (10), remote chain_id=0x3000 > local chain_id=0x2000
         let forks = vec![cross_chain(0x3000, 10, 5_000, 1)];
         assert_eq!(
-            fr.evaluate_cross_chain(0x2000, 10, 5_000, 0, &forks),
+            fr.evaluate_cross_chain(0x2000, 10, 5_000, 0, &forks, false),
             CrossChainDecision::NoAction,
         );
     }
@@ -705,7 +753,7 @@ mod tests {
         // Same height (10), remote has higher vote weight → adopt
         // Remote: avg = 8000/10 = 800. Local: avg = 2000/10 = 200.
         let forks = vec![cross_chain(0xBBBB, 10, 8_000, 1)];
-        let result = fr.evaluate_cross_chain(0xAAAA, 10, 2_000, 0, &forks);
+        let result = fr.evaluate_cross_chain(0xAAAA, 10, 2_000, 0, &forks, false);
         match result {
             CrossChainDecision::Adopt { target_chain_id, .. } => {
                 assert_eq!(target_chain_id, 0xBBBB);
@@ -721,28 +769,28 @@ mod tests {
         let forks = vec![cross_chain(0xBBBB, 10, 2_000, 1)];
         // Local vote weight 8000 > remote 2000
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 10, 8_000, 0, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 10, 8_000, 0, &forks, false),
             CrossChainDecision::NoAction,
         );
     }
 
     #[test]
     fn cross_chain_dwell_timer() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
         let forks = vec![cross_chain(0xBBBB, 20, 10_000, 1)];
 
         // First: pending
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks, false),
             CrossChainDecision::Pending { cycles_remaining: 2 },
         );
         // Second: pending
         assert_eq!(
-            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks),
+            fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks, false),
             CrossChainDecision::Pending { cycles_remaining: 1 },
         );
         // Third: adopt
-        match fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks) {
+        match fr.evaluate_cross_chain(0xAAAA, 5, 5_000, 0, &forks, false) {
             CrossChainDecision::Adopt { target_chain_id, .. } => {
                 assert_eq!(target_chain_id, 0xBBBB);
             }
@@ -752,17 +800,17 @@ mod tests {
 
     #[test]
     fn cross_chain_target_change_resets_dwell() {
-        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestChain, 3);
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
 
         // Track chain A for 2 cycles
         let forks_a = vec![cross_chain(0xAAAA, 20, 10_000, 1)];
-        fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_a);
-        fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_a);
+        fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_a, false);
+        fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_a, false);
         assert_eq!(fr.cross_chain_dwell_counter(), 2);
 
         // Switch to chain B → dwell resets
         let forks_b = vec![cross_chain(0xBBBB, 25, 15_000, 2)];
-        let result = fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_b);
+        let result = fr.evaluate_cross_chain(0x1111, 5, 5_000, 0, &forks_b, false);
         assert_eq!(
             result,
             CrossChainDecision::Pending { cycles_remaining: 2 },
@@ -797,14 +845,121 @@ mod tests {
     }
 
     #[test]
-    fn longest_most_legitimate_same_chain_behaves_like_longest() {
-        // Same-chain fork evaluation should behave like LongestChain
+    fn no_owner_info_original_behavior() {
+        // When has_chain_owner is false on all forks, behaviour is the original >3 threshold.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(5), remote_fork(1, 9, 2)];
         let result = fr.evaluate(5, &forks, 3);
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
             other => panic!("expected Resolve, got {:?}", other),
+        }
+
+        // 3 blocks ahead is NOT enough (must be >3)
+        let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks2 = vec![local_fork(5), remote_fork(1, 8, 2)];
+        assert_eq!(fr2.evaluate(5, &forks2, 3), ForkDecision::NoAction);
+    }
+
+    // ── Chain owner tiebreaker tests ──
+
+    #[test]
+    fn chain_owner_equal_height_switch() {
+        // Equal height (10), owner on dominant fork → should switch.
+        // dominant effective = 10+5=15, local effective = 10+0=10, threshold = 10+3=13
+        // 15 > 13 → switch
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork(10), remote_fork_owner(1, 10, 2)];
+        let result = fr.evaluate(10, &forks, 3);
+        match result {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 10),
+            other => panic!("expected Resolve, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chain_owner_behind_1_block_switch() {
+        // Owner 1 block behind (owner=9, us=10).
+        // dominant effective = 9+5=14, local effective = 10+0=10, threshold = 10+3=13
+        // 14 > 13 → true → Switch
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork(10), remote_fork_owner(1, 9, 2)];
+        let result = fr.evaluate(10, &forks, 3);
+        match result {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
+            other => panic!("expected Resolve, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chain_owner_behind_2_blocks_no_switch() {
+        // Owner 2 blocks behind (owner=8, us=10).
+        // dominant effective = 8+5=13, local effective = 10+0=10, threshold = 10+3=13
+        // 13 > 13 → false → NoAction (boundary: tied, no switch)
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork(10), remote_fork_owner(1, 8, 2)];
+        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+    }
+
+    #[test]
+    fn chain_owner_behind_3_blocks_no_switch() {
+        // Owner 3 blocks behind (owner=7, us=10).
+        // dominant effective = 7+5=12, local effective = 10+0=10, threshold = 10+3=13
+        // 12 > 13 → false → NoAction
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork(10), remote_fork_owner(1, 7, 2)];
+        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+    }
+
+    #[test]
+    fn chain_owner_local_stays() {
+        // We are the owner (local), equal height → should NOT switch.
+        // dominant effective = 10+0=10, local effective = 10+5=15, threshold = 15+3=18
+        // 10 > 18 → false → NoAction
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork_owner(10), remote_fork(1, 10, 2)];
+        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+    }
+
+    #[test]
+    fn non_owner_needs_9_blocks_to_override_owner() {
+        // We are owner (local=10), non-owner remote at 18.
+        // dominant effective = 18+0=18, local effective = 10+5=15, threshold = 15+3=18
+        // 18 > 18 → false → NoAction (8-block lead not enough)
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork_owner(10), remote_fork(1, 18, 2)];
+        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+
+        // Non-owner at 19: 19 > 18 → true → Switch
+        let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks2 = vec![local_fork_owner(10), remote_fork(1, 19, 2)];
+        match fr2.evaluate(10, &forks2, 3) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 19),
+            other => panic!("expected Resolve, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chain_owner_cross_chain_bonus() {
+        // When local node IS chain owner, cross-chain score gets bonus.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        // Remote: height=12, vote_weight=5000 → score = 12*10000 + min(5000/12, 9999) = 120416
+        // Local:  height=10, vote_weight=5000, owner → score = 10*10000 + min(5000/10, 9999) + 5*10000 = 150500
+        // Local > remote → NoAction
+        let forks = vec![cross_chain(0xBBBB, 12, 5_000, 1)];
+        assert_eq!(
+            fr.evaluate_cross_chain(0xAAAA, 10, 5_000, 0, &forks, true),
+            CrossChainDecision::NoAction,
+        );
+
+        // Without owner: local score = 100500 < 120416 → Adopt
+        let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let result = fr2.evaluate_cross_chain(0xAAAA, 10, 5_000, 0, &forks, false);
+        match result {
+            CrossChainDecision::Adopt { target_chain_id, .. } => {
+                assert_eq!(target_chain_id, 0xBBBB);
+            }
+            other => panic!("expected Adopt, got {:?}", other),
         }
     }
 }

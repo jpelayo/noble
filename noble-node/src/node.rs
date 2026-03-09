@@ -1810,9 +1810,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                     // Inject fork status for fork resolver evaluation.
                     {
-                        let (tip_h, tip_hash) = self.consensus.read().chain_tip();
+                        let engine_read = self.consensus.read();
+                        let (tip_h, tip_hash) = engine_read.chain_tip();
+                        let chain_owner_key = engine_read.chain_owner_key().map(|k| k.to_vec());
+                        let our_identity = engine_read.our_validator_wire_bytes();
+                        drop(engine_read);
                         let peers = self.peer_info.read();
-                        let fork_groups = compute_fork_groups(&peers, tip_h, tip_hash);
+                        let fork_groups = compute_fork_groups(
+                            &peers,
+                            tip_h,
+                            tip_hash,
+                            chain_owner_key.as_deref(),
+                            our_identity.as_deref(),
+                        );
                         let total_peers = peers.len();
                         drop(peers);
                         if !fork_groups.is_empty() {
@@ -4426,8 +4436,14 @@ fn parse_fork_resolution_strategy(name: &str) -> noble_consensus::ForkResolution
     match name {
         "manual" => ForkResolutionStrategy::Manual,
         "peer_supermajority" => ForkResolutionStrategy::PeerSupermajority,
-        "longest_chain" => ForkResolutionStrategy::LongestChain,
         "longest_most_legitimate" => ForkResolutionStrategy::LongestMostLegitimate,
+        "longest_chain" => {
+            tracing::warn!(
+                task = "config_load",
+                "fork_resolution_strategy 'longest_chain' is deprecated — using 'longest_most_legitimate'"
+            );
+            ForkResolutionStrategy::LongestMostLegitimate
+        }
         other => {
             tracing::warn!(
                 task = "config_load",
@@ -4442,10 +4458,16 @@ fn parse_fork_resolution_strategy(name: &str) -> noble_consensus::ForkResolution
 ///
 /// Groups peers by `chain_tip_hash` (same logic as `getDetectedForks` RPC).
 /// Always includes the local chain as `is_local = true`.
+///
+/// `chain_owner_key` is block 1's validator wire bytes. When a peer's
+/// `identity_key` matches, or the local node's `our_identity_key` matches,
+/// the corresponding fork group gets `has_chain_owner = true`.
 fn compute_fork_groups(
     peers: &std::collections::HashMap<String, PeerInfoEntry>,
     local_height: u64,
     local_hash: noble_crypto::Hash256,
+    chain_owner_key: Option<&[u8]>,
+    our_identity_key: Option<&[u8]>,
 ) -> Vec<noble_consensus::ForkInfo> {
     let local_tip_hex = hex::encode(local_hash.as_bytes());
 
@@ -4468,6 +4490,30 @@ fn compute_fork_groups(
         local_entry.0 = local_height;
     }
 
+    // Determine which fork group has the chain owner.
+    let mut owner_group: Option<String> = None;
+    if let Some(owner_key) = chain_owner_key {
+        // Check peers for the chain owner.
+        for entry in peers.values() {
+            if let Some(ref ident) = entry.identity_key {
+                if ident.as_slice() == owner_key {
+                    if let Some(ref hash) = entry.chain_tip_hash {
+                        owner_group = Some(hash.clone());
+                    }
+                    break;
+                }
+            }
+        }
+        // Check if WE are the chain owner (local group).
+        if owner_group.is_none() {
+            if let Some(our_key) = our_identity_key {
+                if our_key == owner_key {
+                    owner_group = Some(local_tip_hex.clone());
+                }
+            }
+        }
+    }
+
     groups
         .into_iter()
         .map(|(tip_hash, (height, peer_count))| noble_consensus::ForkInfo {
@@ -4483,6 +4529,7 @@ fn compute_fork_groups(
             height,
             peer_count,
             is_local: tip_hash == local_tip_hex,
+            has_chain_owner: owner_group.as_ref() == Some(&tip_hash),
         })
         .collect()
 }

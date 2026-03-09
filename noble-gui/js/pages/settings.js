@@ -1449,7 +1449,7 @@ export function init(root, ctx) {
   async function loadForkResolution() {
     try {
       const data = await rpc.call('noble_getForkResolutionStatus');
-      const stratColors = { manual: 'var(--text-muted)', peer_supermajority: 'var(--accent-blue,#2196f3)', longest_chain: 'var(--accent-orange,#ff9800)' };
+      const stratColors = { manual: 'var(--text-muted)', peer_supermajority: 'var(--accent-blue,#2196f3)', longest_most_legitimate: 'var(--accent-green,#4caf50)' };
       const color = stratColors[data.strategy] || 'var(--text-muted)';
       let html = `<dl class="detail-grid" style="margin-bottom:0">
         <dt>Strategy</dt><dd><span style="color:${color};font-weight:600">${data.strategy}</span></dd>

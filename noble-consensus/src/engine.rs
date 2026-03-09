@@ -101,6 +101,9 @@ pub struct CycleEngine {
     badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
     /// Phase 1: Finality tracker — counts consecutive clean cycles for finality.
     finality_tracker: FinalityTracker,
+    /// Block 1's validator public key (the chain owner).
+    /// Cached on block 1 commit/import; used by fork resolver for chain owner edge.
+    chain_owner_key: Option<Vec<u8>>,
     /// Phase 3: Automatic fork resolution state machine.
     fork_resolver: crate::fork_resolver::ForkResolver,
     /// Phase 3: Periodic checkpoint manager.
@@ -160,6 +163,7 @@ impl CycleEngine {
             badge_store: BadgeStore::new(),
             badge_proposals: std::collections::HashMap::new(),
             finality_tracker: FinalityTracker::new(confirmation_threshold),
+            chain_owner_key: None,
             fork_resolver: crate::fork_resolver::ForkResolver::new(
                 fork_strategy,
                 fork_delay,
@@ -233,6 +237,11 @@ impl CycleEngine {
     /// Restore finality state from storage on startup.
     pub fn restore_finality(&mut self, height: u64, hash: Hash256, cycle: u64) {
         self.finality_tracker.restore(height, hash, cycle);
+    }
+
+    /// Get the chain owner key (block 1 validator's wire bytes).
+    pub fn chain_owner_key(&self) -> Option<&[u8]> {
+        self.chain_owner_key.as_deref()
     }
 
     /// Get fork resolver (read-only) for RPC queries.
@@ -356,6 +365,7 @@ impl CycleEngine {
             self.tracked_cycle = u64::MAX;
             self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
+            self.chain_owner_key = None;
             self.finality_tracker.reset_full();
             self.checkpoint_mgr.reset();
             self.fork_resolver = crate::fork_resolver::ForkResolver::new(
@@ -434,6 +444,10 @@ impl CycleEngine {
             info!("block 1 tip update — cycle epoch set to {}", timestamp);
             self.cycle_mgr.set_genesis_timestamp(timestamp);
             self.first_tick = true;
+            // Cache the chain owner (block 1 validator) for fork resolution.
+            self.chain_owner_key = Some(
+                self.tip_header.as_ref().unwrap().validator_id.to_wire_bytes()
+            );
         }
     }
 
@@ -775,6 +789,10 @@ impl CycleEngine {
                                 self.cycle_mgr
                                     .set_genesis_timestamp(block.header.timestamp);
                                 self.first_tick = true;
+                                // Cache chain owner for fork resolution.
+                                self.chain_owner_key = Some(
+                                    block.header.validator_id.to_wire_bytes()
+                                );
                                 // Purge stale cycle history from the bootstrap epoch.
                                 // The cycle numbers from the old epoch are meaningless
                                 // after the epoch change.
@@ -1910,12 +1928,18 @@ impl ConsensusStateMachine for CycleEngine {
                 cross_chain_forks,
             } => {
                 let mut outputs = Vec::new();
+                // Check if we are the chain owner for cross-chain scoring bonus.
+                let is_local_chain_owner = match (&self.chain_owner_key, &self.our_validator_key) {
+                    (Some(owner), Some((_, pk))) => owner.as_slice() == pk.to_wire_bytes().as_slice(),
+                    _ => false,
+                };
                 let decision = self.fork_resolver.evaluate_cross_chain(
                     local_chain_id,
                     local_height,
                     local_vote_weight,
                     same_chain_peer_count,
                     &cross_chain_forks,
+                    is_local_chain_owner,
                 );
                 match decision {
                     crate::fork_resolver::CrossChainDecision::Adopt {

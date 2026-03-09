@@ -24,6 +24,7 @@ pub use checkpoint::{Checkpoint, CheckpointManager};
 pub use fork_resolver::{
     CrossChainDecision, CrossChainForkInfo, ForkDecision, ForkInfo,
     ForkResolutionStrategy, ForkResolver, decay_vote_weight,
+    CHAIN_OWNER_EDGE_BLOCKS,
 };
 pub use badge::{
     BadgeProposal, BadgeProposalType, BadgeStatus, BadgeStore, RevocationReason,

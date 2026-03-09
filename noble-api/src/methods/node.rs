@@ -1326,7 +1326,6 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let strategy = match resolver.strategy() {
             noble_consensus::ForkResolutionStrategy::Manual => "manual",
             noble_consensus::ForkResolutionStrategy::PeerSupermajority => "peer_supermajority",
-            noble_consensus::ForkResolutionStrategy::LongestChain => "longest_chain",
             noble_consensus::ForkResolutionStrategy::LongestMostLegitimate => "longest_most_legitimate",
         };
         Ok(ForkResolutionStatusResponse {

@@ -122,7 +122,7 @@ pub struct ConsensusConfig {
     /// For subset_rotation strategy: hex pubkeys of preferred validators.
     #[serde(default)]
     pub voting_subset: Vec<String>,
-    /// Fork resolution strategy: "manual", "peer_supermajority", "longest_chain",
+    /// Fork resolution strategy: "manual", "peer_supermajority",
     /// "longest_most_legitimate" (default: longest_most_legitimate).
     #[serde(default = "default_fork_resolution_strategy")]
     pub fork_resolution_strategy: String,
