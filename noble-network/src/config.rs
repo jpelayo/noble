@@ -20,8 +20,11 @@ pub const P2P_PORTS: [u16; 3] = [P2P_PORT_PRIMARY, P2P_PORT_ALT1, P2P_PORT_ALT2]
 /// JSON-RPC HTTP server port.
 pub const RPC_HTTP_PORT: u16 = 8783;
 
+/// WebSocket-only server port.
+pub const WS_PORT: u16 = 8784;
+
 /// Prometheus metrics HTTP server port (disabled by default).
-pub const METRICS_PORT: u16 = 8784;
+pub const METRICS_PORT: u16 = 8787;
 
 /// Dashboard GUI HTTP server port.
 pub const GUI_PORT: u16 = 8785;

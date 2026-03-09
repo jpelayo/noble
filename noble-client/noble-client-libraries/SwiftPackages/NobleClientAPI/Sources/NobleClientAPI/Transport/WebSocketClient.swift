@@ -29,7 +29,7 @@ public enum SubscriptionTopic: String, Sendable {
 /// 3. Send unsubscribe to stop
 public actor WebSocketClient {
 
-    /// The WebSocket URL (typically `wss://localhost:8783`).
+    /// The WebSocket URL (typically `wss://localhost:8784`).
     public let url: URL
 
     /// Optional bearer token for authenticated connections.

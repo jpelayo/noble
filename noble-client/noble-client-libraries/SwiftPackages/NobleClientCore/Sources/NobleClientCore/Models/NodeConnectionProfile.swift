@@ -26,7 +26,7 @@ public struct NodeConnectionProfile: Identifiable, Codable, Equatable, Sendable 
         self.authMode = authMode
     }
 
-    /// Default localhost connection (JSON-RPC + WS on port 8783).
+    /// Default localhost connection (JSON-RPC HTTP on port 8783, WS on port 8784).
     public static let localhost = NodeConnectionProfile(
         name: "Local Node",
         baseURL: URL(string: "https://127.0.0.1:8783")!,

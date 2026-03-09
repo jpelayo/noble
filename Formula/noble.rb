@@ -129,7 +129,7 @@ class Noble < Formula
 
     # Warn if Noble ports are already occupied (avoids confusion with mock servers, etc.)
     blocked = []
-    {8780 => "P2P", 8783 => "RPC/WebSocket", 8785 => "Dashboard GUI"}.each do |port, label|
+    {8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket", 8785 => "Dashboard GUI"}.each do |port, label|
       pid = `lsof -ti :#{port} 2>/dev/null`.strip
       unless pid.empty?
         proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
@@ -185,7 +185,8 @@ class Noble < Formula
       Ports that should be reachable:
 
         8780  P2P (open to internet for full connectivity)
-        8783  JSON-RPC + WebSocket (HTTPS/WSS) — open for client/wallet access
+        8783  JSON-RPC HTTP-only (HTTPS) — open for client/wallet access
+        8784  WebSocket-only (WSS) — open for real-time subscriptions
 
       Paths:
         Config:    #{etc}/noble/noble.toml
