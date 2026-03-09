@@ -318,8 +318,7 @@ export function init(root, ctx) {
       return;
     }
     connLogBody.innerHTML = entries.slice().reverse().map(e => {
-      const evColor = e.event === 'connected' ? 'var(--success,#34d399)'
-        : e.event === 'rejected' ? 'var(--warning,#fbbf24)'
+      const evColor = e.event === 'disconnected' ? 'var(--warning,#fbbf24)'
         : 'var(--error,#f87171)';
       const name = e.node_name || '';
       const pid = e.peer_id ? e.peer_id.slice(0, 12) + '...' : '';
