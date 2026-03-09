@@ -4157,14 +4157,13 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         &config.consensus.fork_resolution_strategy,
     );
 
+    // Protocol constants come from CConsensusConfig::default() (hardcoded).
+    // Only operator preferences are overwritten from TOML.
     CConsensusConfig {
         voting_strategy,
         confirmation_strategy,
-        min_peers_for_consensus: config.consensus.min_peers_for_consensus,
-        confirmation_threshold: config.consensus.confirmation_threshold,
         fork_resolution_strategy,
         fork_resolution_delay_cycles: config.consensus.fork_resolution_delay_cycles,
-        checkpoint_interval: config.consensus.checkpoint_interval,
         ..CConsensusConfig::default()
     }
 }

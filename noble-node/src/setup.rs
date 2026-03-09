@@ -629,11 +629,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             confirmation_strategy: defaults.consensus.confirmation_strategy.clone(),
             voting_preferred_validator: defaults.consensus.voting_preferred_validator.clone(),
             voting_subset: defaults.consensus.voting_subset.clone(),
-            min_peers_for_consensus: defaults.consensus.min_peers_for_consensus,
-            confirmation_threshold: defaults.consensus.confirmation_threshold,
             fork_resolution_strategy: defaults.consensus.fork_resolution_strategy.clone(),
             fork_resolution_delay_cycles: defaults.consensus.fork_resolution_delay_cycles,
-            checkpoint_interval: defaults.consensus.checkpoint_interval,
         },
         api: ApiConfig {
             rpc_addr: defaults.api.rpc_addr.clone(),

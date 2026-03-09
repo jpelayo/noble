@@ -19,9 +19,8 @@ use crate::validator::ValidatorList;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum VotingStrategy {
-    /// Vote for the first valid candidate block received (current default).
+    /// Vote for the first valid candidate block received.
     /// Fast but biased toward low-latency validators.
-    #[default]
     FirstValid,
 
     /// Always vote for a specific validator's block (by public key hex).
@@ -58,9 +57,10 @@ pub enum VotingStrategy {
     /// If no manual vote is cast before the phase ends, no vote is broadcast.
     Manual,
 
-    /// Weighted probability selection following operator-defined list order.
+    /// Weighted probability selection following operator-defined list order (default).
     /// Position `i` gets weight `N - i` (position 0 = N, last = 1).
     /// Total weight = `N*(N+1)/2`. Deterministic via `cycle % total_weight`.
+    #[default]
     WeightedProbability,
 }
 

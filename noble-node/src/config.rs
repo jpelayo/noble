@@ -99,17 +99,21 @@ fn default_keep_blocks() -> u64 {
     0
 }
 
-/// PoR consensus configuration.
+/// PoR consensus configuration (operator preferences only).
+///
+/// Protocol constants (min_unique_voters, plurality_floor_divisor, etc.) are
+/// hardcoded in `noble_consensus::ConsensusConfig::default()` and cannot be
+/// changed by operators.  Only voting/fork-resolution strategies belong here.
 #[derive(Deserialize, Serialize)]
 pub struct ConsensusConfig {
     pub validator_key_path: String,
     pub validator_list_path: PathBuf,
-    /// Voting strategy for Round 1 (Reflection phase).
+    /// Voting strategy for Round 1.
     /// Values: first_valid, fixed_validator, round_robin, subset_rotation,
     ///         random, weighted_reputation, weighted_probability, follow_majority, manual
     #[serde(default = "default_voting_strategy")]
     pub voting_strategy: String,
-    /// Voting strategy for Round 2 (Confirmation phase).
+    /// Voting strategy for Round 2 (confirmation).
     #[serde(default = "default_confirmation_strategy")]
     pub confirmation_strategy: String,
     /// For fixed_validator strategy: hex pubkey of preferred validator.
@@ -118,12 +122,6 @@ pub struct ConsensusConfig {
     /// For subset_rotation strategy: hex pubkeys of preferred validators.
     #[serde(default)]
     pub voting_subset: Vec<String>,
-    /// Minimum validators required for consensus participation (default: 2).
-    #[serde(default = "default_min_peers_for_consensus")]
-    pub min_peers_for_consensus: usize,
-    /// Number of consecutive clean cycles to finalize a block (default: 3).
-    #[serde(default = "default_confirmation_threshold")]
-    pub confirmation_threshold: u32,
     /// Fork resolution strategy: "manual", "peer_supermajority", "longest_chain",
     /// "longest_most_legitimate" (default: longest_most_legitimate).
     #[serde(default = "default_fork_resolution_strategy")]
@@ -131,9 +129,6 @@ pub struct ConsensusConfig {
     /// Minimum cycles a fork must persist before auto-resolution (default: 3).
     #[serde(default = "default_fork_resolution_delay")]
     pub fork_resolution_delay_cycles: u32,
-    /// Create a checkpoint every N blocks (0 = disabled, default: 30).
-    #[serde(default = "default_checkpoint_interval")]
-    pub checkpoint_interval: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -144,24 +139,12 @@ fn default_confirmation_strategy() -> String {
     "follow_majority".to_string()
 }
 
-fn default_min_peers_for_consensus() -> usize {
-    2
-}
-
-fn default_confirmation_threshold() -> u32 {
-    3
-}
-
 fn default_fork_resolution_strategy() -> String {
     "longest_most_legitimate".to_string()
 }
 
 fn default_fork_resolution_delay() -> u32 {
     3
-}
-
-fn default_checkpoint_interval() -> u64 {
-    30
 }
 
 impl std::fmt::Debug for ConsensusConfig {
@@ -521,11 +504,8 @@ impl Default for ConsensusConfig {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
-            min_peers_for_consensus: default_min_peers_for_consensus(),
-            confirmation_threshold: default_confirmation_threshold(),
             fork_resolution_strategy: default_fork_resolution_strategy(),
             fork_resolution_delay_cycles: default_fork_resolution_delay(),
-            checkpoint_interval: default_checkpoint_interval(),
         }
     }
 }
@@ -611,11 +591,8 @@ mod tests {
             confirmation_strategy: default_confirmation_strategy(),
             voting_preferred_validator: String::new(),
             voting_subset: Vec::new(),
-            min_peers_for_consensus: default_min_peers_for_consensus(),
-            confirmation_threshold: default_confirmation_threshold(),
             fork_resolution_strategy: default_fork_resolution_strategy(),
             fork_resolution_delay_cycles: default_fork_resolution_delay(),
-            checkpoint_interval: default_checkpoint_interval(),
         };
         let debug_str = format!("{config:?}");
         assert!(
