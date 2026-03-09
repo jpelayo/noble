@@ -746,7 +746,7 @@ export function init(root, ctx) {
       if (data.event === 'phase_change') {
         if (data.phase === 'Reflection' && data.total_votes != null) {
           const leader = data.leader_name || truncateHash(data.leader_hash || '', 6);
-          pushActivity({ event: 'consensus_log', message: `Voting results favor ${leader} with ${data.leader_pct}% of votes (${data.total_votes} total)` });
+          pushActivity({ event: 'consensus_log', message: `Voting results favor ${leader} with ${data.leader_pct ?? 0}% of votes (${data.total_votes} total)` });
         }
         if (data.phase === 'Propagation' && (data.winner_name || data.winner_hash)) {
           const winner = data.winner_name || truncateHash(data.winner_hash || '', 6);
@@ -966,7 +966,7 @@ export function init(root, ctx) {
 
       // Update manual vote phase indicator
       const manualPhase = root.querySelector('#cs-manual-phase');
-      manualPhase.textContent = `Cycle #${formatNumber(result.cycle)} — ${result.phase}`;
+      manualPhase.textContent = `Cycle #${formatNumber(result.cycle ?? 0)} — ${result.phase || '--'}`;
 
       if (!result.tallies || result.tallies.length === 0) {
         talliesBody.innerHTML = '<div class="empty-state">No votes recorded for the current cycle.</div>';
