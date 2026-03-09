@@ -1203,8 +1203,15 @@ export function init(root, ctx) {
       row.style.cssText = 'margin-bottom:var(--gap-lg)';
 
       // ── Cycle header ──
-      const statusLabel = cycle.is_current ? 'ACTIVE' : cycle.indeterminate ? 'NO CONSENSUS' : 'FINALIZED';
-      const statusColor = cycle.is_current ? 'var(--accent)' : cycle.indeterminate ? 'var(--text-muted)' : 'var(--success)';
+      // Distinguish "no consensus" (proposals existed, votes tied) from
+      // "no proposals" (truly empty cycle — nobody proposed a block).
+      const hadProposals = cycle.phases[0] && cycle.phases[0].proposals && cycle.phases[0].proposals.length > 0;
+      const statusLabel = cycle.is_current ? 'ACTIVE'
+        : cycle.indeterminate ? (hadProposals ? 'NO CONSENSUS' : 'NO PROPOSALS')
+        : 'FINALIZED';
+      const statusColor = cycle.is_current ? 'var(--accent)'
+        : cycle.indeterminate ? (hadProposals ? 'var(--warning, #e8a435)' : 'var(--text-muted)')
+        : 'var(--success)';
       let disambigBadge = '';
       if (!cycle.indeterminate) {
         disambigBadge = cycle.disambiguation

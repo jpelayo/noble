@@ -63,6 +63,16 @@ export function init(root, ctx) {
       // Blocks come in ascending order; reverse for newest-first display.
       const desc = blocks.reverse();
 
+      // Fetch cycle history to distinguish "no proposals" from "no consensus"
+      // in gap rows. Build a lookup by cycle number.
+      const cycleHistoryMap = new Map();
+      try {
+        const hist = await rpc.call('noble_getCycleHistory', [100]);
+        for (const e of (hist.entries || [])) {
+          cycleHistoryMap.set(e.cycle_number, e);
+        }
+      } catch { /* non-critical — fall back to generic label */ }
+
       tbody.innerHTML = '';
       for (let i = 0; i < desc.length; i++) {
         const b = desc[i];
@@ -74,11 +84,27 @@ export function init(root, ctx) {
         if (i > 0 && desc[i - 1].cycle != null && b.cycle != null) {
           const prevCycle = desc[i - 1].cycle;
           for (let gap = prevCycle - 1; gap > b.cycle; gap--) {
+            // Check cycle history: was this an indeterminate cycle (had
+            // proposals but no consensus) or a truly empty cycle?
+            const hist = cycleHistoryMap.get(gap);
+            let label, color;
+            if (hist && hist.status === 'indeterminate') {
+              label = 'no consensus';
+              color = 'var(--warning, #e8a435)';
+            } else if (hist || cycleHistoryMap.size > 0) {
+              // History available and this cycle has no entry → truly empty
+              label = 'no proposals';
+              color = 'var(--text-muted)';
+            } else {
+              // History unavailable — don't claim a cause
+              label = 'no block';
+              color = 'var(--text-muted)';
+            }
             const gapTr = document.createElement('tr');
             gapTr.style.cssText = 'opacity:0.45';
             gapTr.innerHTML = `
               <td style="color:var(--text-muted)">${gap}</td>
-              <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no proposals</td>
+              <td colspan="3" style="color:${color};font-style:italic;text-align:center">${label}</td>
               <td></td>
               <td></td>
             `;
