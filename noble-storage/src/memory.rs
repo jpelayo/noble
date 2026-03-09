@@ -34,8 +34,8 @@ struct Inner {
     balances: HashMap<NobleAddress, u64>,
     /// Address history: (wire_bytes, height, offset) → tx_id (GAP-H19).
     address_history: BTreeMap<(Vec<u8>, u64, u32), Hash256>,
-    /// Persisted peer bans: peer_id_bytes → (banned_until_unix, category_code).
-    bans: HashMap<Vec<u8>, (u64, u8)>,
+    /// Persisted peer bans: peer_id_bytes → (banned_until_unix, category_code, evidence_hash).
+    bans: HashMap<Vec<u8>, (u64, u8, Option<[u8; 32]>)>,
     /// Pending key rotations: old_key_wire → (new_key_wire, rotation_cycle).
     key_rotations: HashMap<Vec<u8>, (Vec<u8>, u64)>,
     /// Peer memory: identity_key_wire → PeerRecord.
@@ -693,10 +693,10 @@ impl StorageEngine for MemoryStorage {
         Ok(timestamps)
     }
 
-    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8) -> Result<(), StorageError> {
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8, evidence_hash: Option<&[u8; 32]>) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         Self::check_open(&inner)?;
-        inner.bans.insert(peer_id.to_vec(), (banned_until, category_code));
+        inner.bans.insert(peer_id.to_vec(), (banned_until, category_code, evidence_hash.copied()));
         Ok(())
     }
 
@@ -707,7 +707,7 @@ impl StorageEngine for MemoryStorage {
         Ok(())
     }
 
-    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8)>, StorageError> {
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8, Option<[u8; 32]>)>, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
         let now = std::time::SystemTime::now()
@@ -718,8 +718,8 @@ impl StorageEngine for MemoryStorage {
         Ok(inner
             .bans
             .iter()
-            .filter(|(_, (until, _))| *until > now)
-            .map(|(k, (until, cat))| (k.clone(), *until, *cat))
+            .filter(|(_, (until, _, _))| *until > now)
+            .map(|(k, (until, cat, hash))| (k.clone(), *until, *cat, *hash))
             .collect())
     }
 
@@ -1867,13 +1867,14 @@ mod tests {
             .unwrap()
             .as_secs();
         let banned_until = now + 86400;
-        store.store_ban(peer_id, banned_until, 0x04).unwrap();
+        store.store_ban(peer_id, banned_until, 0x04, None).unwrap();
 
         let bans = store.load_bans().unwrap();
         assert_eq!(bans.len(), 1);
         assert_eq!(bans[0].0, peer_id.to_vec());
         assert_eq!(bans[0].1, banned_until);
         assert_eq!(bans[0].2, 0x04);
+        assert_eq!(bans[0].3, None);
     }
 
     #[test]
@@ -1885,10 +1886,10 @@ mod tests {
             .as_secs();
         // Expired ban
         store
-            .store_ban(b"expired_peer", now.saturating_sub(100), 0x01)
+            .store_ban(b"expired_peer", now.saturating_sub(100), 0x01, None)
             .unwrap();
         // Active ban
-        store.store_ban(b"active_peer", now + 86400, 0x02).unwrap();
+        store.store_ban(b"active_peer", now + 86400, 0x02, None).unwrap();
 
         let bans = store.load_bans().unwrap();
         assert_eq!(bans.len(), 1);
@@ -1902,7 +1903,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        store.store_ban(b"peer1", now + 86400, 0x0C).unwrap();
+        store.store_ban(b"peer1", now + 86400, 0x0C, None).unwrap();
         store.remove_ban(b"peer1").unwrap();
 
         let bans = store.load_bans().unwrap();

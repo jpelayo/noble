@@ -58,7 +58,11 @@ pub enum CycleIo {
     /// Request the node event loop to schedule a timer.
     SetTimer { duration_secs: u64 },
     /// Ban a peer for misbehavior.
-    BanPeer { peer_id: Vec<u8>, reason: String },
+    BanPeer {
+        peer_id: Vec<u8>,
+        category: noble_core::BanCategoryCode,
+        reason: String,
+    },
     /// Request a specific block from a peer.
     RequestBlock {
         peer_id: Vec<u8>,

@@ -137,9 +137,13 @@ export function init(root, ctx) {
               <option value="invalid_transaction">Invalid Transaction</option>
               <option value="protocol_violation">Protocol Violation</option>
               <option value="duplicate_proposal">Duplicate Proposal</option>
-              <option value="tx_flood">TX Flood</option>
-              <option value="misrepresentation">Misrepresentation</option>
+              <option value="excessive_connections">Excessive Connections</option>
               <option value="unresponsive">Unresponsive</option>
+              <option value="invalid_vote">Invalid Vote</option>
+              <option value="invalid_announce">Invalid Announce</option>
+              <option value="tx_flood">TX Flood</option>
+              <option value="evidence_received">Evidence Received</option>
+              <option value="misrepresentation">Misrepresentation</option>
             </select>
             <label style="font-size:var(--font-size-sm);color:var(--text-secondary)">Duration</label>
             <select id="ban-duration" style="padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
@@ -425,10 +429,11 @@ export function init(root, ctx) {
         const expiry = new Date(b.banned_until * 1000).toLocaleString();
         const name = b.node_name || '<span style="color:var(--text-muted)">&mdash;</span>';
         const reason = `${b.reason_category}${b.reason_subject ? ': ' + b.reason_subject : ''}`;
+        const evHash = b.evidence_hash ? ` <span class="mono" style="opacity:0.6" title="${b.evidence_hash}">[ev:${b.evidence_hash.slice(0,8)}]</span>` : '';
         tr.innerHTML = `
           <td class="mono" style="font-size:var(--font-size-xs)">${truncateHash(b.peer_id, 8)}</td>
           <td>${name}</td>
-          <td style="font-size:var(--font-size-xs)">${reason}</td>
+          <td style="font-size:var(--font-size-xs)">${reason}${evHash}</td>
           <td style="font-size:var(--font-size-xs)">${expiry}</td>
           <td><button class="btn-sm unban-btn" data-pid="${b.peer_id}" style="padding:4px 10px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Unban</button></td>
         `;

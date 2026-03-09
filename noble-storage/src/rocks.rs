@@ -1222,16 +1222,29 @@ impl StorageEngine for RocksDbStorage {
         Ok(timestamps)
     }
 
-    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8) -> Result<(), StorageError> {
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8, evidence_hash: Option<&[u8; 32]>) -> Result<(), StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_BANS)?;
-        // Value: 8 bytes banned_until (BE) + 1 byte category_code
-        let mut value = [0u8; 9];
-        value[..8].copy_from_slice(&banned_until.to_be_bytes());
-        value[8] = category_code;
-        self.db
-            .put_cf(cf, peer_id, value)
-            .map_err(|e| StorageError::Database(e.to_string()))
+        // Value: 8 bytes banned_until (BE) + 1 byte category_code + optional 32 bytes evidence_hash
+        match evidence_hash {
+            Some(hash) => {
+                let mut value = [0u8; 41];
+                value[..8].copy_from_slice(&banned_until.to_be_bytes());
+                value[8] = category_code;
+                value[9..41].copy_from_slice(hash);
+                self.db
+                    .put_cf(cf, peer_id, value)
+                    .map_err(|e| StorageError::Database(e.to_string()))
+            }
+            None => {
+                let mut value = [0u8; 9];
+                value[..8].copy_from_slice(&banned_until.to_be_bytes());
+                value[8] = category_code;
+                self.db
+                    .put_cf(cf, peer_id, value)
+                    .map_err(|e| StorageError::Database(e.to_string()))
+            }
+        }
     }
 
     fn remove_ban(&self, peer_id: &[u8]) -> Result<(), StorageError> {
@@ -1242,7 +1255,7 @@ impl StorageEngine for RocksDbStorage {
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 
-    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8)>, StorageError> {
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8, Option<[u8; 32]>)>, StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_BANS)?;
         let now = std::time::SystemTime::now()
@@ -1257,8 +1270,16 @@ impl StorageEngine for RocksDbStorage {
                 let banned_until = u64::from_be_bytes(value[..8].try_into().unwrap());
                 // Category code: byte 9 if present, else 0x0C (ManualBan) for legacy 8-byte entries.
                 let category_code = if value.len() >= 9 { value[8] } else { 0x0C };
+                // Evidence hash: bytes 9..41 if present (41-byte entries).
+                let evidence_hash = if value.len() >= 41 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&value[9..41]);
+                    Some(h)
+                } else {
+                    None
+                };
                 if banned_until > now {
-                    bans.push((key.to_vec(), banned_until, category_code));
+                    bans.push((key.to_vec(), banned_until, category_code, evidence_hash));
                 }
             }
         }

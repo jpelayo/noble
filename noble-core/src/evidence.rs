@@ -17,6 +17,27 @@ use noble_crypto::{sha256, Hash256, NoblePublicKey, SignatureEnvelope};
 
 use crate::BlockHeader;
 
+/// Wire-stable category codes for ban reasons.
+///
+/// Lives in `noble-core` so the consensus engine can use it without depending
+/// on `noble-network`. Codes match `BanCategory` in `peer_manager.rs` exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum BanCategoryCode {
+    InvalidBlock = 0x01,
+    InvalidTransaction = 0x02,
+    ProtocolViolation = 0x03,
+    DuplicateProposal = 0x04,
+    ExcessiveConnections = 0x05,
+    Unresponsive = 0x06,
+    InvalidVote = 0x07,
+    InvalidAnnounce = 0x08,
+    TxFlood = 0x09,
+    EvidenceReceived = 0x0A,
+    Misrepresentation = 0x0B,
+    ManualBan = 0x0C,
+}
+
 /// Evidence that a validator proposed two different blocks in the same cycle.
 ///
 /// Both headers must:
@@ -54,6 +75,8 @@ pub enum EvidenceError {
     DifferentRounds,
     /// The two votes are for the same candidate (not equivocation).
     SameCandidateHash,
+    /// Evidence does not demonstrate the claimed violation.
+    VerificationFailed,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -67,6 +90,7 @@ impl std::fmt::Display for EvidenceError {
             Self::DifferentVoters => write!(f, "votes reference different voter keys"),
             Self::DifferentRounds => write!(f, "votes reference different rounds"),
             Self::SameCandidateHash => write!(f, "votes are for the same candidate"),
+            Self::VerificationFailed => write!(f, "evidence does not demonstrate the claimed violation"),
         }
     }
 }
@@ -213,6 +237,205 @@ impl VoteEquivocationEvidence {
     }
 }
 
+/// Which universal block validation check failed (verifiable by any node).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InvalidBlockCode {
+    /// B1: Block CBOR exceeds maximum size.
+    BlockTooLarge { size: usize, max: usize },
+    /// B4: Merkle root in header doesn't match recomputed tree.
+    MerkleRootMismatch,
+    /// B7: tx_count in header doesn't match actual transaction count.
+    TxCountMismatch { claimed: u32, actual: u32 },
+    /// B8: Validator signature verification failed.
+    ValidatorSigInvalid,
+    /// B12: Validator public key uses an unrecognized scheme.
+    ValidatorSchemeUnrecognized(u8),
+    /// Duplicate transaction ID within the block.
+    DuplicateTxInBlock { first: usize, second: usize },
+    /// B11: A transaction in the block failed validation.
+    InvalidTransaction { index: usize, reason: String },
+}
+
+/// Evidence that a validator proposed a block that fails a universal check.
+///
+/// Universal checks are those any node can verify with just the block data
+/// (no local chain state needed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvalidBlockEvidence {
+    /// The invalid block (full header + transactions).
+    pub block: crate::Block,
+    /// Which universal check failed.
+    pub failure_code: InvalidBlockCode,
+}
+
+impl InvalidBlockEvidence {
+    /// Verify that this evidence is valid: re-run the claimed check and confirm it fails.
+    pub fn verify(&self, chain_id: u32) -> Result<(), EvidenceError> {
+        match &self.failure_code {
+            InvalidBlockCode::BlockTooLarge { size, max } => {
+                let cbor = noble_codec::to_canonical_cbor(&self.block)
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                if cbor.len() > *max && cbor.len() == *size {
+                    Ok(())
+                } else {
+                    Err(EvidenceError::VerificationFailed)
+                }
+            }
+            InvalidBlockCode::MerkleRootMismatch => {
+                let tx_ids: Vec<Hash256> = self.block.transactions.iter()
+                    .map(|tx| tx.compute_tx_id(chain_id))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                let root = crate::compute_merkle_root(&tx_ids);
+                if root != self.block.header.merkle_root {
+                    Ok(()) // Mismatch confirmed → evidence valid
+                } else {
+                    Err(EvidenceError::VerificationFailed)
+                }
+            }
+            InvalidBlockCode::TxCountMismatch { claimed, actual } => {
+                let real_count = self.block.transactions.len() as u32;
+                if self.block.header.tx_count != real_count
+                    && *claimed == self.block.header.tx_count
+                    && *actual == real_count
+                {
+                    Ok(())
+                } else {
+                    Err(EvidenceError::VerificationFailed)
+                }
+            }
+            InvalidBlockCode::ValidatorSigInvalid => {
+                let msg = self.block.header.compute_signing_message()
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                match self.block.header.validator_sig.verify_standalone(&msg) {
+                    Err(_) => Ok(()),  // Sig fails → evidence is valid
+                    Ok(()) => Err(EvidenceError::VerificationFailed), // Sig passes → evidence is wrong
+                }
+            }
+            InvalidBlockCode::ValidatorSchemeUnrecognized(scheme_id) => {
+                if *scheme_id == self.block.header.validator_id.scheme_id()
+                    && !noble_crypto::is_signing_scheme(*scheme_id)
+                {
+                    Ok(())
+                } else {
+                    Err(EvidenceError::VerificationFailed)
+                }
+            }
+            InvalidBlockCode::DuplicateTxInBlock { first, second } => {
+                if *first >= self.block.transactions.len()
+                    || *second >= self.block.transactions.len()
+                    || first == second
+                {
+                    return Err(EvidenceError::VerificationFailed);
+                }
+                let id_a = self.block.transactions[*first].compute_tx_id(chain_id)
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                let id_b = self.block.transactions[*second].compute_tx_id(chain_id)
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                if id_a == id_b {
+                    Ok(())
+                } else {
+                    Err(EvidenceError::VerificationFailed)
+                }
+            }
+            InvalidBlockCode::InvalidTransaction { index, .. } => {
+                if *index >= self.block.transactions.len() {
+                    return Err(EvidenceError::VerificationFailed);
+                }
+                let tx = &self.block.transactions[*index];
+                let tx_id = tx.compute_tx_id(chain_id)
+                    .map_err(|e| EvidenceError::HashError(e.to_string()))?;
+                let ctx = crate::validation::TxValidationContext {
+                    current_time: self.block.header.timestamp,
+                    chain_id,
+                    chain_height: self.block.header.height,
+                };
+                match crate::validation::validate_transaction(tx, &tx_id, &ctx) {
+                    Err(_) => Ok(()),  // Tx invalid → evidence valid
+                    Ok(()) => Err(EvidenceError::VerificationFailed),
+                }
+            }
+        }
+    }
+}
+
+/// Type of impossible contradiction between two NodeAnnounce messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AnnounceContradiction {
+    /// Different chain_id (claims two blockchains simultaneously).
+    ChainId,
+    /// Later timestamp with lower chain_tip_height (honest nodes never reorg themselves).
+    ChainTipRegression,
+    /// Same proposed_height but different proposed_hash (competing proposals).
+    CompetingProposals,
+}
+
+/// Evidence that a node sent contradictory NodeAnnounce messages.
+///
+/// Only flags contradictions that are **logically impossible** for an honest node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnounceEquivocationEvidence {
+    /// The node's identity key.
+    pub identity_key: NoblePublicKey,
+    /// First announcement.
+    pub announce_a: crate::NodeAnnounce,
+    /// Conflicting announcement.
+    pub announce_b: crate::NodeAnnounce,
+    /// Type of impossible contradiction.
+    pub contradiction: AnnounceContradiction,
+}
+
+impl AnnounceEquivocationEvidence {
+    /// Verify that this evidence is valid:
+    /// 1. Same identity key on both announces
+    /// 2. Both signatures are valid
+    /// 3. The claimed contradiction actually holds
+    pub fn verify(&self) -> Result<(), EvidenceError> {
+        // 1. Same identity key
+        if self.announce_a.identity_key != self.announce_b.identity_key
+            || self.identity_key != self.announce_a.identity_key
+        {
+            return Err(EvidenceError::DifferentValidators);
+        }
+        // 2. Both signatures valid
+        self.announce_a
+            .verify_signature()
+            .map_err(|e| EvidenceError::InvalidSignature(format!("announce_a: {e}")))?;
+        self.announce_b
+            .verify_signature()
+            .map_err(|e| EvidenceError::InvalidSignature(format!("announce_b: {e}")))?;
+        // 3. Verify contradiction
+        match &self.contradiction {
+            AnnounceContradiction::ChainId => {
+                if self.announce_a.chain_id == self.announce_b.chain_id {
+                    return Err(EvidenceError::VerificationFailed);
+                }
+            }
+            AnnounceContradiction::ChainTipRegression => {
+                let (a_h, b_h) = (
+                    self.announce_a.chain_tip_height.unwrap_or(0),
+                    self.announce_b.chain_tip_height.unwrap_or(0),
+                );
+                let (a_t, b_t) = (self.announce_a.timestamp, self.announce_b.timestamp);
+                // Later timestamp must not have lower height
+                let regression = (a_t > b_t && a_h < b_h) || (b_t > a_t && b_h < a_h);
+                if !regression {
+                    return Err(EvidenceError::VerificationFailed);
+                }
+            }
+            AnnounceContradiction::CompetingProposals => {
+                let same_height = self.announce_a.proposed_height.is_some()
+                    && self.announce_a.proposed_height == self.announce_b.proposed_height;
+                let diff_hash = self.announce_a.proposed_hash != self.announce_b.proposed_hash;
+                if !same_height || !diff_hash {
+                    return Err(EvidenceError::VerificationFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Unified wrapper for all types of misbehavior evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MisbehaviorEvidence {
@@ -220,6 +443,10 @@ pub enum MisbehaviorEvidence {
     DoubleProposal(DoubleProposalEvidence),
     /// A validator voted for two different candidates in the same round.
     VoteEquivocation(VoteEquivocationEvidence),
+    /// A validator proposed a block that fails a universal validation check.
+    InvalidBlock(InvalidBlockEvidence),
+    /// A node sent contradictory NodeAnnounce messages.
+    AnnounceEquivocation(AnnounceEquivocationEvidence),
 }
 
 #[cfg(test)]

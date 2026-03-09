@@ -1326,10 +1326,54 @@ impl CycleEngine {
                 outputs.push(CycleIo::Log(format!(
                     "rejected invalid block from peer: {e}"
                 )));
-                outputs.push(CycleIo::BanPeer {
-                    peer_id: from_peer,
-                    reason: format!("invalid block: {e}"),
-                });
+                // Determine if the failure is evidence-capable (universal check).
+                let evidence_code = match &e {
+                    noble_core::ValidationError::BlockTooLarge { size, max } =>
+                        Some(noble_core::InvalidBlockCode::BlockTooLarge { size: *size, max: *max }),
+                    noble_core::ValidationError::MerkleRootMismatch =>
+                        Some(noble_core::InvalidBlockCode::MerkleRootMismatch),
+                    noble_core::ValidationError::ValidatorSigInvalid(_) =>
+                        Some(noble_core::InvalidBlockCode::ValidatorSigInvalid),
+                    noble_core::ValidationError::TxCountMismatch { claimed, actual } =>
+                        Some(noble_core::InvalidBlockCode::TxCountMismatch { claimed: *claimed, actual: *actual }),
+                    noble_core::ValidationError::DuplicateTxInBlock { first, second } =>
+                        Some(noble_core::InvalidBlockCode::DuplicateTxInBlock { first: *first, second: *second }),
+                    noble_core::ValidationError::ValidatorSchemeUnrecognized(s) =>
+                        Some(noble_core::InvalidBlockCode::ValidatorSchemeUnrecognized(*s)),
+                    noble_core::ValidationError::InvalidTransaction { index, source } =>
+                        Some(noble_core::InvalidBlockCode::InvalidTransaction { index: *index, reason: source.to_string() }),
+                    _ => None, // B2/B3/B5/B6/B9/B10/B13 — local checks, no universal evidence
+                };
+                if let Some(code) = evidence_code {
+                    let evidence = noble_core::InvalidBlockEvidence {
+                        block: (*block).clone(),
+                        failure_code: code,
+                    };
+                    if evidence.verify(self.chain_id).is_ok() {
+                        outputs.push(CycleIo::PublishEvidence(Box::new(
+                            noble_core::MisbehaviorEvidence::InvalidBlock(evidence),
+                        )));
+                        outputs.push(CycleIo::BanPeer {
+                            peer_id: from_peer,
+                            category: noble_core::BanCategoryCode::InvalidBlock,
+                            reason: format!("invalid block (evidence verified): {e}"),
+                        });
+                    } else {
+                        // Evidence construction succeeded but verify() failed — unusual
+                        outputs.push(CycleIo::BanPeer {
+                            peer_id: from_peer,
+                            category: noble_core::BanCategoryCode::InvalidBlock,
+                            reason: format!("invalid block: {e}"),
+                        });
+                    }
+                } else {
+                    // Local-only check failure — ban without evidence
+                    outputs.push(CycleIo::BanPeer {
+                        peer_id: from_peer,
+                        category: noble_core::BanCategoryCode::InvalidBlock,
+                        reason: format!("invalid block: {e}"),
+                    });
+                }
             }
             return outputs;
         }
@@ -1395,6 +1439,7 @@ impl CycleEngine {
                 if evidence_verified {
                     outputs.push(CycleIo::BanPeer {
                         peer_id: from_peer,
+                        category: noble_core::BanCategoryCode::DuplicateProposal,
                         reason: format!(
                             "double proposal (evidence verified): existing {} (ts {}), \
                              new {} (ts {}), validator {}",
@@ -1493,7 +1538,7 @@ impl CycleEngine {
                 first_vote,
                 ..
             }) => {
-                // Construct evidence from both votes.
+                // Construct evidence from both votes — only ban if evidence verifies.
                 if let Some(first) = first_vote {
                     let evidence = noble_core::VoteEquivocationEvidence {
                         cycle: vote.cycle,
@@ -1508,12 +1553,21 @@ impl CycleEngine {
                         outputs.push(CycleIo::PublishEvidence(Box::new(
                             noble_core::MisbehaviorEvidence::VoteEquivocation(evidence),
                         )));
+                        outputs.push(CycleIo::BanPeer {
+                            peer_id: from_peer,
+                            category: noble_core::BanCategoryCode::InvalidVote,
+                            reason: format!("vote equivocation (evidence verified) in round {round}"),
+                        });
+                    } else {
+                        outputs.push(CycleIo::Log(
+                            "WARNING: vote equivocation evidence failed verification — NOT banning".to_string(),
+                        ));
                     }
+                } else {
+                    outputs.push(CycleIo::Log(
+                        "WARNING: vote equivocation detected but first vote unavailable — NOT banning".to_string(),
+                    ));
                 }
-                outputs.push(CycleIo::BanPeer {
-                    peer_id: from_peer,
-                    reason: format!("vote equivocation in round {round}"),
-                });
             }
             Err(crate::vote::VoteError::WrongCycle { .. }) => {
                 outputs.push(CycleIo::Log(format!(

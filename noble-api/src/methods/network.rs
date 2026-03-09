@@ -146,7 +146,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     connected_at: entry.connected_at,
                     ban_score: entry.ban_score,
                     misbehavior_categories: cat_names,
-                    last_ban_reason: None,
+                    last_ban_reason: entry.last_ban_reason.as_ref().map(|(cat, subj)| {
+                        crate::types::BanReasonResponse {
+                            category: cat.clone(),
+                            subject: subj.clone(),
+                        }
+                    }),
                     status: "connected".to_string(),
                     chain_tip_height: entry.chain_tip_height,
                     chain_tip_hash: entry.chain_tip_hash.clone(),
@@ -453,6 +458,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                             reason_subject: e.reason_subject,
                             reason_codes: e.reason_codes,
                             node_name: name_map.get(&pid_hex).cloned(),
+                            evidence_hash: e.evidence_hash,
                         }
                     })
                     .collect();
@@ -489,7 +495,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let banned_until = now + dur;
         {
             let storage = self.storage.read();
-            let _ = storage.store_ban(&peer_bytes, banned_until, 0x0C); // ManualBan
+            let _ = storage.store_ban(&peer_bytes, banned_until, 0x0C, None); // ManualBan
         }
 
         Ok(serde_json::json!({ "success": true, "banned_until": banned_until }))

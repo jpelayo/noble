@@ -100,6 +100,18 @@ impl BanCategory {
         }
     }
 
+    /// Returns `true` for categories that can produce cryptographic evidence.
+    pub fn is_evidence_capable(&self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateProposal
+                | Self::InvalidVote
+                | Self::InvalidBlock
+                | Self::EvidenceReceived
+                | Self::Misrepresentation
+        )
+    }
+
     /// Human-readable name for display in RPC/GUI.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -119,6 +131,12 @@ impl BanCategory {
     }
 }
 
+impl From<noble_core::BanCategoryCode> for BanCategory {
+    fn from(code: noble_core::BanCategoryCode) -> Self {
+        Self::from_u8(code as u8).unwrap_or(Self::ProtocolViolation)
+    }
+}
+
 /// A ban reason combining a fixed category with a human-readable subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BanReason {
@@ -126,6 +144,8 @@ pub struct BanReason {
     /// Free-text clarification (e.g. "block hash 0xab12… failed B3: merkle root mismatch").
     /// Capped at 256 chars. Empty string is valid.
     pub subject: String,
+    /// SHA-256 of the CBOR-encoded evidence that backs this ban (if any).
+    pub evidence_hash: Option<[u8; 32]>,
 }
 
 impl BanReason {
@@ -133,7 +153,14 @@ impl BanReason {
     pub fn new(category: BanCategory, subject: impl Into<String>) -> Self {
         let mut subject = subject.into();
         subject.truncate(256);
-        Self { category, subject }
+        Self { category, subject, evidence_hash: None }
+    }
+
+    /// Create a ban reason with an evidence hash.
+    pub fn with_evidence(category: BanCategory, subject: impl Into<String>, hash: [u8; 32]) -> Self {
+        let mut subject = subject.into();
+        subject.truncate(256);
+        Self { category, subject, evidence_hash: Some(hash) }
     }
 }
 
@@ -208,11 +235,16 @@ const MASS_BAN_COOLDOWN_SECS: u64 = 300;
 #[derive(Debug)]
 pub enum MisbehaviorOutcome {
     /// Peer was banned (score exceeded threshold).
-    Banned,
+    Banned {
+        category: u8,
+        evidence_hash: Option<[u8; 32]>,
+    },
     /// Score increased but peer not yet banned.
     ScoreUpdated {
         ban_score: u32,
         categories: Vec<u8>,
+        last_category: u8,
+        last_reason: String,
     },
     /// Penalty was suppressed (rate-limit or peer not found).
     Suppressed,
@@ -221,7 +253,7 @@ pub enum MisbehaviorOutcome {
 impl MisbehaviorOutcome {
     /// Returns `true` if the peer was banned.
     pub fn is_banned(&self) -> bool {
-        matches!(self, Self::Banned)
+        matches!(self, Self::Banned { .. })
     }
 }
 
@@ -235,6 +267,8 @@ pub struct BanEntry {
     pub score: u32,
     /// Free-text subject from the triggering offense (capped at 256 chars).
     pub subject: String,
+    /// SHA-256 of the CBOR-encoded evidence that backs this ban (if any).
+    pub evidence_hash: Option<[u8; 32]>,
 }
 
 /// Manages connected peers, enforces connection limits, and tracks ban scores.
@@ -357,6 +391,7 @@ impl PeerManager {
             categories,
             score,
             subject: reason.subject,
+            evidence_hash: reason.evidence_hash,
         });
         self.banned_count += 1;
         tracing::info!(task = "peer_ban", %peer_id, "peer force-banned");
@@ -413,6 +448,8 @@ impl PeerManager {
             state.ban_score = state.ban_score.saturating_add(penalty);
             state.last_misbehavior = Some(now);
             state.misbehavior_categories.push(reason.category);
+            let last_cat_u8 = reason.category as u8;
+            let last_reason_str = reason.subject.clone();
             state.last_ban_reason = Some(reason);
 
             let current_score = state.ban_score;
@@ -440,6 +477,8 @@ impl PeerManager {
                         return MisbehaviorOutcome::ScoreUpdated {
                             ban_score: current_score,
                             categories: current_categories,
+                            last_category: last_cat_u8,
+                            last_reason: last_reason_str,
                         };
                     }
                     // Cooldown expired — clear it.
@@ -450,11 +489,17 @@ impl PeerManager {
                 let subject = state.last_ban_reason.as_ref()
                     .map(|r| r.subject.clone())
                     .unwrap_or_default();
+                let evidence_hash = state.last_ban_reason.as_ref()
+                    .and_then(|r| r.evidence_hash);
+                let ban_cat = state.last_ban_reason.as_ref()
+                    .map(|r| r.category as u8)
+                    .unwrap_or(0x03);
                 self.banned.insert(*peer_id, BanEntry {
                     banned_at: now,
                     categories,
                     score: current_score,
                     subject,
+                    evidence_hash,
                 });
                 self.peers.remove(peer_id);
                 self.banned_count += 1;
@@ -463,12 +508,17 @@ impl PeerManager {
                 if self.check_mass_ban() {
                     self.ban_cooldown = Some(now + Duration::from_secs(MASS_BAN_COOLDOWN_SECS));
                 }
-                return MisbehaviorOutcome::Banned;
+                return MisbehaviorOutcome::Banned {
+                    category: ban_cat,
+                    evidence_hash,
+                };
             }
 
             return MisbehaviorOutcome::ScoreUpdated {
                 ban_score: current_score,
                 categories: current_categories,
+                last_category: last_cat_u8,
+                last_reason: last_reason_str,
             };
         }
         MisbehaviorOutcome::Suppressed
@@ -511,14 +561,14 @@ impl PeerManager {
 
     /// Load persisted bans from storage at startup.
     ///
-    /// `bans` is a list of (peer_id_bytes, banned_until_unix, category_code) from storage.
+    /// `bans` is a list of (peer_id_bytes, banned_until_unix, category_code, evidence_hash) from storage.
     /// Only non-expired bans are imported.
-    pub fn load_persisted_bans(&mut self, bans: Vec<(Vec<u8>, u64, u8)>) {
+    pub fn load_persisted_bans(&mut self, bans: Vec<(Vec<u8>, u64, u8, Option<[u8; 32]>)>) {
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        for (peer_bytes, banned_until, cat_code) in bans {
+        for (peer_bytes, banned_until, cat_code, ev_hash) in bans {
             if banned_until > now_unix {
                 if let Ok(peer_id) = PeerId::from_bytes(&peer_bytes) {
                     // Compute the Instant when this ban was placed.
@@ -533,6 +583,7 @@ impl PeerManager {
                         categories: vec![category],
                         score: category.penalty(),
                         subject: String::new(),
+                        evidence_hash: ev_hash,
                     });
                 }
             }
@@ -721,6 +772,7 @@ impl PeerManager {
                 reason_category: primary_category.to_string(),
                 reason_subject: entry.subject.clone(),
                 reason_codes: entry.categories.iter().map(|c| *c as u8).collect(),
+                evidence_hash: entry.evidence_hash.map(hex::encode),
             });
         }
         entries
@@ -998,7 +1050,7 @@ mod tests {
             .as_secs();
         let banned_until = now_unix + 3600; // 1 hour from now
 
-        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04)]);
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04, None)]);
         assert!(pm.is_banned(&p));
         // Verify the category was restored
         let entry = pm.get_ban_entry(&p).unwrap();
@@ -1018,7 +1070,7 @@ mod tests {
             .as_secs();
         let banned_until = now_unix.saturating_sub(100); // 100s ago
 
-        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04)]);
+        pm.load_persisted_bans(vec![(peer_bytes, banned_until, 0x04, None)]);
         assert!(!pm.is_banned(&p));
     }
 

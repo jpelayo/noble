@@ -122,6 +122,10 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
     /// Incremented each time a block is committed with its voter count.
     pub chain_vote_weight: std::sync::atomic::AtomicU64,
+    /// Cache of last NodeAnnounce per identity_key (wire bytes) for equivocation detection.
+    /// Stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS) are evicted on each insert.
+    /// Capped at 1024 entries to bound memory usage.
+    pub announce_cache: parking_lot::Mutex<std::collections::HashMap<Vec<u8>, noble_core::NodeAnnounce>>,
 }
 
 impl Node<MemoryStorage> {
@@ -474,6 +478,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             discovered_blockchains_path: Some(discovered_path),
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
             chain_vote_weight: std::sync::atomic::AtomicU64::new(0),
+            announce_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -2113,6 +2118,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             proposed_height: None,
                             identity_key: None, // set when NodeAnnounce received
                             latency_ms: None,
+                            last_ban_reason: None,
                         },
                     );
                 }
@@ -2239,13 +2245,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "reason": reason,
                 }));
             }
-            NetworkEvent::PeerScoreUpdated { peer_id, ban_score, categories } => {
+            NetworkEvent::PeerScoreUpdated { peer_id, ban_score, categories, last_category, last_reason } => {
                 let hex_pid = hex::encode(peer_id);
                 {
+                    let cat_name = noble_network::BanCategory::from_u8(*last_category)
+                        .map(|c| c.as_str().to_string())
+                        .unwrap_or_else(|| format!("0x{:02x}", last_category));
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
                         entry.ban_score = *ban_score;
                         entry.misbehavior_categories = categories.clone();
+                        entry.last_ban_reason = Some((cat_name, last_reason.clone()));
                     }
                 }
                 let _ = peer_update_tx.send(serde_json::json!({
@@ -2255,7 +2265,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "categories": categories,
                 }));
             }
-            NetworkEvent::PeerBanned { peer_id, reason } => {
+            NetworkEvent::PeerBanned { peer_id, reason, category, evidence_hash } => {
+                // Persist ban to storage.
+                {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let banned_until = now_unix + 86_400; // 24h default ban duration
+                    let storage = self.storage.read();
+                    let _ = storage.store_ban(&peer_id, banned_until, *category, evidence_hash.as_ref());
+                }
                 let hex_pid = hex::encode(peer_id);
                 tracing::warn!(
                     task = "peer_tracking",
@@ -2511,6 +2531,87 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "software_version": announce.software_version,
                     "connected": is_connected,
                 }));
+                // Announce equivocation detection: compare with cached previous announce.
+                {
+                    let mut cache = self.announce_cache.lock();
+                    if let Some(prev) = cache.get(&identity_wire) {
+                        // Check for impossible contradictions.
+                        let contradiction = if prev.chain_id != 0 && announce.chain_id != 0
+                            && prev.chain_id != announce.chain_id
+                        {
+                            Some(noble_core::AnnounceContradiction::ChainId)
+                        } else if prev.chain_tip_height.is_some() && announce.chain_tip_height.is_some() {
+                            let prev_h = prev.chain_tip_height.unwrap_or(0);
+                            let ann_h = announce.chain_tip_height.unwrap_or(0);
+                            let prev_t = prev.timestamp;
+                            let ann_t = announce.timestamp;
+                            if (ann_t > prev_t && ann_h < prev_h) || (prev_t > ann_t && prev_h < ann_h) {
+                                Some(noble_core::AnnounceContradiction::ChainTipRegression)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        // Also check competing proposals.
+                        let contradiction = contradiction.or_else(|| {
+                            if prev.proposed_height.is_some()
+                                && prev.proposed_height == announce.proposed_height
+                                && prev.proposed_hash != announce.proposed_hash
+                            {
+                                Some(noble_core::AnnounceContradiction::CompetingProposals)
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(c) = contradiction {
+                            let evidence = noble_core::AnnounceEquivocationEvidence {
+                                identity_key: announce.identity_key.clone(),
+                                announce_a: prev.clone(),
+                                announce_b: (*announce).as_ref().clone(),
+                                contradiction: c,
+                            };
+                            if evidence.verify().is_ok() {
+                                tracing::warn!(
+                                    task = "evidence",
+                                    "announce equivocation detected for {}",
+                                    hex::encode(&identity_wire),
+                                );
+                                let cbor = noble_codec::NobleCbor::to_cbor(&noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence.clone())).unwrap_or_default();
+                                let ev_hash = noble_crypto::sha256(&cbor);
+                                if let Err(e) = self.storage.read().store_evidence(ev_hash.as_bytes(), &cbor) {
+                                    tracing::warn!(task = "evidence", "failed to store evidence: {e}");
+                                }
+                                self.consensus.write().reputation_mut().record_misbehavior(&identity_wire);
+                                let _ = network_cmd.try_send(NetworkCommand::PublishEvidence(
+                                    Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
+                                ));
+                            }
+                        }
+                    }
+                    // Evict stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS).
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if cache.len() > 512 {
+                        cache.retain(|_, a| now_ts.saturating_sub(a.timestamp) < noble_core::NODE_ANNOUNCE_MAX_AGE_SECS);
+                    }
+                    // Cap at 1024 entries to bound memory.
+                    if cache.len() >= 1024 {
+                        // Remove the oldest entry.
+                        if let Some(oldest_key) = cache.iter()
+                            .min_by_key(|(_, a)| a.timestamp)
+                            .map(|(k, _)| k.clone())
+                        {
+                            cache.remove(&oldest_key);
+                        }
+                    }
+                    // Update cache with latest announce.
+                    cache.insert(identity_wire.clone(), (*announce).as_ref().clone());
+                }
+
                 tracing::debug!(
                     task = "peer_tracking",
                     "Stored announce from {} ({})",
@@ -2525,6 +2626,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let evidence_type = match &**evidence {
                     noble_core::MisbehaviorEvidence::DoubleProposal(_) => "double_proposal",
                     noble_core::MisbehaviorEvidence::VoteEquivocation(_) => "vote_equivocation",
+                    noble_core::MisbehaviorEvidence::InvalidBlock(_) => "invalid_block",
+                    noble_core::MisbehaviorEvidence::AnnounceEquivocation(_) => "announce_equivocation",
                 };
                 tracing::warn!(
                     task = "evidence",
@@ -2532,6 +2635,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "Misbehavior evidence received from {}",
                     hex::encode(&peer_id),
                 );
+                // InvalidBlockEvidence requires chain_id for verification (deferred from
+                // service.rs which doesn't have chain_id). Verify here before accepting.
+                if let noble_core::MisbehaviorEvidence::InvalidBlock(e) = &**evidence {
+                    if e.verify(self.get_chain_id()).is_err() {
+                        tracing::warn!(
+                            task = "evidence",
+                            "InvalidBlockEvidence from {} failed verification — discarding",
+                            hex::encode(&peer_id),
+                        );
+                        return;
+                    }
+                }
                 // Store evidence.
                 let cbor = noble_codec::NobleCbor::to_cbor(&**evidence).unwrap_or_default();
                 let evidence_hash = noble_crypto::sha256(&cbor);
@@ -2542,6 +2657,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let misbehaver_wire = match &**evidence {
                     noble_core::MisbehaviorEvidence::DoubleProposal(e) => e.validator_id.to_wire_bytes(),
                     noble_core::MisbehaviorEvidence::VoteEquivocation(e) => e.voter_pubkey.to_wire_bytes(),
+                    noble_core::MisbehaviorEvidence::InvalidBlock(e) => e.block.header.validator_id.to_wire_bytes(),
+                    noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => e.identity_key.to_wire_bytes(),
                 };
                 self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
                 // GUI event.
@@ -2846,6 +2963,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         metrics: &Option<NobleMetrics>,
         shared_identity: &Arc<RwLock<NodeIdentityData>>,
     ) {
+        // Track the last evidence hash: when PublishEvidence is followed by BanPeer
+        // in the same batch, the hash is injected into the ban for operator auditability.
+        let mut last_evidence_hash: Option<[u8; 32]> = None;
+
         for action in actions {
             match action {
                 CycleIo::CommitBlock(block) => {
@@ -3320,16 +3441,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if let Err(e) = self.storage.read().store_evidence(evidence_hash.as_bytes(), &cbor) {
                         tracing::warn!(task = "evidence", "failed to store evidence: {e}");
                     }
+                    // Stash hash for the immediately following BanPeer action.
+                    last_evidence_hash = Some(*evidence_hash.as_bytes());
                     // Apply reputation penalty.
                     let misbehaver_wire = match &*evidence {
                         noble_core::MisbehaviorEvidence::DoubleProposal(e) => e.validator_id.to_wire_bytes(),
                         noble_core::MisbehaviorEvidence::VoteEquivocation(e) => e.voter_pubkey.to_wire_bytes(),
+                        noble_core::MisbehaviorEvidence::InvalidBlock(e) => e.block.header.validator_id.to_wire_bytes(),
+                        noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => e.identity_key.to_wire_bytes(),
                     };
                     self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
                     // Emit GUI event.
                     let evidence_type = match &*evidence {
                         noble_core::MisbehaviorEvidence::DoubleProposal(_) => "double_proposal",
                         noble_core::MisbehaviorEvidence::VoteEquivocation(_) => "vote_equivocation",
+                        noble_core::MisbehaviorEvidence::InvalidBlock(_) => "invalid_block",
+                        noble_core::MisbehaviorEvidence::AnnounceEquivocation(_) => "announce_equivocation",
                     };
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "evidence_published",
@@ -3482,11 +3609,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 "candidate_name": proposer_name.as_deref().unwrap_or(""),
                             }));
                         }
-                        CycleIo::BanPeer { peer_id, reason } => {
+                        CycleIo::BanPeer { peer_id, category, reason } => {
                             let _ = cycle_phase_tx.send(serde_json::json!({
                                 "event": "peer_banned",
-                                "peer_id": hex::encode(peer_id),
-                                "reason": reason,
+                                "peer_id": hex::encode(&peer_id),
+                                "category": format!("{:#04X}", *category as u8),
+                                "reason": &reason,
                             }));
                         }
                         CycleIo::RequestBlock { block_hash, .. } => {
@@ -3499,7 +3627,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                     // BroadcastVote, BanPeer, RequestBlock → network
                     let cmds = bridge::cycle_io_to_network_commands(other);
-                    for cmd in cmds {
+                    for mut cmd in cmds {
+                        // Inject evidence hash from the preceding PublishEvidence action.
+                        if let NetworkCommand::BanPeer { ref mut evidence_hash, .. } = cmd {
+                            if evidence_hash.is_none() {
+                                *evidence_hash = last_evidence_hash.take();
+                            }
+                        }
                         if let Err(e) = network_cmd.try_send(cmd) {
                             tracing::warn!(
                                 task = "consensus_broadcast",

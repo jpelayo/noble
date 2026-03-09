@@ -27,7 +27,9 @@ pub use debit::{resolve_debit_address, resolve_debit_address_enforced, DebitErro
 pub use encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
 pub use error::ValidationError;
 pub use evidence::{
-    DoubleProposalEvidence, EvidenceError, MisbehaviorEvidence, VoteEquivocationEvidence,
+    AnnounceContradiction, AnnounceEquivocationEvidence, BanCategoryCode,
+    DoubleProposalEvidence, EvidenceError, InvalidBlockCode, InvalidBlockEvidence,
+    MisbehaviorEvidence, VoteEquivocationEvidence,
 };
 pub use genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
 pub use merkle::{compute_merkle_root, MerkleProof};

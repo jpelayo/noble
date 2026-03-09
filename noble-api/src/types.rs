@@ -1135,6 +1135,9 @@ pub struct BannedPeerResponse {
     /// All misbehavior category codes that contributed to this ban (e.g. [1, 7]).
     pub reason_codes: Vec<u8>,
     pub node_name: Option<String>,
+    /// SHA-256 of the CBOR-encoded evidence (hex), if this ban is evidence-backed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_hash: Option<String>,
 }
 
 /// Response for `noble_getBadgeHolders`.

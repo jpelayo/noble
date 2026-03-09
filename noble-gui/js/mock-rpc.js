@@ -282,6 +282,8 @@ function makePeers(chainHeight) {
   const BAN_REASONS = [
     { category: 'InvalidTransaction', subject: 'failed T8: metadata key too long (128 chars max)' },
     { category: 'ProtocolViolation', subject: 'chain_id mismatch: expected 1, got 42' },
+    { category: 'DuplicateProposal', subject: 'double proposal (evidence verified): height 42' },
+    { category: 'InvalidVote', subject: 'vote equivocation (evidence verified) in round 1' },
   ];
   return PEER_IDS.map((peerId, i) => {
     const banScore = i === 22 ? 15 : i === 21 ? 5 : 0;
@@ -294,6 +296,7 @@ function makePeers(chainHeight) {
       country_code: MOCK_COUNTRIES[i] || null,
       connected_at: Math.floor(Date.now() / 1000) - (3600 + i * 120),
       ban_score: banScore,
+      misbehavior_categories: banScore > 0 ? [BAN_REASONS[i % BAN_REASONS.length].category] : [],
       last_ban_reason: banScore > 0 ? BAN_REASONS[i % BAN_REASONS.length] : null,
     };
   });

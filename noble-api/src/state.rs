@@ -91,6 +91,8 @@ pub struct PeerInfoEntry {
     pub identity_key: Option<Vec<u8>>,
     /// Round-trip latency in milliseconds (from libp2p ping). `None` if not yet measured.
     pub latency_ms: Option<u64>,
+    /// Last ban reason category + subject (from most recent misbehavior).
+    pub last_ban_reason: Option<(String, String)>,
 }
 
 /// Shared state available to all RPC method handlers.

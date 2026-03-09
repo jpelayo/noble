@@ -26,17 +26,8 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
                 round: vote.round,
             }]
         }
-        CycleIo::BanPeer { peer_id, reason } => {
-            let category = if reason.starts_with("invalid block") {
-                0x01
-            } else if reason.starts_with("double proposal") {
-                0x04
-            } else if reason.starts_with("vote equivocation") {
-                0x07
-            } else {
-                0x03
-            };
-            vec![NetworkCommand::BanPeer { peer_id, category, reason }]
+        CycleIo::BanPeer { peer_id, category, reason } => {
+            vec![NetworkCommand::BanPeer { peer_id, category: category as u8, reason, evidence_hash: None }]
         }
         CycleIo::RequestBlock {
             peer_id,

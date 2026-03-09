@@ -584,11 +584,13 @@ export function init(root, ctx) {
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received': {
-        const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
+        const etypes = { vote_equivocation: 'Vote equivocation', double_proposal: 'Double-proposal', invalid_block: 'Invalid block', announce_equivocation: 'Announce equivocation' };
+        const etype = etypes[data.type] || data.type;
         return `${etype} evidence from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       }
       case 'evidence_published': {
-        const etype = data.type === 'vote_equivocation' ? 'Vote equivocation' : 'Double-proposal';
+        const etypes = { vote_equivocation: 'Vote equivocation', double_proposal: 'Double-proposal', invalid_block: 'Invalid block', announce_equivocation: 'Announce equivocation' };
+        const etype = etypes[data.type] || data.type;
         return `${etype} evidence published ({${truncateHash(data.evidence_hash || '')}})`;
       }
       case 'peer_wrong_chain':

@@ -903,6 +903,12 @@ async fn handle_swarm_event(
                         GossipMessage::VoteEquivocationEvidence { evidence_bytes } => {
                             handle_vote_equivocation(&evidence_bytes, peer_bytes)
                         }
+                        GossipMessage::InvalidBlockEvidence { evidence_bytes } => {
+                            handle_invalid_block_evidence(&evidence_bytes, peer_bytes)
+                        }
+                        GossipMessage::AnnounceEquivocationEvidence { evidence_bytes } => {
+                            handle_announce_equivocation_evidence(&evidence_bytes, peer_bytes)
+                        }
                     };
                     if let Some(evt) = net_event {
                         // Votes are consensus-critical — use blocking send
@@ -1465,17 +1471,21 @@ fn emit_misbehavior_event(
 ) {
     let peer_bytes = peer_id.to_bytes().to_vec();
     match outcome {
-        MisbehaviorOutcome::Banned => {
+        MisbehaviorOutcome::Banned { category, evidence_hash } => {
             let _ = event_tx.try_send(NetworkEvent::PeerBanned {
                 peer_id: peer_bytes,
                 reason: reason.to_string(),
+                category: *category,
+                evidence_hash: *evidence_hash,
             });
         }
-        MisbehaviorOutcome::ScoreUpdated { ban_score, categories } => {
+        MisbehaviorOutcome::ScoreUpdated { ban_score, categories, last_category, last_reason } => {
             let _ = event_tx.try_send(NetworkEvent::PeerScoreUpdated {
                 peer_id: peer_bytes,
                 ban_score: *ban_score,
                 categories: categories.clone(),
+                last_category: *last_category,
+                last_reason: last_reason.clone(),
             });
         }
         MisbehaviorOutcome::Suppressed => {}
@@ -1529,6 +1539,54 @@ fn handle_vote_equivocation(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Optio
         },
         Err(e) => {
             tracing::debug!(task = "gossip_receive", %e, "failed to decode vote equivocation CBOR");
+            None
+        }
+    }
+}
+
+/// Handle an invalid block evidence gossip message.
+fn handle_invalid_block_evidence(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
+    match ciborium::from_reader::<noble_core::InvalidBlockEvidence, _>(evidence_bytes) {
+        Ok(evidence) => {
+            // NOTE: We can't verify InvalidBlockEvidence here because it requires chain_id.
+            // The node.rs EvidenceReceived handler will verify it.
+            tracing::warn!(
+                task = "gossip_receive",
+                "invalid block evidence received (verification deferred to node)"
+            );
+            Some(NetworkEvent::EvidenceReceived {
+                peer_id: peer_bytes,
+                evidence: Box::new(noble_core::MisbehaviorEvidence::InvalidBlock(evidence)),
+            })
+        }
+        Err(e) => {
+            tracing::debug!(task = "gossip_receive", %e, "failed to decode invalid block evidence CBOR");
+            None
+        }
+    }
+}
+
+/// Handle an announce equivocation evidence gossip message.
+fn handle_announce_equivocation_evidence(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
+    match ciborium::from_reader::<noble_core::AnnounceEquivocationEvidence, _>(evidence_bytes) {
+        Ok(evidence) => match evidence.verify() {
+            Ok(()) => {
+                tracing::warn!(
+                    task = "gossip_receive",
+                    "valid announce equivocation evidence received"
+                );
+                Some(NetworkEvent::EvidenceReceived {
+                    peer_id: peer_bytes,
+                    evidence: Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
+                })
+            }
+            Err(e) => {
+                tracing::debug!(task = "gossip_receive", %e, "invalid announce equivocation evidence rejected");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::debug!(task = "gossip_receive", %e, "failed to decode announce equivocation CBOR");
             None
         }
     }
@@ -1828,6 +1886,20 @@ async fn handle_command(
                     }
                     (GossipMessage::VoteEquivocationEvidence { evidence_bytes: bytes }, "vote_equivocation")
                 }
+                noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
+                    let mut bytes = Vec::new();
+                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                        return false;
+                    }
+                    (GossipMessage::InvalidBlockEvidence { evidence_bytes: bytes }, "invalid_block")
+                }
+                noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
+                    let mut bytes = Vec::new();
+                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                        return false;
+                    }
+                    (GossipMessage::AnnounceEquivocationEvidence { evidence_bytes: bytes }, "announce_equivocation")
+                }
             };
             if let Ok(data) = codec::encode_gossip(&gossip_msg) {
                 let topic = IdentTopic::new(topics::TOPIC_EVIDENCE);
@@ -1912,14 +1984,19 @@ async fn handle_command(
             }
         }
 
-        NetworkCommand::BanPeer { peer_id, category, reason } => {
+        NetworkCommand::BanPeer { peer_id, category, reason, evidence_hash } => {
             if let Ok(pid) = PeerId::from_bytes(&peer_id) {
                 let ban_cat = BanCategory::from_u8(category)
                     .unwrap_or(BanCategory::ProtocolViolation);
                 let reason_clone = reason.clone();
+                let ban_reason = if let Some(hash) = evidence_hash {
+                    BanReason::with_evidence(ban_cat, reason, hash)
+                } else {
+                    BanReason::new(ban_cat, reason)
+                };
                 let outcome = peer_manager.record_misbehavior(
                     &pid,
-                    BanReason::new(ban_cat, reason),
+                    ban_reason,
                 );
                 emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
                 let _ = swarm.disconnect_peer_id(pid);

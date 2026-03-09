@@ -1632,6 +1632,12 @@ fn decode_evidence_summary(cbor: &[u8]) -> Option<(String, String)> {
         noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
             ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()))
         }
+        noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
+            ("invalid_block".to_string(), hex::encode(e.block.header.validator_id.to_wire_bytes()))
+        }
+        noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
+            ("announce_equivocation".to_string(), hex::encode(e.identity_key.to_wire_bytes()))
+        }
     };
     Some((ty, validator))
 }
@@ -1660,6 +1666,23 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
                 "candidate_b": hex::encode(e.candidate_b.as_bytes()),
             });
             ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()), detail)
+        }
+        noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
+            let detail = serde_json::json!({
+                "block_height": e.block.header.height,
+                "block_hash": e.block.header.compute_block_hash()
+                    .map(|h| hex::encode(h.as_bytes())).unwrap_or_default(),
+                "failure_code": format!("{:?}", e.failure_code),
+            });
+            ("invalid_block".to_string(), hex::encode(e.block.header.validator_id.to_wire_bytes()), detail)
+        }
+        noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
+            let detail = serde_json::json!({
+                "contradiction": format!("{:?}", e.contradiction),
+                "announce_a_timestamp": e.announce_a.timestamp,
+                "announce_b_timestamp": e.announce_b.timestamp,
+            });
+            ("announce_equivocation".to_string(), hex::encode(e.identity_key.to_wire_bytes()), detail)
         }
     };
     Some((ty, validator, detail))

@@ -114,6 +114,16 @@ pub enum GossipMessage {
         /// CBOR-encoded `VoteEquivocationEvidence`.
         evidence_bytes: Vec<u8>,
     },
+    /// Broadcast invalid block evidence (sent on `TOPIC_EVIDENCE`).
+    InvalidBlockEvidence {
+        /// CBOR-encoded `InvalidBlockEvidence`.
+        evidence_bytes: Vec<u8>,
+    },
+    /// Broadcast announce equivocation evidence (sent on `TOPIC_EVIDENCE`).
+    AnnounceEquivocationEvidence {
+        /// CBOR-encoded `AnnounceEquivocationEvidence`.
+        evidence_bytes: Vec<u8>,
+    },
     /// Broadcast a node identity announcement (sent on `TOPIC_NODE_ANNOUNCE`).
     NodeAnnounce {
         identity_key: Vec<u8>,
@@ -207,6 +217,8 @@ pub enum NetworkCommand {
         /// BanCategory discriminant (0x01..0x0C). See `peer_manager::BanCategory`.
         category: u8,
         reason: String,
+        /// SHA-256 of the CBOR-encoded evidence that backs this ban (if any).
+        evidence_hash: Option<[u8; 32]>,
     },
     /// Gracefully disconnect a peer without banning (e.g. different chain).
     DisconnectPeer(Vec<u8>),
@@ -247,6 +259,8 @@ pub struct BannedPeerEntry {
     pub reason_subject: String,
     /// All misbehavior category codes that contributed to this ban (e.g. [0x01, 0x07]).
     pub reason_codes: Vec<u8>,
+    /// SHA-256 of the CBOR-encoded evidence (hex), if this ban is evidence-backed.
+    pub evidence_hash: Option<String>,
 }
 
 /// Events emitted from the network service to the node.
@@ -292,9 +306,18 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         ban_score: u32,
         categories: Vec<u8>,
+        /// Category code of the latest misbehavior that triggered this update.
+        last_category: u8,
+        /// Human-readable reason for the latest misbehavior.
+        last_reason: String,
     },
     /// A peer was banned for misbehavior.
-    PeerBanned { peer_id: Vec<u8>, reason: String },
+    PeerBanned {
+        peer_id: Vec<u8>,
+        reason: String,
+        category: u8,
+        evidence_hash: Option<[u8; 32]>,
+    },
     /// A node identity announcement was received from a peer.
     NodeAnnounceReceived {
         peer_id: Vec<u8>,

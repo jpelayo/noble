@@ -104,14 +104,14 @@ pub trait StorageEngine {
     /// Used for median-of-11 timestamp validation (B13).
     fn get_recent_timestamps(&self, count: usize) -> Result<Vec<u64>, StorageError>;
 
-    /// Store a peer ban (peer_id bytes → banned_until unix timestamp + category code).
-    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8) -> Result<(), StorageError>;
+    /// Store a peer ban (peer_id bytes → banned_until unix timestamp + category code + optional evidence hash).
+    fn store_ban(&self, peer_id: &[u8], banned_until: u64, category_code: u8, evidence_hash: Option<&[u8; 32]>) -> Result<(), StorageError>;
 
     /// Remove a peer ban.
     fn remove_ban(&self, peer_id: &[u8]) -> Result<(), StorageError>;
 
-    /// Load all persisted bans. Returns (peer_id_bytes, banned_until_unix, category_code).
-    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8)>, StorageError>;
+    /// Load all persisted bans. Returns (peer_id_bytes, banned_until_unix, category_code, evidence_hash).
+    fn load_bans(&self) -> Result<Vec<(Vec<u8>, u64, u8, Option<[u8; 32]>)>, StorageError>;
 
     /// Roll back the chain to a specific height, removing all blocks above it.
     /// Recalculates balances by replaying from genesis.
