@@ -1003,6 +1003,7 @@ export function init(root, ctx) {
       disambiguation: entry.disambiguation,
       winner: entry.winner,
       winning_hash: entry.winning_hash,
+      finalized_at: entry.finalized_at || null,
       phases: [
         {
           name: 'Block Proposal',
@@ -1170,11 +1171,13 @@ export function init(root, ctx) {
 
       const header = document.createElement('div');
       header.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-xs)';
+      const timeLabel = cycle.finalized_at ? new Date(cycle.finalized_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
       header.innerHTML = `
         <span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span>
         <span style="font-size:var(--font-size-xs);color:${statusColor};font-weight:600">${statusLabel}</span>
         ${disambigBadge}
         ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong title="${cycle.winner}">${getValidatorDisplayName(cycle.winner, 10)}</strong></span>` : ''}
+        ${timeLabel ? `<span style="${cycle.winner ? '' : 'margin-left:auto;'}font-size:var(--font-size-xs);color:var(--text-muted)">${timeLabel}</span>` : ''}
       `;
       row.appendChild(header);
 
@@ -1317,7 +1320,8 @@ export function init(root, ctx) {
               const r2 = voteEntry.r2_vote_count || 0;
               const displayVotes = r2 > 0 ? r2 : r1;
               const pct = votingPhase.total_voters > 0 ? Math.min(100, Math.round(displayVotes / votingPhase.total_voters * 100)) : 0;
-              const roundLabel = r2 > 0
+              // Only show R1/R2 breakdown when R2 changed the outcome (R2 != R1).
+              const roundLabel = (r2 > 0 && r2 !== r1)
                 ? ` <span style="color:var(--text-muted);font-weight:400">(R1:${r1} R2:${r2})</span>`
                 : '';
               card.innerHTML += `

@@ -1719,10 +1719,16 @@ impl CycleEngine {
                     return outputs;
                 }
                 outputs.push(CycleIo::BroadcastBlock(block_box));
+                let hash_hex = format!("{}", block_hash);
+                let hash_short = if hash_hex.len() > 13 {
+                    format!("{{{}...{}}}", &hash_hex[..5], &hash_hex[hash_hex.len()-8..])
+                } else {
+                    format!("{{{hash_hex}}}")
+                };
                 outputs.push(CycleIo::Log(format!(
                     "cycle {}: proposed block {} ({} txs) at height {}",
                     self.cycle_label(),
-                    block_hash,
+                    hash_short,
                     txs.len(),
                     self.tip_height + 1
                 )));

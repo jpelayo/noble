@@ -803,11 +803,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 task = "reconnect",
                 "Low connectivity ({peer_count} peers) — redialing {dialed} known addresses"
             );
-            let _ = activity_tx.send(serde_json::json!({
-                "event": "reconnect_attempt",
-                "addresses": dialed,
-                "current_peers": peer_count,
-            }));
+            // Only show in GUI when we have at least 1 peer (suppresses
+            // startup spam while waiting for the first connection).
+            if peer_count > 0 {
+                let _ = activity_tx.send(serde_json::json!({
+                    "event": "reconnect_attempt",
+                    "addresses": dialed,
+                    "current_peers": peer_count,
+                }));
+            }
         }
     }
 
@@ -2032,12 +2036,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 // Peer status polling — request chain tips from all peers (fork detection)
                 _ = peer_status_interval.tick() => {
-                    if let Err(e) = network_cmd.try_send(NetworkCommand::RequestSync) {
-                        tracing::warn!(task = "sync", "periodic RequestSync dropped: {e}");
+                    let peer_count = self.network_stats.read().peer_count;
+                    if peer_count > 0 {
+                        if let Err(e) = network_cmd.try_send(NetworkCommand::RequestSync) {
+                            tracing::warn!(task = "sync", "periodic RequestSync dropped: {e}");
+                        }
                     }
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "sync_requested",
-                    }));
                 }
 
                 // Auto-reconnect: redial when connectivity is low.
