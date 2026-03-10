@@ -1888,6 +1888,7 @@ async fn handle_command(
         NetworkCommand::RequestSync => {
             // Request status from all connected peers to discover who's ahead.
             let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+            tracing::info!(task = "sync_trace", "RequestSync: sending GetStatus to {} peers", peers.len());
             for pid in peers {
                 swarm
                     .behaviour_mut()
