@@ -24,7 +24,7 @@ pub enum VotingStrategy {
     FirstValid,
 
     /// Always vote for a specific validator's block (by public key hex).
-    /// Falls back to `FirstValid` if that validator doesn't propose.
+    /// Falls back to FollowMajority → Random if that validator doesn't propose.
     FixedValidator {
         /// Hex-encoded public key of the preferred validator.
         validator_key: String,
@@ -32,7 +32,7 @@ pub enum VotingStrategy {
 
     /// Rotate through accepted validators in deterministic order (sorted by pubkey).
     /// Each cycle, the "preferred" validator advances by one position.
-    /// Falls back to `FirstValid` if the expected validator doesn't propose.
+    /// Falls back to FollowMajority → Random if the expected validator doesn't propose.
     RoundRobin,
 
     /// Rotate through a user-defined subset of preferred validators.
@@ -46,11 +46,11 @@ pub enum VotingStrategy {
     Random,
 
     /// Vote for the candidate from the validator with the highest weight.
-    /// Falls back to `FirstValid` on tie.
+    /// Ties broken by insertion order (stable sort).
     WeightedReputation,
 
     /// Follow the majority: vote for the candidate with the most votes so far.
-    /// Falls back to `FirstValid` if no votes observed yet.
+    /// Falls back to Random if no votes observed yet.
     FollowMajority,
 
     /// Do not auto-vote. Wait for operator input via RPC (`noble_castVote`).
@@ -99,42 +99,38 @@ pub fn select_candidate(
     }
 
     match strategy {
-        VotingStrategy::FirstValid => first_valid(&all),
+        VotingStrategy::FirstValid => first_validator(&all),
 
         VotingStrategy::FixedValidator { validator_key } => {
             let target_bytes = hex::decode(validator_key).ok()?;
-            // Find candidate from the specified validator
             for entry in &all {
                 let val_wire = entry.block.header.validator_id.to_wire_bytes();
                 if val_wire == target_bytes {
                     return Some(entry.block_hash);
                 }
             }
-            // Fallback to FirstValid
-            first_valid(&all)
+            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::RoundRobin => {
             let validators = validator_list.ordered_validator_keys();
             if validators.is_empty() {
-                return first_valid(&all);
+                return fallback(&all, vote_tallies, current_cycle);
             }
             let idx = (current_cycle as usize) % validators.len();
             let preferred = &validators[idx];
-            // Check if the preferred validator proposed
             for entry in &all {
                 let val_wire = entry.block.header.validator_id.to_wire_bytes();
                 if val_wire == *preferred {
                     return Some(entry.block_hash);
                 }
             }
-            // Fallback
-            first_valid(&all)
+            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::SubsetRotation { validators } => {
             if validators.is_empty() {
-                return first_valid(&all);
+                return fallback(&all, vote_tallies, current_cycle);
             }
             let idx = (current_cycle as usize) % validators.len();
             let target_bytes = hex::decode(&validators[idx]).ok()?;
@@ -144,7 +140,7 @@ pub fn select_candidate(
                     return Some(entry.block_hash);
                 }
             }
-            first_valid(&all)
+            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::Random => {
@@ -165,29 +161,15 @@ pub fn select_candidate(
                 })
                 .collect();
             scored.sort_by(|a, b| b.1.cmp(&a.1));
-            // If top candidates have equal weight, pick the first seen (stable sort).
             scored.first().map(|(h, _)| *h)
         }
 
-        VotingStrategy::FollowMajority => {
-            if let Some(tallies) = vote_tallies {
-                if !tallies.is_empty() {
-                    // Pick candidate with most votes.
-                    let mut sorted: Vec<(Hash256, usize)> =
-                        tallies.iter().map(|(h, c)| (*h, *c)).collect();
-                    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-                    // If tied, pick the first (arbitrary but no hash-based tiebreaker).
-                    return sorted.first().map(|(h, _)| *h);
-                }
-            }
-            // No tallies available — fall back to FirstValid.
-            first_valid(&all)
-        }
+        VotingStrategy::FollowMajority => fallback(&all, vote_tallies, current_cycle),
 
         VotingStrategy::WeightedProbability => {
             let validators = validator_list.ordered_validator_keys();
             if validators.is_empty() {
-                return first_valid(&all);
+                return fallback(&all, vote_tallies, current_cycle);
             }
             let n = validators.len();
             let total_weight = n * (n + 1) / 2;
@@ -208,16 +190,43 @@ pub fn select_candidate(
                     return Some(entry.block_hash);
                 }
             }
-            first_valid(&all)
+            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::Manual => manual_vote,
     }
 }
 
-/// Helper: return the first-seen candidate's hash.
-fn first_valid(all: &[&crate::candidate::CandidateEntry]) -> Option<Hash256> {
+/// Helper: return the first-seen candidate's hash (insertion order).
+/// Used by the explicit `FirstValid` strategy — intentionally latency-biased:
+/// "vote for the first valid candidate block received."
+fn first_validator(all: &[&crate::candidate::CandidateEntry]) -> Option<Hash256> {
     all.first().map(|e| e.block_hash)
+}
+
+/// Fallback chain: FollowMajority → Random → None (don't vote).
+/// Used when a strategy's primary logic can't pick (validator offline, empty list, etc.).
+fn fallback(
+    all: &[&crate::candidate::CandidateEntry],
+    vote_tallies: Option<&HashMap<Hash256, usize>>,
+    current_cycle: u64,
+) -> Option<Hash256> {
+    // Step 1: Follow majority — pick the vote leader.
+    if let Some(tallies) = vote_tallies {
+        if !tallies.is_empty() {
+            let mut sorted: Vec<(Hash256, usize)> =
+                tallies.iter().map(|(h, c)| (*h, *c)).collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            return sorted.first().map(|(h, _)| *h);
+        }
+    }
+    // Step 2: Random — deterministic pick using cycle number.
+    if !all.is_empty() {
+        let idx = current_cycle as usize % all.len();
+        return Some(all[idx].block_hash);
+    }
+    // Step 3: No candidates — don't vote.
+    None
 }
 
 #[cfg(test)]
@@ -285,6 +294,7 @@ mod tests {
         let (tracker, infos) = setup_tracker_3();
         let vl = ValidatorList::new();
         let result = select_candidate(&VotingStrategy::FirstValid, &tracker, &vl, 0, None, None);
+        // FirstValid returns the first candidate inserted (insertion order = arrival time)
         assert_eq!(result, Some(infos[0].1));
     }
 
@@ -301,14 +311,15 @@ mod tests {
     }
 
     #[test]
-    fn fixed_validator_fallback_to_first() {
+    fn fixed_validator_fallback_no_tallies() {
         let (tracker, infos) = setup_tracker_3();
         let vl = ValidatorList::new();
         let strategy = VotingStrategy::FixedValidator {
             validator_key: "deadbeef".to_string(),
         };
+        // No tallies → FollowMajority has nothing → Random picks cycle % len
         let result = select_candidate(&strategy, &tracker, &vl, 0, None, None);
-        // Falls back to first valid
+        // cycle=0, 0 % 3 = 0 → first candidate
         assert_eq!(result, Some(infos[0].1));
     }
 
@@ -343,6 +354,7 @@ mod tests {
     fn follow_majority_fallback_no_tallies() {
         let (tracker, infos) = setup_tracker_3();
         let vl = ValidatorList::new();
+        // No tallies → Random picks cycle % len
         let result = select_candidate(
             &VotingStrategy::FollowMajority,
             &tracker,
@@ -351,7 +363,18 @@ mod tests {
             None,
             None,
         );
+        // cycle=0, 0 % 3 = 0 → first candidate
         assert_eq!(result, Some(infos[0].1));
+        // cycle=1 should pick a different candidate
+        let r1 = select_candidate(
+            &VotingStrategy::FollowMajority,
+            &tracker,
+            &vl,
+            1,
+            None,
+            None,
+        );
+        assert_eq!(r1, Some(infos[1].1));
     }
 
     #[test]
@@ -484,6 +507,7 @@ mod tests {
     fn weighted_probability_fallback_empty() {
         let (tracker, infos) = setup_tracker_3();
         let vl = ValidatorList::new(); // empty validator list
+        // No tallies → FollowMajority has nothing → Random picks cycle % len
         let result = select_candidate(
             &VotingStrategy::WeightedProbability,
             &tracker,
@@ -492,7 +516,7 @@ mod tests {
             None,
             None,
         );
-        // Falls back to FirstValid
+        // cycle=0, 0 % 3 = 0 → first candidate
         assert_eq!(result, Some(infos[0].1));
     }
 }

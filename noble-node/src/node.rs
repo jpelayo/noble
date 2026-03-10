@@ -1852,11 +1852,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                     .collect();
                                 if let Some(peer_entry) = peers_on_fork.first() {
                                     if let Ok(pid_bytes) = hex::decode(&peer_entry.peer_id) {
-                                        let _ = network_cmd.try_send(noble_network::NetworkCommand::FindCommonAncestor {
+                                        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::FindCommonAncestor {
                                             peer_id: pid_bytes,
                                             local_height: tip_h,
                                             peer_height: remote_group.height,
-                                        });
+                                        }) {
+                                            tracing::warn!(task = "fork", "FindCommonAncestor dropped: {e}");
+                                        }
                                     }
                                 }
                             }
@@ -2030,7 +2032,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 // Peer status polling — request chain tips from all peers (fork detection)
                 _ = peer_status_interval.tick() => {
-                    let _ = network_cmd.try_send(NetworkCommand::RequestSync);
+                    if let Err(e) = network_cmd.try_send(NetworkCommand::RequestSync) {
+                        tracing::warn!(task = "sync", "periodic RequestSync dropped: {e}");
+                    }
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "sync_requested",
                     }));
@@ -2233,8 +2237,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }));
                 // Request peer status immediately on connect so sync and
                 // block proposal don't wait for the 60s poll interval.
-                let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
-                tracing::debug!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
+                if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+                    tracing::warn!(task = "sync", "RequestSync dropped on PeerConnected: {e}");
+                }
+                tracing::info!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
             NetworkEvent::PeerDisconnected { peer_id, reason } => {
                 // Look up direction before removing so we can decrement the right counter.
@@ -2766,7 +2772,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 );
                 let our_height = self.consensus.read().chain_tip().0;
                 if *height > our_height {
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+                        tracing::warn!(task = "sync", "RequestSync on BlockAnnounced dropped: {e}");
+                    }
                 }
             }
             NetworkEvent::SyncComplete { new_height } => {
@@ -2827,16 +2835,36 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }));
                 if *height > our_height {
                     let next_height = our_height + 1;
-                    tracing::debug!(
+                    tracing::info!(
                         task = "sync",
                         "peer {} is at height {}, we're at {} — requesting block {}",
                         hex_pid, height, our_height, next_height
                     );
-                    let _ = network_cmd.try_send(
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "sync_started",
+                        "peer_id": hex_pid,
+                        "peer_height": height,
+                        "our_height": our_height,
+                        "requesting": next_height,
+                    }));
+                    if let Err(e) = network_cmd.try_send(
                         noble_network::NetworkCommand::RequestBlockByHeight {
                             peer_id: peer_id.clone(),
                             height: next_height,
                         },
+                    ) {
+                        tracing::warn!(task = "sync", "RequestBlockByHeight dropped: {e}");
+                    }
+                } else if *height == our_height && *height > 0 {
+                    // We caught up with this peer — emit sync_complete.
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "sync_complete",
+                        "height": our_height,
+                    }));
+                    tracing::info!(
+                        task = "sync",
+                        "Sync complete — caught up with peer {} at height {}",
+                        hex_pid, our_height
                     );
                 }
                 // S60: Bootstrap proposal retry — when the first peer status
@@ -2928,6 +2956,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tip_height,
                         network_cmd,
                         new_block_tx,
+                        cycle_phase_tx,
                         metrics,
                     );
                 } else {
@@ -3563,7 +3592,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         CycleIo::PublishEvidence(evidence),
                     );
                     for cmd in cmds {
-                        let _ = network_cmd.try_send(cmd);
+                        if let Err(e) = network_cmd.try_send(cmd) {
+                            tracing::warn!(task = "evidence", "network command dropped: {e}");
+                        }
                     }
                 }
                 CycleIo::RequestForkResolution { target_hash, target_height, reason } => {
@@ -3625,8 +3656,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                     self.fork_visible = false;
                     self.fork_common_ancestor = None;
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals);
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
+                        tracing::warn!(task = "commit", "ClearPendingProposals dropped: {e}");
+                    }
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+                        tracing::warn!(task = "commit", "RequestSync after commit dropped: {e}");
+                    }
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "fork_auto_resolved",
                         "target_height": target_height,
@@ -3689,8 +3724,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let _ = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true);
                     }
                     // 5. Clear stale proposals and request sync.
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals);
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
+                        tracing::warn!(task = "chain_adoption", "ClearPendingProposals dropped: {e}");
+                    }
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+                        tracing::warn!(task = "chain_adoption", "RequestSync dropped: {e}");
+                    }
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "chain_adoption_started",
                         "target_chain_id": format!("{:#010X}", target_chain_id),
@@ -3793,6 +3832,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         tip_height: u64,
         network_cmd: &tokio::sync::mpsc::Sender<noble_network::NetworkCommand>,
         new_block_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
+        cycle_phase_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
         metrics: &Option<crate::metrics::NobleMetrics>,
     ) {
         let storage = self.storage.read();
@@ -3838,9 +3878,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     | noble_core::ValidationError::TimestampNotAfterParent { .. }
             );
             if is_fork {
-                tracing::debug!(
+                tracing::info!(
                     task = "sync_import",
-                    "sync block at height {} rejected (fork): {e}",
+                    "sync block at height {} rejected (fork disagreement): {e}",
                     block.header.height
                 );
             } else {
@@ -3927,18 +3967,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tx_ids.len()
         );
 
+        // Emit sync_progress to event viewer so the GUI shows each imported block.
+        let _ = cycle_phase_tx.send(serde_json::json!({
+            "event": "sync_progress",
+            "height": block.header.height,
+            "hash": hex::encode(block_hash.as_bytes()),
+            "tx_count": tx_ids.len(),
+        }));
+
         // S53: Clear active proposal on tip advancement.
         *self.last_proposed.lock() = None;
 
-        let _ = new_block_tx.send(serde_json::json!({
+        if new_block_tx.send(serde_json::json!({
             "height": block.header.height,
             "hash": hex::encode(block_hash.as_bytes()),
             "tx_count": tx_ids.len(),
             "source": "sync",
-        }));
+        })).is_err() {
+            tracing::debug!(task = "sync_import", "new_block broadcast: no subscribers");
+        }
 
         // Request next block if we're still behind peers.
-        let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
+        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+            tracing::warn!(task = "sync_import", "RequestSync continuation dropped: {e}");
+        }
     }
 }
 

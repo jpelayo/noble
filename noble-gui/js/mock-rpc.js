@@ -254,6 +254,7 @@ const VALIDATORS = Array.from({ length: 15 }, (_, i) => {
     joined_cycle: Math.floor((now - (200 - i * 12) * CYCLE_DURATION_SECS) / CYCLE_DURATION_SECS),
     last_active: isOnline ? now - i * 120 : now - 86400 * (i - 11),
     proposed_this_cycle: isOnline && i < 5,
+    wants_to_validate: true,
   };
 });
 
@@ -768,6 +769,7 @@ export class MockRpcClient {
           joined_cycle: Math.floor(now / CYCLE_DURATION_SECS),
           last_active: now,
           proposed_this_cycle: false,
+          wants_to_validate: true,
         };
         this.#validators.push(newValidator);
         return { success: true, validator: newValidator };

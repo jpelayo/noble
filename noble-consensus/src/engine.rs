@@ -504,6 +504,7 @@ impl CycleEngine {
                     completed, new_cycle
                 );
                 self.tracked_cycle = new_cycle;
+                self.vote_mgr.set_current_cycle(new_cycle);
                 outputs.extend(self.handle_cycle_boundary(completed));
 
                 // Tick checkpoint activation after cycle boundary.
@@ -1776,7 +1777,9 @@ impl CycleEngine {
                     // without this the validator's vote is lost from its
                     // own tally and compute_majority always returns
                     // Indeterminate on small networks.
-                    let _ = self.vote_mgr.record_vote(b"self", &vote);
+                    if let Err(e) = self.vote_mgr.record_vote(b"self", &vote) {
+                        warn!("cycle {cl}: self R1 vote rejected: {e}");
+                    }
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
                         "cycle {cl}: broadcast R1 vote for candidate {} (strategy: {})",
@@ -1838,7 +1841,9 @@ impl CycleEngine {
             match PorVote::sign_round(cycle, candidate_hash, 2, priv_key, pub_key.clone()) {
                 Ok(vote) => {
                     // Record our own R2 vote
-                    let _ = self.vote_mgr.record_vote(b"self", &vote);
+                    if let Err(e) = self.vote_mgr.record_vote(b"self", &vote) {
+                        warn!("cycle {cl}: self R2 vote rejected: {e}");
+                    }
                     outputs.push(CycleIo::BroadcastVote(vote));
                     outputs.push(CycleIo::Log(format!(
                         "cycle {cl}: broadcast R2 confirmation vote for {} (strategy: {})",

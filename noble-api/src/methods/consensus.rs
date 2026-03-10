@@ -279,8 +279,6 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let validators = consensus
             .validator_list()
             .list_validators_with_liveness(now);
-        let count = validators.len();
-
         // Compute alive count for listers_count (trust metric).
         let alive_count = validators
             .iter()
@@ -354,8 +352,24 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     }
                 }
 
+                // Determine wants_to_validate from known_peers or peer_records.
+                let key_hex = hex::encode(&wire);
+                let is_self = self
+                    .validator_pubkey
+                    .as_deref()
+                    .map_or(false, |s| key_hex == *s);
+                let wants_validate = if is_self {
+                    // Self always wants to validate (we're in the list).
+                    true
+                } else if let Some(kp) = consensus.validator_list().known_peers().get(&key_hex) {
+                    kp.wants_to_validate
+                } else {
+                    // No announce data — benefit of doubt.
+                    true
+                };
+
                 ValidatorEntry {
-                    public_key: hex::encode(&wire),
+                    public_key: key_hex.clone(),
                     name: friendly_name,
                     status: liveness.as_str().to_string(),
                     weight,
@@ -375,11 +389,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                         let w = wire.to_vec();
                         if connected_identity_keys.contains(&w) {
                             Some(now)
-                        } else if self
-                            .validator_pubkey
-                            .as_deref()
-                            .map_or(false, |s| hex::encode(&wire) == *s)
-                        {
+                        } else if is_self {
                             Some(now)
                         } else {
                             last_seen_map.get(&w).copied()
@@ -390,9 +400,60 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     country_code: country,
                     listers_count: alive_count,
                     proposed_this_cycle: candidate_tracker.has_proposed(&wire),
+                    wants_to_validate: wants_validate,
                 }
             })
             .collect();
+
+        // Auto-kick: remove validators that explicitly announced wants_to_validate=false.
+        // Skip self — our own node is never auto-removed.
+        let mut auto_removed = Vec::new();
+        for entry in &entries {
+            if !entry.wants_to_validate {
+                let is_self = self
+                    .validator_pubkey
+                    .as_deref()
+                    .map_or(false, |s| entry.public_key == *s);
+                if !is_self {
+                    auto_removed.push(entry.public_key.clone());
+                }
+            }
+        }
+        for key_hex in &auto_removed {
+            match hex::decode(key_hex) {
+                Ok(wire) => match NoblePublicKey::from_wire_bytes(&wire) {
+                    Ok(pk) => {
+                        consensus.validator_list_mut().remove_validator(&pk);
+                        tracing::info!(
+                            key = %key_hex,
+                            "Auto-removed non-proposer from validator list (wants_to_validate=false)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(key = %key_hex, err = %e, "Auto-kick: failed to parse pubkey");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(key = %key_hex, err = %e, "Auto-kick: failed to decode hex");
+                }
+            }
+        }
+        if !auto_removed.is_empty() {
+            persist_validator_list(self, &consensus)?;
+        }
+
+        // Filter auto-removed entries from the response
+        let filtered_entries: Vec<ValidatorEntry> = if auto_removed.is_empty() {
+            entries
+        } else {
+            let removed_set: std::collections::HashSet<&str> =
+                auto_removed.iter().map(|s| s.as_str()).collect();
+            entries
+                .into_iter()
+                .filter(|e| !removed_set.contains(e.public_key.as_str()))
+                .collect()
+        };
+        let filtered_count = filtered_entries.len();
 
         let priority_order: Vec<String> = consensus
             .validator_list()
@@ -403,8 +464,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
         Ok(ValidatorListResponse {
             selection_policy: "weighted_random".to_string(),
-            validators: entries,
-            count,
+            validators: filtered_entries,
+            count: filtered_count,
             priority_order,
         })
     }

@@ -388,6 +388,9 @@ pub struct ValidatorEntry {
     pub listers_count: usize,
     /// Whether this validator has proposed a block in the current cycle.
     pub proposed_this_cycle: bool,
+    /// Whether this peer announced `wants_to_validate = true`.
+    /// Defaults to `true` for validators with no announce data (benefit of doubt).
+    pub wants_to_validate: bool,
 }
 
 /// Response for `noble_getValidatorList`.

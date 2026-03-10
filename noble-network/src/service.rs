@@ -1072,6 +1072,13 @@ async fn handle_swarm_event(
                         tracing::warn!(task = "sync", "event channel full: BlockReceived dropped");
                     }
                 }
+                SyncResponse::Block(None) => {
+                    tracing::debug!(
+                        task = "sync",
+                        "peer {} responded with Block(None) — block not found",
+                        peer
+                    );
+                }
                 SyncResponse::Status {
                     height,
                     tip_hash,
@@ -1142,12 +1149,14 @@ async fn handle_swarm_event(
                             let offset_ms = (sender_timestamp as i64 - local_now as i64) * 1000;
                             peer_manager.update_clock_offset(&peer, offset_ms);
                         }
-                        let _ = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
+                        if event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
                             peer_id: peer.to_bytes().to_vec(),
                             height,
                             tip_hash,
                             median_clock_offset_ms: peer_manager.median_clock_offset_ms(),
-                        });
+                        }).is_err() {
+                            tracing::warn!(task = "sync", "event channel full: PeerChainTipUpdated dropped");
+                        }
                     }
                 }
                 SyncResponse::BlockHashBatch(ref remote_hashes) => {
@@ -1297,6 +1306,7 @@ async fn handle_swarm_event(
             // Resolve any pending dial whose multiaddr appears in the error.
             // libp2p DialError embeds the target addr in the error string.
             let err_str = error.to_string();
+            tracing::debug!(task = "peer_management", "outbound connection failed: {err_str}");
             let mut resolved_addrs = Vec::new();
             for (addr, _) in pending_dials.iter() {
                 if err_str.contains(&addr.to_string()) {

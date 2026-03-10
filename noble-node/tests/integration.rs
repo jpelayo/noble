@@ -54,8 +54,8 @@ fn voting_strategy_name_roundtrip() {
         );
     }
 
-    // Default should be first_valid
-    assert_eq!(VotingStrategy::default().name(), "first_valid");
+    // Default should be weighted_probability
+    assert_eq!(VotingStrategy::default().name(), "weighted_probability");
 }
 
 /// MemoryStorage must only index notarization checksums, not non-notarization zero-checksums.
