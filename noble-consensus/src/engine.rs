@@ -1914,7 +1914,8 @@ impl ConsensusStateMachine for CycleEngine {
                 total_peers,
             } => {
                 let mut outputs = Vec::new();
-                let decision = self.fork_resolver.evaluate(local_height, &forks, total_peers);
+                let (_, local_hash) = self.chain_tip();
+                let decision = self.fork_resolver.evaluate(local_height, &forks, total_peers, local_hash);
                 match decision {
                     crate::fork_resolver::ForkDecision::Resolve {
                         target_hash,

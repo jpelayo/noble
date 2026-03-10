@@ -43,6 +43,9 @@ impl BlockProvider for NullBlockProvider {
     fn get_block_header(&self, _: &[u8; 32]) -> Option<BlockHeader> {
         None
     }
+    fn get_block_hash_by_height(&self, _: u64) -> Option<[u8; 32]> {
+        None
+    }
     fn chain_tip(&self) -> (u64, [u8; 32]) {
         (0, [0; 32])
     }

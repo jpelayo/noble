@@ -21,6 +21,7 @@
 //! - [`transport`] — Swarm construction (TCP + Noise + Yamux).
 //! - [`service`] — Main event loop and [`NetworkHandle`].
 
+pub mod ancestor;
 pub mod behaviour;
 pub mod codec;
 pub mod config;

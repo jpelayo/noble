@@ -484,6 +484,8 @@ export function init(root, ctx) {
     if (e === 'chain_tip_updated') return `${e}:${data.peer_id || ''}`;
     if (e === 'score_updated') return `${e}:${data.peer_id || ''}`;
     if (e === 'fork_alignment_pending') return e;
+    if (e === 'fork_detected') return e;
+    if (e === 'fork_divergence') return e;
     // All other events: no dedup (they carry unique data)
     return null;
   }
@@ -514,6 +516,9 @@ export function init(root, ctx) {
     phase_change:       '\u25cf',  // filled circle
     heartbeat:          '\u25cf',  // filled circle
     chain_tip_updated:      '\u2195',  // up-down arrow (alignment)
+    fork_detected:          '\u26a0',  // warning triangle
+    fork_aligned:           '\u2713',  // checkmark
+    fork_divergence:        '\u2195',  // up-down arrow
     fork_auto_resolved:     '\u21c4',  // right-left arrows
     fork_alignment_pending: '\u21c4',  // right-left arrows
     fork_alignment_clear:   '\u2713',  // checkmark
@@ -547,6 +552,9 @@ export function init(root, ctx) {
       case 'sync_requested': return '#94a3b8';
       case 'heartbeat': return '#6ee7b7';
       case 'chain_tip_updated': return '#94a3b8';
+      case 'fork_detected': return '#f59e0b';
+      case 'fork_aligned': return 'var(--success, #22c55e)';
+      case 'fork_divergence': return '#f59e0b';
       case 'fork_auto_resolved': return 'var(--danger, #ef4444)';
       case 'fork_alignment_pending': return '#f59e0b';
       case 'fork_alignment_clear': return 'var(--success, #22c55e)';
@@ -632,8 +640,17 @@ export function init(root, ctx) {
         return data.message;
       case 'chain_tip_updated':
         return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
+      case 'fork_detected': {
+        const heights = (data.remote_heights || []).join(', ');
+        const peers = (data.remote_peer_counts || []).reduce((a, b) => a + b, 0);
+        return `Fork detected: ${data.fork_count} chain tips (${peers} peer(s) at height ${heights}, local at ${data.local_height})`;
+      }
+      case 'fork_aligned':
+        return `Fork aligned \u2014 all peers on same chain at height ${data.height}`;
+      case 'fork_divergence':
+        return `Fork divergence: chains split at height ${data.ancestor_height} (${data.divergence_depth} block(s) deep)`;
       case 'fork_auto_resolved':
-        return `Fork auto-resolved \u2192 height ${data.target_height} (${data.reason})`;
+        return `Fork auto-resolved \u2192 rollback to height ${data.rollback_height ?? 0}, target ${data.target_height} (${data.reason})`;
       case 'fork_alignment_pending':
         return `Fork alignment: ${data.cycles_remaining} cycle(s) to resolution`;
       case 'fork_alignment_clear':

@@ -126,6 +126,10 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS) are evicted on each insert.
     /// Capped at 1024 entries to bound memory usage.
     pub announce_cache: parking_lot::Mutex<std::collections::HashMap<Vec<u8>, noble_core::NodeAnnounce>>,
+    /// True when compute_fork_groups() detected >1 distinct chain tip among connected peers.
+    pub fork_visible: bool,
+    /// Common ancestor discovered via AncestorFinder (height, hash).
+    pub fork_common_ancestor: Option<(u64, [u8; 32])>,
 }
 
 impl Node<MemoryStorage> {
@@ -479,6 +483,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
             chain_vote_weight: std::sync::atomic::AtomicU64::new(0),
             announce_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            fork_visible: false,
+            fork_common_ancestor: None,
         })
     }
 
@@ -847,7 +853,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// processing: network events → consensus → storage, consensus ticks,
     /// and CTRL+C graceful shutdown.
     pub async fn run(
-        self,
+        mut self,
         config: &NodeConfig,
         trace_handle: Option<Arc<noble_api::trace_types::TraceHandle>>,
         metrics: Option<NobleMetrics>,
@@ -1824,6 +1830,44 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             our_identity.as_deref(),
                         );
                         let total_peers = peers.len();
+
+                        // Emit fork_detected / fork_aligned events for GUI visibility.
+                        let is_forked = fork_groups.len() > 1;
+                        if is_forked && !self.fork_visible {
+                            self.fork_visible = true;
+                            // Clear stale ancestor from any previous fork.
+                            self.fork_common_ancestor = None;
+                            let remote: Vec<_> = fork_groups.iter().filter(|g| !g.is_local).collect();
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "fork_detected",
+                                "fork_count": fork_groups.len(),
+                                "local_height": tip_h,
+                                "remote_heights": remote.iter().map(|g| g.height).collect::<Vec<_>>(),
+                                "remote_peer_counts": remote.iter().map(|g| g.peer_count).collect::<Vec<_>>(),
+                            }));
+                            // Start common ancestor discovery with the first remote peer group.
+                            if let Some(remote_group) = fork_groups.iter().find(|g| !g.is_local) {
+                                let peers_on_fork: Vec<_> = peers.values()
+                                    .filter(|e| e.chain_tip_hash.as_deref() == Some(&hex::encode(remote_group.tip_hash.as_bytes())))
+                                    .collect();
+                                if let Some(peer_entry) = peers_on_fork.first() {
+                                    if let Ok(pid_bytes) = hex::decode(&peer_entry.peer_id) {
+                                        let _ = network_cmd.try_send(noble_network::NetworkCommand::FindCommonAncestor {
+                                            peer_id: pid_bytes,
+                                            local_height: tip_h,
+                                            peer_height: remote_group.height,
+                                        });
+                                    }
+                                }
+                            }
+                        } else if !is_forked && self.fork_visible {
+                            self.fork_visible = false;
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "fork_aligned",
+                                "height": tip_h,
+                            }));
+                        }
+
                         drop(peers);
                         if !fork_groups.is_empty() {
                             let dwell_before = self.consensus.read().fork_resolver().dwell_counter();
@@ -2075,7 +2119,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
     /// Handle a single network event: route to consensus, update stats, etc.
     #[allow(clippy::too_many_arguments)]
     fn handle_network_event(
-        &self,
+        &mut self,
         event: &NetworkEvent,
         network_cmd: &mpsc::Sender<NetworkCommand>,
         new_block_tx: &broadcast::Sender<serde_json::Value>,
@@ -2903,6 +2947,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
             }
+            NetworkEvent::CommonAncestorFound { peer_id: ca_pid, ancestor_height, ancestor_hash } => {
+                let hex_pid = hex::encode(ca_pid);
+                tracing::info!(
+                    task = "fork",
+                    "common ancestor with {}: height {} ({})",
+                    hex_pid, ancestor_height, hex::encode(ancestor_hash)
+                );
+                self.fork_common_ancestor = Some((*ancestor_height, *ancestor_hash));
+                let our_height = self.consensus.read().chain_tip().0;
+                let _ = cycle_phase_tx.send(serde_json::json!({
+                    "event": "fork_divergence",
+                    "ancestor_height": ancestor_height,
+                    "ancestor_hash": hex::encode(ancestor_hash),
+                    "local_height": our_height,
+                    "divergence_depth": our_height.saturating_sub(*ancestor_height),
+                }));
+            }
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
                 if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
@@ -2989,7 +3050,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
     /// Process actions emitted by the consensus engine.
     fn process_cycle_actions(
-        &self,
+        &mut self,
         actions: Vec<CycleIo>,
         network_cmd: &mpsc::Sender<NetworkCommand>,
         new_block_tx: &broadcast::Sender<serde_json::Value>,
@@ -3510,11 +3571,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         task = "fork_resolution",
                         "AUTO-RESOLVING: {reason} (target height {target_height})"
                     );
-                    // Same path as resetChain RPC: reset storage + consensus + re-sync.
+                    let rollback_height = self.fork_common_ancestor
+                        .map(|(h, _)| h)
+                        .unwrap_or(0); // Fallback to genesis if ancestor unknown
+
                     {
                         let storage = self.storage.read();
-                        if let Err(e) = storage.force_reset_to_genesis(self.get_chain_id()) {
-                            tracing::error!(task = "fork_resolution", "storage reset failed: {e}");
+                        let result = if rollback_height > 0 {
+                            storage.rollback_to_height(rollback_height, self.get_chain_id())
+                        } else {
+                            storage.force_reset_to_genesis(self.get_chain_id())
+                        };
+                        if let Err(e) = result {
+                            // If rollback_to_height fails (MAX_REORG_DEPTH exceeded), fall back to genesis.
+                            tracing::warn!(
+                                task = "fork_resolution",
+                                "rollback to {rollback_height} failed ({e}), resetting to genesis"
+                            );
+                            if let Err(e2) = storage.force_reset_to_genesis(self.get_chain_id()) {
+                                tracing::error!(task = "fork_resolution", "genesis reset also failed: {e2}");
+                            }
                         }
                         if let Err(e) = storage.clear_cycle_history() {
                             tracing::warn!(task = "fork_resolution", "clear cycle history: {e}");
@@ -3531,11 +3607,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             tracing::error!(task = "fork_resolution", "reset_tip failed: {e}");
                         }
                     }
+                    self.fork_visible = false;
+                    self.fork_common_ancestor = None;
                     let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "fork_auto_resolved",
                         "target_height": target_height,
                         "target_hash": hex::encode(target_hash.as_bytes()),
+                        "rollback_height": rollback_height,
                         "reason": reason,
                     }));
                 }
@@ -3577,6 +3656,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // 2. Reset chain_id to 0 (pre-genesis state) so we accept any chain.
                     self.chain_id.store(0, std::sync::atomic::Ordering::Relaxed);
                     self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
+                    self.fork_visible = false;
+                    self.fork_common_ancestor = None;
                     // 2b. Clear discovered blockchains to prevent ping-pong adoption
                     // between the old chain and the new one from stale entries.
                     {
@@ -5079,7 +5160,7 @@ mod tests {
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
 
-        let node = Node::init_memory(&config).unwrap();
+        let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let (block_tx, _) = broadcast::channel(16);
         let (tx_tx, _) = broadcast::channel(16);
@@ -5228,7 +5309,7 @@ mod tests {
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
 
-        let node = Node::init_memory(&config).unwrap();
+        let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let (block_tx, _) = broadcast::channel(16);
         let (tx_tx, _) = broadcast::channel(16);
@@ -5296,7 +5377,7 @@ mod tests {
         let mut config = NodeConfig::default();
         config.wallet.keystore_path = dir.path().join("keystore");
 
-        let node = Node::init_memory(&config).unwrap();
+        let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let (block_tx, _) = broadcast::channel(16);
 

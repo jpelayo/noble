@@ -33,6 +33,8 @@ pub enum SyncRequest {
     GetBlockByHeight { height: u64 },
     /// Request the peer's chain status.
     GetStatus,
+    /// Request block hashes at multiple heights (batch — common ancestor discovery).
+    GetBlockHashBatch { heights: Vec<u64> },
 }
 
 /// Responses sent over the sync protocol.
@@ -62,6 +64,9 @@ pub enum SyncResponse {
     },
     /// An error message from the remote peer.
     Error(String),
+    /// Block hashes at requested heights (batch response — common ancestor discovery).
+    /// Each entry: (height, Some(hash)) if block exists, (height, None) if not.
+    BlockHashBatch(Vec<(u64, Option<[u8; 32]>)>),
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +250,12 @@ pub enum NetworkCommand {
     /// Update the local chain_id in network config (cross-chain adoption).
     /// Also clears the mismatch cooldown map so peers can reconnect immediately.
     UpdateChainId(u32),
+    /// Initiate common ancestor search with a peer on a different fork.
+    FindCommonAncestor {
+        peer_id: Vec<u8>,
+        local_height: u64,
+        peer_height: u64,
+    },
     /// Shut down the network service.
     Shutdown,
 }
@@ -340,6 +351,12 @@ pub enum NetworkEvent {
         tip_hash: [u8; 32],
         /// Median clock offset across all peers with data (ms, positive = peers ahead).
         median_clock_offset_ms: Option<i64>,
+    },
+    /// Common ancestor discovery completed — chains diverged above this height.
+    CommonAncestorFound {
+        peer_id: Vec<u8>,
+        ancestor_height: u64,
+        ancestor_hash: [u8; 32],
     },
 }
 

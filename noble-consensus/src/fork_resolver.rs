@@ -157,6 +157,7 @@ impl ForkResolver {
         local_height: u64,
         forks: &[ForkInfo],
         total_peers: usize,
+        local_tip_hash: Hash256,
     ) -> ForkDecision {
         // Manual strategy never auto-resolves.
         if self.strategy == ForkResolutionStrategy::Manual {
@@ -206,7 +207,52 @@ impl ForkResolver {
             ForkResolutionStrategy::Manual => false,
         };
 
-        if !threshold_met {
+        // Same-height deadlock: if the dominant fork is at our exact height and we've
+        // been in disagreement for min_fork_duration cycles, the height threshold will
+        // NEVER be met (both chains grow or neither grows). Break the deadlock by
+        // yielding to the dominant fork. Tiebreaker: chain owner wins, else majority
+        // peer count, else lower tip hash.
+        if !threshold_met && dominant.height == local_height
+            && self.strategy == ForkResolutionStrategy::LongestMostLegitimate
+        {
+            // Track the same-height fork for dwell accumulation even though
+            // threshold isn't met — needed so dwell counter reaches min_fork_duration.
+            match self.tracked_fork_height {
+                Some(prev_h) if dominant.height < prev_h => {
+                    self.fork_dwell_counter = 0;
+                }
+                None => {
+                    self.fork_dwell_counter = 0;
+                }
+                _ => {}
+            }
+            self.tracked_fork_height = Some(dominant.height);
+            self.fork_dwell_counter += 1;
+
+            if self.fork_dwell_counter >= self.min_fork_duration {
+                let local_has_owner = forks.iter().any(|f| f.is_local && f.has_chain_owner);
+                let should_yield = if dominant.has_chain_owner && !local_has_owner {
+                    true // Chain owner's fork wins
+                } else if !dominant.has_chain_owner && local_has_owner {
+                    false // We're the chain owner, don't yield
+                } else if dominant.peer_count > 1 {
+                    true // Majority peer count (excluding us)
+                } else {
+                    // True tie — deterministic tiebreak by lower tip hash
+                    dominant.tip_hash.as_bytes() < local_tip_hash.as_bytes()
+                };
+                if should_yield {
+                    // Override threshold_met — proceed to resolution.
+                } else {
+                    self.reset_tracking();
+                    return ForkDecision::NoAction;
+                }
+            } else {
+                return ForkDecision::Pending {
+                    cycles_remaining: self.min_fork_duration - self.fork_dwell_counter,
+                };
+            }
+        } else if !threshold_met {
             self.reset_tracking();
             return ForkDecision::NoAction;
         }
@@ -511,7 +557,7 @@ mod tests {
     fn manual_strategy_never_resolves() {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::Manual, 3);
         let forks = vec![local_fork(5), remote_fork(1, 100, 10)];
-        assert_eq!(fr.evaluate(5, &forks, 10), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(5, &forks, 10, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -519,7 +565,7 @@ mod tests {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::PeerSupermajority, 1);
         // 3/4 peers on fork = 75% > 66%
         let forks = vec![local_fork(5), remote_fork(1, 5, 3)];
-        let result = fr.evaluate(5, &forks, 4);
+        let result = fr.evaluate(5, &forks, 4, hash(0));
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 5),
             other => panic!("expected Resolve, got {:?}", other),
@@ -531,7 +577,7 @@ mod tests {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::PeerSupermajority, 3);
         // 1/3 peers on fork = 33% < 66%
         let forks = vec![local_fork(5), remote_fork(1, 5, 1)];
-        assert_eq!(fr.evaluate(5, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(5, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -539,7 +585,7 @@ mod tests {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         // Fork 4 blocks ahead (local=5, fork=9, diff=4 > 3), no owner info
         let forks = vec![local_fork(5), remote_fork(1, 9, 2)];
-        let result = fr.evaluate(5, &forks, 3);
+        let result = fr.evaluate(5, &forks, 3, hash(0));
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
             other => panic!("expected Resolve, got {:?}", other),
@@ -551,7 +597,7 @@ mod tests {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
         // Fork 2 blocks ahead (local=5, fork=7, diff=2 <= 3), no owner info
         let forks = vec![local_fork(5), remote_fork(1, 7, 2)];
-        assert_eq!(fr.evaluate(5, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(5, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -561,20 +607,20 @@ mod tests {
 
         // First evaluation: dwell starts
         assert_eq!(
-            fr.evaluate(5, &forks, 3),
+            fr.evaluate(5, &forks, 3, hash(0)),
             ForkDecision::Pending {
                 cycles_remaining: 2
             }
         );
         // Second
         assert_eq!(
-            fr.evaluate(5, &forks, 3),
+            fr.evaluate(5, &forks, 3, hash(0)),
             ForkDecision::Pending {
                 cycles_remaining: 1
             }
         );
         // Third: dwell expired → resolve
-        match fr.evaluate(5, &forks, 3) {
+        match fr.evaluate(5, &forks, 3, hash(0)) {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 20),
             other => panic!("expected Resolve, got {:?}", other),
         }
@@ -587,18 +633,18 @@ mod tests {
         // Fork A at height 20 — accumulate 2 dwell ticks
         let forks_a = vec![local_fork(5), remote_fork(1, 20, 2)];
         assert!(matches!(
-            fr.evaluate(5, &forks_a, 3),
+            fr.evaluate(5, &forks_a, 3, hash(0)),
             ForkDecision::Pending { .. }
         ));
         assert!(matches!(
-            fr.evaluate(5, &forks_a, 3),
+            fr.evaluate(5, &forks_a, 3, hash(0)),
             ForkDecision::Pending { .. }
         ));
         assert_eq!(fr.dwell_counter(), 2);
 
         // Fork B at height 15 replaces A (shorter dominant fork) — dwell resets
         let forks_b = vec![local_fork(5), remote_fork(2, 15, 3)];
-        let result = fr.evaluate(5, &forks_b, 4);
+        let result = fr.evaluate(5, &forks_b, 4, hash(0));
         assert_eq!(
             result,
             ForkDecision::Pending {
@@ -615,7 +661,7 @@ mod tests {
         // Fork at height 20 — first dwell tick
         let forks_1 = vec![local_fork(5), remote_fork(1, 20, 2)];
         assert!(matches!(
-            fr.evaluate(5, &forks_1, 3),
+            fr.evaluate(5, &forks_1, 3, hash(0)),
             ForkDecision::Pending { .. }
         ));
         assert_eq!(fr.dwell_counter(), 1);
@@ -623,14 +669,14 @@ mod tests {
         // Fork grows to height 21 — dwell continues (not reset)
         let forks_2 = vec![local_fork(5), remote_fork(2, 21, 2)];
         assert!(matches!(
-            fr.evaluate(5, &forks_2, 3),
+            fr.evaluate(5, &forks_2, 3, hash(0)),
             ForkDecision::Pending { .. }
         ));
         assert_eq!(fr.dwell_counter(), 2);
 
         // Fork grows to height 22 — dwell completes → resolve
         let forks_3 = vec![local_fork(5), remote_fork(3, 22, 2)];
-        match fr.evaluate(5, &forks_3, 3) {
+        match fr.evaluate(5, &forks_3, 3, hash(0)) {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 22),
             other => panic!("expected Resolve, got {:?}", other),
         }
@@ -642,21 +688,21 @@ mod tests {
         fr.set_finalized_height(10);
         // Fork at height 8 — below finalized
         let forks = vec![local_fork(5), remote_fork(1, 8, 5)];
-        assert_eq!(fr.evaluate(5, &forks, 5), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(5, &forks, 5, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
     fn no_peers_no_resolution() {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::PeerSupermajority, 1);
         let forks = vec![local_fork(5)];
-        assert_eq!(fr.evaluate(5, &forks, 0), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(5, &forks, 0, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
     fn strategy_change_resets_state() {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
         let forks = vec![local_fork(5), remote_fork(1, 20, 2)];
-        fr.evaluate(5, &forks, 3);
+        fr.evaluate(5, &forks, 3, hash(0));
         assert_eq!(fr.dwell_counter(), 1);
 
         fr.set_strategy(ForkResolutionStrategy::PeerSupermajority);
@@ -849,7 +895,7 @@ mod tests {
         // When has_chain_owner is false on all forks, behaviour is the original >3 threshold.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(5), remote_fork(1, 9, 2)];
-        let result = fr.evaluate(5, &forks, 3);
+        let result = fr.evaluate(5, &forks, 3, hash(0));
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
             other => panic!("expected Resolve, got {:?}", other),
@@ -858,7 +904,7 @@ mod tests {
         // 3 blocks ahead is NOT enough (must be >3)
         let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks2 = vec![local_fork(5), remote_fork(1, 8, 2)];
-        assert_eq!(fr2.evaluate(5, &forks2, 3), ForkDecision::NoAction);
+        assert_eq!(fr2.evaluate(5, &forks2, 3, hash(0)), ForkDecision::NoAction);
     }
 
     // ── Chain owner tiebreaker tests ──
@@ -870,7 +916,7 @@ mod tests {
         // 15 > 13 → switch
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(10), remote_fork_owner(1, 10, 2)];
-        let result = fr.evaluate(10, &forks, 3);
+        let result = fr.evaluate(10, &forks, 3, hash(0));
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 10),
             other => panic!("expected Resolve, got {:?}", other),
@@ -884,7 +930,7 @@ mod tests {
         // 14 > 13 → true → Switch
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(10), remote_fork_owner(1, 9, 2)];
-        let result = fr.evaluate(10, &forks, 3);
+        let result = fr.evaluate(10, &forks, 3, hash(0));
         match result {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
             other => panic!("expected Resolve, got {:?}", other),
@@ -898,7 +944,7 @@ mod tests {
         // 13 > 13 → false → NoAction (boundary: tied, no switch)
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(10), remote_fork_owner(1, 8, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -908,7 +954,7 @@ mod tests {
         // 12 > 13 → false → NoAction
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork(10), remote_fork_owner(1, 7, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -918,7 +964,7 @@ mod tests {
         // 10 > 18 → false → NoAction
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork_owner(10), remote_fork(1, 10, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
     }
 
     #[test]
@@ -928,12 +974,12 @@ mod tests {
         // 18 > 18 → false → NoAction (8-block lead not enough)
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks = vec![local_fork_owner(10), remote_fork(1, 18, 2)];
-        assert_eq!(fr.evaluate(10, &forks, 3), ForkDecision::NoAction);
+        assert_eq!(fr.evaluate(10, &forks, 3, hash(0)), ForkDecision::NoAction);
 
         // Non-owner at 19: 19 > 18 → true → Switch
         let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
         let forks2 = vec![local_fork_owner(10), remote_fork(1, 19, 2)];
-        match fr2.evaluate(10, &forks2, 3) {
+        match fr2.evaluate(10, &forks2, 3, hash(0)) {
             ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 19),
             other => panic!("expected Resolve, got {:?}", other),
         }

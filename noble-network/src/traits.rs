@@ -22,6 +22,9 @@ pub trait BlockProvider: Send + Sync {
     /// Returns `(height, tip_hash)` of the current chain tip.
     fn chain_tip(&self) -> (u64, [u8; 32]);
 
+    /// Get the block hash at a specific height (lightweight — no full block deserialization).
+    fn get_block_hash_by_height(&self, height: u64) -> Option<[u8; 32]>;
+
     /// Cumulative transaction count across all blocks (fork KPI).
     fn total_transactions(&self) -> u64 {
         0

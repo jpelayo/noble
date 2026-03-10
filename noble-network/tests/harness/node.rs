@@ -40,6 +40,10 @@ impl BlockProvider for StorageBlockProvider {
         self.storage.get_block_header(&h).ok()
     }
 
+    fn get_block_hash_by_height(&self, height: u64) -> Option<[u8; 32]> {
+        self.storage.get_block_hash_by_height(height).ok().map(|h| *h.as_bytes())
+    }
+
     fn chain_tip(&self) -> (u64, [u8; 32]) {
         self.storage
             .get_chain_tip()

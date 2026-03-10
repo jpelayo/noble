@@ -417,6 +417,9 @@ async fn run_event_loop(
     // include it in the PeerDisconnected event sent to the GUI.
     let mut disconnect_reasons: HashMap<PeerId, String> = HashMap::new();
 
+    // Common ancestor discovery state machine (one search at a time).
+    let mut ancestor_finder: Option<crate::ancestor::AncestorFinder> = None;
+
     loop {
         tokio::select! {
             // --- Swarm events ---
@@ -437,12 +440,13 @@ async fn run_event_loop(
                     &mut pending_proposals,
                     &mut mismatch_cooldown,
                     &mut disconnect_reasons,
+                    &mut ancestor_finder,
                 ).await;
             }
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &event_tx).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &event_tx, &mut ancestor_finder).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -572,6 +576,7 @@ async fn handle_swarm_event(
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
     disconnect_reasons: &mut HashMap<PeerId, String>,
+    ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -1145,6 +1150,42 @@ async fn handle_swarm_event(
                         });
                     }
                 }
+                SyncResponse::BlockHashBatch(ref remote_hashes) => {
+                    if let Some(ref mut finder) = ancestor_finder {
+                        if finder.peer_id == peer {
+                            // Get local hashes for the same heights.
+                            let local_hashes: Vec<(u64, Option<[u8; 32]>)> = remote_hashes
+                                .iter()
+                                .map(|(h, _)| (*h, block_provider.get_block_hash_by_height(*h)))
+                                .collect();
+                            match finder.process_response(remote_hashes, &local_hashes) {
+                                Ok(Some(ancestor_height)) => {
+                                    let ancestor_hash = block_provider
+                                        .get_block_hash_by_height(ancestor_height)
+                                        .unwrap_or([0; 32]);
+                                    let _ = event_tx.try_send(NetworkEvent::CommonAncestorFound {
+                                        peer_id: peer.to_bytes().to_vec(),
+                                        ancestor_height,
+                                        ancestor_hash,
+                                    });
+                                    *ancestor_finder = None;
+                                }
+                                Ok(None) => {
+                                    // Need Round 2 — send bisect fill.
+                                    let round2 = finder.round2_heights();
+                                    swarm.behaviour_mut().sync_rpc.send_request(
+                                        &peer,
+                                        SyncRequest::GetBlockHashBatch { heights: round2 },
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(task = "ancestor", "ancestor search failed: {e}");
+                                    *ancestor_finder = None;
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1715,6 +1756,16 @@ fn handle_sync_request(
                 sender_timestamp,
             }
         }
+
+        SyncRequest::GetBlockHashBatch { heights } => {
+            // Cap at 256 heights per request to prevent abuse.
+            let capped = &heights[..heights.len().min(256)];
+            let hashes: Vec<(u64, Option<[u8; 32]>)> = capped
+                .iter()
+                .map(|&h| (h, block_provider.get_block_hash_by_height(h)))
+                .collect();
+            SyncResponse::BlockHashBatch(hashes)
+        }
     }
 }
 
@@ -1728,6 +1779,7 @@ async fn handle_command(
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+    ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -2064,6 +2116,22 @@ async fn handle_command(
             mismatch_cooldown.clear();
         }
 
+        NetworkCommand::FindCommonAncestor {
+            peer_id,
+            local_height,
+            peer_height,
+        } => {
+            if let Ok(pid) = PeerId::from_bytes(&peer_id) {
+                let (finder, probes) =
+                    crate::ancestor::AncestorFinder::new(pid, local_height, peer_height);
+                swarm.behaviour_mut().sync_rpc.send_request(
+                    &pid,
+                    SyncRequest::GetBlockHashBatch { heights: probes },
+                );
+                *ancestor_finder = Some(finder);
+            }
+        }
+
         NetworkCommand::Shutdown => {
             return true;
         }
@@ -2355,6 +2423,9 @@ mod tests {
             None
         }
         fn get_block_header(&self, _hash: &[u8; 32]) -> Option<BlockHeader> {
+            None
+        }
+        fn get_block_hash_by_height(&self, _height: u64) -> Option<[u8; 32]> {
             None
         }
         fn chain_tip(&self) -> (u64, [u8; 32]) {
