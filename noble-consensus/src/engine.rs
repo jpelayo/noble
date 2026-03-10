@@ -14,7 +14,7 @@ use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use tracing::{debug, info, warn};
 
 use crate::badge::{self, BadgeProposalType, BadgeStore, VoteBadge};
-use crate::candidate::CandidateTracker;
+use crate::candidate::{CandidateTracker, DeliveredBlockLog};
 use crate::config::ConsensusConfig;
 use crate::error::ConsensusError;
 use crate::finality::FinalityTracker;
@@ -104,6 +104,10 @@ pub struct CycleEngine {
     /// Block 1's validator public key (the chain owner).
     /// Cached on block 1 commit/import; used by fork resolver for chain owner edge.
     chain_owner_key: Option<Vec<u8>>,
+    /// Long-lived block hash memory — prevents false DuplicateProposal bans
+    /// when stale blocks from prior cycles re-arrive after `previous_hashes`
+    /// has been cleared.  Checked before `add_candidate()` in `handle_block_proposed`.
+    delivered_block_log: DeliveredBlockLog,
     /// Phase 3: Automatic fork resolution state machine.
     fork_resolver: crate::fork_resolver::ForkResolver,
     /// Phase 3: Periodic checkpoint manager.
@@ -164,6 +168,7 @@ impl CycleEngine {
             badge_proposals: std::collections::HashMap::new(),
             finality_tracker: FinalityTracker::new(confirmation_threshold),
             chain_owner_key: None,
+            delivered_block_log: DeliveredBlockLog::new(2048),
             fork_resolver: crate::fork_resolver::ForkResolver::new(
                 fork_strategy,
                 fork_delay,
@@ -353,6 +358,7 @@ impl CycleEngine {
         self.tip_header = None;
         self.vote_mgr = VoteManager::new();
         self.candidate_tracker = CandidateTracker::new();
+        self.delivered_block_log.clear();
         self.last_cycle_history = None;
         self.manual_vote = None;
         self.r1_vote_cast = false;
@@ -1408,9 +1414,19 @@ impl CycleEngine {
             }
         };
 
+        // DeliveredBlockLog: long-lived hash memory.  If this block was EVER
+        // processed by handle_block_proposed (even many cycles ago), skip it
+        // silently.  This is the primary defense against false DuplicateProposal
+        // bans from stale re-deliveries.
+        if self.delivered_block_log.contains(block_hash.as_bytes()) {
+            debug!("delivered_block_log: duplicate block {} — ignoring", block_hash);
+            return outputs;
+        }
+
         // Add to candidate tracker
         match self.candidate_tracker.add_candidate(block, block_hash, 0) {
             Ok(()) => {
+                self.delivered_block_log.insert(*block_hash.as_bytes());
                 outputs.push(CycleIo::Log(format!(
                     "accepted candidate block {} from validator {}",
                     block_hash,
@@ -3027,6 +3043,104 @@ mod tests {
             engine.candidate_tracker.len(),
             0,
             "rejected block should not be in candidate tracker"
+        );
+    }
+
+    // --- DeliveredBlockLog integration tests ---
+
+    #[test]
+    fn delivered_log_prevents_cross_cycle_false_ban() {
+        // Block from cycle N re-arrives in cycle N+2 (after an empty cycle).
+        // The delivered_block_log should catch it and prevent any ban.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        // Cycle N: propose block
+        let (block1, _hash1) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let block1_clone = Box::new(Block {
+            header: block1.header.clone(),
+            transactions: block1.transactions.clone(),
+        });
+
+        engine.step(CycleEvent::BlockProposed {
+            block: block1,
+            from_peer: b"peer1".to_vec(),
+        });
+        assert_eq!(engine.candidate_tracker.len(), 1);
+
+        // Cycle boundary → N+1
+        engine.candidate_tracker.clear();
+        // Cycle boundary → N+2 (empty cycle, previous_hashes from N+1 is empty)
+        engine.candidate_tracker.clear();
+
+        // Block from cycle N re-arrives in cycle N+2
+        let outputs = engine.step(CycleEvent::BlockProposed {
+            block: block1_clone,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(
+            !has_ban(&outputs),
+            "stale block from cycle N must not trigger ban in cycle N+2"
+        );
+        assert_eq!(
+            engine.candidate_tracker.len(),
+            0,
+            "stale block should not be added to candidate tracker"
+        );
+    }
+
+    #[test]
+    fn reset_tip_clears_delivered_log() {
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        let (block, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed {
+            block,
+            from_peer: b"peer1".to_vec(),
+        });
+        assert!(!engine.delivered_block_log.is_empty());
+
+        // Blockchain hop: reset to genesis
+        engine
+            .reset_tip(0, Hash256::ZERO, true)
+            .expect("force reset should succeed");
+        assert!(
+            engine.delivered_block_log.is_empty(),
+            "reset_tip should clear delivered_block_log"
+        );
+    }
+
+    #[test]
+    fn true_double_proposal_still_bans_with_delivered_log() {
+        // Same cycle, same validator, two different blocks → still bans.
+        // The delivered_block_log should NOT interfere.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        block2.header.timestamp += 1;
+        let msg = block2.header.compute_signing_message().unwrap();
+        block2.header.validator_sig = vp.sign(&msg).unwrap();
+
+        engine.step(CycleEvent::BlockProposed {
+            block: block1,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        let outputs = engine.step(CycleEvent::BlockProposed {
+            block: block2,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(
+            has_ban(&outputs),
+            "true double proposal should still ban even with delivered_block_log"
         );
     }
 }

@@ -115,6 +115,14 @@ impl DoubleProposalEvidence {
     /// 2. Both headers are at the same height
     /// 3. The block hashes differ
     /// 4. Both headers carry valid signatures from the validator
+    ///
+    /// **Important limitation:** Same-height blocks from *different* consensus
+    /// cycles (e.g., after empty cycles where no block was committed) are
+    /// indistinguishable at the evidence level — both are valid proposals at
+    /// the same height with valid signatures.  The `DeliveredBlockLog` in the
+    /// consensus engine is the primary defense against false positives: it
+    /// recognizes any previously-processed block hash and silently drops it
+    /// before the duplicate-proposal check ever fires.
     pub fn verify(&self) -> Result<(), EvidenceError> {
         // 1. Same validator
         if self.header_a.validator_id != self.header_b.validator_id {

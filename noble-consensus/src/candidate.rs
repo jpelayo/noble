@@ -6,11 +6,72 @@
 //! Enforces one-block-per-validator, tracks first-seen order for
 //! tiebreaking, and collects orphaned transactions from losing candidates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use noble_core::{Block, Transaction};
 use noble_crypto::Hash256;
 use tracing::{debug, trace};
+
+/// Long-lived FIFO-bounded block hash memory.
+///
+/// Remembers every block hash ever processed by `handle_block_proposed`.
+/// Checked BEFORE `add_candidate()` so that any block from any prior cycle
+/// is immediately recognized as a duplicate delivery — eliminating false
+/// `DuplicateProposal (0x04)` bans that occur when stale blocks bypass the
+/// `CandidateTracker.previous_hashes` one-cycle window.
+pub struct DeliveredBlockLog {
+    hashes: HashSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+    capacity: usize,
+}
+
+impl DeliveredBlockLog {
+    /// Create a new log with the given capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            hashes: HashSet::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Insert a block hash.  Returns `true` if it was new, `false` if already seen.
+    pub fn insert(&mut self, hash: [u8; 32]) -> bool {
+        if self.hashes.contains(&hash) {
+            return false;
+        }
+        // FIFO eviction when at capacity.
+        if self.hashes.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.hashes.remove(&oldest);
+            }
+        }
+        self.hashes.insert(hash);
+        self.order.push_back(hash);
+        true
+    }
+
+    /// Check if a block hash has been seen.
+    pub fn contains(&self, hash: &[u8; 32]) -> bool {
+        self.hashes.contains(hash)
+    }
+
+    /// Clear all state (used for blockchain hop / hard reset).
+    pub fn clear(&mut self) {
+        self.hashes.clear();
+        self.order.clear();
+    }
+
+    /// Number of entries currently stored.
+    pub fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    /// Whether the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+}
 
 /// A candidate block proposed during this cycle.
 #[derive(Debug, Clone)]
@@ -194,16 +255,24 @@ impl CandidateTracker {
 
     /// Clear all state for a new cycle.
     ///
-    /// Saves current candidate hashes into `previous_hashes` so that stale
-    /// re-deliveries arriving after the clear can be detected and ignored
-    /// (instead of triggering false double-proposal bans).
+    /// **Accumulates** current candidate hashes into `previous_hashes` so that
+    /// stale re-deliveries arriving after the clear can be detected and ignored
+    /// (instead of triggering false double-proposal bans).  Hashes accumulate
+    /// across cycles (extending detection from 1 cycle to ~25 cycles / ~8 hours).
+    /// Capped at 256 entries — on overflow, resets to current candidates only.
     pub fn clear(&mut self) {
-        // Only replace previous_hashes when there are actual candidates.
+        // Only accumulate when there are actual candidates.
         // Both `handle_cycle_boundary` and `handle_phase_transition(Proposal)`
         // call clear() in sequence — the second call would see an empty
         // candidates map and must not wipe the hashes saved by the first call.
         if !self.candidates.is_empty() {
-            self.previous_hashes = self.candidates.keys().cloned().collect();
+            for hash in self.candidates.keys() {
+                self.previous_hashes.insert(*hash);
+            }
+            // Cap at 256 entries.  On overflow, replace with current only.
+            if self.previous_hashes.len() > 256 {
+                self.previous_hashes = self.candidates.keys().cloned().collect();
+            }
         }
         self.candidates.clear();
         self.by_validator.clear();
@@ -508,5 +577,105 @@ mod tests {
         tracker.add_candidate(b2, h2, 1001).unwrap();
         tracker.add_candidate(b3, h3, 1002).unwrap();
         assert_eq!(tracker.len(), 3);
+    }
+
+    // --- DeliveredBlockLog tests ---
+
+    #[test]
+    fn delivered_log_insert_returns_true_for_new() {
+        let mut log = DeliveredBlockLog::new(16);
+        assert!(log.insert([0xAA; 32]));
+    }
+
+    #[test]
+    fn delivered_log_insert_returns_false_for_duplicate() {
+        let mut log = DeliveredBlockLog::new(16);
+        assert!(log.insert([0xAA; 32]));
+        assert!(!log.insert([0xAA; 32]));
+    }
+
+    #[test]
+    fn delivered_log_contains_after_insert() {
+        let mut log = DeliveredBlockLog::new(16);
+        assert!(!log.contains(&[0xBB; 32]));
+        log.insert([0xBB; 32]);
+        assert!(log.contains(&[0xBB; 32]));
+    }
+
+    #[test]
+    fn delivered_log_fifo_eviction_at_capacity() {
+        let mut log = DeliveredBlockLog::new(3);
+        let h1 = [0x01; 32];
+        let h2 = [0x02; 32];
+        let h3 = [0x03; 32];
+        let h4 = [0x04; 32];
+
+        log.insert(h1);
+        log.insert(h2);
+        log.insert(h3);
+        assert_eq!(log.len(), 3);
+
+        // Inserting h4 should evict h1 (oldest).
+        log.insert(h4);
+        assert_eq!(log.len(), 3);
+        assert!(!log.contains(&h1), "oldest entry should be evicted");
+        assert!(log.contains(&h2));
+        assert!(log.contains(&h3));
+        assert!(log.contains(&h4));
+    }
+
+    #[test]
+    fn delivered_log_clear_wipes_all() {
+        let mut log = DeliveredBlockLog::new(16);
+        log.insert([0x01; 32]);
+        log.insert([0x02; 32]);
+        assert_eq!(log.len(), 2);
+
+        log.clear();
+        assert!(log.is_empty());
+        assert!(!log.contains(&[0x01; 32]));
+    }
+
+    // --- CandidateTracker accumulation tests ---
+
+    #[test]
+    fn stale_block_detected_two_cycles_later() {
+        // Block from cycle N should be detected in cycle N+2.
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+
+        // Cycle N: propose
+        let (block_n, hash_n) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        tracker.add_candidate(block_n, hash_n, 1000).unwrap();
+        tracker.clear(); // Cycle N → N+1
+
+        // Cycle N+1: empty cycle (no proposals)
+        tracker.clear(); // Cycle N+1 → N+2
+
+        // Cycle N+2: stale block from cycle N re-arrives
+        let (block_n_copy, _) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let err = tracker.add_candidate(block_n_copy, hash_n, 3000).unwrap_err();
+        assert_eq!(err, hash_n, "stale block from cycle N detected in cycle N+2");
+    }
+
+    #[test]
+    fn previous_hashes_cap_enforced() {
+        let mut tracker = CandidateTracker::new();
+
+        // Fill previous_hashes with many entries across many cycles.
+        for cycle in 0..260 {
+            let (pk, pub_k) = make_validator();
+            let (block, hash) = make_candidate_block_at(&pub_k, &pk, 1_700_000_000 + cycle);
+            tracker.add_candidate(block, hash, cycle).unwrap();
+            tracker.clear();
+        }
+
+        // After 260 cycles with 1 unique proposal each, previous_hashes
+        // should have been capped and reset on overflow.
+        assert!(
+            tracker.previous_hashes.len() <= 256,
+            "previous_hashes should be capped at 256, got {}",
+            tracker.previous_hashes.len()
+        );
     }
 }

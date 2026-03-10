@@ -692,7 +692,15 @@ async fn handle_swarm_event(
                     // members and the message is silently dropped.  Re-publishing
                     // after the first peer connects ensures the block reaches the
                     // network.
+                    //
+                    // Height gate: skip blocks at or below the committed tip.
+                    // Stale re-announces are the primary trigger for false
+                    // DuplicateProposal (0x04) bans between honest nodes.
+                    let tip_height = block_provider.chain_tip().0;
                     for (hash, (block, _ts)) in pending_proposals.iter() {
+                        if block.header.height <= tip_height {
+                            continue; // Stale — already committed
+                        }
                         let msg = GossipMessage::BlockAnnounce {
                             block_hash: *hash,
                             height: block.header.height,
@@ -1011,10 +1019,17 @@ async fn handle_swarm_event(
                     let peer_bytes = peer.to_bytes().to_vec();
                     for block in blocks {
                         // Cache for serving to other peers.
+                        // Evict any previous block from the same validator first
+                        // to prevent stale proposals from prior cycles lingering
+                        // and triggering false DuplicateProposal (0x04) bans when
+                        // re-announced on PeerConnected.
                         if let Ok(bh) = block.header.compute_block_hash() {
+                            let validator_wire = block.header.validator_id.to_wire_bytes();
+                            pending_proposals.retain(|_, (b, _)| {
+                                b.header.validator_id.to_wire_bytes() != validator_wire
+                            });
                             pending_proposals
-                                .entry(*bh.as_bytes())
-                                .or_insert_with(|| (block.clone(), now_cache_ts));
+                                .insert(*bh.as_bytes(), (block.clone(), now_cache_ts));
                         }
                         if event_tx
                             .try_send(NetworkEvent::BlockReceived {
@@ -1033,10 +1048,14 @@ async fn handle_swarm_event(
                 }
                 SyncResponse::Block(Some(block)) => {
                     // Cache for serving to other peers.
+                    // Evict stale same-validator entries (see SyncResponse::Blocks).
                     if let Ok(bh) = block.header.compute_block_hash() {
+                        let validator_wire = block.header.validator_id.to_wire_bytes();
+                        pending_proposals.retain(|_, (b, _)| {
+                            b.header.validator_id.to_wire_bytes() != validator_wire
+                        });
                         pending_proposals
-                            .entry(*bh.as_bytes())
-                            .or_insert_with(|| (block.clone(), now_cache_ts));
+                            .insert(*bh.as_bytes(), (block.clone(), now_cache_ts));
                     }
                     if event_tx
                         .try_send(NetworkEvent::BlockReceived {
