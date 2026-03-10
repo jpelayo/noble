@@ -2132,6 +2132,10 @@ async fn handle_command(
             }
         }
 
+        NetworkCommand::ClearPendingProposals => {
+            pending_proposals.clear();
+        }
+
         NetworkCommand::Shutdown => {
             return true;
         }

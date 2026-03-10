@@ -256,6 +256,8 @@ pub enum NetworkCommand {
         local_height: u64,
         peer_height: u64,
     },
+    /// Clear the pending_proposals cache (used during fork resolution/chain adoption).
+    ClearPendingProposals,
     /// Shut down the network service.
     Shutdown,
 }

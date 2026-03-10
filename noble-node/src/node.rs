@@ -3606,9 +3606,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         if let Err(e) = self.consensus.write().reset_tip(tip.height, tip.block_hash, true) {
                             tracing::error!(task = "fork_resolution", "reset_tip failed: {e}");
                         }
+                        // Restore tip_header from storage so B2/B3/B5 validation works
+                        // for incoming blocks (prevents false DuplicateProposal bans).
+                        if tip.height > 0 {
+                            match storage.get_block_header(&tip.block_hash) {
+                                Ok(header) => {
+                                    self.consensus.write().update_tip_with_header(header);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        task = "fork_resolution",
+                                        height = tip.height,
+                                        "failed to restore tip_header — B2/B3/B5 validation degraded until next commit: {e}"
+                                    );
+                                }
+                            }
+                        }
                     }
                     self.fork_visible = false;
                     self.fork_common_ancestor = None;
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals);
                     let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "fork_auto_resolved",
@@ -3671,7 +3688,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     {
                         let _ = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true);
                     }
-                    // 5. Request sync — will discover peers on the target chain and bootstrap.
+                    // 5. Clear stale proposals and request sync.
+                    let _ = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals);
                     let _ = network_cmd.try_send(noble_network::NetworkCommand::RequestSync);
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "chain_adoption_started",

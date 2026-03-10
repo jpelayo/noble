@@ -77,6 +77,8 @@ pub enum EvidenceError {
     SameCandidateHash,
     /// Evidence does not demonstrate the claimed violation.
     VerificationFailed,
+    /// The two headers have different prev_block_hash values (cross-fork, not double proposal).
+    CrossForkProposal,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -91,6 +93,7 @@ impl std::fmt::Display for EvidenceError {
             Self::DifferentRounds => write!(f, "votes reference different rounds"),
             Self::SameCandidateHash => write!(f, "votes are for the same candidate"),
             Self::VerificationFailed => write!(f, "evidence does not demonstrate the claimed violation"),
+            Self::CrossForkProposal => write!(f, "headers are from different forks (different prev_block_hash)"),
         }
     }
 }
@@ -148,6 +151,13 @@ impl DoubleProposalEvidence {
             .map_err(|e| EvidenceError::HashError(e.to_string()))?;
         if hash_a == hash_b {
             return Err(EvidenceError::SameBlockHash);
+        }
+
+        // 3b. Same parent — blocks on different forks (different prev_block_hash)
+        // are NOT genuine double proposals; they're honest proposals on competing
+        // chains after a fork.
+        if self.header_a.prev_block_hash != self.header_b.prev_block_hash {
+            return Err(EvidenceError::CrossForkProposal);
         }
 
         // 4. Valid signatures — compute signing message, then verify via SignatureEnvelope
@@ -542,6 +552,23 @@ mod tests {
         let h2 = h1.clone(); // identical → same hash
         let evidence = DoubleProposalEvidence::new(h1, h2);
         assert_eq!(evidence.verify().unwrap_err(), EvidenceError::SameBlockHash);
+    }
+
+    #[test]
+    fn cross_fork_proposal_rejected() {
+        let (priv_key, pub_key) = make_validator();
+        let h1 = make_signed_header(&priv_key, &pub_key, 10, 1_700_000_000);
+        // h2 is on a different fork (different prev_block_hash)
+        let mut h2 = make_signed_header(&priv_key, &pub_key, 10, 1_700_000_001);
+        h2.prev_block_hash = Hash256::from_bytes([0xAA; 32]);
+        // Re-sign after changing prev_block_hash
+        let msg = h2.compute_signing_message().unwrap();
+        h2.validator_sig = priv_key.sign(&msg).unwrap();
+        let evidence = DoubleProposalEvidence::new(h1, h2);
+        assert_eq!(
+            evidence.verify().unwrap_err(),
+            EvidenceError::CrossForkProposal
+        );
     }
 
     #[test]
