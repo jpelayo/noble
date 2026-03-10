@@ -139,7 +139,6 @@ export function init(root, ctx) {
               <option value="random">Random</option>
               <option value="weighted_reputation">Weighted Reputation</option>
               <option value="weighted_probability">Weighted Probability</option>
-              <option value="follow_majority">Follow Majority</option>
               <option value="manual">Manual</option>
             </select>
             <div id="cs-r1-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
@@ -154,7 +153,7 @@ export function init(root, ctx) {
               <option value="random">Random</option>
               <option value="weighted_reputation">Weighted Reputation</option>
               <option value="weighted_probability">Weighted Probability</option>
-              <option value="follow_majority">Follow Majority</option>
+              <option value="follow_majority">Follow Round 1 Majority</option>
               <option value="manual">Manual</option>
             </select>
             <div id="cs-r2-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
@@ -393,7 +392,7 @@ export function init(root, ctx) {
     random: 'Randomly select among valid candidates (deterministic per cycle).',
     weighted_reputation: 'Vote for the candidate from the highest-weight validator.',
     weighted_probability: 'Probabilistic vote weighted by priority order — higher in the list = more likely.',
-    follow_majority: 'Vote for the leading candidate. Fallback: random if no tallies yet.',
+    follow_majority: 'Confirm the Round 1 leader. Fallback: random if no tallies yet.',
     manual: 'Do not auto-vote. Use inline Vote buttons in the tally panel each cycle.',
   };
 
@@ -563,13 +562,13 @@ export function init(root, ctx) {
       case 'peer_banned':
         return `Peer banned: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
       case 'peer_status':
-        return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
+        return null; // Suppressed — only sync_started/sync_complete are meaningful
       case 'announce_received':
         return `${data.node_name || hashLabel(data.identity)} v${data.software_version || '?'}${data.wants_to_validate ? ' \u2022 validator' : ''}${data.wants_to_vote ? ' \u2022 voter' : ''} \u2014 ${data.connected ? 'connected' : 'via gossip'}`;
       case 'tx_announced':
         return `Tx {${truncateHash(data.tx_id || '')}} from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
       case 'sync_started':
-        return `Syncing: peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.peer_height}, we're at ${data.our_height} \u2192 requesting block #${data.requesting}`;
+        return `Behind by ${data.blocks_behind} block${data.blocks_behind > 1 ? 's' : ''} (height ${data.our_height} \u2192 ${data.peer_height}) \u2014 syncing`;
       case 'sync_progress':
         return `Sync-imported block #${data.height} (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
       case 'sync_complete':
@@ -682,6 +681,7 @@ export function init(root, ctx) {
       const icon = ACTIVITY_ICONS[data.event] || '\u2022';
       const color = activityColor(data.event);
       const msg = formatActivityMessage(data);
+      if (!msg) continue;
       const badge = count > 1 ? ` <span style="font-size:0.75em;color:var(--text-muted);background:var(--bg-tertiary);padding:0 4px;border-radius:3px">\u00d7${count}</span>` : '';
       html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text-muted)">${ts}</span> <span style="color:${color}">${icon}</span> ${escapeHtml(msg)}${badge}</div>`;
     }

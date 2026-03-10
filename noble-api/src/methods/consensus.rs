@@ -648,6 +648,12 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         if round != 1 && round != 2 {
             return Err(ApiError::InvalidParam("round must be 1 or 2".into()).into());
         }
+        if round == 1 && strategy == "follow_majority" {
+            return Err(ApiError::InvalidParam(
+                "follow_majority is only valid for round 2 (confirmation)".into(),
+            )
+            .into());
+        }
         let parsed = parse_strategy(&strategy, params.as_ref()).map_err(ErrorObjectOwned::from)?;
 
         let mut consensus = self.consensus.write();

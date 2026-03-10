@@ -130,6 +130,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub fork_visible: bool,
     /// Common ancestor discovered via AncestorFinder (height, hash).
     pub fork_common_ancestor: Option<(u64, [u8; 32])>,
+    /// True while this node is catching up blocks from a peer that is ahead.
+    pub sync_behind: bool,
 }
 
 impl Node<MemoryStorage> {
@@ -485,6 +487,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             fork_visible: false,
             fork_common_ancestor: None,
+            sync_behind: false,
         })
     }
 
@@ -2782,10 +2785,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
             NetworkEvent::SyncComplete { new_height } => {
-                let _ = cycle_phase_tx.send(serde_json::json!({
-                    "event": "sync_complete",
-                    "height": new_height,
-                }));
                 tracing::info!(
                     task = "sync",
                     "Sync complete up to height {new_height}"
@@ -2832,25 +2831,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // validation and commitment, then triggers another RequestSync
                 // to continue the chain until we're caught up.
                 let our_height = self.consensus.read().chain_tip().0;
-                let _ = cycle_phase_tx.send(serde_json::json!({
-                    "event": "peer_status",
-                    "peer_id": hex_pid,
-                    "height": height,
-                }));
                 if *height > our_height {
+                    let behind = *height - our_height;
                     let next_height = our_height + 1;
+                    if !self.sync_behind {
+                        // First time we see a peer ahead — emit sync_started.
+                        self.sync_behind = true;
+                        let _ = cycle_phase_tx.send(serde_json::json!({
+                            "event": "sync_started",
+                            "peer_height": height,
+                            "our_height": our_height,
+                            "blocks_behind": behind,
+                        }));
+                    }
                     tracing::info!(
                         task = "sync",
-                        "peer {} is at height {}, we're at {} — requesting block {}",
-                        hex_pid, height, our_height, next_height
+                        "peer {} at height {}, we're at {} ({} behind) — requesting block {}",
+                        hex_pid, height, our_height, behind, next_height
                     );
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "sync_started",
-                        "peer_id": hex_pid,
-                        "peer_height": height,
-                        "our_height": our_height,
-                        "requesting": next_height,
-                    }));
                     if let Err(e) = network_cmd.try_send(
                         noble_network::NetworkCommand::RequestBlockByHeight {
                             peer_id: peer_id.clone(),
@@ -2859,16 +2857,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     ) {
                         tracing::warn!(task = "sync", "RequestBlockByHeight dropped: {e}");
                     }
-                } else if *height == our_height && *height > 0 {
-                    // We caught up with this peer — emit sync_complete.
+                } else if self.sync_behind && *height == our_height && *height > 0 {
+                    // We were behind and caught up — emit sync_complete.
+                    self.sync_behind = false;
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "sync_complete",
                         "height": our_height,
                     }));
                     tracing::info!(
                         task = "sync",
-                        "Sync complete — caught up with peer {} at height {}",
-                        hex_pid, our_height
+                        "Sync complete — caught up at height {}",
+                        our_height
                     );
                 }
                 // S60: Bootstrap proposal retry — when the first peer status
