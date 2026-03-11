@@ -70,6 +70,7 @@ export function init(root, ctx) {
       <div style="flex:1"><h1 style="display:inline">Consensus</h1><p>Proof of Reputation cycle status, accepted validator registry, and network candidate discovery</p></div>
       <button id="cs-badge-gear" title="Badge Governance" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1;flex-shrink:0;align-self:flex-start">&#9881;</button>
     </div>
+    <div id="cs-sync-banner" style="display:none;padding:10px 16px;margin-bottom:var(--gap);border-radius:var(--radius-sm);background:var(--bg-warning, #fef3c7);border:1px solid var(--border-warning, #f59e0b);color:var(--text-warning, #92400e);font-size:var(--font-size-sm);font-weight:500"></div>
 
     <!-- Superposition Timeline -->
     <div class="panel">
@@ -783,6 +784,12 @@ export function init(root, ctx) {
       if (data.event === 'phase_change') {
         scheduleReload(loadCycle, loadVoteTallies);
       }
+      // Sync banner: show on sync_started, hide on sync_complete
+      if (data.event === 'sync_started') {
+        updateSyncBanner(true, data.peer_height);
+      } else if (data.event === 'sync_complete') {
+        updateSyncBanner(false);
+      }
     }));
     unsubs.push(ws.subscribe('peerUpdates', (data) => {
       // Normalize peerUpdates event names to match activity log conventions.
@@ -835,11 +842,28 @@ export function init(root, ctx) {
     }).catch(() => {});
   }
 
+  // ── Sync banner management ──
+  const syncBanner = root.querySelector('#cs-sync-banner');
+
+  function updateSyncBanner(syncing, targetHeight) {
+    if (!syncBanner) return;
+    if (syncing) {
+      syncBanner.style.display = 'block';
+      syncBanner.textContent = targetHeight
+        ? `Syncing \u2014 catching up to height ${formatNumber(targetHeight)}\u2026`
+        : 'Syncing \u2014 catching up to peer chain\u2026';
+    } else {
+      syncBanner.style.display = 'none';
+    }
+  }
+
   // ── Startup seed: lightweight "node is alive" snapshot ──
   function seedNodeStatus() {
     rpc.call('noble_getNodeInfo').then(info => {
       if (info) {
         pushActivity({ event: 'heartbeat', message: `Node v${info.version}` });
+        // Show sync banner immediately from RPC state (no WS event needed).
+        updateSyncBanner(info.sync_behind, info.sync_target_height);
       }
     }).catch(() => {});
   }

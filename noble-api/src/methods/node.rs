@@ -295,6 +295,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let network_name = self.network_name.clone();
         let genesis_hash = self.genesis_hash.clone();
 
+        let sync_behind = self.sync_behind.load(std::sync::atomic::Ordering::Relaxed);
+        let sync_target_height = self.sync_target_height.load(std::sync::atomic::Ordering::Relaxed);
+
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
             software_version: SOFTWARE_VERSION.to_string(),
@@ -312,6 +315,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_capacity_bytes,
             data_dir: data_dir_str,
             validator_pubkey: self.validator_pubkey.clone(),
+            sync_behind,
+            sync_target_height,
         })
     }
 

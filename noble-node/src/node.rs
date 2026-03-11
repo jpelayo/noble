@@ -132,6 +132,14 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub fork_common_ancestor: Option<(u64, [u8; 32])>,
     /// True while this node is catching up blocks from a peer that is ahead.
     pub sync_behind: bool,
+    /// The peer we're currently syncing from (their PeerId bytes). Set on sync_started, cleared on sync_complete.
+    pub sync_from_peer: Option<Vec<u8>>,
+    /// Target height we're syncing towards. Set on sync_started, cleared on sync_complete.
+    pub sync_target_height: Option<u64>,
+    /// Shared AtomicBool for RPC visibility of sync_behind state.
+    pub sync_behind_shared: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared sync target height for RPC visibility (0 = not syncing).
+    pub sync_target_height_shared: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Node<MemoryStorage> {
@@ -488,6 +496,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             fork_visible: false,
             fork_common_ancestor: None,
             sync_behind: false,
+            sync_from_peer: None,
+            sync_target_height: None,
+            sync_behind_shared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_target_height_shared: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -1578,6 +1590,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .unwrap_or_default()
             },
             discovered_blockchains: self.discovered_blockchains.clone(),
+            sync_behind: self.sync_behind_shared.clone(),
+            sync_target_height: self.sync_target_height_shared.clone(),
         });
 
         // --- Determine bind addresses ---
@@ -1758,12 +1772,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         tokio::pin!(announce_delay);
         let mut announce_delay_armed = false;
 
-        // --- Peer status polling (every 60s) — populates chain_tip for fork detection ---
-        let mut peer_status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // --- Stale-peer sync fallback (every 60s) — sends GetStatus to peers silent for 120s ---
+        // Start after 3s delay so WS subscribers have time to connect before sync events fire.
+        let mut peer_status_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(60),
+        );
         peer_status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // --- Auto-reconnect timer (every 30s) — redial seeds + stored peers when isolated ---
-        let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        // --- Auto-reconnect timer (every 30s, first tick at T+3s) — redial seeds + stored peers when isolated ---
+        let mut reconnect_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(30),
+        );
         reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!(
@@ -2037,12 +2058,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     announce_delay_armed = false;
                 }
 
-                // Peer status polling — request chain tips from all peers (fork detection)
+                // Stale-peer sync fallback — send GetStatus only to peers whose
+                // chain_tip hasn't been refreshed via gossip in 120s.
                 _ = peer_status_interval.tick() => {
                     let peer_count = self.network_stats.read().peer_count;
                     if peer_count > 0 {
-                        if let Err(e) = network_cmd.try_send(NetworkCommand::RequestSync) {
-                            tracing::warn!(task = "sync", "periodic RequestSync dropped: {e}");
+                        if let Err(e) = network_cmd.try_send(NetworkCommand::RequestStaleSync { threshold_secs: 120 }) {
+                            tracing::warn!(task = "sync", "periodic RequestStaleSync dropped: {e}");
                         }
                     }
                 }
@@ -2242,11 +2264,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "direction": direction,
                     "node_name": peer_name.as_deref().unwrap_or(""),
                 }));
-                // Request peer status immediately on connect so sync and
-                // block proposal don't wait for the 60s poll interval.
-                if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-                    tracing::warn!(task = "sync", "RequestSync dropped on PeerConnected: {e}");
-                }
+                // Sync is gossip-driven: NodeAnnounce → PeerChainTipUpdated → height compare.
+                // Stale-peer fallback (GetStatus) runs every 60s for silent peers only.
                 tracing::info!(task = "peer_tracking", "Peer connected ({direction}): {addr}");
             }
             NetworkEvent::PeerDisconnected { peer_id, reason } => {
@@ -2779,8 +2798,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 );
                 let our_height = self.consensus.read().chain_tip().0;
                 if *height > our_height {
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-                        tracing::warn!(task = "sync", "RequestSync on BlockAnnounced dropped: {e}");
+                    // Fetch directly from the announcing peer instead of polling all peers.
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
+                        peer_id: peer_id.clone(),
+                        height: our_height + 1,
+                    }) {
+                        tracing::warn!(task = "sync", "RequestBlockByHeight on BlockAnnounced dropped: {e}");
                     }
                 }
             }
@@ -2826,10 +2849,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 }
-                // Sync catch-up: if the peer is ahead, request the next block
-                // we need.  The sync import path (try_sync_import) handles
-                // validation and commitment, then triggers another RequestSync
-                // to continue the chain until we're caught up.
+                // Gossip-driven sync: if the peer is ahead, request the next block
+                // directly from them.  The sync import path (try_sync_import)
+                // handles validation and commitment, then fetches the next block
+                // from the same peer to continue the chain until caught up.
                 let our_height = self.consensus.read().chain_tip().0;
                 if *height > our_height {
                     let behind = *height - our_height;
@@ -2837,12 +2860,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if !self.sync_behind {
                         // First time we see a peer ahead — emit sync_started.
                         self.sync_behind = true;
+                        self.sync_from_peer = Some(peer_id.clone());
+                        self.sync_target_height = Some(*height);
+                        self.sync_behind_shared.store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.sync_target_height_shared.store(*height, std::sync::atomic::Ordering::Relaxed);
                         let _ = cycle_phase_tx.send(serde_json::json!({
                             "event": "sync_started",
                             "peer_height": height,
                             "our_height": our_height,
                             "blocks_behind": behind,
                         }));
+                    } else if *height > self.sync_target_height.unwrap_or(0) {
+                        // Update target if this peer is further ahead.
+                        self.sync_from_peer = Some(peer_id.clone());
+                        self.sync_target_height = Some(*height);
+                        self.sync_target_height_shared.store(*height, std::sync::atomic::Ordering::Relaxed);
                     }
                     tracing::info!(
                         task = "sync",
@@ -2857,9 +2889,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     ) {
                         tracing::warn!(task = "sync", "RequestBlockByHeight dropped: {e}");
                     }
-                } else if self.sync_behind && *height == our_height && *height > 0 {
+                } else if self.sync_behind && *height <= our_height && our_height > 0 {
                     // We were behind and caught up — emit sync_complete.
                     self.sync_behind = false;
+                    self.sync_from_peer = None;
+                    self.sync_target_height = None;
+                    self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "sync_complete",
                         "height": our_height,
@@ -2962,6 +2998,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         cycle_phase_tx,
                         metrics,
                     );
+                    // Sync local fields from shared atomics (try_sync_import takes &self,
+                    // so it can only update atomics — we sync locals here with &mut self).
+                    if self.sync_behind && !self.sync_behind_shared.load(std::sync::atomic::Ordering::Relaxed) {
+                        self.sync_behind = false;
+                        self.sync_from_peer = None;
+                        self.sync_target_height = None;
+                    }
                 } else {
                     // Live proposal — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
@@ -3632,11 +3675,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                     {
                         let storage = self.storage.read();
-                        let tip = storage.get_chain_tip().ok().flatten()
-                            .unwrap_or(noble_storage::ChainTip {
+                        let tip = match storage.get_chain_tip() {
+                            Ok(Some(t)) => t,
+                            Ok(None) => noble_storage::ChainTip {
                                 block_hash: noble_crypto::Hash256::ZERO,
                                 height: 0,
-                            });
+                            },
+                            Err(e) => {
+                                tracing::error!(task = "fork_resolution", "get_chain_tip failed after rollback: {e} — falling back to genesis");
+                                noble_storage::ChainTip {
+                                    block_hash: noble_crypto::Hash256::ZERO,
+                                    height: 0,
+                                }
+                            }
+                        };
                         if let Err(e) = self.consensus.write().reset_tip(tip.height, tip.block_hash, true) {
                             tracing::error!(task = "fork_resolution", "reset_tip failed: {e}");
                         }
@@ -3662,8 +3714,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
                         tracing::warn!(task = "commit", "ClearPendingProposals dropped: {e}");
                     }
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-                        tracing::warn!(task = "commit", "RequestSync after commit dropped: {e}");
+                    // After fork resolution, fetch next block from sync peer if syncing,
+                    // otherwise let gossip-driven sync pick it up.
+                    if self.sync_behind {
+                        if let Some(ref speer) = self.sync_from_peer {
+                            let next = self.consensus.read().chain_tip().0 + 1;
+                            if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
+                                peer_id: speer.clone(),
+                                height: next,
+                            }) {
+                                tracing::warn!(task = "commit", "RequestBlockByHeight after fork resolution dropped: {e}");
+                            }
+                        }
                     }
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "fork_auto_resolved",
@@ -3841,12 +3903,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let storage = self.storage.read();
 
         // Load parent header from storage for B2/B3/B5 validation.
+        // Abort sync import if storage fails — proceeding without parent_header
+        // would skip prev_hash, height sequence, and timestamp ordering checks.
         let parent_header = if tip_height > 0 {
-            storage
-                .get_chain_tip()
-                .ok()
-                .flatten()
-                .and_then(|t| storage.get_block_header(&t.block_hash).ok())
+            let chain_tip = match storage.get_chain_tip() {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    tracing::error!(task = "sync_import", "chain tip missing at height {tip_height} — aborting sync import");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(task = "sync_import", "failed to load chain tip: {e} — aborting sync import");
+                    return;
+                }
+            };
+            match storage.get_block_header(&chain_tip.block_hash) {
+                Ok(header) => Some(header),
+                Err(e) => {
+                    tracing::error!(task = "sync_import", "failed to load parent header: {e} — aborting sync import");
+                    return;
+                }
+            }
         } else {
             None
         };
@@ -3990,9 +4067,39 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tracing::debug!(task = "sync_import", "new_block broadcast: no subscribers");
         }
 
-        // Request next block if we're still behind peers.
-        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-            tracing::warn!(task = "sync_import", "RequestSync continuation dropped: {e}");
+        // Check if we've reached the sync target — complete immediately
+        // instead of waiting for the next PeerChainTipUpdated event.
+        // NOTE: We use shared atomics here because try_sync_import takes &self.
+        // The caller (run loop with &mut self) will sync local fields from the atomics.
+        let committed_height = block.header.height;
+        let target = self.sync_target_height_shared.load(std::sync::atomic::Ordering::Relaxed);
+        if self.sync_behind_shared.load(std::sync::atomic::Ordering::Relaxed) && target > 0 {
+            if committed_height >= target {
+                self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
+                if cycle_phase_tx.send(serde_json::json!({
+                    "event": "sync_complete",
+                    "height": committed_height,
+                })).is_err() {
+                    tracing::debug!(task = "sync_import", "sync_complete broadcast: no subscribers");
+                }
+                tracing::info!(
+                    task = "sync_import",
+                    "Sync complete — caught up at height {}",
+                    committed_height
+                );
+                return;
+            }
+            // Still behind — request next block from the same peer.
+            if let Some(ref speer) = self.sync_from_peer {
+                let next = committed_height + 1;
+                if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
+                    peer_id: speer.clone(),
+                    height: next,
+                }) {
+                    tracing::warn!(task = "sync_import", "RequestBlockByHeight continuation dropped: {e}");
+                }
+            }
         }
     }
 }

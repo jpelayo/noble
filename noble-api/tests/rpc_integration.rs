@@ -161,6 +161,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         genesis_hash: hex::encode(test_genesis_hash().as_bytes()),
         discovered_blockchains: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         max_peers: std::sync::atomic::AtomicU32::new(50),
+        sync_behind: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sync_target_height: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     (state, dir)

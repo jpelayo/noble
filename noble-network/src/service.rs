@@ -1897,6 +1897,27 @@ async fn handle_command(
             }
         }
 
+        NetworkCommand::RequestStaleSync { threshold_secs } => {
+            // Send GetStatus only to peers whose chain_tip hasn't been refreshed
+            // within the threshold — gossip-driven fallback for silent peers.
+            let threshold = std::time::Duration::from_secs(threshold_secs);
+            let stale_peers = peer_manager.stale_chain_tip_peers(threshold);
+            if !stale_peers.is_empty() {
+                tracing::info!(
+                    task = "sync_trace",
+                    "RequestStaleSync: sending GetStatus to {} stale peers (threshold={}s)",
+                    stale_peers.len(),
+                    threshold_secs,
+                );
+                for pid in stale_peers {
+                    swarm
+                        .behaviour_mut()
+                        .sync_rpc
+                        .send_request(&pid, SyncRequest::GetStatus);
+                }
+            }
+        }
+
         NetworkCommand::PublishNodeAnnounce(announce) => {
             // Flatten optional attestation for wire format
             let (att_scheme, att_scope, att_fingerprint, att_data) =

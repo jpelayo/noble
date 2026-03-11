@@ -214,8 +214,11 @@ pub enum NetworkCommand {
     RequestBlockFromAll { hash: [u8; 32] },
     /// Request a block by height from a specific peer (sync catch-up).
     RequestBlockByHeight { peer_id: Vec<u8>, height: u64 },
-    /// Trigger a chain sync check.
+    /// Trigger a chain sync check (all peers — used for chain adoption only).
     RequestSync,
+    /// Send GetStatus to peers whose chain_tip hasn't been updated within `threshold_secs`.
+    /// Gossip-driven fallback for peers that don't send NodeAnnounce.
+    RequestStaleSync { threshold_secs: u64 },
     /// Ban a peer by their serialized PeerId bytes with a category code and reason.
     BanPeer {
         peer_id: Vec<u8>,

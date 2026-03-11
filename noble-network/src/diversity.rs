@@ -157,11 +157,12 @@ mod tests {
     use std::time::Instant;
 
     fn make_peer_state(latency_ms: u64, ban_score: u32) -> PeerState {
+        let now = Instant::now();
         PeerState {
             direction: Direction::Outbound,
             ban_score,
-            connected_at: Instant::now(),
-            last_seen: Instant::now(),
+            connected_at: now,
+            last_seen: now,
             chain_tip: None,
             latency: Some(Duration::from_millis(latency_ms)),
             announce: None,
@@ -171,6 +172,7 @@ mod tests {
             last_ban_reason: None,
             misbehavior_categories: Vec::new(),
             clock_offset_ms: None,
+            last_chain_tip_at: now,
         }
     }
 

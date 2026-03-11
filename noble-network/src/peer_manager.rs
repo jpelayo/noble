@@ -187,6 +187,8 @@ pub struct PeerState {
     pub misbehavior_categories: Vec<BanCategory>,
     /// Clock offset in milliseconds (positive = peer ahead of us). `None` if not yet sampled.
     pub clock_offset_ms: Option<i64>,
+    /// Timestamp of the last `update_chain_tip()` call (for stale-peer detection).
+    pub last_chain_tip_at: Instant,
 }
 
 /// Maximum length of a software version string in a NodeAnnounce.
@@ -356,6 +358,7 @@ impl PeerManager {
                 last_ban_reason: None,
                 misbehavior_categories: Vec::new(),
                 clock_offset_ms: None,
+                last_chain_tip_at: now,
             },
         );
         tracing::info!(task = "peer_connect", peer_id = %peer_id, "peer connected");
@@ -598,9 +601,21 @@ impl PeerManager {
     /// Update a peer's reported chain tip.
     pub fn update_chain_tip(&mut self, peer_id: &PeerId, height: u64, hash: [u8; 32]) {
         if let Some(state) = self.peers.get_mut(peer_id) {
+            let now = Instant::now();
             state.chain_tip = Some((height, hash));
-            state.last_seen = Instant::now();
+            state.last_seen = now;
+            state.last_chain_tip_at = now;
         }
+    }
+
+    /// Return connected peers whose `last_chain_tip_at` is older than `threshold`.
+    /// Used by the stale-peer sync fallback to send targeted `GetStatus` requests.
+    pub fn stale_chain_tip_peers(&self, threshold: Duration) -> Vec<PeerId> {
+        self.peers
+            .iter()
+            .filter(|(_, state)| state.last_chain_tip_at.elapsed() > threshold)
+            .map(|(pid, _)| *pid)
+            .collect()
     }
 
     /// Update a peer's measured latency.

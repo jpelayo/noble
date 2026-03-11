@@ -301,4 +301,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Blockchains discovered via NodeAnnounce from peers on different chains.
     /// Shared with the Node event loop which writes; API reads.
     pub discovered_blockchains: Arc<Mutex<HashMap<u32, crate::types::DiscoveredBlockchainInfo>>>,
+
+    /// True when the node is catching up blocks from an ahead peer (shared with Node event loop).
+    pub sync_behind: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Target height the node is syncing towards (0 = not syncing, shared with Node event loop).
+    pub sync_target_height: Arc<std::sync::atomic::AtomicU64>,
 }

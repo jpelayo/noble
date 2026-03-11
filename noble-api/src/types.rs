@@ -490,6 +490,10 @@ pub struct NodeInfoResponse {
     /// Hex-encoded validator public key, if configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_pubkey: Option<String>,
+    /// True when the node is catching up blocks from a peer.
+    pub sync_behind: bool,
+    /// Target height the node is syncing towards (0 when not syncing).
+    pub sync_target_height: u64,
 }
 
 /// Response for `noble_getApiVersion`.

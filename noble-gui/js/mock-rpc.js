@@ -994,6 +994,11 @@ export class MockRpcClient {
           data_dir: '/var/noble/data',
           totp_enabled: this.#authEnabled,
           validator_pubkey: selfKeyHex,
+          peer_id: '12D3KooWMockPeerIdForDevMode',
+          network_name: '34E9E7A4',
+          latest_network_version: null,
+          sync_behind: false,
+          sync_target_height: 0,
         };
       }
 
