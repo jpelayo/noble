@@ -9,12 +9,18 @@
  */
 export function renderQR(container, text, size = 200) {
     const matrix = generateQR(text);
+    const dpr = window.devicePixelRatio || 1;
     const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+    canvas.style.width = size + 'px';
+    canvas.style.height = size + 'px';
     canvas.className = 'qr-canvas';
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', 'QR code for ' + text);
 
     const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
     const modules = matrix.length;
     const cellSize = size / modules;
 

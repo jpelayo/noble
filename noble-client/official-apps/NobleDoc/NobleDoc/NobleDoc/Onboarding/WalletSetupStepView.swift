@@ -35,7 +35,7 @@ struct WalletSetupStepView: View {
             if let errorMessage {
                 Text(errorMessage)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color(.systemRed))
             }
         }
         .padding()
@@ -169,6 +169,7 @@ struct WalletSetupStepView: View {
                 .clipShape(.rect(cornerRadius: 4))
             }
         }
+        .privacySensitive()
     }
 
     // MARK: - Actions

@@ -5,6 +5,7 @@ import { hashText } from '../components/hash-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { formatAmount } from '../components/amount-text.js';
+import { esc, formatTimestamp } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -21,6 +22,7 @@ export function init(root, ctx) {
     function render() {
         if (!alive) return;
         root.innerHTML = '';
+        root.classList.add('page-content');
 
         // Header
         const header = document.createElement('div');
@@ -31,6 +33,8 @@ export function init(root, ctx) {
         // Mode selector
         const seg = document.createElement('div');
         seg.className = 'segmented-control';
+        seg.setAttribute('role', 'tablist');
+        seg.setAttribute('aria-label', 'Verification input mode');
         seg.style.marginBottom = 'var(--gap)';
 
         const modes = [
@@ -41,6 +45,9 @@ export function init(root, ctx) {
         for (const m of modes) {
             const btn = document.createElement('button');
             btn.className = mode === m.key ? 'active' : '';
+            btn.setAttribute('role', 'tab');
+            btn.setAttribute('aria-selected', mode === m.key ? 'true' : 'false');
+            btn.setAttribute('tabindex', mode === m.key ? '0' : '-1');
             btn.textContent = m.label;
             btn.addEventListener('click', () => {
                 mode = m.key;
@@ -52,6 +59,23 @@ export function init(root, ctx) {
             });
             seg.appendChild(btn);
         }
+        seg.addEventListener('keydown', (e) => {
+            const keys = modes.map(m => m.key);
+            const idx = keys.indexOf(mode);
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                e.preventDefault();
+                const next = (idx + 1) % keys.length;
+                mode = keys[next];
+                checksum = ''; result = null; versions = null; selectedFile = null;
+                render();
+            } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                const prev = (idx - 1 + keys.length) % keys.length;
+                mode = keys[prev];
+                checksum = ''; result = null; versions = null; selectedFile = null;
+                render();
+            }
+        });
         root.appendChild(seg);
 
         // Input area
@@ -69,6 +93,8 @@ export function init(root, ctx) {
         if (verifying) {
             const loading = document.createElement('div');
             loading.style.cssText = 'text-align:center;padding:var(--gap);color:var(--text-muted)';
+            loading.setAttribute('role', 'status');
+            loading.setAttribute('aria-live', 'polite');
             loading.textContent = 'Verifying...';
             root.appendChild(loading);
         }
@@ -107,7 +133,13 @@ export function init(root, ctx) {
 
         const zone = document.createElement('div');
         zone.className = 'drop-zone';
+        zone.setAttribute('role', 'button');
+        zone.setAttribute('aria-label', 'Select a file to verify');
+        zone.setAttribute('tabindex', '0');
         zone.innerHTML = '<div style="font-size:2rem;margin-bottom:var(--gap-sm)">\u{1F4C4}</div><div>Click to select a file</div>';
+        zone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zone.click(); }
+        });
         zone.addEventListener('click', async () => {
             try {
                 const res = await Bridge.call('noble_app', 'openFileDialog', { multiple: false });
@@ -355,13 +387,3 @@ export function init(root, ctx) {
     };
 }
 
-function formatTimestamp(ts) {
-    const d = new Date(ts * 1000);
-    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
-}
-
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
-}

@@ -58,7 +58,7 @@
     --bg-primary: #0f172a;
     --bg-secondary: #1e293b;
     --bg-tertiary: #334155;
-    --bg-surface: #1e293b;
+    --bg-surface: #232d3f;
 
     --text-primary: #e2e8f0;
     --text-secondary: #94a3b8;
@@ -78,12 +78,17 @@
 /* ── Reset & Base ── */
 html {
   color-scheme: light dark;
+  overscroll-behavior: none;
 }
 
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+a, button, [role="button"], .btn, .contact-row, .fee-option, .segmented-control button {
+  touch-action: manipulation;
 }
 
 body {
@@ -94,6 +99,7 @@ body {
   line-height: 1.5;
   min-width: 320px;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #app-content {
@@ -139,17 +145,32 @@ input, textarea, select, button {
   font-size: var(--font-size-sm);
 }
 
+.section-title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--gap);
+}
+
+.step-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: var(--gap-sm);
+}
+
 /* ── Panel ── */
 .panel {
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
 @supports (container-type: inline-size) {
-  .panel { container-type: inline-size; }
+  .panel { container-type: inline-size; container-name: panel; }
 }
 
 .panel-header {
@@ -220,6 +241,7 @@ input, textarea, select, button {
   padding: var(--gap-sm) var(--gap);
   border-bottom: 1px solid var(--border);
   color: var(--text-primary);
+  transition: background-color 0.15s ease;
 }
 
 /* hover gated behind @media (hover: hover) and (pointer: fine) below */
@@ -251,7 +273,7 @@ input, textarea, select, button {
   background: var(--bg-surface);
   color: var(--text-primary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease, color 0.15s ease;
   line-height: 1.4;
 }
 
@@ -341,7 +363,7 @@ input, textarea, select, button {
   word-break: break-all;
 }
 
-@container (min-width: 28rem) {
+@container panel (min-width: 28rem) {
   .detail-grid {
     grid-template-columns: 160px 1fr;
     gap: var(--gap-sm) var(--gap);
@@ -488,7 +510,7 @@ input, textarea, select, button {
   background: var(--bg-surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease, color 0.15s ease;
 }
 
 .segmented-control button:not(:last-child) {
@@ -682,7 +704,8 @@ input, textarea, select, button {
   height: 100%;
   background: var(--accent);
   border-radius: 2px;
-  transition: width 0.3s ease;
+  transition: transform 0.3s ease;
+  transform-origin: left;
 }
 
 /* ── Metadata Editor ── */
@@ -698,7 +721,7 @@ input, textarea, select, button {
   grid-column: 1 / -1;
 }
 
-@container (min-width: 32rem) {
+@container panel (min-width: 32rem) {
   .metadata-row {
     grid-template-columns: 180px 1fr auto;
   }
@@ -750,7 +773,7 @@ input, textarea, select, button {
 /* ── Fee Selector ── */
 .fee-options {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: var(--gap-sm);
 }
 
@@ -760,7 +783,7 @@ input, textarea, select, button {
   padding: var(--gap-sm) var(--gap);
   text-align: center;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease, color 0.15s ease;
 }
 
 .fee-option:hover {
@@ -815,6 +838,7 @@ input, textarea, select, button {
   z-index: 1000;
   opacity: 0;
   transition: opacity 0.2s ease;
+  overscroll-behavior: contain;
 }
 
 .modal-overlay.visible {
@@ -829,6 +853,7 @@ input, textarea, select, button {
   width: 90%;
   max-width: 520px;
   max-height: 80vh;
+  max-height: 80dvh;
   display: flex;
   flex-direction: column;
   transform: translateY(12px);
@@ -880,7 +905,7 @@ input, textarea, select, button {
   gap: var(--gap-sm);
   padding: var(--gap-sm) var(--gap);
   border-bottom: 1px solid var(--border);
-  transition: background 0.1s ease;
+  transition: background-color 0.15s ease;
 }
 
 .contact-row:last-child {
@@ -1024,6 +1049,11 @@ body {
   opacity: 0.75;
 }
 
+.contact-row, .fee-option, .tx-row, .segmented-control button, .step-indicator, .file-remove {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ══════════════════════════════════════════════════════════════
    INPUT METHOD ADAPTATION
    ══════════════════════════════════════════════════════════════ */
@@ -1036,7 +1066,7 @@ body {
   }
 
   .btn-sm {
-    min-height: 36px;
+    min-height: 44px;
     padding: 8px 12px;
   }
 
@@ -1076,10 +1106,20 @@ body {
   }
 
   .segmented-control button {
-    min-height: 40px;
+    min-height: 44px;
   }
 
   .fee-option {
+    min-height: 44px;
+  }
+
+  .toggle input[type="checkbox"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .input-sm,
+  select.input-sm {
     min-height: 44px;
   }
 }
@@ -1149,6 +1189,7 @@ body {
   .modal-panel {
     width: 95%;
     max-height: 85vh;
+    max-height: 85dvh;
   }
 
   .modal-panel-wizard {
@@ -1216,6 +1257,7 @@ body {
     width: 100%;
     max-width: 100%;
     max-height: 92vh;
+    max-height: 92dvh;
     border-radius: var(--radius) var(--radius) 0 0;
     border-bottom: none;
   }
@@ -1307,6 +1349,10 @@ body {
   .receipt-card {
     padding: var(--gap-sm);
   }
+
+  .page-content {
+    padding: 0 var(--gap-sm);
+  }
 }
 
 /* ── Small mobile (max-width: 360px) ── */
@@ -1325,6 +1371,7 @@ body {
 
   .modal-panel {
     max-height: 95vh;
+    max-height: 95dvh;
   }
 }
 
@@ -1338,10 +1385,15 @@ body {
   padding: var(--gap-sm) 0;
   border-bottom: 1px solid var(--border);
   gap: var(--gap);
+  flex-wrap: wrap;
 }
 
 .settings-row:last-child {
   border-bottom: none;
+}
+
+.settings-row .mono {
+  font-size: var(--font-size-xs);
 }
 
 .settings-label {
@@ -1402,4 +1454,51 @@ body {
 .qr-canvas {
   border-radius: var(--radius);
   border: 1px solid var(--border);
+}
+
+/* ── Skeleton loading ── */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-tertiary) 50%, var(--bg-secondary) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+.skeleton-line {
+  height: 1em;
+  margin-bottom: var(--gap-sm);
+}
+.skeleton-card {
+  height: 80px;
+  margin-bottom: var(--gap);
+}
+@keyframes skeleton-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Error card ── */
+.error-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  text-align: center;
+  color: var(--error);
+}
+.error-card button {
+  margin-top: var(--gap-sm);
+  padding: 6px 16px;
+  background: var(--error);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.error-card button:hover { opacity: 0.85; }
+
+/* ── Page content constraints ── */
+.page-content {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 var(--gap-lg);
 }

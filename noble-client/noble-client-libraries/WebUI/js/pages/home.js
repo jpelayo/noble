@@ -5,6 +5,7 @@ import { hashText } from '../components/hash-text.js';
 import { amountText, formatAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
+import { esc, timeAgo, showCopyFeedback } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -19,6 +20,8 @@ export function init(root, ctx) {
         return { destroy() { alive = false; }, refresh() {} };
     }
 
+    root.classList.add('page-content');
+
     // Page header
     const header = document.createElement('div');
     header.className = 'page-header';
@@ -28,6 +31,7 @@ export function init(root, ctx) {
     // Balance card placeholder
     const balanceContainer = document.createElement('div');
     balanceContainer.style.marginBottom = 'var(--gap)';
+    balanceContainer.setAttribute('aria-live', 'polite');
     root.appendChild(balanceContainer);
 
     // Quick actions
@@ -45,18 +49,25 @@ export function init(root, ctx) {
     split.appendChild(txsContainer);
     root.appendChild(split);
 
-    // Load data
+    // Show skeleton while loading
+    balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+    docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+    txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+
     loadDashboard();
 
     async function loadDashboard() {
         if (!alive) return;
         const address = state.walletAddress;
         if (!address) {
+            balanceContainer.innerHTML = '';
             balanceContainer.appendChild(emptyState({
                 icon: '\u{1F4B0}',
                 title: 'No Wallet',
                 subtitle: 'Set up a wallet to see your balance.'
             }));
+            docsContainer.innerHTML = '';
+            txsContainer.innerHTML = '';
             return;
         }
 
@@ -73,11 +84,19 @@ export function init(root, ctx) {
         } catch (err) {
             if (!alive) return;
             balanceContainer.innerHTML = '';
-            balanceContainer.appendChild(emptyState({
-                icon: '\u26A0\uFE0F',
-                title: 'Error',
-                subtitle: err.message
-            }));
+            const errDiv = document.createElement('div');
+            errDiv.className = 'error-card';
+            errDiv.setAttribute('role', 'alert');
+            errDiv.innerHTML = `<p>${err.message}</p><button type="button">Retry</button>`;
+            errDiv.querySelector('button').addEventListener('click', () => {
+                balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                loadDashboard();
+            });
+            balanceContainer.appendChild(errDiv);
+            docsContainer.innerHTML = '';
+            txsContainer.innerHTML = '';
         }
     }
 
@@ -99,7 +118,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Address</div>
-                    <div class="kpi-value" id="home-address" style="font-size: var(--font-size-sm); cursor: pointer;" title="${address}">${address.slice(0, 8)}\u2026${address.slice(-8)}</div>
+                    <button class="kpi-value" id="home-address" style="background:none;border:none;cursor:pointer;font:inherit;color:inherit;padding:0;font-size:var(--font-size-sm);" title="${address}">${address.slice(0, 8)}\u2026${address.slice(-8)}</button>
                 </div>
             </div>
         `;
@@ -112,8 +131,7 @@ export function init(root, ctx) {
             addrEl.addEventListener('click', () => {
                 Bridge.call('noble_app', 'copyToClipboard', { text: address });
                 const orig = addrEl.textContent;
-                addrEl.textContent = 'Copied!';
-                setTimeout(() => { addrEl.textContent = orig; }, 1200);
+                showCopyFeedback(addrEl, orig);
             });
         }
     }
@@ -217,6 +235,7 @@ export function init(root, ctx) {
             const btn = document.createElement('button');
             btn.className = 'btn';
             btn.textContent = `${a.icon} ${a.label}`;
+            btn.setAttribute('aria-label', a.label);
             btn.addEventListener('click', () => {
                 Bridge.call('noble_app', 'navigateTo', { section: a.section });
             });
@@ -233,12 +252,4 @@ export function init(root, ctx) {
             Object.assign(state, newState);
         }
     };
-}
-
-function timeAgo(timestamp) {
-    const diff = Math.floor(Date.now() / 1000 - timestamp);
-    if (diff < 60) return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
 }

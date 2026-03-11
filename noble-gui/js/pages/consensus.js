@@ -1208,32 +1208,18 @@ export function init(root, ctx) {
           const hi = allEntries[i].cycle_number;
           const lo = allEntries[i + 1].cycle_number;
           if (hi - lo <= 1) continue;
-          // Cap individual gap rows at 10, then summary.
-          const gapStart = hi - 1;
-          const gapEnd = Math.max(lo + 1, hi - 10);
-          for (let g = gapStart; g >= gapEnd; g--) {
-            filled.push({
-              cycle_number: g,
-              status: 'no_consensus',
-              proposals: [],
-              votes: [],
-              winner: null,
-              winning_hash: null,
-              _gap: true,
-            });
-          }
-          if (hi - lo > 11) {
-            filled.push({
-              cycle_number: null,
-              status: 'gap_summary',
-              _gapCount: hi - lo - 1,
-              _gapFrom: lo + 1,
-              _gapTo: hi - 1,
-              proposals: [],
-              votes: [],
-              _gap: true,
-            });
-          }
+          // Collapse all empty cycles into a single summary line.
+          const gapSize = hi - lo - 1;
+          filled.push({
+            cycle_number: null,
+            status: 'gap_summary',
+            _gapCount: gapSize,
+            _gapFrom: lo + 1,
+            _gapTo: hi - 1,
+            proposals: [],
+            votes: [],
+            _gap: true,
+          });
         }
       }
 

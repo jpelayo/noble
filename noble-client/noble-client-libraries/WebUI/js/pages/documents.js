@@ -4,6 +4,7 @@ import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { formatAmount } from '../components/amount-text.js';
 import { emptyState } from '../components/empty-state.js';
+import { esc, formatBytes } from '../utils.js';
 
 const STEP_NAMES = ['Files', 'Checksum', 'Version', 'Metadata', 'Fee', 'Review', 'Submit'];
 
@@ -37,6 +38,7 @@ export function init(root, ctx) {
     // ── Landing Page ──
 
     function renderLanding() {
+        root.classList.add('page-content');
         const header = document.createElement('div');
         header.className = 'page-header';
         header.innerHTML = '<h1>Documents</h1><p>Register documents on the NOBLE blockchain</p>';
@@ -61,6 +63,11 @@ export function init(root, ctx) {
         // Step indicators
         const indicators = document.createElement('div');
         indicators.className = 'wizard-steps';
+        indicators.setAttribute('role', 'progressbar');
+        indicators.setAttribute('aria-valuenow', step + 1);
+        indicators.setAttribute('aria-valuemin', '1');
+        indicators.setAttribute('aria-valuemax', String(STEP_NAMES.length));
+        indicators.setAttribute('aria-label', `Step ${step + 1} of ${STEP_NAMES.length}: ${STEP_NAMES[step]}`);
         for (let i = 0; i < STEP_NAMES.length; i++) {
             const dot = document.createElement('div');
             dot.className = 'step-indicator' + (i === step ? ' active' : '') + (i < step ? ' completed' : '');
@@ -129,7 +136,13 @@ export function init(root, ctx) {
     function renderStepFiles(container) {
         const zone = document.createElement('div');
         zone.className = 'drop-zone';
+        zone.setAttribute('role', 'button');
+        zone.setAttribute('aria-label', 'Select files to register');
+        zone.setAttribute('tabindex', '0');
         zone.innerHTML = '<div style="font-size:2rem; margin-bottom:var(--gap-sm)">\u{1F4C1}</div><div>Click to select files</div><div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">Up to 100 files</div>';
+        zone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zone.click(); }
+        });
         zone.addEventListener('click', async () => {
             try {
                 const result = await Bridge.call('noble_app', 'openFileDialog', { multiple: true });
@@ -426,6 +439,7 @@ export function init(root, ctx) {
     function renderStepReview(container) {
         const warning = document.createElement('div');
         warning.className = 'warning-box';
+        warning.setAttribute('role', 'alert');
         warning.textContent = '\u26A0\uFE0F Permanent \u2014 checksums cannot be removed from the blockchain once registered.';
         container.appendChild(warning);
 
@@ -595,14 +609,3 @@ export function init(root, ctx) {
     };
 }
 
-function formatBytes(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1048576).toFixed(1) + ' MB';
-}
-
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-}

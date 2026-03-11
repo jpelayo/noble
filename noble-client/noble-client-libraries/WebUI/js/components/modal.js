@@ -1,16 +1,39 @@
 // Reusable modal container + wizard variant.
 
-let _activeModal = null;
+const _modalStack = [];
+
+function _trapFocus(container, closeFn) {
+    const focusable = container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+
+    function handler(e) {
+        if (e.key === 'Escape') { closeFn(); return; }
+        if (e.key !== 'Tab') return;
+        if (e.shiftKey) {
+            if (document.activeElement === first) { e.preventDefault(); last?.focus(); }
+        } else {
+            if (document.activeElement === last) { e.preventDefault(); first?.focus(); }
+        }
+    }
+    container.addEventListener('keydown', handler);
+    first?.focus();
+    return () => container.removeEventListener('keydown', handler);
+}
 
 /** Open a simple modal. Returns { el, close }. */
-export function openModal({ title, body, onClose }) {
-    closeModal();
+export function openModal({ title, body, onClose, stack = false }) {
+    if (!stack) closeModal();
+
+    const previousFocus = document.activeElement;
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
 
     const panel = document.createElement('div');
     panel.className = 'modal-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
 
     // Header
     const header = document.createElement('div');
@@ -42,28 +65,44 @@ export function openModal({ title, body, onClose }) {
     // Trigger animation
     requestAnimationFrame(() => overlay.classList.add('visible'));
 
-    _activeModal = { el: overlay, close };
+    const entry = { el: overlay, close, previousFocus };
+    _modalStack.push(entry);
+
+    // Focus trap
+    let removeTrap = _trapFocus(panel, close);
 
     function close() {
+        if (removeTrap) { removeTrap(); removeTrap = null; }
         overlay.classList.remove('visible');
-        setTimeout(() => { overlay.remove(); }, 200);
+        overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
+        // Fallback in case transitionend doesn't fire
+        setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 500);
         if (onClose) onClose();
-        if (_activeModal && _activeModal.el === overlay) _activeModal = null;
+        const idx = _modalStack.indexOf(entry);
+        if (idx !== -1) _modalStack.splice(idx, 1);
+        // Restore focus
+        if (previousFocus && typeof previousFocus.focus === 'function') {
+            previousFocus.focus();
+        }
     }
 
     return { el: bodyEl, close };
 }
 
 /** Open a multi-step wizard modal. Returns { el, close }. */
-export function openWizardModal({ title, steps, onComplete, onCancel }) {
-    closeModal();
+export function openWizardModal({ title, steps, onComplete, onCancel, stack = false }) {
+    if (!stack) closeModal();
     let current = 0;
+
+    const previousFocus = document.activeElement;
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
 
     const panel = document.createElement('div');
     panel.className = 'modal-panel modal-panel-wizard';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
 
     // Header
     const header = document.createElement('div');
@@ -100,7 +139,10 @@ export function openWizardModal({ title, steps, onComplete, onCancel }) {
     document.body.appendChild(overlay);
     requestAnimationFrame(() => overlay.classList.add('visible'));
 
-    _activeModal = { el: overlay, close };
+    const entry = { el: overlay, close, previousFocus };
+    _modalStack.push(entry);
+
+    let removeTrap = null;
 
     renderStep();
 
@@ -155,22 +197,32 @@ export function openWizardModal({ title, steps, onComplete, onCancel }) {
 
         nav.appendChild(backBtn);
         nav.appendChild(nextBtn);
+
+        // Re-apply focus trap
+        if (removeTrap) removeTrap();
+        removeTrap = _trapFocus(panel, close);
     }
 
     function close() {
+        if (removeTrap) { removeTrap(); removeTrap = null; }
         overlay.classList.remove('visible');
-        setTimeout(() => overlay.remove(), 200);
+        overlay.addEventListener('transitionend', () => overlay.remove(), { once: true });
+        setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 500);
         if (onCancel) onCancel();
-        if (_activeModal && _activeModal.el === overlay) _activeModal = null;
+        const idx = _modalStack.indexOf(entry);
+        if (idx !== -1) _modalStack.splice(idx, 1);
+        if (previousFocus && typeof previousFocus.focus === 'function') {
+            previousFocus.focus();
+        }
     }
 
     return { el: bodyEl, close, renderStep: () => renderStep() };
 }
 
-/** Close any active modal. */
+/** Close any active modal (top of stack). */
 export function closeModal() {
-    if (_activeModal) {
-        _activeModal.close();
-        _activeModal = null;
+    if (_modalStack.length > 0) {
+        const top = _modalStack[_modalStack.length - 1];
+        top.close();
     }
 }

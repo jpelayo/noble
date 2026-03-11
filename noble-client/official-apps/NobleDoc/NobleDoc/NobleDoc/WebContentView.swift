@@ -57,22 +57,27 @@ struct WebContentView: NSViewRepresentable {
 
     private func buildNativeConfigScript() -> String {
         let address = appState.walletAddress ?? ""
-        let connected = appState.isConnected ? "true" : "false"
-        let hasWallet = appState.hasWallet ? "true" : "false"
-        let network = appState.networkLabel
+        let connected = appState.isConnected
+        let hasWallet = appState.hasWallet
+        let chainId = appState.chainId
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1"
         let section = appState.selectedSection?.webRoute ?? "home"
 
-        return """
-        window.NativeConfig = {
-            platform: 'macos',
-            version: '0.23.0',
-            isConnected: \(connected),
-            hasWallet: \(hasWallet),
-            walletAddress: '\(address)',
-            network: '\(network)',
-            initialRoute: '\(section)'
-        };
-        """
+        let config: [String: Any] = [
+            "platform": "macos",
+            "version": version,
+            "isConnected": connected,
+            "hasWallet": hasWallet,
+            "walletAddress": address,
+            "chainId": chainId,
+            "initialRoute": section
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: config),
+              let json = String(data: data, encoding: .utf8) else {
+            return "window.NativeConfig = {};"
+        }
+        return "window.NativeConfig = \(json);"
     }
 
     // MARK: - Coordinator

@@ -4,6 +4,7 @@ import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { renderQR } from '../components/qr-code.js';
+import { esc, escAttr } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -44,6 +45,7 @@ export function init(root, ctx) {
     function render() {
         if (!alive) return;
         root.innerHTML = '';
+        root.classList.add('page-content');
 
         // Page header
         const header = document.createElement('div');
@@ -81,10 +83,10 @@ export function init(root, ctx) {
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Node URL</span>
-                    <span class="mono" style="font-size: 0.85em">${esc(nodeURL)}</span>
+                    <span class="mono" style="font-size: var(--font-size-sm)">${esc(nodeURL)}</span>
                 </div>
                 <div class="settings-row settings-edit-row">
-                    <input type="text" class="input" id="settings-node-url" value="${escAttr(nodeURL)}" placeholder="https://host:8783" />
+                    <input type="text" class="input" id="settings-node-url" value="${escAttr(nodeURL)}" placeholder="https://host:8783" aria-label="Node URL" enterkeyhint="done" />
                     <button class="btn btn-secondary" id="settings-test-btn">Test Connection</button>
                 </div>
                 <div id="settings-conn-result" style="margin-top: var(--gap-xs)"></div>
@@ -94,7 +96,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">TLS Fingerprint</span>
-                    <span class="mono" style="font-size: 0.8em; word-break: break-all">${esc(fingerprint)}</span>
+                    <span class="mono" style="font-size: var(--font-size-xs); word-break: break-all">${esc(fingerprint)}</span>
                 </div>
                 <div class="settings-actions">
                     ${isConn
@@ -120,8 +122,10 @@ export function init(root, ctx) {
                 resultDiv.innerHTML = '';
                 try {
                     await Bridge.call('noble_app', 'testConnection', { url });
+                    resultDiv.setAttribute('role', 'status');
                     resultDiv.innerHTML = '<span style="color: var(--success)">Connection successful</span>';
                 } catch (e) {
+                    resultDiv.setAttribute('role', 'alert');
                     resultDiv.innerHTML = `<span style="color: var(--error)">Failed: ${esc(e.message || 'Unknown error')}</span>`;
                 } finally {
                     testBtn.disabled = false;
@@ -267,7 +271,7 @@ export function init(root, ctx) {
                 <div class="settings-actions">
                     <button class="btn btn-secondary" id="settings-refresh-chain">Refresh</button>
                 </div>
-                <div class="settings-row" style="color: var(--text-muted); font-size: 0.85em">
+                <div class="settings-row" style="color: var(--text-muted); font-size: var(--font-size-sm)"
                     Last updated: <span id="settings-last-updated">${new Date().toLocaleTimeString()}</span>
                 </div>
             </div>
@@ -487,12 +491,3 @@ export function init(root, ctx) {
     };
 }
 
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-}
-
-function escAttr(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}

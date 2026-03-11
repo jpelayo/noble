@@ -28,12 +28,13 @@ struct NodeConnectionStepView: View {
                 TextField("https://localhost:8783", text: $appState.nodeURL)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
+                    .onSubmit { testConnection() }
             }
 
             if let error = appState.connectionError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color(.systemRed))
             }
 
             if appState.isConnected {
@@ -76,13 +77,14 @@ struct NodeConnectionStepView: View {
     private var connectedInfo: some View {
         HStack(spacing: 8) {
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading) {
                 Text("Connected")
                     .font(.caption)
                     .bold()
-                Text("Network: \(appState.networkLabel) · Block \(appState.blockHeight)")
+                Text("Chain: \(appState.chainId) · Block \(appState.blockHeight)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -90,7 +92,7 @@ struct NodeConnectionStepView: View {
             Spacer()
         }
         .padding()
-        .background(.green.opacity(0.1))
+        .background(Color.accentColor.opacity(0.1))
         .clipShape(.rect(cornerRadius: 8))
     }
 

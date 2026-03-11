@@ -150,7 +150,7 @@ final class WebBridgeHandler {
         case "getNodeInfo":
             let info = try await api.getNodeInfo()
             return [
-                "network": info.network,
+                "chainId": info.chainId,
                 "version": info.version,
                 "blockHeight": info.blockHeight,
                 "peerCount": info.peerCount,
@@ -299,7 +299,7 @@ final class WebBridgeHandler {
                 metadata: metadataItems,
                 fee: NobleAmount(atomic: feeAtomic),
                 privateKey: privateKey,
-                chainId: NobleProtocol.mainnetChainId
+                chainId: NobleProtocol.primaryChainId
             )
             return ["txHex": txHex]
 
@@ -321,7 +321,7 @@ final class WebBridgeHandler {
                 amount: NobleAmount(atomic: amountAtomic),
                 fee: NobleAmount(atomic: feeAtomic),
                 privateKey: privateKey,
-                chainId: NobleProtocol.mainnetChainId,
+                chainId: NobleProtocol.primaryChainId,
                 sourceAddress: nil
             )
             return ["txHex": txHex]
@@ -362,7 +362,7 @@ final class WebBridgeHandler {
                 "isConnected": appState.isConnected,
                 "hasWallet": appState.hasWallet,
                 "walletAddress": appState.walletAddress ?? "",
-                "network": appState.networkLabel,
+                "chainId": appState.chainId,
                 "blockHeight": appState.blockHeight,
                 "selectedSection": appState.selectedSection?.webRoute ?? "home",
             ] as [String: Any]
@@ -393,8 +393,16 @@ final class WebBridgeHandler {
             guard let text = params["text"] as? String else {
                 throw BridgeError.missingParam("text")
             }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            let picker = NSSharingServicePicker(items: [text])
+            if let webView = appState.webViewCoordinator?.webView {
+                // Anchor the share picker to the top-right of the WebView
+                let anchor = CGRect(x: webView.bounds.maxX - 40, y: 0, width: 1, height: 1)
+                picker.show(relativeTo: anchor, of: webView, preferredEdge: .minY)
+            } else {
+                // Fallback: copy to clipboard
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
             return ["ok": true]
 
         case "saveFileDialog":

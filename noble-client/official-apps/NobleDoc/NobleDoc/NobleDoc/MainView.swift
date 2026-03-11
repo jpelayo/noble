@@ -14,7 +14,23 @@ struct MainView: View {
         } detail: {
             detailContent
         }
-        .navigationTitle("")
+        .navigationTitle(appState.selectedSection?.label ?? "NobleDoc")
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(appState.isConnected ? Color.accentColor : Color(.systemRed))
+                        .frame(width: 8, height: 8)
+                    Text(appState.isConnected ? "Block \(appState.blockHeight)" : "Offline")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(appState.isConnected ? "Connected, block \(appState.blockHeight)" : "Offline")
+            }
+        }
+        .frame(minWidth: 700, minHeight: 500)
     }
 
     // MARK: - Sidebar

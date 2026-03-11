@@ -12,6 +12,7 @@ struct WelcomeStepView: View {
             Image(systemName: "doc.text.fill")
                 .font(.system(size: 64))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
 
             Text("Welcome to NobleDoc")
                 .font(.largeTitle)

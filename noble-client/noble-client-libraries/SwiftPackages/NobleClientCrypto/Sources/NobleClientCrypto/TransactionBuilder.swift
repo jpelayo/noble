@@ -14,10 +14,10 @@ public enum NobleProtocol {
     public static let txTypeNotarization: UInt8 = 0x00
     /// Transaction type: transfer.
     public static let txTypeTransfer: UInt8 = 0x01
-    /// Mainnet chain ID ("NOBL" in ASCII).
-    public static let mainnetChainId: UInt32 = 0x4E4F_424C
-    /// Testnet chain ID ("TSTN" in ASCII).
-    public static let testnetChainId: UInt32 = 0x5453_544E
+    /// Primary chain ID ("NOBL" in ASCII).
+    public static let primaryChainId: UInt32 = 0x4E4F_424C
+    /// Test chain ID ("TSTN" in ASCII).
+    public static let testChainId: UInt32 = 0x5453_544E
     /// secp256k1 scheme ID.
     public static let schemeSecp256k1: UInt8 = 0x02
     /// Maximum metadata entries per transaction.
@@ -50,7 +50,7 @@ public struct TransactionBuilder: Sendable {
         metadata: [MetadataItem],
         fee: NobleAmount,
         privateKey: Data,
-        chainId: UInt32 = NobleProtocol.mainnetChainId
+        chainId: UInt32 = NobleProtocol.primaryChainId
     ) throws -> String {
         let timestamp = UInt64(Date().timeIntervalSince1970)
         let publicKey = try Secp256k1Helper.compressedPublicKey(from: privateKey)
@@ -122,7 +122,7 @@ public struct TransactionBuilder: Sendable {
         amount: NobleAmount,
         fee: NobleAmount,
         privateKey: Data,
-        chainId: UInt32 = NobleProtocol.mainnetChainId,
+        chainId: UInt32 = NobleProtocol.primaryChainId,
         sourceAddress: Data? = nil
     ) throws -> String {
         let timestamp = UInt64(Date().timeIntervalSince1970)

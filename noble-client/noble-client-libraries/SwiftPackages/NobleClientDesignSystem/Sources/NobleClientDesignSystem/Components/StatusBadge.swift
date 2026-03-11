@@ -48,14 +48,9 @@ extension StatusBadge {
         StatusBadge(label, color: NobleColors.error)
     }
 
-    /// Network label badge.
-    public static func network(_ label: String) -> StatusBadge {
-        let color: Color = switch label.lowercased() {
-        case "mainnet": NobleColors.mainnet
-        case "testnet": NobleColors.testnet
-        case "regtest": NobleColors.regtest
-        default: NobleColors.accent
-        }
-        return StatusBadge(label, color: color)
+    /// Chain ID badge — displays the genesis-derived chain identifier from the connected node.
+    public static func chain(_ chainId: String) -> StatusBadge {
+        let label = chainId.isEmpty ? "Unknown" : chainId
+        return StatusBadge(label, color: NobleColors.accent)
     }
 }

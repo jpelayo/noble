@@ -4,6 +4,7 @@ import { nobleCard } from '../components/noble-card.js';
 import { emptyState } from '../components/empty-state.js';
 import { contactCard } from '../components/contact-card.js';
 import { openModal, closeModal } from '../components/modal.js';
+import { esc, truncate, initials } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -32,6 +33,7 @@ export function init(root, ctx) {
     function render() {
         if (!alive) return;
         root.innerHTML = '';
+        root.classList.add('page-content');
 
         // Page header
         const header = document.createElement('div');
@@ -95,10 +97,16 @@ export function init(root, ctx) {
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
         searchInput.placeholder = 'Search contacts...';
+        searchInput.setAttribute('aria-label', 'Search contacts');
         searchInput.value = searchQuery;
         searchInput.addEventListener('input', () => {
             searchQuery = searchInput.value.trim().toLowerCase();
             render();
+            const newSearchEl = root.querySelector('.search-bar input');
+            if (newSearchEl && searchQuery) {
+                newSearchEl.focus();
+                newSearchEl.setSelectionRange(newSearchEl.value.length, newSearchEl.value.length);
+            }
         });
         searchWrap.appendChild(searchInput);
         toolbar.appendChild(searchWrap);
@@ -107,15 +115,18 @@ export function init(root, ctx) {
         const addBtn = document.createElement('button');
         addBtn.className = 'btn btn-primary btn-sm';
         addBtn.textContent = 'Add Contact';
+        addBtn.setAttribute('aria-label', 'Add new contact');
         addBtn.addEventListener('click', () => openEditModal(null));
 
         const importBtn = document.createElement('button');
         importBtn.className = 'btn btn-sm';
         importBtn.textContent = 'Import VCF';
+        importBtn.setAttribute('aria-label', 'Import contacts from VCF file');
         importBtn.addEventListener('click', importVCF);
 
         const exportBtn = document.createElement('button');
         exportBtn.className = 'btn btn-sm';
+        exportBtn.setAttribute('aria-label', multiSelect ? 'Export selected contacts' : 'Export all contacts');
         exportBtn.textContent = multiSelect ? 'Export Selected' : 'Export All';
         exportBtn.addEventListener('click', () => {
             if (multiSelect && selectedIds.size > 0) {
@@ -261,6 +272,7 @@ export function init(root, ctx) {
         const backBtn = document.createElement('button');
         backBtn.className = 'btn btn-secondary btn-sm';
         backBtn.textContent = '\u2190 Back';
+        backBtn.setAttribute('aria-label', 'Back to contact list');
         backBtn.style.marginBottom = 'var(--gap)';
         backBtn.addEventListener('click', () => { selectedContact = null; render(); });
         root.appendChild(backBtn);
@@ -546,21 +558,3 @@ export function init(root, ctx) {
     };
 }
 
-// ── Helpers ──
-
-function initials(contact) {
-    const f = (contact.firstName || '')[0] || '';
-    const l = (contact.lastName || '')[0] || '';
-    return (f + l).toUpperCase() || '?';
-}
-
-function truncate(s, len) {
-    if (!s || s.length <= len * 2 + 1) return s || '';
-    return s.slice(0, len) + '\u2026' + s.slice(-len);
-}
-
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
-}

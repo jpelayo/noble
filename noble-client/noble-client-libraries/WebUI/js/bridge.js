@@ -3,6 +3,9 @@
 
 let _callbackId = 0;
 const _callbacks = {};
+const DEFAULT_TIMEOUT_MS = 10000;
+const TX_TIMEOUT_MS = 30000;
+const TX_ACTIONS = new Set(['submitTransaction', 'signNotarization', 'signTransfer']);
 
 /** Real bridge for WKWebView — calls Swift via webkit.messageHandlers. */
 class NativeBridge {
@@ -11,9 +14,17 @@ class NativeBridge {
     }
 
     static call(handler, action, params = {}) {
+        const timeoutMs = TX_ACTIONS.has(action) ? TX_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
             const id = 'cb_' + (++_callbackId);
-            _callbacks[id] = { resolve, reject };
+            const timer = setTimeout(() => {
+                delete _callbacks[id];
+                reject(new Error(`Bridge timeout: ${handler}.${action} exceeded ${timeoutMs}ms`));
+            }, timeoutMs);
+            _callbacks[id] = {
+                resolve: v => { clearTimeout(timer); resolve(v); },
+                reject: e => { clearTimeout(timer); reject(e); }
+            };
             window.webkit.messageHandlers[handler].postMessage({
                 callbackId: id,
                 action,
@@ -30,7 +41,13 @@ class NativeBridge {
         if (error) {
             cb.reject(new Error(typeof result === 'string' ? result : error));
         } else {
-            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            let parsed;
+            try {
+                parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            } catch (e) {
+                cb.reject(new Error('Invalid bridge response: ' + e.message));
+                return;
+            }
             cb.resolve(parsed);
         }
     }
@@ -134,7 +151,7 @@ class MockBridge {
                 txId: 'f6789012345678901234567890123456789012345678901234567890abcdef01', accepted: true
             };
             if (action === 'getNodeInfo') return {
-                chain_id: '4E4F424C', version: '0.28.0', blockHeight: 1234
+                chainId: '0x4E4F424C', version: '0.30.0', blockHeight: 1234
             };
             if (action === 'getBlockCount') return { height: 1234, block_hash: '00ab1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab' };
             if (action === 'getNetworkInfo') return { peer_count: 8, inbound: 5, outbound: 3, clock_offset_ms: 0 };

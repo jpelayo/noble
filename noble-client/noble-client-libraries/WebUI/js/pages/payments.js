@@ -7,6 +7,7 @@ import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
 import { renderQR } from '../components/qr-code.js';
+import { esc, timeAgo, truncate, initials, showCopyFeedback } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -22,6 +23,7 @@ export function init(root, ctx) {
     async function render() {
         if (!alive) return;
         root.innerHTML = '';
+        root.classList.add('page-content');
 
         if (!state.hasWallet) {
             root.appendChild(emptyState({
@@ -38,9 +40,11 @@ export function init(root, ctx) {
         header.innerHTML = '<h1>Payments</h1><p>Send, receive, and track NOBLE transfers</p>';
         root.appendChild(header);
 
-        // Balance card placeholder
+        // Balance card placeholder with skeleton
         const balanceContainer = document.createElement('div');
         balanceContainer.style.marginBottom = 'var(--gap)';
+        balanceContainer.setAttribute('aria-live', 'polite');
+        balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
         root.appendChild(balanceContainer);
 
         // Action buttons
@@ -51,20 +55,23 @@ export function init(root, ctx) {
         const sendBtn = document.createElement('button');
         sendBtn.className = 'btn btn-primary';
         sendBtn.textContent = '\u{1F4E4} Send';
+        sendBtn.setAttribute('aria-label', 'Send payment');
         sendBtn.addEventListener('click', openSendWizard);
 
         const recvBtn = document.createElement('button');
         recvBtn.className = 'btn';
         recvBtn.textContent = '\u{1F4E5} Receive';
+        recvBtn.setAttribute('aria-label', 'Receive payment');
         recvBtn.addEventListener('click', openReceiveModal);
 
         actions.appendChild(sendBtn);
         actions.appendChild(recvBtn);
         root.appendChild(actions);
 
-        // Transaction history placeholder
+        // Transaction history placeholder with skeleton
         const historyContainer = document.createElement('div');
         historyContainer.id = 'payment-history';
+        historyContainer.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
         root.appendChild(historyContainer);
 
         // Load data
@@ -88,11 +95,18 @@ export function init(root, ctx) {
             renderHistory(historyContainer, history);
         } catch (err) {
             if (!alive) return;
-            balanceContainer.appendChild(emptyState({
-                icon: '\u26A0\uFE0F',
-                title: 'Error',
-                subtitle: err.message
-            }));
+            balanceContainer.innerHTML = '';
+            historyContainer.innerHTML = '';
+            const errDiv = document.createElement('div');
+            errDiv.className = 'error-card';
+            errDiv.setAttribute('role', 'alert');
+            errDiv.innerHTML = `<p>${err.message}</p><button type="button">Retry</button>`;
+            errDiv.querySelector('button').addEventListener('click', () => {
+                balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                historyContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                loadData(balanceContainer, historyContainer);
+            });
+            balanceContainer.appendChild(errDiv);
         }
     }
 
@@ -160,6 +174,15 @@ export function init(root, ctx) {
         html += '</tbody></table></div>';
 
         const card = nobleCard('Transaction History', html);
+
+        // Keyboard accessibility for tx rows
+        card.querySelectorAll('.tx-row').forEach(row => {
+            row.setAttribute('tabindex', '0');
+            row.setAttribute('role', 'button');
+            row.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+            });
+        });
 
         // Click handler for rows
         card.addEventListener('click', e => {
@@ -466,8 +489,7 @@ export function init(root, ctx) {
             copyBtn.style.marginTop = 'var(--gap-sm)';
             copyBtn.addEventListener('click', () => {
                 Bridge.call('noble_app', 'copyToClipboard', { text: submitResult?.txId || '' });
-                copyBtn.textContent = 'Copied!';
-                setTimeout(() => { copyBtn.textContent = 'Copy TX ID'; }, 1200);
+                showCopyFeedback(copyBtn, 'Copy TX ID');
             });
             card.appendChild(copyBtn);
             el.appendChild(card);
@@ -522,7 +544,8 @@ export function init(root, ctx) {
 
             const pickerModal = openModal({
                 title: 'Pick Contact',
-                body
+                body,
+                stack: true
             });
         });
     }
@@ -558,8 +581,7 @@ export function init(root, ctx) {
         copyBtn.textContent = 'Copy Address';
         copyBtn.addEventListener('click', () => {
             Bridge.call('noble_app', 'copyToClipboard', { text: address });
-            copyBtn.textContent = 'Copied!';
-            setTimeout(() => { copyBtn.textContent = 'Copy Address'; }, 1200);
+            showCopyFeedback(copyBtn, 'Copy Address');
         });
 
         const shareBtn = document.createElement('button');
@@ -589,29 +611,4 @@ function parseAmount(str) {
     const n = parseFloat(str);
     if (isNaN(n) || n <= 0) return 0;
     return Math.round(n * 1_000_000);
-}
-
-function timeAgo(timestamp) {
-    const diff = Math.floor(Date.now() / 1000 - timestamp);
-    if (diff < 60) return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-}
-
-function truncate(s, len) {
-    if (!s || s.length <= len * 2 + 1) return s || '';
-    return s.slice(0, len) + '\u2026' + s.slice(-len);
-}
-
-function initials(contact) {
-    const f = (contact.firstName || '')[0] || '';
-    const l = (contact.lastName || '')[0] || '';
-    return (f + l).toUpperCase() || '?';
-}
-
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
 }

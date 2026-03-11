@@ -1,4 +1,5 @@
 import { Bridge } from '../bridge.js';
+import { showCopyFeedback } from '../utils.js';
 
 // Truncated hash display with copy-on-click.
 export function hashText(hex, opts = {}) {
@@ -19,8 +20,7 @@ export function hashText(hex, opts = {}) {
     el.addEventListener('click', () => {
         Bridge.call('noble_app', 'copyToClipboard', { text: hex });
         const orig = el.textContent;
-        el.textContent = 'Copied!';
-        setTimeout(() => { el.textContent = orig; }, 1200);
+        showCopyFeedback(el, orig);
     });
 
     return el;

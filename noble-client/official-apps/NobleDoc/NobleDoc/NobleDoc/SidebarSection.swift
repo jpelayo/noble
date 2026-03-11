@@ -35,7 +35,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .verify: "checkmark.seal.fill"
         case .payments: "creditcard.fill"
         case .contacts: "person.2.fill"
-        case .settings: "gear"
+        case .settings: "gearshape.fill"
         }
     }
 }

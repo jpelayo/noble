@@ -13,6 +13,7 @@ struct OnboardingView: View {
             ProgressView(value: Double(appState.onboardingStep.rawValue), total: 3)
                 .padding(.horizontal, 40)
                 .padding(.top)
+                .accessibilityLabel("Setup progress, step \(appState.onboardingStep.rawValue + 1) of 4")
 
             Spacer()
 

@@ -34,6 +34,7 @@ const App = {
         }
         currentPage = null;
         currentRoute = section;
+        root.className = '';
         root.innerHTML = '';
 
         const initFn = pages[section];
@@ -65,8 +66,30 @@ const App = {
     /** Handle an event pushed from Swift (poll timer, state change). */
     handleEvent(type, data) {
         if (type === 'stateUpdate') {
+            const wasConnected = appState.isConnected;
             App.updateState(data);
+            if (data.isConnected === false && wasConnected !== false) {
+                App._showDisconnectedBanner();
+            } else if (data.isConnected === true) {
+                App._hideDisconnectedBanner();
+            }
         }
+    },
+
+    _showDisconnectedBanner() {
+        let banner = document.getElementById('disconnected-banner');
+        if (banner) return;
+        banner = document.createElement('div');
+        banner.id = 'disconnected-banner';
+        banner.setAttribute('role', 'alert');
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:var(--gap-sm) var(--gap);background:var(--error);color:#fff;text-align:center;font-size:var(--font-size-sm);z-index:2000;';
+        banner.textContent = 'Connection lost. Reconnecting...';
+        document.body.appendChild(banner);
+    },
+
+    _hideDisconnectedBanner() {
+        const banner = document.getElementById('disconnected-banner');
+        if (banner) banner.remove();
     }
 };
 

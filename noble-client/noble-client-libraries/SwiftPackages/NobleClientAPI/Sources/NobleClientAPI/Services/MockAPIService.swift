@@ -36,8 +36,8 @@ public struct MockAPIService: NobleAPIService {
     public func getNodeInfo() async throws -> NodeInfo {
         await simulateDelay()
         return NodeInfo(
-            version: "0.21.0",
-            network: "testnet",
+            version: "0.30.0",
+            chainId: "0x5453544E",
             blockHeight: 1_247,
             peerCount: 3,
             isSyncing: false

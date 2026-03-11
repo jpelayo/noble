@@ -9,28 +9,28 @@ public struct NodeConnectionProfile: Identifiable, Codable, Equatable, Sendable 
     public let id: UUID
     public var name: String
     public var baseURL: URL
-    public var networkLabel: String
+    public var chainId: String
     public var authMode: AuthMode
 
     public init(
         id: UUID = UUID(),
         name: String,
         baseURL: URL,
-        networkLabel: String = "mainnet",
+        chainId: String = "",
         authMode: AuthMode = .none
     ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
-        self.networkLabel = networkLabel
+        self.chainId = chainId
         self.authMode = authMode
     }
 
     /// Default localhost connection (JSON-RPC HTTP on port 8783, WS on port 8784).
+    /// Chain ID is populated at connection time from the node's response.
     public static let localhost = NodeConnectionProfile(
         name: "Local Node",
         baseURL: URL(string: "https://127.0.0.1:8783")!,
-        networkLabel: "mainnet",
         authMode: .none
     )
 }

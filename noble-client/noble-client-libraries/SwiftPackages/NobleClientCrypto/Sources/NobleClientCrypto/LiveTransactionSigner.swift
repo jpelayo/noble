@@ -15,7 +15,7 @@ public struct LiveTransactionSigner: TransactionSigning {
         amount: NobleAmount,
         fee: NobleAmount,
         privateKey: Data,
-        chainId: UInt32 = NobleProtocol.mainnetChainId,
+        chainId: UInt32 = NobleProtocol.primaryChainId,
         sourceAddress: Data? = nil
     ) throws -> String {
         try builder.buildTransfer(
@@ -33,7 +33,7 @@ public struct LiveTransactionSigner: TransactionSigning {
         metadata: [MetadataItem],
         fee: NobleAmount,
         privateKey: Data,
-        chainId: UInt32 = NobleProtocol.mainnetChainId
+        chainId: UInt32 = NobleProtocol.primaryChainId
     ) throws -> String {
         try builder.buildNotarization(
             checksum: checksum,

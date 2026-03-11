@@ -11,7 +11,8 @@ struct OnboardingCompleteView: View {
         VStack(spacing: 24) {
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 64))
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
 
             Text("You're All Set")
                 .font(.largeTitle)

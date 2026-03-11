@@ -73,17 +73,6 @@ public enum NobleColors {
     /// Strong border for emphasis (#cbd5e1 / #475569).
     public static let borderStrong = adaptive(light: 0xcbd5e1, dark: 0x475569)
 
-    // MARK: - Network Badges
-
-    /// Mainnet badge (#22a663).
-    public static let mainnet = Color(hex: 0x22a663)
-
-    /// Testnet badge (#e08a1e).
-    public static let testnet = Color(hex: 0xe08a1e)
-
-    /// Regtest badge (#d14040).
-    public static let regtest = Color(hex: 0xd14040)
-
     // MARK: - Terminal
 
     /// Terminal background (#0d1117).

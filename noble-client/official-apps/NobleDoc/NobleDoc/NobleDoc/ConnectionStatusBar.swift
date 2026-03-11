@@ -10,11 +10,12 @@ struct ConnectionStatusBar: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(appState.isConnected ? .green : .red)
+                .fill(appState.isConnected ? Color.accentColor : Color(.systemRed))
                 .frame(width: 6, height: 6)
+                .accessibilityLabel(appState.isConnected ? "Connected" : "Disconnected")
 
             if appState.isConnected {
-                Text(appState.networkLabel.isEmpty ? "Connected" : appState.networkLabel)
+                Text(appState.chainId.isEmpty ? "Connected" : appState.chainId)
                     .font(.caption)
 
                 Spacer()
@@ -31,6 +32,7 @@ struct ConnectionStatusBar: View {
                 Spacer()
             }
         }
+        .accessibilityElement(children: .combine)
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)

@@ -57,8 +57,8 @@ final class AppState {
     /// Whether the app is connected to a NOBLE node.
     var isConnected = false
 
-    /// Network label reported by the node (e.g. "testnet", "mainnet").
-    var networkLabel = ""
+    /// Chain ID reported by the node (e.g. "0x4E4F424C").
+    var chainId = ""
 
     /// Current block height from the connected node.
     var blockHeight: UInt64 = 0
@@ -248,7 +248,7 @@ final class AppState {
             let nodeInfo = try await service.getNodeInfo()
             apiService = service
             isConnected = true
-            networkLabel = nodeInfo.network
+            chainId = nodeInfo.chainId
             blockHeight = nodeInfo.blockHeight
             saveNodeURL(nodeURL)
             startPolling()
@@ -273,7 +273,7 @@ final class AppState {
         stopPolling()
         apiService = nil
         isConnected = false
-        networkLabel = ""
+        chainId = ""
         blockHeight = 0
         connectionError = nil
     }
@@ -298,7 +298,7 @@ final class AppState {
     }
 
     /// Single poll tick — fetches node info + balance and pushes to WebView.
-    private func pollTick() async {
+    func pollTick() async {
         guard let service = apiService else { return }
 
         do {
@@ -308,14 +308,14 @@ final class AppState {
 
             // Update local state
             blockHeight = nodeInfo.blockHeight
-            networkLabel = nodeInfo.network
+            chainId = nodeInfo.chainId
             pollFailureCount = 0
 
             // Build state update for WebView
             var stateUpdate: [String: Any] = [
                 "isConnected": true,
                 "blockHeight": nodeInfo.blockHeight,
-                "network": nodeInfo.network,
+                "chainId": nodeInfo.chainId,
                 "peerCount": nodeInfo.peerCount,
                 "isSyncing": nodeInfo.isSyncing,
             ]
