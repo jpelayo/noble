@@ -6,7 +6,11 @@ import Foundation
 // MARK: - noble_getNodeInfo
 
 /// Raw JSON-RPC response from `noble_getNodeInfo`.
-struct NodeInfoDTO: Decodable, Sendable {
+///
+/// The node may return `chain_id` as either a string or an integer,
+/// and `protocol_version` as either a string or an integer.
+/// Custom decoding handles both representations.
+struct NodeInfoDTO: Sendable {
     let version: String?
     let software_version: String?
     let protocol_version: String?
@@ -22,6 +26,49 @@ struct NodeInfoDTO: Decodable, Sendable {
     let storage_bytes: UInt64?
     let storage_capacity_bytes: UInt64?
     let data_dir: String?
+}
+
+extension NodeInfoDTO: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case version, software_version, protocol_version, chain_id, network_name
+        case genesis_hash, uptime_secs, rpc_port, ws_port, p2p_port, peer_id
+        case latest_network_version, storage_bytes, storage_capacity_bytes, data_dir
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(String.self, forKey: .version)
+        software_version = try c.decodeIfPresent(String.self, forKey: .software_version)
+        genesis_hash = try c.decodeIfPresent(String.self, forKey: .genesis_hash)
+        uptime_secs = try c.decodeIfPresent(UInt64.self, forKey: .uptime_secs)
+        rpc_port = try c.decodeIfPresent(UInt16.self, forKey: .rpc_port)
+        ws_port = try c.decodeIfPresent(UInt16.self, forKey: .ws_port)
+        p2p_port = try c.decodeIfPresent(UInt16.self, forKey: .p2p_port)
+        peer_id = try c.decodeIfPresent(String.self, forKey: .peer_id)
+        latest_network_version = try c.decodeIfPresent(String.self, forKey: .latest_network_version)
+        storage_bytes = try c.decodeIfPresent(UInt64.self, forKey: .storage_bytes)
+        storage_capacity_bytes = try c.decodeIfPresent(UInt64.self, forKey: .storage_capacity_bytes)
+        data_dir = try c.decodeIfPresent(String.self, forKey: .data_dir)
+        network_name = try c.decodeIfPresent(String.self, forKey: .network_name)
+
+        // chain_id: node sends integer (e.g. 3104764622), decode as either String or UInt64→hex
+        if let s = try? c.decodeIfPresent(String.self, forKey: .chain_id) {
+            chain_id = s
+        } else if let n = try? c.decodeIfPresent(UInt64.self, forKey: .chain_id) {
+            chain_id = String(format: "%08X", n)
+        } else {
+            chain_id = nil
+        }
+
+        // protocol_version: node sends integer, decode flexibly
+        if let s = try? c.decodeIfPresent(String.self, forKey: .protocol_version) {
+            protocol_version = s
+        } else if let n = try? c.decodeIfPresent(UInt64.self, forKey: .protocol_version) {
+            protocol_version = String(n)
+        } else {
+            protocol_version = nil
+        }
+    }
 }
 
 // MARK: - noble_getApiVersion

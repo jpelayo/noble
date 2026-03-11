@@ -22,7 +22,7 @@ public struct LiveNobleAPIService: NobleAPIService {
         let syncStatus = try? await client.call(method: "noble_getSyncStatus", expecting: SyncStatusDTO.self)
         return NodeInfo(
             version: dto.version ?? dto.software_version ?? "unknown",
-            network: dto.network_name ?? "unknown",
+            chainId: dto.network_name ?? "unknown",
             blockHeight: UInt64(blockCount?.height ?? 0),
             peerCount: networkInfo?.peer_count ?? 0,
             isSyncing: !(syncStatus?.synced ?? true)

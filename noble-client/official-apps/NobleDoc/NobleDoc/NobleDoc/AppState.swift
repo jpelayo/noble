@@ -137,15 +137,18 @@ final class AppState {
     private static let lockTimeoutKey = "nobledoc.settings.lockTimeout"
     private static let reAuthForSendsKey = "nobledoc.settings.reAuthForSends"
     private static let autoConnectKey = "nobledoc.settings.autoConnect"
+    private static let onboardingCompleteKey = "nobledoc.onboardingComplete"
 
     // MARK: - Lifecycle
 
     /// Check if a wallet already exists on launch.
     func checkExistingWallet() {
+        // Onboarding flag persists in UserDefaults — only set by completeOnboarding()
+        hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey)
+
         do {
             hasWallet = try keychainService.hasKey(label: Self.privateKeyLabel)
             if hasWallet {
-                hasCompletedOnboarding = true
                 loadWalletAddress()
                 loadSavedNodeURL()
             }
@@ -156,7 +159,7 @@ final class AppState {
         loadSecuritySettings()
 
         // Auto-connect if enabled and node URL is saved
-        if autoConnect && !nodeURL.isEmpty && hasWallet {
+        if autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding {
             Task {
                 await connectToNode()
             }
@@ -339,7 +342,7 @@ final class AppState {
             // Fetch balance if wallet exists
             if let address = walletAddress {
                 if let balance = try? await service.getBalance(address: address) {
-                    walletBalance = balance.balance.displayString
+                    walletBalance = balance.balance.formatted
                     stateUpdate["walletBalance"] = balance.balance.atomic
                     stateUpdate["walletAvailable"] = balance.available.atomic
                 }
@@ -415,6 +418,7 @@ final class AppState {
     /// Complete onboarding and transition to main app.
     func completeOnboarding() {
         hasCompletedOnboarding = true
+        UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey)
         // Clear sensitive onboarding state
         mnemonicWords = []
         mnemonicBackupConfirmed = false

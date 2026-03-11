@@ -2,11 +2,90 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
+
+// MARK: - Custom URL Scheme Handler
+
+/// Serves bundled WebUI files under the `noble-app://` scheme.
+///
+/// This avoids `file://` restrictions that break ES module imports
+/// in a sandboxed WKWebView.
+final class WebUISchemeHandler: NSObject, WKURLSchemeHandler {
+    private let baseDirectory: URL
+
+    init(baseDirectory: URL) {
+        self.baseDirectory = baseDirectory
+        super.init()
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+        guard let requestURL = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+
+        // Map noble-app://webui/path → WebUI/path in the bundle
+        let relativePath = requestURL.path.hasPrefix("/")
+            ? String(requestURL.path.dropFirst())
+            : requestURL.path
+        let fileURL = baseDirectory.appendingPathComponent(relativePath)
+
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+
+        guard let data = try? Data(contentsOf: fileURL) else {
+            urlSchemeTask.didFailWithError(URLError(.cannotOpenFile))
+            return
+        }
+
+        let mimeType = Self.mimeType(for: fileURL.pathExtension)
+        let response = URLResponse(
+            url: requestURL,
+            mimeType: mimeType,
+            expectedContentLength: data.count,
+            textEncodingName: mimeType.hasPrefix("text/") || mimeType.contains("javascript") ? "utf-8" : nil
+        )
+        urlSchemeTask.didReceive(response)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {
+        // Nothing to cancel for synchronous file reads
+    }
+
+    private static func mimeType(for ext: String) -> String {
+        switch ext.lowercased() {
+        case "html": "text/html"
+        case "css": "text/css"
+        case "js", "mjs": "application/javascript"
+        case "json": "application/json"
+        case "svg": "image/svg+xml"
+        case "png": "image/png"
+        case "jpg", "jpeg": "image/jpeg"
+        case "woff2": "font/woff2"
+        case "woff": "font/woff"
+        default:
+            if let utType = UTType(filenameExtension: ext), let mime = utType.preferredMIMEType {
+                mime
+            } else {
+                "application/octet-stream"
+            }
+        }
+    }
+}
+
+// MARK: - WebContentView
 
 /// NSViewRepresentable wrapping a WKWebView that hosts the portable web UI.
 struct WebContentView: NSViewRepresentable {
     let appState: AppState
+
+    /// Base URL for the custom scheme — matches what the scheme handler expects.
+    private static let baseURLString = "noble-app://webui/"
 
     func makeCoordinator() -> Coordinator {
         Coordinator(appState: appState)
@@ -14,6 +93,14 @@ struct WebContentView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+
+        // Register the custom URL scheme handler for bundled WebUI files
+        if let webUIDir = Bundle.main.url(forResource: "WebUI", withExtension: nil)
+            ?? Bundle.main.resourceURL?.appendingPathComponent("WebUI")
+        {
+            let schemeHandler = WebUISchemeHandler(baseDirectory: webUIDir)
+            config.setURLSchemeHandler(schemeHandler, forURLScheme: "noble-app")
+        }
 
         // Register bridge message handlers
         let handlers = ["noble_api", "noble_crypto", "noble_security", "noble_app", "noble_storage"]
@@ -39,13 +126,15 @@ struct WebContentView: NSViewRepresentable {
         }
         #endif
 
+        // Set navigation delegate to catch loading errors
+        webView.navigationDelegate = context.coordinator
+
         context.coordinator.webView = webView
         appState.webViewCoordinator = context.coordinator
 
-        // Load index.html from the bundle
-        if let htmlURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "WebUI") {
-            let webUIDir = htmlURL.deletingLastPathComponent()
-            webView.loadFileURL(htmlURL, allowingReadAccessTo: webUIDir)
+        // Load index.html via the custom scheme
+        if let url = URL(string: "\(Self.baseURLString)index.html") {
+            webView.load(URLRequest(url: url))
         }
 
         return webView
@@ -82,7 +171,7 @@ struct WebContentView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let appState: AppState
         weak var webView: WKWebView?
         private let bridgeHandler: WebBridgeHandler
@@ -100,6 +189,16 @@ struct WebContentView: NSViewRepresentable {
                     print("[WebContentView] JS error: \(error.localizedDescription)")
                 }
             }
+        }
+
+        // MARK: - WKNavigationDelegate
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+            print("[WebContentView] Navigation failed: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+            print("[WebContentView] Provisional navigation failed: \(error.localizedDescription)")
         }
 
         // MARK: - WKScriptMessageHandler

@@ -23,18 +23,20 @@ final class TLSTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable 
 
     func urlSession(
         _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge
-    ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
-
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let serverTrust = challenge.protectionSpace.serverTrust else {
-            return (.performDefaultHandling, nil)
+            completionHandler(.performDefaultHandling, nil)
+            return
         }
 
         // Extract the server certificate
         guard let certificates = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
               let serverCert = certificates.first else {
-            return (.cancelAuthenticationChallenge, nil)
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
         }
 
         let fingerprint = Self.sha256Fingerprint(of: serverCert)
@@ -43,20 +45,23 @@ final class TLSTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable 
         if let trusted = trustedFingerprint {
             if fingerprint.lowercased() == trusted.lowercased() {
                 lastCapturedFingerprint = fingerprint
-                return (.useCredential, URLCredential(trust: serverTrust))
+                completionHandler(.useCredential, URLCredential(trust: serverTrust))
+            } else {
+                // Fingerprint mismatch — reject
+                completionHandler(.cancelAuthenticationChallenge, nil)
             }
-            // Fingerprint mismatch — reject
-            return (.cancelAuthenticationChallenge, nil)
+            return
         }
 
         // Mode 2: Trust On First Use — accept and capture fingerprint
         if trustOnFirstUse {
             lastCapturedFingerprint = fingerprint
-            return (.useCredential, URLCredential(trust: serverTrust))
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+            return
         }
 
         // No trust policy configured — fall back to system default
-        return (.performDefaultHandling, nil)
+        completionHandler(.performDefaultHandling, nil)
     }
 
     /// Compute SHA-256 fingerprint of a DER-encoded certificate.
