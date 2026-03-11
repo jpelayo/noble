@@ -74,6 +74,50 @@ export function init(root, ctx) {
       } catch { /* non-critical — fall back to generic label */ }
 
       tbody.innerHTML = '';
+
+      // Insert gap rows ABOVE the first block — from the current active
+      // cycle down to the first block's cycle.  This surfaces the
+      // "no consensus" / "no proposals" cycles between the chain tip
+      // and the live consensus cycle.
+      if (currentPage === 0 && desc.length > 0 && desc[0].cycle != null) {
+        const topBlockCycle = desc[0].cycle;
+        // Get current cycle from consensus engine; fall back to highest in history.
+        let highestCycle = topBlockCycle;
+        try {
+          const cs = await rpc.call('noble_getCycleStatus');
+          if (cs.cycle_number != null) highestCycle = cs.cycle_number;
+        } catch { /* fall back */ }
+        if (highestCycle <= topBlockCycle) {
+          for (const [cn] of cycleHistoryMap) {
+            if (cn > highestCycle) highestCycle = cn;
+          }
+        }
+        // Start from highestCycle - 1: the active cycle is still in progress.
+        for (let gap = highestCycle - 1; gap > topBlockCycle; gap--) {
+          const hist = cycleHistoryMap.get(gap);
+          let label, color;
+          if (hist && hist.status === 'indeterminate') {
+            label = 'no consensus';
+            color = 'var(--warning, #e8a435)';
+          } else if (hist || cycleHistoryMap.size > 0) {
+            label = 'no proposals';
+            color = 'var(--text-muted)';
+          } else {
+            label = 'no block';
+            color = 'var(--text-muted)';
+          }
+          const gapTr = document.createElement('tr');
+          gapTr.style.cssText = 'opacity:0.45';
+          gapTr.innerHTML = `
+            <td style="color:var(--text-muted)">${gap}</td>
+            <td colspan="3" style="color:${color};font-style:italic;text-align:center">${label}</td>
+            <td></td>
+            <td></td>
+          `;
+          tbody.appendChild(gapTr);
+        }
+      }
+
       for (let i = 0; i < desc.length; i++) {
         const b = desc[i];
         const cycle = b.cycle != null ? b.cycle : '—';
