@@ -310,6 +310,10 @@ async fn gossip_block_announce_end_to_end() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    struct NoopLookup;
+    impl noble_consensus::proposal::UtxoValueLookup for NoopLookup {
+        fn utxo_value(&self, _: &noble_core::OutPoint) -> Option<u64> { None }
+    }
     let block = noble_consensus::propose_block(
         &[],
         Hash256::ZERO,
@@ -319,6 +323,7 @@ async fn gossip_block_announce_end_to_end() {
         &sk,
         &pk,
         4 * 1024 * 1024,
+        &NoopLookup,
     )
     .expect("block proposal should succeed");
     let expected_hash = block.header.compute_block_hash().unwrap();

@@ -145,10 +145,16 @@ pub async fn handle_faucet(
 
     // Send transfer: local signing (preferred) or node RPC (legacy fallback).
     let tx_id = if let Some(ref wallet) = state.wallet {
+        // Get current chain height for coinbase maturity filtering
+        let chain_height = state.rpc.get_node_info()
+            .await
+            .map(|info| info.block_height)
+            .unwrap_or(0);
         // Build and sign locally, then submit raw transaction.
         let fee = noble_core::MIN_TX_FEE;
         let tx_hex = wallet
-            .build_transfer(&req.address, state.config.drip_amount, fee)
+            .build_transfer(&state.rpc, &req.address, state.config.drip_amount, fee, chain_height)
+            .await
             .map_err(|e| internal_error(&format!("Build transfer: {e}")))?;
         state
             .rpc

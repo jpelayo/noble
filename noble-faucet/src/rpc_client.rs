@@ -143,6 +143,15 @@ pub struct AddressEntry {
     pub scheme_id: u8,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct UtxoResult {
+    pub txid: String,
+    pub vout: u32,
+    pub value: u64,
+    pub height: u64,
+    pub is_coinbase: bool,
+}
+
 #[derive(Deserialize)]
 pub struct BalanceResult {
     pub balance: u64,
@@ -156,6 +165,8 @@ pub struct NodeInfoResult {
     pub chain_id: u64,
     #[serde(default)]
     pub network_label: String,
+    #[serde(default)]
+    pub block_height: u64,
 }
 
 impl NodeRpcClient {
@@ -225,6 +236,23 @@ impl NodeRpcClient {
     pub async fn get_node_info(&self) -> Result<NodeInfoResult, FaucetError> {
         self.call("noble_getNodeInfo", &serde_json::Value::Null)
             .await
+    }
+
+    /// Get UTXOs for an address.
+    pub async fn get_address_utxos(&self, address: &str) -> Result<Vec<UtxoResult>, FaucetError> {
+        #[derive(Serialize)]
+        struct Params<'a> {
+            address: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            utxos: Vec<UtxoResult>,
+        }
+        let resp: Response = self.call(
+            "noble_getAddressUtxos",
+            &Params { address },
+        ).await?;
+        Ok(resp.utxos)
     }
 
     /// Get balance for an address.

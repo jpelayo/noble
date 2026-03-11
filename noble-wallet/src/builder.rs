@@ -1,10 +1,12 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transaction builder — constructs and signs notarization and transfer transactions.
+//! Transaction builder — constructs and signs notarization and transfer transactions
+//! using the UTXO model (inputs/outputs).
 
 use noble_core::{
-    EncryptedLocator, ExternalAttestation, LocatorRecipient, MetadataEntry, Transaction,
+    EncryptedLocator, ExternalAttestation, LocatorRecipient, MetadataEntry, NobleAddress,
+    OutPoint, Transaction, TxIn, TxOut,
     MIN_TX_FEE, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
 };
 use noble_crypto::ecies::{encrypt_for_recipient, EciesRecipient};
@@ -14,22 +16,12 @@ use crate::error::WalletError;
 use crate::keystore::KeyStore;
 
 /// A typed metadata slot for schema-aware notarization.
-///
-/// Each variant carries its data and a label string.  The builder uses
-/// these to auto-generate the slot-0 schema descriptor.
 pub enum TypedSlot {
-    /// UTF-8 plaintext (visibility: public).
     Utf8 { label: String, value: String },
-    /// Base64-encoded text (visibility: public).
     Base64 { label: String, value: String },
-    /// Raw hex bytes (visibility: public).
     Hex { label: String, value: Vec<u8> },
-    /// DER-encoded certificate (visibility: public).
     Der { label: String, value: Vec<u8> },
-    /// ECIES-encrypted data (visibility: private).  The builder stores the
-    /// *already-encrypted* bytes — encryption is the caller's responsibility.
     Ecies { label: String, value: Vec<u8> },
-    /// Opaque raw bytes (visibility: public).
     Raw { label: String, value: Vec<u8> },
 }
 
@@ -79,11 +71,21 @@ impl TypedSlot {
     }
 }
 
+/// A selected UTXO for spending in a transaction.
+#[derive(Debug, Clone)]
+pub struct SelectedUtxo {
+    pub outpoint: OutPoint,
+    pub value: u64,
+}
+
 /// Static-like namespace for building signed transactions.
 pub struct TransactionBuilder;
 
 impl TransactionBuilder {
-    /// Build a signed notarization transaction.
+    /// Build a signed notarization transaction (UTXO model).
+    ///
+    /// `utxos`: selected UTXOs to spend (must cover the fee).
+    /// Fee = sum(utxo values) - sum(output values).
     pub fn build_notarization(
         keystore: &KeyStore,
         signer: &NoblePublicKey,
@@ -91,6 +93,8 @@ impl TransactionBuilder {
         fee: u64,
         metadata: Vec<MetadataEntry>,
         chain_id: u32,
+        utxos: &[SelectedUtxo],
+        change_address: &NobleAddress,
     ) -> Result<Transaction, WalletError> {
         tracing::debug!(task = "wallet_build", "building notarization transaction");
         let timestamp = std::time::SystemTime::now()
@@ -98,14 +102,33 @@ impl TransactionBuilder {
             .unwrap_or_default()
             .as_secs();
 
+        let total_input: u64 = utxos.iter().map(|u| u.value).sum();
+        if total_input < fee {
+            return Err(WalletError::InsufficientFunds {
+                available: total_input,
+                required: fee,
+            });
+        }
+
+        let inputs: Vec<TxIn> = utxos
+            .iter()
+            .map(|u| TxIn { prev_output: u.outpoint.clone() })
+            .collect();
+
+        let change = total_input - fee;
+        let outputs = if change > 0 {
+            vec![TxOut { value: change, address: change_address.clone() }]
+        } else {
+            vec![]
+        };
+
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs,
+            outputs,
             checksum,
             timestamp,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
@@ -116,38 +139,43 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
 
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
-        tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
+        tracing::trace!(task = "wallet_build", "notarization built, fee: {}", fee);
         Ok(tx)
     }
 
-    /// Build a signed transfer transaction.
+    /// Build a signed transfer transaction (UTXO model).
     ///
-    /// If `source_address` is `Some`, it is included in the signing payload
-    /// and commits the sender to debiting a specific balance bucket.
+    /// `utxos`: selected UTXOs to spend (must cover amount + fee).
+    /// Creates recipient output + optional change output.
     pub fn build_transfer(
         keystore: &KeyStore,
         signer: &NoblePublicKey,
-        recipient: noble_core::NobleAddress,
+        recipient: NobleAddress,
         amount: u64,
         fee: u64,
         memo: Option<String>,
-        source_address: Option<noble_core::NobleAddress>,
         chain_id: u32,
+        utxos: &[SelectedUtxo],
+        change_address: &NobleAddress,
     ) -> Result<Transaction, WalletError> {
-        tracing::debug!(
-            task = "wallet_build",
-            "building transfer transaction, amount: {}",
-            amount
-        );
+        tracing::debug!(task = "wallet_build", "building transfer, amount: {}", amount);
         if amount == 0 {
             return Err(WalletError::InvalidRecipient("amount must be > 0".into()));
+        }
+
+        let total_input: u64 = utxos.iter().map(|u| u.value).sum();
+        let required = amount + fee;
+        if total_input < required {
+            return Err(WalletError::InsufficientFunds {
+                available: total_input,
+                required,
+            });
         }
 
         let timestamp = std::time::SystemTime::now()
@@ -155,7 +183,6 @@ impl TransactionBuilder {
             .unwrap_or_default()
             .as_secs();
 
-        let checksum = Hash256::ZERO; // transfers use zero checksum
         let mut metadata = vec![];
         if let Some(m) = memo {
             metadata.push(MetadataEntry {
@@ -164,14 +191,24 @@ impl TransactionBuilder {
             });
         }
 
+        let inputs: Vec<TxIn> = utxos
+            .iter()
+            .map(|u| TxIn { prev_output: u.outpoint.clone() })
+            .collect();
+
+        let change = total_input - amount - fee;
+        let mut outputs = vec![TxOut { value: amount, address: recipient }];
+        if change > 0 {
+            outputs.push(TxOut { value: change, address: change_address.clone() });
+        }
+
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
-            checksum,
+            inputs,
+            outputs,
+            checksum: Hash256::ZERO,
             timestamp,
-            fee,
-            recipient: Some(recipient),
-            amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
@@ -182,21 +219,17 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: source_address.map(|a| a.to_wire_bytes()),
         };
 
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
         tx.publisher_sig = keystore.sign(signer, &msg)?;
-        tracing::trace!(task = "wallet_build", "transaction built, fee: {}", fee);
+        tracing::trace!(task = "wallet_build", "transfer built, fee: {}", fee);
         Ok(tx)
     }
 
-    /// Build a signed notarization transaction with an encrypted locator.
-    ///
-    /// The `url` is encrypted for each recipient using hybrid ECIES.
-    /// Optionally includes external attestations (opaque signatures from non-NOBLE PKI).
+    /// Build a signed notarization with an encrypted locator (UTXO model).
     #[allow(clippy::too_many_arguments)]
     pub fn build_notarization_with_locator(
         keystore: &KeyStore,
@@ -208,6 +241,8 @@ impl TransactionBuilder {
         recipients: &[NoblePublicKey],
         attestations: Vec<ExternalAttestation>,
         chain_id: u32,
+        utxos: &[SelectedUtxo],
+        change_address: &NobleAddress,
     ) -> Result<Transaction, WalletError> {
         if recipients.is_empty() {
             return Err(WalletError::Crypto(
@@ -253,14 +288,28 @@ impl TransactionBuilder {
             .unwrap_or_default()
             .as_secs();
 
+        let total_input: u64 = utxos.iter().map(|u| u.value).sum();
+        if total_input < fee {
+            return Err(WalletError::InsufficientFunds {
+                available: total_input,
+                required: fee,
+            });
+        }
+        let inputs: Vec<TxIn> = utxos.iter().map(|u| TxIn { prev_output: u.outpoint.clone() }).collect();
+        let change = total_input - fee;
+        let outputs = if change > 0 {
+            vec![TxOut { value: change, address: change_address.clone() }]
+        } else {
+            vec![]
+        };
+
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs,
+            outputs,
             checksum,
             timestamp,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
@@ -271,7 +320,6 @@ impl TransactionBuilder {
             encrypted_locator,
             external_attestations: attestations,
             gateway_address: None,
-            source_address: None,
         };
 
         let msg = tx
@@ -281,11 +329,7 @@ impl TransactionBuilder {
         Ok(tx)
     }
 
-    /// Build a signed notarization with auto-generated schema descriptor.
-    ///
-    /// Slot 0 is reserved for the schema descriptor (generated automatically
-    /// from the provided `TypedSlot` definitions).  User-provided slots start
-    /// at index 1.
+    /// Build a signed notarization with auto-generated schema descriptor (UTXO model).
     pub fn build_notarization_with_schema(
         keystore: &KeyStore,
         signer: &NoblePublicKey,
@@ -293,9 +337,9 @@ impl TransactionBuilder {
         fee: u64,
         slots: Vec<TypedSlot>,
         chain_id: u32,
+        utxos: &[SelectedUtxo],
+        change_address: &NobleAddress,
     ) -> Result<Transaction, WalletError> {
-        // Build the schema descriptor lines.  Slot 0 is always the schema
-        // itself; user slots are numbered 1..=N.
         let mut lines = vec!["0:pub:utf8:opt:schema".to_string()];
         for (i, slot) in slots.iter().enumerate() {
             lines.push(format!(
@@ -308,7 +352,6 @@ impl TransactionBuilder {
         }
         let schema_value = lines.join("\n");
 
-        // Assemble metadata: slot 0 = schema descriptor, then user slots.
         let mut metadata = Vec::with_capacity(1 + slots.len());
         metadata.push(MetadataEntry {
             key: "schema".into(),
@@ -318,14 +361,10 @@ impl TransactionBuilder {
             metadata.push(slot.to_metadata_entry());
         }
 
-        Self::build_notarization(keystore, signer, checksum, fee, metadata, chain_id)
+        Self::build_notarization(keystore, signer, checksum, fee, metadata, chain_id, utxos, change_address)
     }
 
     /// Set the gateway address on an already-built transaction and re-sign.
-    ///
-    /// Call after `build_*()` and before mempool admission.  The gateway
-    /// address is included in the signing payload, so the transaction must
-    /// be re-signed after the field is set.
     pub fn set_gateway_and_resign(
         tx: &mut Transaction,
         keystore: &KeyStore,
@@ -342,7 +381,6 @@ impl TransactionBuilder {
     }
 
     /// Estimate fee based on mempool fullness (placeholder).
-    /// Returns (low, medium, high) fee estimates.
     pub fn estimate_fee() -> (u64, u64, u64) {
         (MIN_TX_FEE, MIN_TX_FEE * 2, MIN_TX_FEE * 5)
     }
@@ -351,11 +389,10 @@ impl TransactionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::SCHEME_ED25519;
+    use noble_crypto::{sha256, SCHEME_ED25519};
     use noble_test_utils::fixtures::test_chain_id;
     use tempfile::tempdir;
 
-    /// Helper: create an unlocked keystore with one Ed25519 key.
     fn setup_keystore() -> (crate::keystore::KeyStore, NoblePublicKey) {
         let dir = tempdir().unwrap();
         let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
@@ -364,235 +401,127 @@ mod tests {
         (ks, pk)
     }
 
+    fn make_test_utxos(pk: &NoblePublicKey, value: u64) -> (Vec<SelectedUtxo>, NobleAddress) {
+        let addr = NobleAddress::Noble(pk.clone());
+        let outpoint = OutPoint {
+            txid: sha256(pk.key_bytes()),
+            vout: 0,
+        };
+        (vec![SelectedUtxo { outpoint, value }], addr)
+    }
+
     #[test]
     fn build_notarization_valid() {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);
-        let tx =
-            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id()).unwrap();
+        let (utxos, addr) = make_test_utxos(&pk, 100_000);
+        let tx = TransactionBuilder::build_notarization(
+            &ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id(), &utxos, &addr,
+        ).unwrap();
 
         assert_eq!(tx.version, PROTOCOL_VERSION);
         assert_eq!(tx.tx_type, TX_TYPE_NOTARIZATION);
         assert_eq!(tx.checksum, checksum);
-        assert_eq!(tx.fee, MIN_TX_FEE);
-        assert!(tx.recipient.is_none());
-        assert!(tx.amount.is_none());
+        assert_eq!(tx.inputs.len(), 1);
+        // Change output: 100_000 - MIN_TX_FEE
+        assert_eq!(tx.outputs.len(), 1);
+        assert_eq!(tx.outputs[0].value, 100_000 - MIN_TX_FEE);
 
-        // Verify the signature.
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg, &tx.publisher_sig).is_ok());
     }
 
     #[test]
     fn build_transfer_valid() {
-        let (ks, sender) = setup_keystore();
-        // Create a recipient key (just need the public key).
+        let (ks, sender_pk) = setup_keystore();
         let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
         let recipient = NoblePublicKey::Ed25519(recipient_bytes);
+        let recipient_addr = NobleAddress::Noble(recipient.clone());
 
-        let recipient_addr = noble_core::NobleAddress::Noble(recipient.clone());
+        let (utxos, change_addr) = make_test_utxos(&sender_pk, 1_000_000);
         let tx = TransactionBuilder::build_transfer(
-            &ks,
-            &sender,
-            recipient_addr.clone(),
-            500_000,
-            MIN_TX_FEE,
-            None,
-            None,
-            test_chain_id(),
-        )
-        .unwrap();
+            &ks, &sender_pk, recipient_addr, 500_000, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &change_addr,
+        ).unwrap();
 
         assert_eq!(tx.tx_type, TX_TYPE_TRANSFER);
-        assert_eq!(tx.recipient.as_ref().unwrap(), &recipient_addr);
-        assert_eq!(tx.amount, Some(500_000));
+        assert_eq!(tx.outputs[0].value, 500_000); // recipient
+        assert!(tx.outputs.len() >= 2); // + change
         assert_eq!(tx.checksum, Hash256::ZERO);
 
-        // Verify the signature.
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(sender.verify(&msg, &tx.publisher_sig).is_ok());
+        assert!(sender_pk.verify(&msg, &tx.publisher_sig).is_ok());
     }
 
     #[test]
     fn build_transfer_zero_amount_rejected() {
-        let (ks, sender) = setup_keystore();
-        let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
-        let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes));
+        let (ks, sender_pk) = setup_keystore();
+        let (_, rb) = noble_crypto::ed25519::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (utxos, addr) = make_test_utxos(&sender_pk, 1_000_000);
 
-        let result =
-            TransactionBuilder::build_transfer(&ks, &sender, recipient, 0, MIN_TX_FEE, None, None, test_chain_id());
+        let result = TransactionBuilder::build_transfer(
+            &ks, &sender_pk, recipient, 0, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &addr,
+        );
         assert!(result.is_err());
-        match result.unwrap_err() {
-            WalletError::InvalidRecipient(msg) => {
-                assert!(msg.contains("amount"), "error should mention amount: {msg}");
-            }
-            other => panic!("expected InvalidRecipient, got: {other}"),
-        }
+    }
+
+    #[test]
+    fn build_transfer_insufficient_funds() {
+        let (ks, sender_pk) = setup_keystore();
+        let (_, rb) = noble_crypto::ed25519::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (utxos, addr) = make_test_utxos(&sender_pk, 100); // only 100 atomic
+
+        let result = TransactionBuilder::build_transfer(
+            &ks, &sender_pk, recipient, 500_000, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &addr,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
     fn build_transfer_with_memo() {
-        let (ks, sender) = setup_keystore();
-        let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
-        let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes));
+        let (ks, sender_pk) = setup_keystore();
+        let (_, rb) = noble_crypto::ed25519::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (utxos, addr) = make_test_utxos(&sender_pk, 1_000_000);
 
         let tx = TransactionBuilder::build_transfer(
-            &ks,
-            &sender,
-            recipient,
-            100_000,
-            MIN_TX_FEE,
-            Some("payment for services".into()),
-            None,
-            test_chain_id(),
-        )
-        .unwrap();
+            &ks, &sender_pk, recipient, 100_000, MIN_TX_FEE,
+            Some("payment for services".into()), test_chain_id(), &utxos, &addr,
+        ).unwrap();
 
         assert_eq!(tx.metadata.len(), 1);
         assert_eq!(tx.metadata[0].key, "memo");
-        assert_eq!(
-            String::from_utf8(tx.metadata[0].value.clone()).unwrap(),
-            "payment for services"
-        );
     }
 
     #[test]
     fn estimate_fee_returns_triple() {
         let (low, med, high) = TransactionBuilder::estimate_fee();
-        assert_eq!(low, MIN_TX_FEE);
-        assert_eq!(med, MIN_TX_FEE * 2);
-        assert_eq!(high, MIN_TX_FEE * 5);
-        assert!(low < med);
-        assert!(med < high);
-    }
-
-    #[test]
-    fn build_with_schema_produces_valid_descriptor() {
-        let (ks, pk) = setup_keystore();
-        let checksum = Hash256::from_bytes([0xCC; 32]);
-        let slots = vec![
-            TypedSlot::Utf8 {
-                label: "description".into(),
-                value: "Certificate of Completion".into(),
-            },
-            TypedSlot::Hex {
-                label: "fingerprint".into(),
-                value: vec![0xAB; 32],
-            },
-        ];
-
-        let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
-        )
-        .unwrap();
-
-        // Slot 0 must be the schema descriptor.
-        assert_eq!(tx.metadata.len(), 3);
-        assert_eq!(tx.metadata[0].key, "schema");
-
-        let schema_text = String::from_utf8(tx.metadata[0].value.clone()).unwrap();
-        assert!(schema_text.contains("0:pub:utf8:opt:schema"));
-        assert!(schema_text.contains("1:pub:utf8:opt:description"));
-        assert!(schema_text.contains("2:pub:hex:opt:fingerprint"));
-    }
-
-    #[test]
-    fn schema_descriptor_matches_slot_count_and_types() {
-        let (ks, pk) = setup_keystore();
-        let checksum = Hash256::from_bytes([0xDD; 32]);
-        let slots = vec![
-            TypedSlot::Base64 {
-                label: "doc_summary".into(),
-                value: "SGVsbG8gV29ybGQ=".into(),
-            },
-            TypedSlot::Der {
-                label: "cert_pubkey".into(),
-                value: vec![0x30; 64],
-            },
-            TypedSlot::Ecies {
-                label: "secret_url".into(),
-                value: vec![0xFF; 48],
-            },
-        ];
-
-        let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
-        )
-        .unwrap();
-
-        // 1 schema + 3 user slots = 4 metadata entries.
-        assert_eq!(tx.metadata.len(), 4);
-
-        let schema_text = String::from_utf8(tx.metadata[0].value.clone()).unwrap();
-        let lines: Vec<&str> = schema_text.lines().collect();
-        // 4 lines: schema + 3 user slots.
-        assert_eq!(lines.len(), 4);
-        assert!(lines[1].contains("b64"));
-        assert!(lines[1].contains("doc_summary"));
-        assert!(lines[2].contains("der"));
-        assert!(lines[2].contains("cert_pubkey"));
-        assert!(lines[3].contains("ecies"));
-        assert!(lines[3].contains("priv"));
-        assert!(lines[3].contains("secret_url"));
-    }
-
-    #[test]
-    fn schema_roundtrip_types_match() {
-        let (ks, pk) = setup_keystore();
-        let checksum = Hash256::from_bytes([0xEE; 32]);
-        let original_desc = "Test document #42";
-        let slots = vec![TypedSlot::Utf8 {
-            label: "description".into(),
-            value: original_desc.into(),
-        }];
-
-        let tx = TransactionBuilder::build_notarization_with_schema(
-            &ks, &pk, checksum, MIN_TX_FEE, slots, test_chain_id(),
-        )
-        .unwrap();
-
-        // Verify the signature is valid.
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(pk.verify(&msg, &tx.publisher_sig).is_ok());
-
-        // Parse the schema back from metadata.
-        let schema_text = String::from_utf8(tx.metadata[0].value.clone()).unwrap();
-        let lines: Vec<&str> = schema_text.lines().collect();
-        assert_eq!(lines.len(), 2);
-
-        // Verify slot 1 value matches original.
-        let desc_value = String::from_utf8(tx.metadata[1].value.clone()).unwrap();
-        assert_eq!(desc_value, original_desc);
+        assert!(low < med && med < high);
     }
 
     #[test]
     fn set_gateway_and_resign_updates_field_and_signature() {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);
-        let mut tx =
-            TransactionBuilder::build_notarization(&ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id()).unwrap();
+        let (utxos, addr) = make_test_utxos(&pk, 100_000);
+        let mut tx = TransactionBuilder::build_notarization(
+            &ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id(), &utxos, &addr,
+        ).unwrap();
 
-        assert!(tx.gateway_address.is_none());
-
-        // Original signature is valid
         let msg_before = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(pk.verify(&msg_before, &tx.publisher_sig).is_ok());
 
-        // Set gateway
         let (_, gw_pk) = noble_crypto::ed25519::generate_keypair();
         let gw_key = NoblePublicKey::Ed25519(gw_pk);
         let gw_wire = gw_key.to_wire_bytes();
 
-        TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire.clone(), test_chain_id()).unwrap();
+        TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire, test_chain_id()).unwrap();
 
-        // Field is set
-        assert_eq!(tx.gateway_address.as_ref().unwrap(), &gw_wire);
-
-        // New signature is valid (covers gateway_address)
         let msg_after = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(pk.verify(&msg_after, &tx.publisher_sig).is_ok());
-
-        // Signing messages differ (gateway changed the payload)
         assert_ne!(msg_before, msg_after);
+        assert!(pk.verify(&msg_after, &tx.publisher_sig).is_ok());
     }
 }

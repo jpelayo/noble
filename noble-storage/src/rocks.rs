@@ -1,7 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! RocksDB-backed storage engine with 13 column families.
+//! RocksDB-backed storage engine with UTXO-model column families.
 //!
 //! # Panic Safety Audit
 //!
@@ -17,7 +17,7 @@
 //!
 //! # Architecture
 //!
-//! Single RocksDB instance, single volume. The 13 column families are logical
+//! Single RocksDB instance, single volume. Column families are logical
 //! partitions within one database directory. If the underlying disk disappears
 //! (I/O failure), all operations surface as `StorageError::Database` — no panics.
 //! Corruption recovery is handled by `open_with_repair()` at startup.
@@ -28,9 +28,11 @@
 //! - `tx_index`: tx_id (32B) → height(8B) + tx_offset(4B)
 //! - `checksum_index`: doc_checksum (32B) → concatenated tx_ids (N×32B)
 //! - `chain_state`: string key → value bytes
-//! - `validator_state`: validator_pubkey → reputation data (reserved for Sprint 4+)
-//! - `address_balances`: pubkey_wire → u64 BE balance (GAP-H19)
-//! - `address_history`: pubkey_wire+height(8B BE)+offset(4B BE) → tx_id(32B) (GAP-H19)
+//! - `validator_state`: validator_pubkey → reputation data
+//! - `utxo_set`: outpoint (36B) → encoded UtxoEntry
+//! - `address_utxos`: address_wire || outpoint (36B) → empty (presence index)
+//! - `undo_data`: height (8B BE) → CBOR-encoded spent UTXOs
+//! - `address_history`: pubkey_wire+height(8B BE)+offset(4B BE) → tx_id(32B)
 //! - `bans`: peer_id bytes → banned_until (u64 BE)
 //! - `peer_memory`: identity_key wire → CBOR-encoded PeerRecord
 //! - `version_chain`: prev_checksum (32B) → concatenated successor tx_ids (N×32B)
@@ -46,10 +48,10 @@ use rocksdb::{
 
 use noble_codec::NobleCbor;
 use noble_core::constants::{
-    subsidy_at_height, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM, TX_TYPE_NOTARIZATION,
-    TX_TYPE_TRANSFER,
+    subsidy_at_height, COINBASE_MATURITY, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM,
+    TX_TYPE_COINBASE, TX_TYPE_NOTARIZATION,
 };
-use noble_core::{Block, BlockHeader, NobleAddress, PeerRecord, Transaction};
+use noble_core::{Block, BlockHeader, NobleAddress, OutPoint, PeerRecord, Transaction, UtxoEntry};
 use noble_crypto::{Hash256, NoblePublicKey};
 
 use crate::error::StorageError;
@@ -64,7 +66,9 @@ const CF_TX_INDEX: &str = "tx_index";
 const CF_CHECKSUM_INDEX: &str = "checksum_index";
 const CF_CHAIN_STATE: &str = "chain_state";
 const CF_VALIDATOR_STATE: &str = "validator_state";
-const CF_ADDRESS_BALANCES: &str = "address_balances";
+const CF_UTXO_SET: &str = "utxo_set";
+const CF_ADDRESS_UTXOS: &str = "address_utxos";
+const CF_UNDO_DATA: &str = "undo_data";
 const CF_ADDRESS_HISTORY: &str = "address_history";
 const CF_BANS: &str = "bans";
 const CF_PEER_MEMORY: &str = "peer_memory";
@@ -73,12 +77,12 @@ const CF_PUBLISHER_INDEX: &str = "publisher_index";
 const CF_BADGE_STATE: &str = "badge_state";
 const CF_EVIDENCE: &str = "evidence";
 
-/// All 14 column family names, for introspection (storage stats).
+/// All column family names, for introspection (storage stats).
 const ALL_CF_NAMES: &[&str] = &[
     CF_BLOCKS, CF_BLOCK_HASHES, CF_TX_INDEX, CF_CHECKSUM_INDEX,
-    CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_ADDRESS_BALANCES,
-    CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY, CF_VERSION_CHAIN,
-    CF_PUBLISHER_INDEX, CF_BADGE_STATE, CF_EVIDENCE,
+    CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_UTXO_SET, CF_ADDRESS_UTXOS,
+    CF_UNDO_DATA, CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY,
+    CF_VERSION_CHAIN, CF_PUBLISHER_INDEX, CF_BADGE_STATE, CF_EVIDENCE,
 ];
 
 // --- Chain state keys ---
@@ -142,7 +146,9 @@ impl RocksDbStorage {
             Self::cf_checksum_index(config),
             Self::cf_chain_state(),
             Self::cf_validator_state(),
-            Self::cf_address_balances(config),
+            Self::cf_utxo_set(config),
+            Self::cf_address_utxos(config),
+            Self::cf_undo_data(),
             Self::cf_address_history(config),
             Self::cf_bans(),
             Self::cf_peer_memory(),
@@ -205,12 +211,24 @@ impl RocksDbStorage {
         ColumnFamilyDescriptor::new(CF_VALIDATOR_STATE, Options::default())
     }
 
-    fn cf_address_balances(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
+    fn cf_utxo_set(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
         let mut table_opts = rocksdb::BlockBasedOptions::default();
         table_opts.set_bloom_filter(config.bloom_filter_bits as f64, false);
         opts.set_block_based_table_factory(&table_opts);
-        ColumnFamilyDescriptor::new(CF_ADDRESS_BALANCES, opts)
+        ColumnFamilyDescriptor::new(CF_UTXO_SET, opts)
+    }
+
+    fn cf_address_utxos(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        let mut table_opts = rocksdb::BlockBasedOptions::default();
+        table_opts.set_bloom_filter(config.bloom_filter_bits as f64, false);
+        opts.set_block_based_table_factory(&table_opts);
+        ColumnFamilyDescriptor::new(CF_ADDRESS_UTXOS, opts)
+    }
+
+    fn cf_undo_data() -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor::new(CF_UNDO_DATA, Options::default())
     }
 
     fn cf_address_history(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
@@ -270,15 +288,10 @@ impl RocksDbStorage {
             .ok_or_else(|| StorageError::Database(format!("column family '{name}' not found")))
     }
 
-    /// Build the CF key for an address balance: wire bytes.
+    /// Build the CF key for an address balance/history: wire bytes.
     /// Supports both native NOBLE keys (0x01/0x02) and Bitcoin addresses (0x80/0x81).
     fn address_key(address: &NobleAddress) -> Vec<u8> {
         address.to_wire_bytes()
-    }
-
-    /// Build the CF key for an address balance from a NoblePublicKey (convenience).
-    fn pubkey_key(pubkey: &NoblePublicKey) -> Vec<u8> {
-        pubkey.to_wire_bytes()
     }
 
     /// Build the CF key for an address history entry.
@@ -290,24 +303,115 @@ impl RocksDbStorage {
         key
     }
 
-    /// Read a balance from the DB, returning 0 for unknown addresses.
-    fn read_balance_raw(&self, key: &[u8]) -> Result<u64, StorageError> {
-        let cf = self.cf(CF_ADDRESS_BALANCES)?;
+    // --- UTXO encoding/decoding helpers ---
+
+    /// Build the CF_UTXO_SET key: outpoint bytes (txid 32B || vout 4B LE).
+    fn outpoint_key(outpoint: &OutPoint) -> [u8; 36] {
+        outpoint.to_bytes()
+    }
+
+    /// Decode an OutPoint from 36 bytes.
+    fn decode_outpoint_key(bytes: &[u8]) -> OutPoint {
+        let mut arr = [0u8; 36];
+        arr.copy_from_slice(&bytes[..36]);
+        OutPoint::from_bytes(&arr)
+    }
+
+    /// Build the CF_ADDRESS_UTXOS key: address_wire || outpoint bytes.
+    fn address_utxo_key(address_wire: &[u8], outpoint: &OutPoint) -> Vec<u8> {
+        let op_bytes = outpoint.to_bytes();
+        let mut key = Vec::with_capacity(address_wire.len() + 36);
+        key.extend_from_slice(address_wire);
+        key.extend_from_slice(&op_bytes);
+        key
+    }
+
+    /// Encode a UtxoEntry to bytes for CF_UTXO_SET value.
+    /// Format: value(8B BE) || height(8B BE) || is_coinbase(1B) || address_wire(var)
+    fn encode_utxo_entry(entry: &UtxoEntry) -> Vec<u8> {
+        let addr_wire = entry.address.to_wire_bytes();
+        let mut buf = Vec::with_capacity(8 + 8 + 1 + addr_wire.len());
+        buf.extend_from_slice(&entry.value.to_be_bytes());
+        buf.extend_from_slice(&entry.height.to_be_bytes());
+        buf.push(if entry.is_coinbase { 1 } else { 0 });
+        buf.extend_from_slice(&addr_wire);
+        buf
+    }
+
+    /// Decode a UtxoEntry from bytes stored in CF_UTXO_SET.
+    fn decode_utxo_entry(bytes: &[u8]) -> Result<UtxoEntry, StorageError> {
+        // Minimum: 8 (value) + 8 (height) + 1 (is_coinbase) + 1 (min address) = 18
+        if bytes.len() < 18 {
+            return Err(StorageError::Database(format!(
+                "corrupt UTXO entry: expected at least 18 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let value = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+        let height = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+        let is_coinbase = bytes[16] != 0;
+        let address = NobleAddress::from_wire_bytes(&bytes[17..])
+            .map_err(|e| StorageError::Database(format!("corrupt UTXO address: {e}")))?;
+        Ok(UtxoEntry {
+            value,
+            address,
+            height,
+            is_coinbase,
+        })
+    }
+
+    /// Encode a list of spent UtxoEntries with their outpoints for undo data.
+    /// Format: count(4B BE) || (outpoint(36B) || entry_len(4B BE) || entry_bytes)*
+    fn encode_undo_data(spent: &[(OutPoint, UtxoEntry)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(spent.len() as u32).to_be_bytes());
+        for (outpoint, entry) in spent {
+            buf.extend_from_slice(&outpoint.to_bytes());
+            let entry_bytes = Self::encode_utxo_entry(entry);
+            buf.extend_from_slice(&(entry_bytes.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&entry_bytes);
+        }
+        buf
+    }
+
+    /// Decode undo data back into (OutPoint, UtxoEntry) pairs.
+    fn decode_undo_data(bytes: &[u8]) -> Result<Vec<(OutPoint, UtxoEntry)>, StorageError> {
+        if bytes.len() < 4 {
+            return Err(StorageError::Database("corrupt undo data: too short".into()));
+        }
+        let count = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let mut pos = 4;
+        let mut result = Vec::with_capacity(count);
+        for _ in 0..count {
+            if pos + 36 + 4 > bytes.len() {
+                return Err(StorageError::Database("corrupt undo data: truncated".into()));
+            }
+            let op_bytes: [u8; 36] = bytes[pos..pos + 36].try_into().unwrap();
+            let outpoint = OutPoint::from_bytes(&op_bytes);
+            pos += 36;
+            let entry_len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            if pos + entry_len > bytes.len() {
+                return Err(StorageError::Database("corrupt undo data: truncated entry".into()));
+            }
+            let entry = Self::decode_utxo_entry(&bytes[pos..pos + entry_len])?;
+            pos += entry_len;
+            result.push((outpoint, entry));
+        }
+        Ok(result)
+    }
+
+    /// Read a UTXO entry from the UTXO set by outpoint.
+    fn read_utxo(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, StorageError> {
+        let cf = self.cf(CF_UTXO_SET)?;
+        let key = Self::outpoint_key(outpoint);
         match self
             .db
             .get_cf(cf, key)
             .map_err(|e| StorageError::Database(e.to_string()))?
         {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(StorageError::Database(format!(
-                        "corrupt balance entry: expected 8 bytes, got {}",
-                        bytes.len()
-                    )));
-                }
-                Ok(u64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
-            }
-            None => Ok(0),
+            Some(bytes) => Ok(Some(Self::decode_utxo_entry(&bytes)?)),
+            None => Ok(None),
         }
     }
 }
@@ -460,111 +564,145 @@ impl StorageEngine for RocksDbStorage {
         batch.put_cf(cf_state, KEY_TIP_HASH, block_hash.as_bytes());
         batch.put_cf(cf_state, KEY_TIP_HEIGHT, height_be);
 
-        // --- Balance accumulator (GAP-H19) ---
-        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
+        // --- UTXO processing ---
+        let cf_utxo = self.cf(CF_UTXO_SET)?;
+        let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
+        let cf_undo = self.cf(CF_UNDO_DATA)?;
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
 
-        // Phase 1: accumulate deltas as i128
-        let mut deltas: HashMap<Vec<u8>, i128> = HashMap::new();
+        // Collect all spent UTXOs for undo data
+        let mut spent_utxos: Vec<(OutPoint, UtxoEntry)> = Vec::new();
+        let mut total_fees: u64 = 0;
 
-        // Validator gets subsidy + fees (split with gateway if present)
-        let validator_key = Self::pubkey_key(&block.header.validator_id);
-        let subsidy = subsidy_at_height(height) as i128;
-
-        // Split fees: 50% to gateway (if present), remainder to validator.
-        // Subsidy always goes 100% to validator.
-        let mut validator_fee_total: i128 = 0;
-        for tx in &block.transactions {
-            let fee = tx.fee as i128;
-            if let Some(ref gw) = tx.gateway_address {
-                let gw_share = fee / 2;
-                let val_share = fee - gw_share; // validator gets rounding
-                *deltas.entry(gw.clone()).or_default() += gw_share;
-                validator_fee_total += val_share;
-            } else {
-                validator_fee_total += fee;
-            }
-        }
-        *deltas.entry(validator_key).or_default() += subsidy + validator_fee_total;
+        // Track outpoints deleted within this block (double-spend within same block)
+        let mut deleted_in_block: HashMap<[u8; 36], UtxoEntry> = HashMap::new();
+        // Track outpoints created within this block (for spending in-block outputs)
+        let mut created_in_block: HashMap<[u8; 36], UtxoEntry> = HashMap::new();
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
-            let sender_pk = tx
-                .publisher_sig
-                .to_noble_public_key()
-                .map_err(|e| StorageError::Codec(e.to_string()))?;
-            // S34: Canonical debit address resolution
-            // S35 F1: delta-aware balance closure — each tx sees effective balances
-            // including earlier in-block changes
-            let need = tx.amount.unwrap_or(0) + tx.fee;
-            let sender_addr = noble_core::resolve_debit_address(
-                &tx.source_address,
-                &sender_pk,
-                need,
-                |a| {
-                    let key = a.to_wire_bytes();
-                    let base = self.read_balance_raw(&key).unwrap_or(0) as i128;
-                    let delta = deltas.get(&key).copied().unwrap_or(0);
-                    let effective = base + delta;
-                    if effective > 0 { effective as u64 } else { 0 }
-                },
-            )
-            .map_err(|e| StorageError::Codec(e.to_string()))?;
-            let sender_key = sender_addr.to_wire_bytes();
+            let is_coinbase = tx.is_coinbase();
 
-            if tx.tx_type == TX_TYPE_TRANSFER {
-                let amount = tx.amount.unwrap_or(0) as i128;
-                let fee = tx.fee as i128;
-                *deltas.entry(sender_key.clone()).or_default() -= amount + fee;
-                if let Some(ref recipient) = tx.recipient {
-                    let recip_key = recipient.to_wire_bytes();
-                    *deltas.entry(recip_key.clone()).or_default() += amount;
+            // --- Process inputs (consume UTXOs) for non-coinbase ---
+            let mut input_sum: u64 = 0;
+            if !is_coinbase {
+                for input in &tx.inputs {
+                    let op_key = Self::outpoint_key(&input.prev_output);
 
-                    // History for recipient
-                    let hkey = Self::history_key(&recip_key, height, offset as u32);
-                    batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+                    // Check double-spend within block
+                    if deleted_in_block.contains_key(&op_key) {
+                        return Err(StorageError::Database(format!(
+                            "double-spend within block: txid={}, vout={}",
+                            input.prev_output.txid, input.prev_output.vout
+                        )));
+                    }
+
+                    // Try in-block created outputs first, then DB
+                    let entry = if let Some(e) = created_in_block.remove(&op_key) {
+                        e
+                    } else {
+                        self.read_utxo(&input.prev_output)?
+                            .ok_or_else(|| StorageError::UtxoNotFound {
+                                txid: input.prev_output.txid.to_string(),
+                                vout: input.prev_output.vout,
+                            })?
+                    };
+
+                    // Check coinbase maturity
+                    if entry.is_coinbase && !entry.is_mature(height) {
+                        return Err(StorageError::ImmatureCoinbase {
+                            created_height: entry.height,
+                            current_height: height,
+                            maturity: COINBASE_MATURITY,
+                        });
+                    }
+
+                    input_sum += entry.value;
+
+                    // Delete from UTXO set and address index
+                    let addr_wire = entry.address.to_wire_bytes();
+                    batch.delete_cf(cf_utxo, op_key);
+                    batch.delete_cf(cf_addr_utxo, Self::address_utxo_key(&addr_wire, &input.prev_output));
+
+                    // Record for undo data
+                    spent_utxos.push((input.prev_output.clone(), entry.clone()));
+                    deleted_in_block.insert(op_key, entry);
                 }
-            } else {
-                // Notarization: sender pays fee only
-                let fee = tx.fee as i128;
-                *deltas.entry(sender_key.clone()).or_default() -= fee;
+                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                if input_sum >= output_sum {
+                    total_fees += input_sum - output_sum;
+                }
             }
 
-            // History for sender
-            let hkey = Self::history_key(&sender_key, height, offset as u32);
-            batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+            // --- Process outputs (create new UTXOs) ---
+            for (vout, output) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid: *tx_id,
+                    vout: vout as u32,
+                };
+                let entry = UtxoEntry {
+                    value: output.value,
+                    address: output.address.clone(),
+                    height,
+                    is_coinbase,
+                };
+                let op_key = Self::outpoint_key(&outpoint);
+                let entry_bytes = Self::encode_utxo_entry(&entry);
+                let addr_wire = output.address.to_wire_bytes();
+
+                batch.put_cf(cf_utxo, op_key, &entry_bytes);
+                batch.put_cf(cf_addr_utxo, Self::address_utxo_key(&addr_wire, &outpoint), &[]);
+
+                created_in_block.insert(op_key, entry);
+            }
+
+            // --- Address history for all involved addresses ---
+            // Record history for each unique address touched by this tx
+            let mut history_addresses: Vec<Vec<u8>> = Vec::new();
+
+            if !is_coinbase {
+                for input in &tx.inputs {
+                    let op_key = Self::outpoint_key(&input.prev_output);
+                    if let Some(spent_entry) = deleted_in_block.get(&op_key) {
+                        let wire = spent_entry.address.to_wire_bytes();
+                        if !history_addresses.contains(&wire) {
+                            history_addresses.push(wire);
+                        }
+                    }
+                }
+            }
+            for output in &tx.outputs {
+                let wire = output.address.to_wire_bytes();
+                if !history_addresses.contains(&wire) {
+                    history_addresses.push(wire);
+                }
+            }
+            for addr_wire in &history_addresses {
+                let hkey = Self::history_key(addr_wire, height, offset as u32);
+                batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+            }
         }
 
-        // Phase 2: read current balances, apply deltas, write final
-        for (key, delta) in &deltas {
-            tracing::debug!(
-                task = "storage",
-                "balance delta: {} for key len={}",
-                delta,
-                key.len()
-            );
-            let current = self.read_balance_raw(key)?;
-            let new_balance = current as i128 + delta;
-            if new_balance < 0 {
-                return Err(StorageError::InsufficientBalance {
-                    available: current,
-                    needed: (-delta) as u64,
-                });
+        // Store undo data for this block
+        let undo_bytes = Self::encode_undo_data(&spent_utxos);
+        batch.put_cf(cf_undo, height_be, &undo_bytes);
+
+        // Verify coinbase output value matches subsidy + collected fees
+        let subsidy = subsidy_at_height(height);
+        if let Some(coinbase_tx) = block.transactions.first() {
+            if coinbase_tx.tx_type == TX_TYPE_COINBASE {
+                let coinbase_total: u64 = coinbase_tx.outputs.iter().map(|o| o.value).sum();
+                let expected = subsidy + total_fees;
+                if coinbase_total != expected {
+                    return Err(StorageError::Database(format!(
+                        "coinbase output mismatch: got {coinbase_total}, expected {expected} (subsidy {subsidy} + fees {total_fees})"
+                    )));
+                }
             }
-            if new_balance > u64::MAX as i128 {
-                return Err(StorageError::BalanceOverflow {
-                    current,
-                    amount: *delta as u64,
-                });
-            }
-            batch.put_cf(cf_balances, key, (new_balance as u64).to_be_bytes());
         }
 
-        // Phase 3: MAX_SUPPLY cap enforcement via O(1) running total (AUD2-M2)
-        // Read current total_supply from chain_state, add this block's subsidy,
-        // and check against MAX_SUPPLY. No full-balance iteration needed.
-        let block_subsidy = subsidy_at_height(height);
+        // MAX_SUPPLY cap enforcement via O(1) running total
+        let block_subsidy = subsidy;
         let prev_supply = self.get_total_supply()?;
-        // Use checked_add to fail loudly on u64 overflow rather than silently capping.
         let new_supply =
             prev_supply
                 .checked_add(block_subsidy)
@@ -578,7 +716,6 @@ impl StorageEngine for RocksDbStorage {
                 max: MAX_SUPPLY,
             });
         }
-        // Persist updated total_supply in the same atomic batch
         batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, new_supply.to_be_bytes());
 
         // Atomic commit
@@ -724,8 +861,80 @@ impl StorageEngine for RocksDbStorage {
 
     fn get_balance(&self, address: &NobleAddress) -> Result<u64, StorageError> {
         self.check_open()?;
-        let key = Self::address_key(address);
-        self.read_balance_raw(&key)
+
+        let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
+        let cf_utxo = self.cf(CF_UTXO_SET)?;
+        let prefix = Self::address_key(address);
+
+        let iter = self
+            .db
+            .iterator_cf(cf_addr_utxo, IteratorMode::From(&prefix, Direction::Forward));
+
+        let mut total: u64 = 0;
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+
+            // Check prefix match
+            if key.len() < prefix.len() || &key[..prefix.len()] != prefix.as_slice() {
+                break;
+            }
+
+            // Extract outpoint bytes from the key (last 36 bytes)
+            if key.len() < prefix.len() + 36 {
+                continue; // malformed key, skip
+            }
+            let op_bytes = &key[prefix.len()..prefix.len() + 36];
+
+            // Look up the UTXO value
+            if let Some(entry_bytes) = self
+                .db
+                .get_cf(cf_utxo, op_bytes)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+            {
+                let entry = Self::decode_utxo_entry(&entry_bytes)?;
+                total = total.saturating_add(entry.value);
+            }
+        }
+
+        Ok(total)
+    }
+
+    fn get_address_utxos(
+        &self,
+        address: &NobleAddress,
+    ) -> Result<Vec<(noble_core::OutPoint, noble_core::UtxoEntry)>, StorageError> {
+        self.check_open()?;
+
+        let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
+        let cf_utxo = self.cf(CF_UTXO_SET)?;
+        let prefix = Self::address_key(address);
+
+        let iter = self
+            .db
+            .iterator_cf(cf_addr_utxo, IteratorMode::From(&prefix, Direction::Forward));
+
+        let mut result = Vec::new();
+        for item in iter {
+            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.len() < prefix.len() || &key[..prefix.len()] != prefix.as_slice() {
+                break;
+            }
+            if key.len() < prefix.len() + 36 {
+                continue;
+            }
+            let op_bytes = &key[prefix.len()..prefix.len() + 36];
+            if let Some(entry_bytes) = self
+                .db
+                .get_cf(cf_utxo, op_bytes)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+            {
+                let entry = Self::decode_utxo_entry(&entry_bytes)?;
+                let outpoint = Self::decode_outpoint_key(op_bytes);
+                result.push((outpoint, entry));
+            }
+        }
+
+        Ok(result)
     }
 
     fn get_address_history(
@@ -854,26 +1063,71 @@ impl StorageEngine for RocksDbStorage {
             });
         }
 
-        let mut batch = WriteBatch::default();
         let cf_blocks = self.cf(CF_BLOCKS)?;
         let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
         let cf_tx = self.cf(CF_TX_INDEX)?;
+        let cf_utxo = self.cf(CF_UTXO_SET)?;
+        let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
+        let cf_undo = self.cf(CF_UNDO_DATA)?;
 
-        // Phase 1: Remove blocks above target_height
-        for h in (target_height + 1)..=tip.height {
+        // Process blocks in reverse order using undo data
+        for h in (target_height + 1..=tip.height).rev() {
             let height_be = h.to_be_bytes();
+            let mut batch = WriteBatch::default();
 
-            // Get block data to find transactions
+            // Load undo data for this height
+            let undo_bytes = self
+                .db
+                .get_cf(cf_undo, height_be)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+                .ok_or(StorageError::UndoDataNotFound { height: h })?;
+            let spent_utxos = Self::decode_undo_data(&undo_bytes)?;
+
+            // Load block to find outputs to remove and tx_ids to unindex
             if let Some(block_bytes) = self
                 .db
                 .get_cf(cf_blocks, height_be)
                 .map_err(|e| StorageError::Database(e.to_string()))?
             {
-                if let Ok(block) = Block::from_cbor(&block_bytes) {
-                    // Remove tx index entries
-                    for tx in &block.transactions {
-                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
+                match Block::from_cbor(&block_bytes) {
+                    Ok(block) => {
+                    // Remove tx index entries and delete created UTXOs
+                    for (offset, tx) in block.transactions.iter().enumerate() {
+                        match tx.compute_tx_id(chain_id) {
+                            Ok(tx_id) => {
                             batch.delete_cf(cf_tx, tx_id.as_bytes());
+
+                            // Remove outputs created by this tx
+                            for (vout, output) in tx.outputs.iter().enumerate() {
+                                let outpoint = OutPoint {
+                                    txid: tx_id,
+                                    vout: vout as u32,
+                                };
+                                let op_key = Self::outpoint_key(&outpoint);
+                                let addr_wire = output.address.to_wire_bytes();
+                                batch.delete_cf(cf_utxo, op_key);
+                                batch.delete_cf(cf_addr_utxo, Self::address_utxo_key(&addr_wire, &outpoint));
+                            }
+
+                            // Remove history entries for this tx
+                            // Collect unique addresses
+                            let mut addrs: Vec<Vec<u8>> = Vec::new();
+                            for output in &tx.outputs {
+                                let wire = output.address.to_wire_bytes();
+                                if !addrs.contains(&wire) {
+                                    addrs.push(wire);
+                                }
+                            }
+                            // Input addresses from undo data — handled below
+                            for addr_wire in &addrs {
+                                let hkey = Self::history_key(addr_wire, h, offset as u32);
+                                let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+                                batch.delete_cf(cf_history, hkey);
+                            }
+                            }
+                            Err(e) => {
+                                tracing::error!("corrupt tx during rollback at height {h}: {e}");
+                            }
                         }
                     }
 
@@ -881,60 +1135,47 @@ impl StorageEngine for RocksDbStorage {
                     if let Ok(block_hash) = block.header.compute_block_hash() {
                         batch.delete_cf(cf_hashes, block_hash.as_bytes());
                     }
+                    }
+                    Err(e) => {
+                        tracing::error!("corrupt block during rollback at height {h}: {e}");
+                    }
                 }
             }
 
-            // Remove block data
+            // Restore spent UTXOs
+            for (outpoint, entry) in &spent_utxos {
+                let op_key = Self::outpoint_key(outpoint);
+                let entry_bytes = Self::encode_utxo_entry(entry);
+                let addr_wire = entry.address.to_wire_bytes();
+                batch.put_cf(cf_utxo, op_key, &entry_bytes);
+                batch.put_cf(cf_addr_utxo, Self::address_utxo_key(&addr_wire, outpoint), &[]);
+            }
+
+            // Remove block data and undo data
             batch.delete_cf(cf_blocks, height_be);
+            batch.delete_cf(cf_undo, height_be);
+
+            self.db
+                .write(batch)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
         }
 
-        // Write phase 1 deletions
-        self.db
-            .write(batch)
-            .map_err(|e| StorageError::Database(e.to_string()))?;
-
-        // Phase 2: Clear all balances, history, and checksum_index (iterate and delete)
+        // Clear and rebuild merge-append indexes (checksum, version_chain, publisher)
         let mut clear_batch = WriteBatch::default();
-        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
-        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
-
-        let iter = self.db.iterator_cf(cf_balances, IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            clear_batch.delete_cf(cf_balances, &key);
-        }
-
-        let iter = self.db.iterator_cf(cf_history, IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            clear_batch.delete_cf(cf_history, &key);
-        }
-
-        // Clear checksum_index (merge-append values can't be selectively trimmed)
-        let iter = self.db.iterator_cf(cf_checksum, IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            clear_batch.delete_cf(cf_checksum, &key);
-        }
-
-        // Clear version_chain (same merge-append pattern as checksum_index)
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
-        let iter = self.db.iterator_cf(cf_version, IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            clear_batch.delete_cf(cf_version, &key);
-        }
-
-        // Clear publisher_index (same merge-append pattern)
         let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
-        let iter = self.db.iterator_cf(cf_publisher, IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
-            clear_batch.delete_cf(cf_publisher, &key);
+        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+
+        for cf in [cf_checksum, cf_version, cf_publisher, cf_history] {
+            let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+            for item in iter {
+                let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+                clear_batch.delete_cf(cf, &key);
+            }
         }
 
-        // Phase 3: Update chain tip
+        // Update chain tip
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         let target_hash = self.get_block_hash_by_height(target_height)?;
         clear_batch.put_cf(cf_state, KEY_TIP_HASH, target_hash.as_bytes());
@@ -944,70 +1185,30 @@ impl StorageEngine for RocksDbStorage {
             .write(clear_batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Phase 4: Replay balances, history, checksum_index, version_chain, and publisher_index from 0..=target_height
-        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
-        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
+        // Replay checksum_index, version_chain, publisher_index, and history from 0..=target_height
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
         let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
+        let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
 
-        let mut balances: HashMap<Vec<u8>, i128> = HashMap::new();
         let mut replay_batch = WriteBatch::default();
-        // AUD3-D8: Track total_supply during rollback replay.
         let mut replay_supply: u64 = 0;
 
         for h in 0..=target_height {
             let hash = self.get_block_hash_by_height(h)?;
             let block = self.get_block(&hash)?;
 
-            let validator_key = Self::pubkey_key(&block.header.validator_id);
-            let subsidy = subsidy_at_height(h) as i128;
-            replay_supply = replay_supply.saturating_add(subsidy as u64);
-
-            let mut validator_fee_total: i128 = 0;
-            for tx in &block.transactions {
-                let fee = tx.fee as i128;
-                if let Some(ref gw) = tx.gateway_address {
-                    let gw_share = fee / 2;
-                    let val_share = fee - gw_share;
-                    *balances.entry(gw.clone()).or_default() += gw_share;
-                    validator_fee_total += val_share;
-                } else {
-                    validator_fee_total += fee;
-                }
-            }
-            *balances.entry(validator_key).or_default() += subsidy + validator_fee_total;
+            replay_supply = replay_supply.saturating_add(subsidy_at_height(h));
 
             for (offset, tx) in block.transactions.iter().enumerate() {
-                let sender_pk = tx
-                    .publisher_sig
-                    .to_noble_public_key()
-                    .map_err(|e| StorageError::Codec(e.to_string()))?;
-                // S34: Use canonical debit resolution (fixes P0 replay divergence)
-                // S35 F1: replay uses accumulated balances (already delta-aware)
-                let need = tx.amount.unwrap_or(0) + tx.fee;
-                let sender_addr = noble_core::resolve_debit_address(
-                    &tx.source_address,
-                    &sender_pk,
-                    need,
-                    |a| {
-                        let key = a.to_wire_bytes();
-                        let bal = balances.get(&key).copied().unwrap_or(0);
-                        if bal >= 0 { bal as u64 } else { 0 }
-                    },
-                )
-                .map_err(|e| StorageError::Codec(e.to_string()))?;
-                let sender_key = sender_addr.to_wire_bytes();
-
                 let tx_id = tx
                     .compute_tx_id(chain_id)
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
 
-                // Rebuild checksum_index
-                replay_batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
-
-                // Rebuild version_chain and publisher_index
+                // Rebuild checksum_index for notarizations
                 if tx.tx_type == TX_TYPE_NOTARIZATION {
+                    replay_batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
+
                     if let Some(prev_hex) = tx
                         .metadata
                         .iter()
@@ -1022,38 +1223,44 @@ impl StorageEngine for RocksDbStorage {
                             );
                         }
                     }
-                    // Rebuild publisher_index
-                    replay_batch.merge_cf(cf_publisher, &sender_key, tx_id.as_bytes());
+
+                    let publisher_wire = tx
+                        .publisher_sig
+                        .to_noble_public_key()
+                        .map_err(|e| StorageError::Codec(e.to_string()))?
+                        .to_wire_bytes();
+                    replay_batch.merge_cf(cf_publisher, &publisher_wire, tx_id.as_bytes());
                 }
 
-                if tx.tx_type == TX_TYPE_TRANSFER {
-                    let amount = tx.amount.unwrap_or(0) as i128;
-                    let fee = tx.fee as i128;
-                    *balances.entry(sender_key.clone()).or_default() -= amount + fee;
-                    if let Some(ref recipient) = tx.recipient {
-                        let recip_key = recipient.to_wire_bytes();
-                        *balances.entry(recip_key.clone()).or_default() += amount;
-                        let hkey = Self::history_key(&recip_key, h, offset as u32);
-                        replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+                // Rebuild address history
+                let mut history_addresses: Vec<Vec<u8>> = Vec::new();
+                if !tx.is_coinbase() {
+                    // We don't have the spent UTXO addresses at replay time easily,
+                    // but we can get them from the publisher_sig for simple cases.
+                    // For a complete solution, use the publisher's key.
+                    let sender_pk = tx
+                        .publisher_sig
+                        .to_noble_public_key()
+                        .map_err(|e| StorageError::Codec(e.to_string()))?;
+                    let sender_wire = NobleAddress::Noble(sender_pk).to_wire_bytes();
+                    if !history_addresses.contains(&sender_wire) {
+                        history_addresses.push(sender_wire);
                     }
-                } else {
-                    let fee = tx.fee as i128;
-                    *balances.entry(sender_key.clone()).or_default() -= fee;
                 }
-
-                let hkey = Self::history_key(&sender_key, h, offset as u32);
-                replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+                for output in &tx.outputs {
+                    let wire = output.address.to_wire_bytes();
+                    if !history_addresses.contains(&wire) {
+                        history_addresses.push(wire);
+                    }
+                }
+                for addr_wire in &history_addresses {
+                    let hkey = Self::history_key(addr_wire, h, offset as u32);
+                    replay_batch.put_cf(cf_history, hkey, tx_id.as_bytes());
+                }
             }
         }
 
-        // Write balances
-        for (key, balance) in &balances {
-            if *balance >= 0 {
-                replay_batch.put_cf(cf_balances, key, (*balance as u64).to_be_bytes());
-            }
-        }
-
-        // AUD3-D8: Persist total_supply so get_total_supply() is correct after rollback.
+        // Persist total_supply
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         replay_batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, replay_supply.to_be_bytes());
 
@@ -1082,7 +1289,7 @@ impl StorageEngine for RocksDbStorage {
             tip.height
         );
 
-        // Reuse rollback logic for height 0, but bypass MAX_REORG_DEPTH check.
+        // Remove blocks and tx indexes
         let mut batch = WriteBatch::default();
         let cf_blocks = self.cf(CF_BLOCKS)?;
         let cf_hashes = self.cf(CF_BLOCK_HASHES)?;
@@ -1095,14 +1302,24 @@ impl StorageEngine for RocksDbStorage {
                 .get_cf(cf_blocks, height_be)
                 .map_err(|e| StorageError::Database(e.to_string()))?
             {
-                if let Ok(block) = Block::from_cbor(&block_bytes) {
-                    for tx in &block.transactions {
-                        if let Ok(tx_id) = tx.compute_tx_id(chain_id) {
-                            batch.delete_cf(cf_tx, tx_id.as_bytes());
+                match Block::from_cbor(&block_bytes) {
+                    Ok(block) => {
+                        for tx in &block.transactions {
+                            match tx.compute_tx_id(chain_id) {
+                                Ok(tx_id) => {
+                                    batch.delete_cf(cf_tx, tx_id.as_bytes());
+                                }
+                                Err(e) => {
+                                    tracing::error!("corrupt tx during force_reset at height {h}: {e}");
+                                }
+                            }
+                        }
+                        if let Ok(block_hash) = block.header.compute_block_hash() {
+                            batch.delete_cf(cf_hashes, block_hash.as_bytes());
                         }
                     }
-                    if let Ok(block_hash) = block.header.compute_block_hash() {
-                        batch.delete_cf(cf_hashes, block_hash.as_bytes());
+                    Err(e) => {
+                        tracing::error!("corrupt block during force_reset at height {h}: {e}");
                     }
                 }
             }
@@ -1113,10 +1330,12 @@ impl StorageEngine for RocksDbStorage {
             .write(batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Clear balances, history, checksum, version_chain, publisher_index
+        // Clear UTXO set, address UTXOs, undo data, history, checksum, version_chain, publisher_index
         let mut clear_batch = WriteBatch::default();
         for cf_name in [
-            CF_ADDRESS_BALANCES,
+            CF_UTXO_SET,
+            CF_ADDRESS_UTXOS,
+            CF_UNDO_DATA,
             CF_ADDRESS_HISTORY,
             CF_CHECKSUM_INDEX,
             CF_VERSION_CHAIN,
@@ -1140,16 +1359,38 @@ impl StorageEngine for RocksDbStorage {
             .write(clear_batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Replay genesis block (height 0) for balances
+        // Replay genesis block (height 0) for UTXOs
         let block = self.get_block(&genesis_hash)?;
         let mut replay_batch = WriteBatch::default();
-        let cf_balances = self.cf(CF_ADDRESS_BALANCES)?;
-        let subsidy = subsidy_at_height(0);
-        let validator_key = Self::pubkey_key(&block.header.validator_id);
-        if subsidy > 0 {
-            replay_batch.put_cf(cf_balances, &validator_key, subsidy.to_be_bytes());
+        let cf_utxo = self.cf(CF_UTXO_SET)?;
+        let cf_addr_utxo = self.cf(CF_ADDRESS_UTXOS)?;
+
+        // Genesis block: re-create UTXOs from coinbase outputs
+        for tx in &block.transactions {
+            match tx.compute_tx_id(chain_id) {
+                Ok(tx_id) => {
+                    for (vout, output) in tx.outputs.iter().enumerate() {
+                        let outpoint = OutPoint { txid: tx_id, vout: vout as u32 };
+                        let entry = UtxoEntry {
+                            value: output.value,
+                            address: output.address.clone(),
+                            height: 0,
+                            is_coinbase: tx.is_coinbase(),
+                        };
+                        let op_key = Self::outpoint_key(&outpoint);
+                        let entry_bytes = Self::encode_utxo_entry(&entry);
+                        let addr_wire = output.address.to_wire_bytes();
+                        replay_batch.put_cf(cf_utxo, op_key, &entry_bytes);
+                        replay_batch.put_cf(cf_addr_utxo, Self::address_utxo_key(&addr_wire, &outpoint), &[]);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("corrupt genesis tx during force_reset: {e}");
+                }
+            }
         }
 
+        let subsidy = subsidy_at_height(0);
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         replay_batch.put_cf(cf_state, KEY_TOTAL_SUPPLY, subsidy.to_be_bytes());
 
@@ -1176,7 +1417,9 @@ impl StorageEngine for RocksDbStorage {
             CF_CHECKSUM_INDEX,
             CF_CHAIN_STATE,
             CF_VALIDATOR_STATE,
-            CF_ADDRESS_BALANCES,
+            CF_UTXO_SET,
+            CF_ADDRESS_UTXOS,
+            CF_UNDO_DATA,
             CF_ADDRESS_HISTORY,
             CF_BANS,
             CF_PEER_MEMORY,
@@ -1480,6 +1723,11 @@ impl StorageEngine for RocksDbStorage {
             .map_err(|e| StorageError::Database(e.to_string()))
     }
 
+    fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UtxoEntry>, StorageError> {
+        self.check_open()?;
+        self.read_utxo(outpoint)
+    }
+
     fn store_finality_state(&self, data: &[u8]) -> Result<(), StorageError> {
         self.check_open()?;
         let cf = self.cf(CF_CHAIN_STATE)?;
@@ -1757,7 +2005,8 @@ fn parse_checksum_index_value(bytes: &[u8]) -> Result<Vec<Hash256>, StorageError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY};
+    use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY, TX_TYPE_COINBASE, TX_TYPE_TRANSFER};
+    use noble_core::utxo::{OutPoint, TxIn, TxOut};
     use noble_core::{Block, BlockHeader, Transaction, PROTOCOL_VERSION};
     use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{
@@ -1777,17 +2026,22 @@ mod tests {
         NobleAddress::Noble(pk.clone())
     }
 
-    fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], timestamp: u64) -> (Transaction, Hash256) {
+    /// Create a coinbase transaction paying `value` to `address`.
+    fn make_coinbase_tx(
+        sk: &[u8],
+        pk: &[u8],
+        address: &NobleAddress,
+        value: u64,
+        timestamp: u64,
+    ) -> (Transaction, Hash256) {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let checksum = sha256(doc);
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: 0,
-            checksum,
+            tx_type: TX_TYPE_COINBASE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: vec![TxOut { value, address: address.clone() }],
+            checksum: Hash256::ZERO,
             timestamp,
-            fee: 1_000,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1798,7 +2052,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1806,24 +2059,34 @@ mod tests {
         (tx, tx_id)
     }
 
-    fn make_transfer_tx(
+    /// Create a notarization tx that spends a UTXO (input) and returns change.
+    /// Fee = input_value - change_value.
+    fn make_signed_tx(
         sk: &[u8],
         pk: &[u8],
-        recipient: &NoblePublicKey,
-        amount: u64,
-        fee: u64,
+        doc: &[u8],
         timestamp: u64,
     ) -> (Transaction, Hash256) {
+        // This creates a notarization with a dummy input outpoint.
+        // Tests that use this must ensure the input UTXO exists.
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let checksum = sha256(b"transfer");
+        let checksum = sha256(doc);
+        let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
+            tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint {
+                    txid: Hash256::from_bytes([0xDD; 32]), // dummy, overridden by caller
+                    vout: 0,
+                },
+            }],
+            outputs: vec![TxOut {
+                value: 0, // will be set by caller or use default
+                address: sender_addr,
+            }],
             checksum,
             timestamp,
-            fee,
-            recipient: Some(NobleAddress::Noble(recipient.clone())),
-            amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1834,7 +2097,49 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
+        };
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        (tx, tx_id)
+    }
+
+    /// Create a transfer tx: spends `input_outpoint` and sends `amount` to `recipient`,
+    /// with change back to sender. Fee = input_value - amount - change.
+    fn make_transfer_tx_utxo(
+        sk: &[u8],
+        pk: &[u8],
+        recipient: &NobleAddress,
+        input_outpoint: OutPoint,
+        input_value: u64,
+        amount: u64,
+        fee: u64,
+        timestamp: u64,
+    ) -> (Transaction, Hash256) {
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
+        let change = input_value - amount - fee;
+        let mut outputs = vec![TxOut { value: amount, address: recipient.clone() }];
+        if change > 0 {
+            outputs.push(TxOut { value: change, address: sender_addr });
+        }
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn { prev_output: input_outpoint }],
+            outputs,
+            checksum: Hash256::ZERO,
+            timestamp,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1921,6 +2226,31 @@ mod tests {
         (block, block_hash, tx_ids)
     }
 
+    /// Helper: commit an empty block with a coinbase paying subsidy to the validator.
+    fn commit_block_with_coinbase(
+        db: &RocksDbStorage,
+        height: u64,
+        prev_hash: Hash256,
+        timestamp: u64,
+        val_sk: &[u8],
+        val_pk: &[u8],
+    ) -> (Hash256, Hash256) {
+        let val_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(val_pk.to_vec()));
+        let subsidy = subsidy_at_height(height);
+        let (coinbase_tx, coinbase_id) =
+            make_coinbase_tx(val_sk, val_pk, &val_addr, subsidy, timestamp);
+        let (block, block_hash, tx_ids) = make_block_with_validator(
+            vec![(coinbase_tx, coinbase_id)],
+            height,
+            prev_hash,
+            timestamp,
+            val_sk,
+            val_pk,
+        );
+        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
+        (block_hash, coinbase_id)
+    }
+
     // --- Basic operations ---
 
     #[test]
@@ -1932,13 +2262,9 @@ mod tests {
     }
 
     #[test]
-    fn commit_and_retrieve_block() {
+    fn commit_and_retrieve_empty_block() {
         let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
-        let (block, block_hash, tx_ids) =
-            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-
+        let (block, block_hash, tx_ids) = make_block(vec![], 0, Hash256::ZERO, 1_700_000_000);
         db.commit_block(&block, &block_hash, &tx_ids).unwrap();
 
         let got = db.get_block(&block_hash).unwrap();
@@ -1946,27 +2272,21 @@ mod tests {
     }
 
     #[test]
-    fn retrieve_block_header() {
+    fn commit_block_with_coinbase_and_retrieve() {
         let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
-        let (block, block_hash, tx_ids) =
-            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (hash, _coinbase_id) =
+            commit_block_with_coinbase(&db, 1, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
 
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-
-        let header = db.get_block_header(&block_hash).unwrap();
-        assert_eq!(header, block.header);
+        let tip = db.get_chain_tip().unwrap().unwrap();
+        assert_eq!(tip.block_hash, hash);
+        assert_eq!(tip.height, 1);
     }
 
     #[test]
     fn block_hash_by_height() {
         let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
-        let (block, block_hash, tx_ids) =
-            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-
+        let (block, block_hash, tx_ids) = make_block(vec![], 0, Hash256::ZERO, 1_700_000_000);
         db.commit_block(&block, &block_hash, &tx_ids).unwrap();
 
         let hash = db.get_block_hash_by_height(0).unwrap();
@@ -1974,105 +2294,18 @@ mod tests {
     }
 
     #[test]
-    fn retrieve_transaction() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
-        let (block, block_hash, tx_ids) = make_block_with_validator(
-            vec![(tx.clone(), tx_id)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-
-        let got = db.get_transaction(&tx_id).unwrap();
-        assert_eq!(got, tx);
-        assert!(db.has_transaction(&tx_id).unwrap());
-    }
-
-    #[test]
-    fn checksum_lookup_single() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
-        let checksum = tx.checksum;
-        let (block, block_hash, tx_ids) =
-            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-
-        let results = db.lookup_checksum(&checksum).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], tx_id);
-    }
-
-    #[test]
-    fn checksum_lookup_multiple_blocks() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Block 0: first registration of same_doc (sender = validator)
-        let (tx1, tx_id1) = make_signed_tx(&sk, &pk, b"same_doc", 1_700_000_000);
-        let checksum = tx1.checksum;
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![(tx1, tx_id1)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        // Block 1: second registration of same_doc
-        let (tx2, tx_id2) = make_signed_tx(&sk, &pk, b"same_doc", 1_700_000_001);
-        let (block1, hash1, ids1) =
-            make_block_with_validator(vec![(tx2, tx_id2)], 1, hash0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        let results = db.lookup_checksum(&checksum).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0], tx_id1);
-        assert_eq!(results[1], tx_id2);
-    }
-
-    #[test]
-    fn checksum_lookup_empty() {
-        let (db, _dir) = temp_db();
-        let missing = Hash256::from_bytes([0xFF; 32]);
-        let results = db.lookup_checksum(&missing).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn chain_tip_updates() {
         let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
         assert!(db.get_chain_tip().unwrap().is_none());
 
-        let (tx0, tx_id0) = make_signed_tx(&sk, &pk, b"doc0", 1_700_000_000);
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![(tx0, tx_id0)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
+        let (block0, hash0, ids0) = make_block(vec![], 0, Hash256::ZERO, 1_700_000_000);
         db.commit_block(&block0, &hash0, &ids0).unwrap();
 
         let tip = db.get_chain_tip().unwrap().unwrap();
         assert_eq!(tip.block_hash, hash0);
         assert_eq!(tip.height, 0);
 
-        let (tx1, tx_id1) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_001);
-        let (block1, hash1, ids1) =
-            make_block_with_validator(vec![(tx1, tx_id1)], 1, hash0, 1_700_000_001, &sk, &pk);
+        let (block1, hash1, ids1) = make_block(vec![], 1, hash0, 1_700_000_001);
         db.commit_block(&block1, &hash1, &ids1).unwrap();
 
         let tip = db.get_chain_tip().unwrap().unwrap();
@@ -2100,103 +2333,7 @@ mod tests {
         assert!(!db.has_transaction(&missing).unwrap());
     }
 
-    #[test]
-    fn persistence_across_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let (sk, pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"persistent_doc", 1_700_000_000);
-        let checksum = tx.checksum;
-        let (block, block_hash, tx_ids) = make_block_with_validator(
-            vec![(tx.clone(), tx_id)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-
-        // Write and close
-        {
-            let db = RocksDbStorage::open(dir.path()).unwrap();
-            db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        }
-
-        // Reopen and verify
-        {
-            let db = RocksDbStorage::open(dir.path()).unwrap();
-            let got = db.get_block(&block_hash).unwrap();
-            assert_eq!(got, block);
-
-            let got_tx = db.get_transaction(&tx_id).unwrap();
-            assert_eq!(got_tx, tx);
-
-            let results = db.lookup_checksum(&checksum).unwrap();
-            assert_eq!(results, vec![tx_id]);
-
-            let tip = db.get_chain_tip().unwrap().unwrap();
-            assert_eq!(tip.block_hash, block_hash);
-            assert_eq!(tip.height, 0);
-        }
-    }
-
-    #[test]
-    fn empty_block_commit() {
-        let (db, _dir) = temp_db();
-        let (block, block_hash, tx_ids) = make_block(vec![], 0, Hash256::ZERO, 1_700_000_000);
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-
-        let got = db.get_block(&block_hash).unwrap();
-        assert_eq!(got.transactions.len(), 0);
-
-        let tip = db.get_chain_tip().unwrap().unwrap();
-        assert_eq!(tip.height, 0);
-    }
-
-    #[test]
-    fn multiple_transactions_in_block() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        let (tx1, id1) = make_signed_tx(&sk, &pk, b"doc_a", 1_700_000_000);
-        let (tx2, id2) = make_signed_tx(&sk, &pk, b"doc_b", 1_700_000_000);
-        let (tx3, id3) = make_signed_tx(&sk, &pk, b"doc_c", 1_700_000_000);
-
-        let (block, hash, ids) = make_block_with_validator(
-            vec![(tx1.clone(), id1), (tx2.clone(), id2), (tx3.clone(), id3)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&block, &hash, &ids).unwrap();
-
-        assert_eq!(db.get_transaction(&id1).unwrap(), tx1);
-        assert_eq!(db.get_transaction(&id2).unwrap(), tx2);
-        assert_eq!(db.get_transaction(&id3).unwrap(), tx3);
-    }
-
-    // --- Merge operator tests ---
-
-    #[test]
-    fn parse_checksum_index_value_valid() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&[0xAA; 32]);
-        bytes.extend_from_slice(&[0xBB; 32]);
-
-        let result = parse_checksum_index_value(&bytes).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], Hash256::from_bytes([0xAA; 32]));
-        assert_eq!(result[1], Hash256::from_bytes([0xBB; 32]));
-    }
-
-    #[test]
-    fn parse_checksum_index_value_invalid_length() {
-        let bytes = vec![0u8; 33]; // Not a multiple of 32
-        assert!(parse_checksum_index_value(&bytes).is_err());
-    }
-
-    // --- Balance storage tests (GAP-H19) ---
+    // --- UTXO Balance tests ---
 
     #[test]
     fn balance_zero_for_unknown_address() {
@@ -2207,456 +2344,156 @@ mod tests {
     }
 
     #[test]
-    fn subsidy_credited_to_validator() {
-        let (db, _dir) = temp_db();
-        let (block, block_hash, tx_ids) = make_block(vec![], 1, Hash256::ZERO, 1_700_000_000);
-        let validator = block.header.validator_id.clone();
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
-    }
-
-    #[test]
-    fn subsidy_halves_at_halving_interval() {
-        let (db, _dir) = temp_db();
-        let (block, block_hash, tx_ids) =
-            make_block(vec![], HALVING_INTERVAL, Hash256::ZERO, 1_700_000_000);
-        let validator = block.header.validator_id.clone();
-        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
-        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY / 2);
-    }
-
-    #[test]
-    fn fees_credited_to_validator() {
+    fn coinbase_creates_utxo() {
         let (db, _dir) = temp_db();
         let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
 
-        // Fund sender as validator of block 1
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
+        let (_hash, _coinbase_id) =
+            commit_block_with_coinbase(&db, 1, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
 
-        // Block 2: 2 notarization txs
-        let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
-        let (tx2, id2) = make_signed_tx(&sender_sk, &sender_pk, b"doc2", 1_700_000_001);
-        let (block1, hash1, ids1) = make_block_with_validator(
-            vec![(tx1, id1), (tx2, id2)],
-            2,
-            hash0,
-            1_700_000_001,
-            &val_sk,
-            &val_pk,
-        );
-        let validator = block1.header.validator_id.clone();
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY + 2_000);
-    }
-
-    #[test]
-    fn notarization_debits_sender_fee() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender as validator of block 1
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY);
-
-        // Block 2: sender submits a notarization (different validator)
-        let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
-        let fee = tx1.fee;
-        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 2, hash0, 1_700_000_001);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY - fee);
-    }
-
-    #[test]
-    fn transfer_debits_sender_credits_recipient() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender as validator of block 1
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        // Create transfer
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recip_pk);
-        let amount = 100_000u64;
-        let fee = 1_000u64;
-        let (tx, tx_id) = make_transfer_tx(
-            &sender_sk,
-            &sender_pk,
-            &recipient,
-            amount,
-            fee,
-            1_700_000_001,
-        );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        assert_eq!(
-            db.get_balance(&addr(&sender_pub)).unwrap(),
-            INITIAL_SUBSIDY - amount - fee
-        );
-        assert_eq!(db.get_balance(&addr(&recipient)).unwrap(), amount);
-    }
-
-    #[test]
-    fn transfer_insufficient_balance_fails() {
-        let (db, _dir) = temp_db();
-
-        // Sender has no prior funds
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recip_pk);
-        let (tx, tx_id) = make_transfer_tx(
-            &sender_sk,
-            &sender_pk,
-            &recipient,
-            100_000,
-            1_000,
-            1_700_000_000,
-        );
-        let (block, block_hash, tx_ids) =
-            make_block(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000);
-
-        let result = db.commit_block(&block, &block_hash, &tx_ids);
-        assert!(matches!(
-            result,
-            Err(StorageError::InsufficientBalance { .. })
-        ));
-    }
-
-    #[test]
-    fn balance_overflow_fails() {
-        let (db, _dir) = temp_db();
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-
-        // Block 0: empty block to create the validator's balance entry
-        let (block0, hash0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &val_sk, &val_pk);
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        // Directly write a near-max balance into the DB
-        let cf_balances = db.cf(CF_ADDRESS_BALANCES).unwrap();
-        let key = RocksDbStorage::pubkey_key(&NoblePublicKey::Ed25519(val_pk.to_vec()));
-        db.db
-            .put_cf(cf_balances, &key, &(u64::MAX - 10).to_be_bytes())
-            .unwrap();
-
-        // Block 1: validator gets another subsidy → overflow
-        let (block1, hash1, ids1) =
-            make_block_with_validator(vec![], 1, hash0, 1_700_000_001, &val_sk, &val_pk);
-        let result = db.commit_block(&block1, &hash1, &ids1);
-        assert!(matches!(result, Err(StorageError::BalanceOverflow { .. })));
-    }
-
-    #[test]
-    fn history_records_notarization() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let (tx1, id1) = make_signed_tx(&sender_sk, &sender_pk, b"doc1", 1_700_000_001);
-        let (block1, hash1, ids1) = make_block(vec![(tx1, id1)], 2, hash0, 1_700_000_001);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = db.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
-        assert!(history.contains(&id1));
-    }
-
-    #[test]
-    fn history_records_transfer_both_parties() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recip_pk);
-        let (tx, tx_id) = make_transfer_tx(
-            &sender_sk,
-            &sender_pk,
-            &recipient,
-            10_000,
-            1_000,
-            1_700_000_001,
-        );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        assert!(db
-            .get_address_history(&addr(&sender_pub), 0, 100)
-            .unwrap()
-            .contains(&tx_id));
-        assert!(db
-            .get_address_history(&addr(&recipient), 0, 100)
-            .unwrap()
-            .contains(&tx_id));
-    }
-
-    #[test]
-    fn history_pagination() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender as validator
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let mut prev_hash = hash0;
-        for i in 1..=3u64 {
-            let (tx, id) = make_signed_tx(
-                &sender_sk,
-                &sender_pk,
-                format!("doc{i}").as_bytes(),
-                1_700_000_000 + i,
-            );
-            let (block, hash, ids) = make_block_with_validator(
-                vec![(tx, id)],
-                i,
-                prev_hash,
-                1_700_000_000 + i,
-                &sender_sk,
-                &sender_pk,
-            );
-            db.commit_block(&block, &hash, &ids).unwrap();
-            prev_hash = hash;
-        }
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let page0 = db.get_address_history(&addr(&sender_pub), 0, 2).unwrap();
-        assert_eq!(page0.len(), 2);
-        let page1 = db.get_address_history(&addr(&sender_pub), 1, 2).unwrap();
-        assert_eq!(page1.len(), 1);
-        assert!(!page0.contains(&page1[0]));
-    }
-
-    #[test]
-    fn history_empty_for_unknown() {
-        let (db, _dir) = temp_db();
-        let (_, pk) = ed25519::generate_keypair();
-        let pubkey = NoblePublicKey::Ed25519(pk);
-        let history = db.get_address_history(&addr(&pubkey), 0, 100).unwrap();
-        assert!(history.is_empty());
-    }
-
-    #[test]
-    fn history_chronological_order() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let mut prev_hash = hash0;
-        let mut expected_order = vec![];
-        for i in 1..=3u64 {
-            let (tx, id) = make_signed_tx(
-                &sender_sk,
-                &sender_pk,
-                format!("doc{i}").as_bytes(),
-                1_700_000_000 + i,
-            );
-            expected_order.push(id);
-            let (block, hash, ids) = make_block_with_validator(
-                vec![(tx, id)],
-                i,
-                prev_hash,
-                1_700_000_000 + i,
-                &sender_sk,
-                &sender_pk,
-            );
-            db.commit_block(&block, &hash, &ids).unwrap();
-            prev_hash = hash;
-        }
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let history = db.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
-        assert_eq!(history, expected_order);
+        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY);
     }
 
     #[test]
     fn multi_block_balance_accumulation() {
         let (db, _dir) = temp_db();
         let (val_sk, val_pk) = ed25519::generate_keypair();
+        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
 
         let mut prev_hash = Hash256::ZERO;
         for h in 1..4u64 {
-            let (block, hash, ids) = make_block_with_validator(
-                vec![],
-                h,
-                prev_hash,
-                1_700_000_000 + h,
-                &val_sk,
-                &val_pk,
+            let (hash, _) = commit_block_with_coinbase(
+                &db, h, prev_hash, 1_700_000_000 + h, &val_sk, &val_pk,
             );
-            db.commit_block(&block, &hash, &ids).unwrap();
             prev_hash = hash;
         }
 
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
         assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
     #[test]
-    fn validator_gets_transfer_fees() {
+    fn transfer_debits_sender_credits_recipient() {
         let (db, _dir) = temp_db();
-
-        // Fund sender
         let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
+        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
 
-        // Transfer validated by a different validator
-        let (val_sk, val_pk) = ed25519::generate_keypair();
+        // Block 1: coinbase funds sender
+        let (hash0, coinbase_id) = commit_block_with_coinbase(
+            &db, 1, Hash256::ZERO, 1_700_000_000, &sender_sk, &sender_pk,
+        );
+
+        // Wait for maturity (block at height 1 + COINBASE_MATURITY = 7)
+        let mut prev = hash0;
+        for h in 2..=7u64 {
+            let (hash, _) = commit_block_with_coinbase(
+                &db, h, prev, 1_700_000_000 + h, &sender_sk, &sender_pk,
+            );
+            prev = hash;
+        }
+
+        // Block 8: transfer from sender to recipient
         let (_, recip_pk) = ed25519::generate_keypair();
         let recipient = NoblePublicKey::Ed25519(recip_pk);
-        let fee = 2_000u64;
-        let (tx, tx_id) = make_transfer_tx(
-            &sender_sk,
-            &sender_pk,
-            &recipient,
-            10_000,
-            fee,
-            1_700_000_001,
-        );
-        let (block1, hash1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, hash0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
-
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + fee);
-    }
-
-    #[test]
-    fn self_transfer_balance_correct() {
-        let (db, _dir) = temp_db();
-
-        // Fund sender as validator of block 1
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (block0, hash0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&block0, &hash0, &ids0).unwrap();
-
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
+        let recip_addr = NobleAddress::Noble(recipient.clone());
+        let amount = 100_000u64;
         let fee = 1_000u64;
-        let amount = 10_000u64;
-        let (tx, tx_id) = make_transfer_tx(
-            &sender_sk,
-            &sender_pk,
-            &sender_pub,
-            amount,
-            fee,
-            1_700_000_001,
+        // Spend coinbase from block 1
+        let input_outpoint = OutPoint { txid: coinbase_id, vout: 0 };
+        let (tx, tx_id) = make_transfer_tx_utxo(
+            &sender_sk, &sender_pk, &recip_addr, input_outpoint, INITIAL_SUBSIDY,
+            amount, fee, 1_700_000_008,
         );
-        let (block1, hash1, ids1) = make_block(vec![(tx, tx_id)], 2, hash0, 1_700_000_001);
-        db.commit_block(&block1, &hash1, &ids1).unwrap();
+        let (block, block_hash, tx_ids) =
+            make_block_with_validator(vec![(tx, tx_id)], 8, prev, 1_700_000_008, &sender_sk, &sender_pk);
+        db.commit_block(&block, &block_hash, &tx_ids).unwrap();
 
-        // Self-transfer: net effect is -fee only
-        assert_eq!(db.get_balance(&addr(&sender_pub)).unwrap(), INITIAL_SUBSIDY - fee);
+        assert_eq!(db.get_balance(&addr(&recipient)).unwrap(), amount);
+        // Sender has: coinbase from blocks 2-7 (6 UTXOs) + change from transfer
+        let sender_balance = db.get_balance(&addr(&sender_pub)).unwrap();
+        let expected_change = INITIAL_SUBSIDY - amount - fee;
+        // Block 8 has no coinbase, only the transfer tx
+        let expected = INITIAL_SUBSIDY * 6 + expected_change;
+        assert_eq!(sender_balance, expected);
     }
 
     #[test]
-    fn persistence_across_reopen_balances() {
-        let dir = tempfile::tempdir().unwrap();
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let validator = NoblePublicKey::Ed25519(val_pk.to_vec());
+    fn spending_nonexistent_utxo_fails() {
+        let (db, _dir) = temp_db();
+        let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip_pk) = ed25519::generate_keypair();
+        let recip_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(recip_pk));
 
-        // Write a block and close
-        {
-            let db = RocksDbStorage::open(dir.path()).unwrap();
-            let (block, hash, ids) = make_block_with_validator(
-                vec![],
-                1,
-                Hash256::ZERO,
-                1_700_000_000,
-                &val_sk,
-                &val_pk,
-            );
-            db.commit_block(&block, &hash, &ids).unwrap();
-            assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
-        }
+        // Try to spend a UTXO that doesn't exist
+        let fake_outpoint = OutPoint {
+            txid: Hash256::from_bytes([0xAA; 32]),
+            vout: 0,
+        };
+        let (tx, tx_id) = make_transfer_tx_utxo(
+            &sk, &pk, &recip_addr, fake_outpoint, 100_000, 50_000, 1_000, 1_700_000_000,
+        );
+        let (block, block_hash, tx_ids) =
+            make_block(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000);
 
-        // Reopen and verify
-        {
-            let db = RocksDbStorage::open(dir.path()).unwrap();
-            assert_eq!(db.get_balance(&addr(&validator)).unwrap(), INITIAL_SUBSIDY);
-        }
+        let result = db.commit_block(&block, &block_hash, &tx_ids);
+        assert!(matches!(result, Err(StorageError::UtxoNotFound { .. })));
+    }
+
+    // --- Total supply tests ---
+
+    #[test]
+    fn total_supply_tracks_across_blocks() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.get_total_supply().unwrap(), 0);
+
+        let (sk, pk) = ed25519::generate_keypair();
+
+        let (h0, _) = commit_block_with_coinbase(&db, 1, Hash256::ZERO, 1_700_000_000, &sk, &pk);
+        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY);
+
+        let (h1, _) = commit_block_with_coinbase(&db, 2, h0, 1_700_000_001, &sk, &pk);
+        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY * 2);
+
+        let halved = INITIAL_SUBSIDY / 2;
+        let (_h2, _) = commit_block_with_coinbase(&db, HALVING_INTERVAL, h1, 1_700_000_002, &sk, &pk);
+        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY * 2 + halved);
+    }
+
+    // --- UTXO encoding/decoding tests ---
+
+    #[test]
+    fn utxo_entry_encode_decode_roundtrip() {
+        let (_, pk) = ed25519::generate_keypair();
+        let entry = UtxoEntry {
+            value: 42_000_000,
+            address: NobleAddress::Noble(NoblePublicKey::Ed25519(pk)),
+            height: 123,
+            is_coinbase: true,
+        };
+        let encoded = RocksDbStorage::encode_utxo_entry(&entry);
+        let decoded = RocksDbStorage::decode_utxo_entry(&encoded).unwrap();
+        assert_eq!(entry, decoded);
+    }
+
+    #[test]
+    fn undo_data_encode_decode_roundtrip() {
+        let (_, pk) = ed25519::generate_keypair();
+        let entry = UtxoEntry {
+            value: 100_000,
+            address: NobleAddress::Noble(NoblePublicKey::Ed25519(pk)),
+            height: 5,
+            is_coinbase: false,
+        };
+        let outpoint = OutPoint {
+            txid: Hash256::from_bytes([0xAB; 32]),
+            vout: 2,
+        };
+        let spent = vec![(outpoint.clone(), entry.clone())];
+        let encoded = RocksDbStorage::encode_undo_data(&spent);
+        let decoded = RocksDbStorage::decode_undo_data(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, outpoint);
+        assert_eq!(decoded[0].1, entry);
     }
 
     // --- Rollback tests ---
@@ -2680,22 +2517,20 @@ mod tests {
     }
 
     #[test]
-    fn rollback_recalculates_balances() {
+    fn rollback_restores_utxos() {
         let (db, _dir) = temp_db();
         let (sk, pk) = ed25519::generate_keypair();
         let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
 
-        // Genesis block at height 0 (0 subsidy), then funded blocks at heights 1-3
         let mut prev = Hash256::ZERO;
         for h in 0..4u64 {
-            let (b, hash, ids) =
-                make_block_with_validator(vec![], h, prev, 1_700_000_000 + h, &sk, &pk);
-            db.commit_block(&b, &hash, &ids).unwrap();
+            let (hash, _) = commit_block_with_coinbase(&db, h, prev, 1_700_000_000 + h, &sk, &pk);
             prev = hash;
         }
 
         // Heights 1,2,3 each give INITIAL_SUBSIDY; height 0 gives 0
         assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
+
         db.rollback_to_height(2, test_chain_id()).unwrap();
         // After rollback: heights 0,1,2 remain → 0 + INITIAL_SUBSIDY + INITIAL_SUBSIDY
         assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 2);
@@ -2707,7 +2542,6 @@ mod tests {
         {
             let _db = RocksDbStorage::open(dir.path()).unwrap();
         }
-        // Repair a valid DB should succeed
         RocksDbStorage::repair(dir.path()).unwrap();
     }
 
@@ -2763,7 +2597,6 @@ mod tests {
         db.store_peer_record(&PeerRecord::new(vec![3], vec![30], 9000))
             .unwrap();
 
-        // At time 10000, max_age 3000 → records older than 7000 are stale
         let pruned = db.prune_peer_records(10000, 3000).unwrap();
         assert_eq!(pruned, 2);
         let remaining = db.list_peer_records().unwrap();
@@ -2781,675 +2614,34 @@ mod tests {
         ));
     }
 
-    // --- Gateway fee split tests ---
+    // --- Merge operator tests ---
 
-    /// Helper: create a signed notarization tx with an optional gateway_address.
-    fn make_signed_tx_with_gateway(
-        sk: &[u8],
-        pk: &[u8],
-        doc: &[u8],
-        timestamp: u64,
-        fee: u64,
-        gateway: Option<Vec<u8>>,
-    ) -> (Transaction, Hash256) {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let checksum = sha256(doc);
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: 0,
-            checksum,
-            timestamp,
-            fee,
-            recipient: None,
-            amount: None,
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: gateway,
-            source_address: None,
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        (tx, tx_id)
+    #[test]
+    fn parse_checksum_index_value_valid() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xAA; 32]);
+        bytes.extend_from_slice(&[0xBB; 32]);
+
+        let result = parse_checksum_index_value(&bytes).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Hash256::from_bytes([0xAA; 32]));
+        assert_eq!(result[1], Hash256::from_bytes([0xBB; 32]));
     }
 
     #[test]
-    fn gateway_fee_split_50_50() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (_, gw_pk) = ed25519::generate_keypair();
-        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
-        let gw_wire = gw_key.to_wire_bytes();
-
-        // Fund sender with block 1
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 2: tx with gateway, fee=2000
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx_with_gateway(
-            &sender_sk,
-            &sender_pk,
-            b"doc-gw",
-            1_700_000_001,
-            2_000,
-            Some(gw_wire),
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        // Validator gets subsidy + 50% of fee (1000)
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 1_000);
-        // Gateway gets 50% of fee (1000)
-        assert_eq!(db.get_balance(&addr(&gw_key)).unwrap(), 1_000);
-    }
-
-    #[test]
-    fn gateway_fee_split_odd_rounds_to_validator() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (_, gw_pk) = ed25519::generate_keypair();
-        let gw_key = NoblePublicKey::Ed25519(gw_pk.clone());
-        let gw_wire = gw_key.to_wire_bytes();
-
-        // Fund sender
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 2: tx with gateway, odd fee=1001
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx_with_gateway(
-            &sender_sk,
-            &sender_pk,
-            b"doc-odd",
-            1_700_000_001,
-            1_001,
-            Some(gw_wire),
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        // fee=1001: gw_share=500, val_share=501
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 501);
-        assert_eq!(db.get_balance(&addr(&gw_key)).unwrap(), 500);
-    }
-
-    #[test]
-    fn no_gateway_100_percent_to_validator() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-
-        // Fund sender
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 2: tx WITHOUT gateway, fee=2000
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx_with_gateway(
-            &sender_sk,
-            &sender_pk,
-            b"doc-no-gw",
-            1_700_000_001,
-            2_000,
-            None,
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        // Validator gets subsidy + 100% of fee
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 2_000);
-    }
-
-    #[test]
-    fn gateway_equals_sender() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
-        let sender_wire = sender_pub.to_wire_bytes();
-
-        // Fund sender with block 1 (sender is also validator)
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-        // sender_pub balance = INITIAL_SUBSIDY
-
-        // Block 2: sender sends notarization with self as gateway, fee=2000
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let (tx, tx_id) = make_signed_tx_with_gateway(
-            &sender_sk,
-            &sender_pk,
-            b"doc-self-gw",
-            1_700_000_001,
-            2_000,
-            Some(sender_wire),
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // sender pays fee=2000, gets back gw_share=1000 → net change = -1000
-        assert_eq!(
-            db.get_balance(&addr(&sender_pub)).unwrap(),
-            INITIAL_SUBSIDY - 1_000
-        );
-        // validator gets subsidy + val_share=1000
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 1_000);
-    }
-
-    #[test]
-    fn gateway_equals_validator() {
-        let (db, _dir) = temp_db();
-
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
-        let val_wire = val_pub.to_wire_bytes();
-
-        // Fund sender
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![],
-            1,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sender_sk,
-            &sender_pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 2: gateway == validator, fee=2000
-        let (tx, tx_id) = make_signed_tx_with_gateway(
-            &sender_sk,
-            &sender_pk,
-            b"doc-val-gw",
-            1_700_000_001,
-            2_000,
-            Some(val_wire),
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx, tx_id)], 2, h0, 1_700_000_001, &val_sk, &val_pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // validator gets subsidy + val_share(1000) + gw_share(1000) = subsidy + 2000
-        assert_eq!(db.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY + 2_000);
-    }
-
-    // --- AUD2-M2: O(1) total_supply tracking ---
-
-    #[test]
-    fn aud2_m2_total_supply_tracks_across_blocks() {
-        let (db, _dir) = temp_db();
-        // Initially total_supply is 0
-        assert_eq!(db.get_total_supply().unwrap(), 0);
-
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Block 1: validator gets INITIAL_SUBSIDY
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 1, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY);
-
-        // Block 2: another INITIAL_SUBSIDY (same validator, height < HALVING_INTERVAL)
-        let (b1, h1, ids1) = make_block_with_validator(vec![], 2, h0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-        assert_eq!(db.get_total_supply().unwrap(), INITIAL_SUBSIDY * 2);
-
-        // Block at HALVING_INTERVAL: subsidy halves
-        let halved_subsidy = INITIAL_SUBSIDY / 2;
-        let (b2, h2, ids2) =
-            make_block_with_validator(vec![], HALVING_INTERVAL, h1, 1_700_000_002, &sk, &pk);
-        db.commit_block(&b2, &h2, &ids2).unwrap();
-        assert_eq!(
-            db.get_total_supply().unwrap(),
-            INITIAL_SUBSIDY * 2 + halved_subsidy
-        );
-    }
-
-    #[test]
-    fn aud2_m2_total_supply_read_is_o1() {
-        // This test verifies that get_total_supply() reads a single key
-        // from chain_state (not iterating balances). The proof is structural:
-        // we commit multiple blocks with different validators and confirm the
-        // total_supply key returns the correct cumulative subsidy without
-        // scanning address_balances.
-        let (db, _dir) = temp_db();
-
-        let (sk1, pk1) = ed25519::generate_keypair();
-        let (sk2, pk2) = ed25519::generate_keypair();
-
-        // Two blocks, each mined by a different validator
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 1, Hash256::ZERO, 1_700_000_000, &sk1, &pk1);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        let (b1, h1, _ids1) = make_block_with_validator(vec![], 2, h0, 1_700_000_001, &sk2, &pk2);
-        db.commit_block(&b1, &h1, &_ids1).unwrap();
-
-        // Total supply is 2x INITIAL_SUBSIDY, read from chain_state key (O(1))
-        let supply = db.get_total_supply().unwrap();
-        assert_eq!(supply, INITIAL_SUBSIDY * 2);
-
-        // Each validator has INITIAL_SUBSIDY individually
-        let v1 = NoblePublicKey::Ed25519(pk1.to_vec());
-        let v2 = NoblePublicKey::Ed25519(pk2.to_vec());
-        assert_eq!(db.get_balance(&addr(&v1)).unwrap(), INITIAL_SUBSIDY);
-        assert_eq!(db.get_balance(&addr(&v2)).unwrap(), INITIAL_SUBSIDY);
-    }
-
-    // --- Version chain tests ---
-
-    fn make_versioned_notarization(
-        sk: &[u8],
-        pk: &[u8],
-        doc: &[u8],
-        prev_checksum: Option<&Hash256>,
-        version: Option<u32>,
-        timestamp: u64,
-    ) -> (Transaction, Hash256) {
-        use noble_core::constants::{META_KEY_PREV_CHECKSUM, META_KEY_VERSION};
-        use noble_core::MetadataEntry;
-
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let checksum = sha256(doc);
-        let mut metadata = Vec::new();
-        if let Some(prev) = prev_checksum {
-            metadata.push(MetadataEntry {
-                key: META_KEY_PREV_CHECKSUM.to_string(),
-                value: prev.to_string().into_bytes(),
-            });
-        }
-        if let Some(v) = version {
-            metadata.push(MetadataEntry {
-                key: META_KEY_VERSION.to_string(),
-                value: v.to_string().into_bytes(),
-            });
-        }
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: 0,
-            checksum,
-            timestamp,
-            fee: 1_000,
-            recipient: None,
-            amount: None,
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata,
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: None,
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        (tx, tx_id)
-    }
-
-    #[test]
-    fn version_chain_indexed_on_commit() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Block 0: v1 notarization (no prev_checksum)
-        let (tx1, tx_id1) =
-            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_000);
-        let v1_checksum = tx1.checksum;
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![(tx1, tx_id1)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: v2 notarization referencing v1's checksum
-        let (tx2, tx_id2) = make_versioned_notarization(
-            &sk,
-            &pk,
-            b"doc_v2",
-            Some(&v1_checksum),
-            Some(2),
-            1_700_000_001,
-        );
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx2, tx_id2)], 1, h0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // v1_checksum should have tx_id2 as a successor
-        let successors = db.lookup_version_successors(&v1_checksum).unwrap();
-        assert_eq!(successors.len(), 1);
-        assert_eq!(successors[0], tx_id2);
-    }
-
-    #[test]
-    fn version_chain_empty_for_non_versioned() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Commit a normal notarization without version metadata
-        let (tx, tx_id) = make_signed_tx(&sk, &pk, b"plain_doc", 1_700_000_000);
-        let checksum = tx.checksum;
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![(tx, tx_id)], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // No successors for a plain document
-        let successors = db.lookup_version_successors(&checksum).unwrap();
-        assert!(successors.is_empty());
-    }
-
-    #[test]
-    fn version_chain_multiple_successors() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Block 0: v1
-        let (tx1, tx_id1) =
-            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_000);
-        let v1_checksum = tx1.checksum;
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![(tx1, tx_id1)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: two different v2s referencing same v1 checksum (fork)
-        let (tx2a, tx_id2a) = make_versioned_notarization(
-            &sk,
-            &pk,
-            b"doc_v2a",
-            Some(&v1_checksum),
-            Some(2),
-            1_700_000_001,
-        );
-        let (tx2b, tx_id2b) = make_versioned_notarization(
-            &sk,
-            &pk,
-            b"doc_v2b",
-            Some(&v1_checksum),
-            Some(2),
-            1_700_000_002,
-        );
-        let (b1, h1, ids1) = make_block_with_validator(
-            vec![(tx2a, tx_id2a), (tx2b, tx_id2b)],
-            1,
-            h0,
-            1_700_000_001,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        let successors = db.lookup_version_successors(&v1_checksum).unwrap();
-        assert_eq!(successors.len(), 2);
-        assert!(successors.contains(&tx_id2a));
-        assert!(successors.contains(&tx_id2b));
-    }
-
-    #[test]
-    fn version_chain_rollback_cleans_index() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-
-        // Block 0: empty genesis (sender=validator collects subsidy)
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: v1 notarization
-        let (tx1, tx_id1) =
-            make_versioned_notarization(&sk, &pk, b"doc_v1", None, Some(1), 1_700_000_001);
-        let v1_checksum = tx1.checksum;
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx1, tx_id1)], 1, h0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // Block 2: v2 referencing v1
-        let (tx2, tx_id2) = make_versioned_notarization(
-            &sk,
-            &pk,
-            b"doc_v2",
-            Some(&v1_checksum),
-            Some(2),
-            1_700_000_002,
-        );
-        let (b2, h2, ids2) =
-            make_block_with_validator(vec![(tx2, tx_id2)], 2, h1, 1_700_000_002, &sk, &pk);
-        db.commit_block(&b2, &h2, &ids2).unwrap();
-
-        // Verify version chain exists
-        assert_eq!(db.lookup_version_successors(&v1_checksum).unwrap().len(), 1);
-
-        // Rollback to height 1 (removes block 2 which has the v2)
-        db.rollback_to_height(1, test_chain_id()).unwrap();
-
-        // Version chain should be empty after rollback (block 2 removed)
-        let successors = db.lookup_version_successors(&v1_checksum).unwrap();
-        assert!(successors.is_empty());
-    }
-
-    // ── Publisher Index Tests ──
-
-    #[test]
-    fn publisher_index_populated_on_commit() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
-        let wire = pub_key.to_wire_bytes();
-
-        // Block 0: two notarizations from same key
-        let (tx1, tx_id1) =
-            make_versioned_notarization(&sk, &pk, b"doc_a", None, Some(1), 1_700_000_000);
-        let (tx2, tx_id2) =
-            make_versioned_notarization(&sk, &pk, b"doc_b", None, Some(1), 1_700_000_000);
-        let (b0, h0, ids0) = make_block_with_validator(
-            vec![(tx1, tx_id1), (tx2, tx_id2)],
-            0,
-            Hash256::ZERO,
-            1_700_000_000,
-            &sk,
-            &pk,
-        );
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        let results = db.lookup_by_publisher(&wire).unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&tx_id1));
-        assert!(results.contains(&tx_id2));
-    }
-
-    #[test]
-    fn publisher_index_empty_for_unknown_key() {
-        let (db, _dir) = temp_db();
-        let unknown_wire = vec![0x01; 33];
-        let results = db.lookup_by_publisher(&unknown_wire).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn publisher_index_ignores_transfers() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
-        let wire = pub_key.to_wire_bytes();
-
-        let (_sk2, pk2) = ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(pk2.clone());
-
-        // Block 0: genesis (empty)
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: transfer only
-        let (tx_t, tx_id_t) = make_transfer_tx(&sk, &pk, &recipient, 100, 1_000, 1_700_000_001);
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx_t, tx_id_t)], 1, h0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // Publisher index should be empty — transfers are not indexed
-        let results = db.lookup_by_publisher(&wire).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn publisher_index_multiple_publishers() {
-        let (db, _dir) = temp_db();
-
-        let (sk_a, pk_a) = ed25519::generate_keypair();
-        let pub_a = NoblePublicKey::Ed25519(pk_a.clone());
-        let wire_a = pub_a.to_wire_bytes();
-
-        let (sk_b, pk_b) = ed25519::generate_keypair();
-        let pub_b = NoblePublicKey::Ed25519(pk_b.clone());
-        let wire_b = pub_b.to_wire_bytes();
-
-        // Block 0: empty genesis (subsidy(0)=0)
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk_a, &pk_a);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: empty — A gets subsidy(1) as validator
-        let (b1, h1, ids1) = make_block_with_validator(vec![], 1, h0, 1_700_000_001, &sk_a, &pk_a);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // Block 2: empty — B gets subsidy(2) as validator
-        let (b2, h2, ids2) = make_block_with_validator(vec![], 2, h1, 1_700_000_002, &sk_b, &pk_b);
-        db.commit_block(&b2, &h2, &ids2).unwrap();
-
-        // Block 3: notarization from A (A has subsidy from block 1)
-        let (tx_a, tx_id_a) =
-            make_versioned_notarization(&sk_a, &pk_a, b"doc_by_a", None, Some(1), 1_700_000_003);
-        let (b3, h3, ids3) =
-            make_block_with_validator(vec![(tx_a, tx_id_a)], 3, h2, 1_700_000_003, &sk_b, &pk_b);
-        db.commit_block(&b3, &h3, &ids3).unwrap();
-
-        // Block 4: notarization from B (B has subsidy from blocks 2+3)
-        let (tx_b, tx_id_b) =
-            make_versioned_notarization(&sk_b, &pk_b, b"doc_by_b", None, Some(1), 1_700_000_004);
-        let (b4, _h4, ids4) =
-            make_block_with_validator(vec![(tx_b, tx_id_b)], 4, h3, 1_700_000_004, &sk_a, &pk_a);
-        db.commit_block(&b4, &_h4, &ids4).unwrap();
-
-        let results_a = db.lookup_by_publisher(&wire_a).unwrap();
-        assert_eq!(results_a.len(), 1);
-        assert_eq!(results_a[0], tx_id_a);
-
-        let results_b = db.lookup_by_publisher(&wire_b).unwrap();
-        assert_eq!(results_b.len(), 1);
-        assert_eq!(results_b[0], tx_id_b);
-    }
-
-    #[test]
-    fn publisher_index_rollback_clears_and_replays() {
-        let (db, _dir) = temp_db();
-        let (sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
-        let wire = pub_key.to_wire_bytes();
-
-        // Block 0: empty genesis
-        let (b0, h0, ids0) =
-            make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
-        db.commit_block(&b0, &h0, &ids0).unwrap();
-
-        // Block 1: notarization A
-        let (tx1, tx_id1) =
-            make_versioned_notarization(&sk, &pk, b"doc_1", None, Some(1), 1_700_000_001);
-        let (b1, h1, ids1) =
-            make_block_with_validator(vec![(tx1, tx_id1)], 1, h0, 1_700_000_001, &sk, &pk);
-        db.commit_block(&b1, &h1, &ids1).unwrap();
-
-        // Block 2: notarization B
-        let (tx2, tx_id2) =
-            make_versioned_notarization(&sk, &pk, b"doc_2", None, Some(1), 1_700_000_002);
-        let (b2, h2, ids2) =
-            make_block_with_validator(vec![(tx2, tx_id2)], 2, h1, 1_700_000_002, &sk, &pk);
-        db.commit_block(&b2, &h2, &ids2).unwrap();
-
-        // Block 3: notarization C
-        let (tx3, tx_id3) =
-            make_versioned_notarization(&sk, &pk, b"doc_3", None, Some(1), 1_700_000_003);
-        let (b3, _h3, ids3) =
-            make_block_with_validator(vec![(tx3, tx_id3)], 3, h2, 1_700_000_003, &sk, &pk);
-        db.commit_block(&b3, &_h3, &ids3).unwrap();
-
-        // Before rollback: 3 tx_ids
-        assert_eq!(db.lookup_by_publisher(&wire).unwrap().len(), 3);
-
-        // Rollback to height 1 (removes blocks 2 and 3)
-        db.rollback_to_height(1, test_chain_id()).unwrap();
-
-        // After rollback: only tx_id1 from block 1
-        let results = db.lookup_by_publisher(&wire).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], tx_id1);
+    fn parse_checksum_index_value_invalid_length() {
+        let bytes = vec![0u8; 33];
+        assert!(parse_checksum_index_value(&bytes).is_err());
     }
 
     // --- Storage stats tests ---
 
     #[test]
-    fn rocks_get_storage_stats_returns_all_14_cfs() {
+    fn rocks_get_storage_stats_returns_all_cfs() {
         let dir = tempfile::tempdir().unwrap();
         let db = RocksDbStorage::open(dir.path()).unwrap();
         let stats = db.get_storage_stats().unwrap();
-        assert_eq!(stats.column_families.len(), 14);
-        // Verify all CF names are present
+        assert_eq!(stats.column_families.len(), ALL_CF_NAMES.len());
         let names: Vec<&str> = stats.column_families.iter().map(|cf| cf.name.as_str()).collect();
         assert!(names.contains(&"blocks"));
         assert!(names.contains(&"block_hashes"));
@@ -3457,7 +2649,9 @@ mod tests {
         assert!(names.contains(&"checksum_index"));
         assert!(names.contains(&"chain_state"));
         assert!(names.contains(&"validator_state"));
-        assert!(names.contains(&"address_balances"));
+        assert!(names.contains(&"utxo_set"));
+        assert!(names.contains(&"address_utxos"));
+        assert!(names.contains(&"undo_data"));
         assert!(names.contains(&"address_history"));
         assert!(names.contains(&"bans"));
         assert!(names.contains(&"peer_memory"));

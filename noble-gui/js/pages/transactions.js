@@ -63,12 +63,12 @@ export function init(root, ctx) {
         <div class="panel-header">Transaction Found</div>
         <div class="panel-body" style="padding:0">
           <table class="data-table">
-            <thead><tr><th>Tx ID</th><th>Block</th><th>Fee</th><th>Status</th><th>Confirmations</th></tr></thead>
+            <thead><tr><th>Tx ID</th><th>Block</th><th>Total Output</th><th>Status</th><th>Confirmations</th></tr></thead>
             <tbody>
               <tr class="clickable" id="tx-result-row">
                 <td class="mono">${truncateHash(txResult.tx_id)}</td>
                 <td>${txResult.block_height}</td>
-                <td>${formatFee(txResult.tx.fee)}</td>
+                <td>${formatFee(txResult.tx.total_output)}</td>
                 <td><span class="badge confirmed">${txResult.status}</span></td>
                 <td>${txResult.confirmations}</td>
               </tr>

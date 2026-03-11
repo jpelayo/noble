@@ -82,6 +82,12 @@ pub trait StorageEngine {
     /// Accepts both native NOBLE public keys and Bitcoin-format addresses.
     fn get_balance(&self, address: &NobleAddress) -> Result<u64, StorageError>;
 
+    /// Get all unspent transaction outputs (UTXOs) owned by an address.
+    fn get_address_utxos(
+        &self,
+        address: &NobleAddress,
+    ) -> Result<Vec<(noble_core::OutPoint, noble_core::UtxoEntry)>, StorageError>;
+
     /// Get paginated transaction history for an address.
     ///
     /// Returns tx_ids in chronological order (earliest first).
@@ -235,6 +241,12 @@ pub trait StorageEngine {
 
     /// Retrieve vote witness data for a specific block height.
     fn get_block_votes(&self, height: u64) -> Result<Option<Vec<u8>>, StorageError>;
+
+    // ── UTXO Lookup ──
+
+    /// Look up a single UTXO by outpoint. Returns `Some(UtxoEntry)` if the UTXO
+    /// exists and is unspent, `None` otherwise.
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Result<Option<noble_core::UtxoEntry>, StorageError>;
 
     // ── Pruning Support ──
 

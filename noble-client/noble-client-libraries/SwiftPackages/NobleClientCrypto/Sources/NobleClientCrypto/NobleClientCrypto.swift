@@ -11,21 +11,24 @@ import NobleClientCore
 /// Implementations use secp256k1 signing + CBOR serialization.
 /// The signed transaction is submitted as raw hex via JSON-RPC.
 public protocol TransactionSigning: Sendable {
-    /// Build and sign a transfer transaction. Returns hex-encoded CBOR.
+    /// Build and sign a transfer transaction (UTXO model). Returns hex-encoded CBOR.
     func signTransfer(
         to: NobleAddress,
         amount: NobleAmount,
         fee: NobleAmount,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
         privateKey: Data,
-        chainId: UInt32,
-        sourceAddress: Data?
+        chainId: UInt32
     ) throws -> String
 
-    /// Build and sign a document notarization transaction. Returns hex-encoded CBOR.
+    /// Build and sign a document notarization transaction (UTXO model). Returns hex-encoded CBOR.
     func signNotarization(
         checksum: Hash256,
         metadata: [MetadataItem],
         fee: NobleAmount,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
         privateKey: Data,
         chainId: UInt32
     ) throws -> String

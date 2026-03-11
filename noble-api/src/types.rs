@@ -126,12 +126,15 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         tx_type: tx.tx_type,
         checksum: hash_to_hex(&tx.checksum),
         timestamp: tx.timestamp,
-        fee: tx.fee,
-        recipient: tx
-            .recipient
-            .as_ref()
-            .map(|r| hex::encode(r.to_wire_bytes())),
-        amount: tx.amount,
+        total_output: tx.total_output_value(),
+        inputs: tx.inputs.iter().map(|i| TxInputResponse {
+            txid: hash_to_hex(&i.prev_output.txid),
+            vout: i.prev_output.vout,
+        }).collect(),
+        outputs: tx.outputs.iter().map(|o| TxOutputResponse {
+            value: o.value,
+            address: hex::encode(o.address.to_wire_bytes()),
+        }).collect(),
         signer: hex::encode(&tx.publisher_sig.public_key),
         metadata: tx
             .metadata
@@ -196,22 +199,39 @@ pub struct BlockHeaderResponse {
     pub cycle: Option<u64>,
 }
 
-/// Transaction response used in blocks and standalone queries.
+/// Transaction response used in blocks and standalone queries (UTXO model).
 #[derive(Debug, Clone, Serialize)]
 pub struct TransactionResponse {
     pub tx_id: String,
     pub tx_type: u8,
     pub checksum: String,
     pub timestamp: u64,
-    pub fee: u64,
-    pub recipient: Option<String>,
-    pub amount: Option<u64>,
+    /// Total output value.
+    pub total_output: u64,
+    /// Inputs: references to spent UTXOs.
+    pub inputs: Vec<TxInputResponse>,
+    /// Outputs: new UTXOs created.
+    pub outputs: Vec<TxOutputResponse>,
     pub signer: String,
     pub metadata: Vec<MetadataResponse>,
     pub has_encrypted_locator: bool,
     pub locator_recipient_count: usize,
     pub attestation_count: usize,
     pub attestations: Vec<AttestationResponse>,
+}
+
+/// Transaction input response.
+#[derive(Debug, Clone, Serialize)]
+pub struct TxInputResponse {
+    pub txid: String,
+    pub vout: u32,
+}
+
+/// Transaction output response.
+#[derive(Debug, Clone, Serialize)]
+pub struct TxOutputResponse {
+    pub value: u64,
+    pub address: String,
 }
 
 /// External attestation response (protocol-opaque, for display only).
@@ -425,6 +445,23 @@ pub struct AddressBalanceResponse {
     pub available: u64,
     pub pending: u64,
     pub tx_count: u64,
+}
+
+/// Response for `noble_getAddressUtxos`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddressUtxosResponse {
+    pub address: String,
+    pub utxos: Vec<UtxoResponse>,
+}
+
+/// A single UTXO in the address UTXO response.
+#[derive(Debug, Clone, Serialize)]
+pub struct UtxoResponse {
+    pub txid: String,
+    pub vout: u32,
+    pub value: u64,
+    pub height: u64,
+    pub is_coinbase: bool,
 }
 
 /// Response for `noble_getAddressHistory`.

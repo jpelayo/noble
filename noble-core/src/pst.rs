@@ -270,6 +270,7 @@ impl PartiallySignedTransaction {
 mod tests {
     use super::*;
     use crate::metadata::MetadataEntry;
+    use crate::utxo::{OutPoint, TxIn};
     use noble_crypto::{ed25519, Hash256, SCHEME_ED25519};
 
     const TEST_CHAIN_ID: u32 = 0x4E4F424C;
@@ -283,11 +284,12 @@ mod tests {
         let tx = Transaction {
             version: 1,
             tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: Hash256::from_bytes([0xAB; 32]),
             timestamp: 1_700_000_000,
-            fee: 1_000,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pub_key.key_bytes().to_vec(),
@@ -301,7 +303,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
 
         (tx, priv_key, pub_key)

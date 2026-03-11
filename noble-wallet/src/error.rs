@@ -46,6 +46,15 @@ pub enum WalletError {
         need: u64,
     },
 
+    /// Insufficient UTXO funds for transaction.
+    #[error("insufficient funds: available {available}, required {required}")]
+    InsufficientFunds {
+        /// Total value of selected UTXOs.
+        available: u64,
+        /// Required amount (amount + fee).
+        required: u64,
+    },
+
     /// Invalid recipient address.
     #[error("invalid recipient: {0}")]
     InvalidRecipient(String),

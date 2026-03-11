@@ -202,7 +202,7 @@ export function init(root, ctx) {
             const ago = timeAgo(tx.timestamp);
             html += `<tr>
                 <td>${dir} ${typeLabel}</td>
-                <td class="mono">\u25C6 ${formatAmount(tx.amount || 0)}</td>
+                <td class="mono">\u25C6 ${formatAmount(tx.total_output || tx.outputs?.[0]?.value || 0)}</td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;
         }

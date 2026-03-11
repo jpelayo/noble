@@ -23,7 +23,7 @@ use noble_consensus::{
     ValidatorList,
 };
 use noble_crypto::Hash256;
-use noble_mempool::{BalanceLookup, ChainLookup, Mempool};
+use noble_mempool::{UtxoLookup, ChainLookup, Mempool};
 use noble_network::{NetworkCommand, NetworkEvent};
 use noble_storage::{IntegrityReport, MemoryStorage, StorageEngine};
 use noble_wallet::{KeyStore, WalletState};
@@ -431,6 +431,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 tracing::info!(task = "init", count, "restored checkpoint(s) from storage");
             }
         }
+        // Wire UTXO value lookup for accurate fee computation in block proposals.
+        engine.set_utxo_value_lookup(Box::new(ArcStorageUtxoValueLookup {
+            storage: Arc::clone(&storage),
+        }));
         let consensus = Arc::new(RwLock::new(engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---
@@ -3254,10 +3258,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .map(|t| t.height)
                         .unwrap_or(0);
                     let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
-                    let balance_lookup = StorageBalanceLookupAdapter { storage: &*storage };
+                    let utxo_lookup = StorageUtxoLookupAdapter { storage: &*storage };
                     let mut mempool = self.mempool.lock();
                     for tx in txs {
-                        let _ = mempool.admit(&tx, now, &chain_lookup, &balance_lookup, chain_height);
+                        if let Err(e) = mempool.admit(&tx, now, &chain_lookup, &utxo_lookup, chain_height) {
+                            tracing::trace!("mempool rejected broadcast tx: {e}");
+                        }
                     }
                 }
                 CycleIo::Log(msg) => {
@@ -4115,13 +4121,36 @@ impl<S: StorageEngine> ChainLookup for StorageChainLookupAdapter<'_, S> {
     }
 }
 
-struct StorageBalanceLookupAdapter<'a, S: StorageEngine> {
+struct StorageUtxoLookupAdapter<'a, S: StorageEngine> {
     storage: &'a S,
 }
 
-impl<S: StorageEngine> BalanceLookup for StorageBalanceLookupAdapter<'_, S> {
-    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-        self.storage.get_balance(address).unwrap_or(0)
+impl<S: StorageEngine> UtxoLookup for StorageUtxoLookupAdapter<'_, S> {
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<(u64, bool, u64)> {
+        match self.storage.get_utxo(outpoint) {
+            Ok(Some(entry)) => Some((entry.value, entry.is_coinbase, entry.height)),
+            _ => None,
+        }
+    }
+}
+
+/// Arc-based UTXO value lookup adapter for the consensus engine.
+///
+/// The consensus engine holds this as a `Box<dyn UtxoValueLookup>` to resolve
+/// input UTXO values when building block proposals (fee computation).
+struct ArcStorageUtxoValueLookup<S: StorageEngine + Send + Sync + 'static> {
+    storage: Arc<RwLock<S>>,
+}
+
+impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoValueLookup
+    for ArcStorageUtxoValueLookup<S>
+{
+    fn utxo_value(&self, outpoint: &noble_core::OutPoint) -> Option<u64> {
+        let s = self.storage.read();
+        match s.get_utxo(outpoint) {
+            Ok(Some(entry)) => Some(entry.value),
+            _ => None,
+        }
     }
 }
 
@@ -5187,6 +5216,8 @@ mod tests {
         let height1 = node1.chain_height();
 
         // Init again with the same storage — should not duplicate genesis.
+        // Drop consensus first (it holds an Arc<RwLock<S>> via UTXO value lookup).
+        drop(node1.consensus);
         let storage = Arc::try_unwrap(node1.storage)
             .unwrap_or_else(|_| panic!("storage has multiple owners"))
             .into_inner();

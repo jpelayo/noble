@@ -648,27 +648,29 @@ async fn get_validator_list_shape() {
 // Transaction receipt methods
 // ---------------------------------------------------------------------------
 
-/// Commit a block with one transaction on top of genesis, return (block_hash, tx_id).
+/// Commit a block with one coinbase transaction on top of genesis, return (block_hash, tx_id).
 fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
-    use noble_core::{Block, BlockHeader, Transaction, PROTOCOL_VERSION};
+    use noble_core::{
+        Block, BlockHeader, OutPoint, Transaction, TxIn, TxOut, PROTOCOL_VERSION,
+        TX_TYPE_COINBASE,
+    };
     use noble_crypto::{
-        ed25519, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-        SCHEME_ED25519,
+        ed25519, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
     };
 
     let (sk, pk) = ed25519::generate_keypair();
     let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+    let addr = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
 
-    // Create a notarization tx
-    let checksum = sha256(b"test_document");
+    // Create a coinbase tx (valid — no UTXO inputs to verify)
+    let subsidy = noble_core::subsidy_at_height(1);
     let mut tx = Transaction {
         version: PROTOCOL_VERSION,
-        tx_type: 0,
-        checksum,
+        tx_type: TX_TYPE_COINBASE,
+        inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+        outputs: vec![TxOut { value: subsidy, address: addr }],
+        checksum: noble_crypto::Hash256::ZERO,
         timestamp: 1_700_000_001,
-        fee: 0, // zero fee so no balance needed
-        recipient: None,
-        amount: None,
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.to_vec(),
@@ -679,7 +681,6 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();

@@ -44,7 +44,7 @@ export function init(root, ctx) {
           <div class="panel-header">Transactions (${block.transactions.length})</div>
           <div class="panel-body" style="padding:0">
             <table class="data-table">
-              <thead><tr><th>#</th><th>Tx ID</th><th>Fee</th><th>Signer</th><th>Metadata</th></tr></thead>
+              <thead><tr><th>#</th><th>Tx ID</th><th>Total Output</th><th>Type</th><th>Inputs / Outputs</th></tr></thead>
               <tbody id="block-txs"></tbody>
             </table>
           </div>
@@ -53,14 +53,16 @@ export function init(root, ctx) {
 
         const tbody = panel.querySelector('#block-txs');
         block.transactions.forEach((tx, i) => {
+          const isCoinbase = tx.tx_type === 0x10 || (tx.inputs && tx.inputs.length === 1 && tx.inputs[0].txid === '0'.repeat(64));
+          const typeLabel = isCoinbase ? '<span class="badge coinbase">Coinbase</span>' : `Type ${tx.tx_type}`;
           const tr = document.createElement('tr');
           tr.className = 'clickable';
           tr.innerHTML = `
-            <td>${i + 1}</td>
+            <td>${i}</td>
             <td class="mono">${truncateHash(tx.tx_id)}</td>
-            <td>${formatFee(tx.fee)}</td>
-            <td class="mono">${truncateHash(tx.signer, 12)}</td>
-            <td>${tx.metadata.length} entries</td>
+            <td>${formatFee(tx.total_output)}</td>
+            <td>${typeLabel}</td>
+            <td>${(tx.inputs || []).length} in / ${(tx.outputs || []).length} out</td>
           `;
           tr.addEventListener('click', () => {
             location.hash = `#/tx/${tx.tx_id}`;

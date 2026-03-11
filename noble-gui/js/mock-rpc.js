@@ -171,11 +171,32 @@ function makeTransaction(seed, timestamp) {
   const hasGateway = seed % 3 === 0;
   const gateway_address = hasGateway ? deterministicHash(seed * 59).slice(0, 66) : null;
 
+  // UTXO model: outputs with value + address, inputs referencing prior UTXOs
+  const outputValue = fee + 500_000 + Math.floor(Math.abs(Math.cos(seed)) * 5_000_000);
+  const changeValue = Math.floor(Math.abs(Math.sin(seed * 3)) * 200_000);
+  const totalOutput = outputValue + changeValue;
+
+  const outputs = [
+    { value: outputValue, address: deterministicHash(seed * 61).slice(0, 40) },
+  ];
+  if (changeValue > 0) {
+    outputs.push({ value: changeValue, address: deterministicHash(seed * 63).slice(0, 40) });
+  }
+
+  const inputs = [
+    { txid: deterministicHash(seed * 71), vout: seed % 4 },
+  ];
+  if (seed % 5 === 0) {
+    inputs.push({ txid: deterministicHash(seed * 73), vout: (seed + 1) % 3 });
+  }
+
   return {
     version: PROTOCOL_VERSION,
     checksum: deterministicHash(seed * 17),
     timestamp,
-    fee,
+    total_output: totalOutput,
+    inputs,
+    outputs,
     publisher_sig: makeSignatureEnvelope(seed),
     additional_sigs: seed % 4 === 0 ? [makeSignatureEnvelope(seed + 1000)] : [],
     metadata,
@@ -398,11 +419,13 @@ function generateMempool(count, chainHeight) {
   for (let i = 0; i < count; i++) {
     const seed = chainHeight * 1000 + i;
     const tx = makeTransaction(seed, now - Math.floor(Math.random() * 300));
+    // Mempool computes fee from UTXO lookups (implicit in UTXO model)
+    const mempoolFee = MIN_TX_FEE + Math.floor(Math.abs(Math.sin(seed)) * 50000);
     entries.push({
       tx,
       tx_id: deterministicHash(seed * 29),
       size_bytes: 256 + Math.floor(Math.random() * 512),
-      fee: tx.fee,
+      fee: mempoolFee,
       received_at: now - Math.floor(Math.random() * 300),
     });
   }
@@ -1085,7 +1108,8 @@ export class MockRpcClient {
         for (const h of blocksWon) {
           const block = this.#chain.blocks[h];
           if (!block) continue;
-          const totalFees = block.transactions.reduce((s, tx) => s + tx.fee, 0);
+          // Fee is implicit in UTXO model; approximate from total_output for mock wallet
+          const totalFees = block.transactions.reduce((s, tx) => s + Math.floor(tx.total_output * 0.01), 0);
           const confirmations = chainHeight - h;
           const txCount = block.transactions.length;
 
@@ -1978,11 +2002,13 @@ export class MockRpcClient {
     const now = Math.floor(Date.now() / 1000);
     const seed = now * 1000 + Math.floor(Math.random() * 1000);
     const tx = makeTransaction(seed, now);
+    // Mempool computes fee from UTXO lookups (implicit in UTXO model)
+    const mempoolFee = MIN_TX_FEE + Math.floor(Math.abs(Math.sin(seed)) * 50000);
     const entry = {
       tx,
       tx_id: deterministicHash(seed * 29),
       size_bytes: 256 + Math.floor(Math.random() * 512),
-      fee: tx.fee,
+      fee: mempoolFee,
       received_at: now,
     };
     this.#mempool.unshift(entry);

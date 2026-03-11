@@ -146,10 +146,10 @@ public struct MockAPIService: NobleAPIService {
             txId: hash,
             txType: .transfer,
             status: .confirmed,
-            from: Self.sampleSender,
-            to: Self.sampleReceiver,
-            amount: NobleAmount(atomic: 5_000_000),
-            fee: NobleAmount(atomic: 100),
+            signer: Self.sampleSender,
+            totalOutput: 5_000_000,
+            inputs: [TxInput(txid: String(repeating: "00", count: 32), vout: 0)],
+            outputs: [TxOutput(value: 5_000_000, address: Self.sampleReceiver.wireHex)],
             blockHeight: 1_230,
             timestamp: Date(timeIntervalSinceNow: -1800)
         )
@@ -239,14 +239,15 @@ public struct MockAPIService: NobleAPIService {
             let hexString = String(repeating: hexByte, count: 32)
             guard let txId = Hash256(hex: hexString) else { continue }
 
+            let outputValue = UInt64((i + 1) * 1_000_000)
             let record = TransactionRecord(
                 txId: txId,
                 txType: i % 2 == 0 ? .transfer : .notarization,
                 status: .confirmed,
-                from: sampleSender,
-                to: sampleReceiver,
-                amount: NobleAmount(atomic: UInt64((i + 1) * 1_000_000)),
-                fee: NobleAmount(atomic: 100),
+                signer: sampleSender,
+                totalOutput: outputValue,
+                inputs: [TxInput(txid: String(repeating: "00", count: 32), vout: 0)],
+                outputs: [TxOutput(value: outputValue, address: sampleReceiver.wireHex)],
                 blockHeight: UInt64(1_200 + i * 10),
                 timestamp: Date(timeIntervalSinceNow: Double(-3600 + i * 600))
             )

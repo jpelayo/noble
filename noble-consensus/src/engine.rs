@@ -112,6 +112,9 @@ pub struct CycleEngine {
     fork_resolver: crate::fork_resolver::ForkResolver,
     /// Phase 3: Periodic checkpoint manager.
     checkpoint_mgr: crate::checkpoint::CheckpointManager,
+    /// Optional UTXO value lookup for accurate fee computation in proposals.
+    /// When None, fees default to 0 (coinbase gets subsidy only).
+    utxo_value_lookup: Option<Box<dyn crate::proposal::UtxoValueLookup + Send + Sync>>,
 }
 
 impl CycleEngine {
@@ -177,7 +180,16 @@ impl CycleEngine {
                 checkpoint_interval,
                 confirmation_threshold,
             ),
+            utxo_value_lookup: None,
         }
+    }
+
+    /// Set the UTXO value lookup for accurate fee computation in block proposals.
+    ///
+    /// When set, `propose_block` uses this to resolve input UTXO values and
+    /// compute correct fee totals for the coinbase transaction.
+    pub fn set_utxo_value_lookup(&mut self, lookup: Box<dyn crate::proposal::UtxoValueLookup + Send + Sync>) {
+        self.utxo_value_lookup = Some(lookup);
     }
 
     /// Update the connected peer count (called by node event loop).
@@ -1652,6 +1664,17 @@ impl CycleEngine {
             .unwrap_or_default()
             .as_secs();
 
+        // Use injected UTXO lookup if available, otherwise fall back to no-op (0 fees).
+        struct NoopUtxoLookup;
+        impl crate::proposal::UtxoValueLookup for NoopUtxoLookup {
+            fn utxo_value(&self, _: &noble_core::OutPoint) -> Option<u64> { None }
+        }
+        let noop = NoopUtxoLookup;
+        let lookup: &dyn crate::proposal::UtxoValueLookup = match &self.utxo_value_lookup {
+            Some(l) => l.as_ref(),
+            None => &noop,
+        };
+
         match crate::proposal::propose_block(
             &txs,
             self.tip_hash,
@@ -1661,6 +1684,7 @@ impl CycleEngine {
             priv_key,
             pub_key,
             self.config.max_block_size,
+            lookup,
         ) {
             Ok(block) => {
                 // P0-3: Validate self-proposed block before broadcast (same checks as remote proposals).
@@ -2043,7 +2067,10 @@ impl ConsensusStateMachine for CycleEngine {
 mod tests {
     use super::*;
     use crate::strategy::VotingStrategy;
-    use noble_core::{BlockHeader, PROTOCOL_VERSION};
+    use noble_core::{
+        BlockHeader, NobleAddress, OutPoint, Transaction, TxIn, TxOut,
+        TX_TYPE_COINBASE, PROTOCOL_VERSION, subsidy_at_height,
+    };
     use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{ed25519, NobleSigner, SignatureEnvelope, SCHEME_ED25519};
 
@@ -2082,18 +2109,49 @@ mod tests {
         height: u64,
         prev_hash: Hash256,
     ) -> (Box<Block>, Hash256) {
-        let merkle_root = noble_core::compute_merkle_root(&[]);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        // Build a coinbase transaction (U9: every block must have exactly one)
+        let subsidy = subsidy_at_height(height);
+        let validator_addr = NobleAddress::Noble(val_pub.clone());
+        let coinbase_tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_COINBASE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: vec![TxOut { value: subsidy, address: validator_addr }],
+            checksum: Hash256::ZERO,
+            timestamp: now,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: val_pub.scheme_id(),
+                public_key: val_pub.key_bytes().to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        // Sign the coinbase
+        let chain_id = test_chain_id();
+        let cb_msg = coinbase_tx.compute_signing_message_for_chain(chain_id).unwrap();
+        let cb_sig = val_priv.sign(&cb_msg).unwrap();
+        let mut coinbase_signed = coinbase_tx;
+        coinbase_signed.publisher_sig = cb_sig;
+
+        let tx_id = coinbase_signed.compute_tx_id(chain_id).unwrap();
+        let merkle_root = noble_core::compute_merkle_root(&[tx_id]);
+
         let mut header = BlockHeader {
             version: PROTOCOL_VERSION,
             prev_block_hash: prev_hash,
             merkle_root,
             timestamp: now,
             height,
-            tx_count: 0,
+            tx_count: 1,
             validator_id: val_pub.clone(),
             validator_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
@@ -2107,7 +2165,7 @@ mod tests {
         (
             Box::new(Block {
                 header,
-                transactions: vec![],
+                transactions: vec![coinbase_signed],
             }),
             hash,
         )

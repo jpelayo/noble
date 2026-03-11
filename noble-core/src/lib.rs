@@ -6,7 +6,6 @@
 pub mod address;
 pub mod block;
 pub mod constants;
-pub mod debit;
 pub mod paths;
 pub mod encrypted_locator;
 pub mod error;
@@ -18,12 +17,12 @@ pub mod node_announce;
 pub mod peer_record;
 pub mod pst;
 pub mod transaction;
+pub mod utxo;
 pub mod validation;
 
 pub use address::{AddressError, NobleAddress};
 pub use block::{Block, BlockHeader};
 pub use constants::*;
-pub use debit::{resolve_debit_address, resolve_debit_address_enforced, DebitError};
 pub use encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
 pub use error::ValidationError;
 pub use evidence::{
@@ -38,6 +37,7 @@ pub use node_announce::{compute_pki_binding_message_for_key, NodeAnnounce, NodeR
 pub use peer_record::PeerRecord;
 pub use pst::{PartiallySignedTransaction, PstError, SignerEntry, SignerRole, PST_VERSION};
 pub use transaction::Transaction;
+pub use utxo::{OutPoint, TxIn, TxOut, UtxoEntry};
 pub use validation::{
     median_timestamp, validate_block, validate_block_timestamp, validate_source_address,
     validate_transaction, BlockValidationContext, TxValidationContext,

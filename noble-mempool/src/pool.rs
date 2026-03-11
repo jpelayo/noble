@@ -25,8 +25,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_codec::NobleCbor;
 use noble_core::{
-    Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
-    TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
+    OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
+    TX_TYPE_NOTARIZATION,
 };
 use noble_crypto::{is_recognized_scheme, Hash256};
 
@@ -78,14 +78,10 @@ pub struct MempoolEntry {
     pub tx_id: Hash256,
     /// Serialized size in bytes.
     pub size_bytes: usize,
-    /// Fee in atomic units.
+    /// Implicit fee in atomic units: sum(input UTXO values) - sum(output values).
     pub fee: u64,
     /// Unix timestamp when the transaction was received.
     pub received_at: u64,
-    /// S35 F2/F4: Resolved debit bucket for transfer transactions.
-    /// Set during admission via `resolve_debit_address()`.
-    /// `None` for non-transfer transactions.
-    pub debit_address: Option<noble_core::NobleAddress>,
 }
 
 /// Callback trait for checking whether a transaction exists in the confirmed chain.
@@ -113,22 +109,27 @@ impl ChainLookup for NoChainLookup {
     }
 }
 
-/// Callback trait for querying on-chain balances during mempool admission.
+/// Callback trait for querying on-chain UTXOs during mempool admission.
 ///
 /// Decoupled from `ChainLookup` (SRP) following the project pattern of
 /// one trait per concern (ChainLookup, BlockProvider, TxProvider).
-pub trait BalanceLookup {
-    /// Return the confirmed balance for the given address (in atomic units).
-    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64;
+pub trait UtxoLookup {
+    /// Look up a UTXO by its outpoint. Returns `(value, is_coinbase, creation_height)` if it
+    /// exists and is unspent on-chain. Returns `None` if the UTXO doesn't exist or is already spent.
+    fn get_utxo(&self, outpoint: &OutPoint) -> Option<(u64, bool, u64)>;
 }
 
-/// A no-op balance lookup that always returns `u64::MAX`.
-/// Existing tests pass this so balance checks never reject.
-pub struct NoBalanceLookup;
+/// A no-op UTXO lookup that always returns a fixed-value non-coinbase UTXO.
+/// Returns 1_000_000 atomic units per UTXO, matching test fixture conventions.
+/// For production code, implement `UtxoLookup` against the actual UTXO set.
+pub struct NoUtxoLookup;
 
-impl BalanceLookup for NoBalanceLookup {
-    fn get_balance(&self, _address: &noble_core::NobleAddress) -> u64 {
-        u64::MAX
+/// Default UTXO value returned by `NoUtxoLookup` (matches test fixture `make_signed_tx` input_value).
+pub const NO_UTXO_LOOKUP_VALUE: u64 = 1_000_000;
+
+impl UtxoLookup for NoUtxoLookup {
+    fn get_utxo(&self, _outpoint: &OutPoint) -> Option<(u64, bool, u64)> {
+        Some((NO_UTXO_LOOKUP_VALUE, false, 0))
     }
 }
 
@@ -145,6 +146,8 @@ pub struct Mempool {
     by_timestamp: BTreeMap<u64, HashSet<Hash256>>,
     /// Sender index: pubkey wire bytes → set of tx_ids (for pending debit calc).
     by_sender: HashMap<Vec<u8>, HashSet<Hash256>>,
+    /// UTXO double-spend prevention: outpoints consumed by in-mempool transactions.
+    spent_by_mempool: HashSet<OutPoint>,
     /// Signature verification cache.
     sig_cache: SigCache,
     /// Current total serialized size of all transactions.
@@ -162,6 +165,7 @@ impl Mempool {
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
             by_sender: HashMap::new(),
+            spent_by_mempool: HashSet::new(),
             sig_cache,
             total_size_bytes: 0,
         }
@@ -216,31 +220,38 @@ impl Mempool {
         let min_fee = self.by_fee.keys().next().copied().unwrap_or(0);
         let max_fee = self.by_fee.keys().next_back().copied().unwrap_or(0);
         let count = self.by_id.len() as u64;
-        let total_fees: u64 = self.by_id.values().map(|e| e.tx.fee).sum();
+        let total_fees: u64 = self.by_id.values().map(|e| e.fee).sum();
         let avg_fee = if count > 0 { total_fees / count } else { 0 };
         (min_fee, max_fee, avg_fee)
     }
 
-    /// Sum of `(amount + fee)` for all pending transfer transactions from the given sender.
+    /// Sum of `(total_output_value + fee)` for all pending transactions from the given sender.
     pub fn pending_debit(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
         let wire = pubkey.to_wire_bytes();
         self.pending_debits_for_sender(&wire)
     }
 
-    /// Sum of pending debits targeting a specific `NobleAddress` bucket.
+    /// Whether an outpoint is already consumed by an in-mempool transaction.
+    pub fn is_outpoint_spent(&self, outpoint: &OutPoint) -> bool {
+        self.spent_by_mempool.contains(outpoint)
+    }
+
+    /// Pending debits for a specific address.
     ///
-    /// S35 F2/F4: Uses `entry.debit_address` (resolved at admission) instead of
-    /// scanning `source_address` wire bytes. This correctly attributes debits to
-    /// the resolved bucket, including legacy fallback resolution.
+    /// In the UTXO model, pending debits are tracked via the `spent_by_mempool`
+    /// set (outpoint-level). This sums output values of mempool txs where
+    /// the sender matches the queried address. Returns 0 if no pending txs.
     pub fn pending_debit_for_address(&self, addr: &noble_core::NobleAddress) -> u64 {
-        self.by_id
-            .values()
-            .filter(|e| e.tx.tx_type == TX_TYPE_TRANSFER)
-            .filter(|e| e.debit_address.as_ref() == Some(addr))
-            .fold(0u64, |acc, e| {
-                acc.saturating_add(e.tx.amount.unwrap_or(0))
-                    .saturating_add(e.tx.fee)
+        let addr_wire = addr.to_wire_bytes();
+        self.by_id.values()
+            .filter(|entry| {
+                // Check if the publisher (sender) matches the queried address
+                entry.tx.publisher_sig.to_noble_public_key()
+                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == addr_wire)
+                    .unwrap_or(false)
             })
+            .map(|entry| entry.tx.total_output_value() + entry.fee)
+            .fold(0u64, |acc, v| acc.saturating_add(v))
     }
 
     /// Iterate transactions in descending fee order (highest fee first).
@@ -258,20 +269,20 @@ impl Mempool {
     ///
     /// `current_time` is the wall-clock Unix timestamp for expiry tracking.
     /// `chain` is used for duplicate detection against confirmed transactions.
-    /// `balance` is used for transfer balance-sufficiency checks (step 6.5).
+    /// `utxos` is used for UTXO existence and double-spend checks (step 6.5).
     ///
     /// Returns `Ok(tx_id)` if admitted, or `Err(MempoolError)` with the
     /// specific step that rejected the transaction.
     #[tracing::instrument(
-        skip(self, tx, current_time, chain, balance),
+        skip(self, tx, current_time, chain, utxos),
         fields(task = "mempool_admit")
     )]
-    pub fn admit<C: ChainLookup, B: BalanceLookup>(
+    pub fn admit<C: ChainLookup, U: UtxoLookup>(
         &mut self,
         tx: &Transaction,
         current_time: u64,
         chain: &C,
-        balance: &B,
+        utxos: &U,
         chain_height: u64,
     ) -> Result<Hash256, MempoolError> {
         // Step 1: Size check
@@ -315,6 +326,13 @@ impl Mempool {
             }
         }
 
+        // Step 2.55: Reject coinbase transactions (only block proposer creates them)
+        if tx.is_coinbase() {
+            return Err(MempoolError::StructuralValidation(
+                "coinbase transactions are not allowed in mempool".into(),
+            ));
+        }
+
         // Step 2.6: Version chain — if doc:prev_checksum is present, verify it exists on-chain
         if tx.tx_type == TX_TYPE_NOTARIZATION {
             if let Some(prev_hex) = tx
@@ -355,50 +373,64 @@ impl Mempool {
             self.sig_cache.insert(tx_id);
         }
 
-        // Step 6.3: Source address ownership validation (T31/T32)
-        tracing::trace!("mempool step 6.3: source_address validation");
-        noble_core::validate_source_address(tx, chain_height)
-            .map_err(|e| MempoolError::StructuralValidation(format!("source_address: {e}")))?;
+        // Step 6.5: UTXO existence + double-spend check
+        tracing::trace!("mempool step 6.5: UTXO validation");
+        let mut input_value_sum: u64 = 0;
+        for input in &tx.inputs {
+            let outpoint = &input.prev_output;
 
-        // Step 6.5: Balance sufficiency check (transfer transactions only)
-        // S35 F2/F4: Resolve debit bucket FIRST, then compute bucket-specific pending
-        tracing::trace!("mempool step 6.5: balance sufficiency check");
-        let resolved_debit_addr = if tx.tx_type == TX_TYPE_TRANSFER {
-            if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
-                let amount = tx.amount.unwrap_or(0);
-                let this_need = amount.saturating_add(tx.fee);
-
-                // Resolve which bucket this tx will debit
-                let debit_addr = noble_core::resolve_debit_address(
-                    &tx.source_address,
-                    &sender,
-                    this_need,
-                    |a| balance.get_balance(a),
-                )
-                .map_err(|e| MempoolError::ValidationFailed(e.to_string()))?;
-
-                // Compute pending from the SAME bucket using entry.debit_address
-                let bucket_pending = self.pending_debit_for_address(&debit_addr);
-                let need = this_need.saturating_add(bucket_pending);
-
-                let have = balance.get_balance(&debit_addr);
-                if have < need {
-                    return Err(MempoolError::InsufficientBalance { have, need });
-                }
-                Some(debit_addr)
-            } else {
-                None
+            // Reject coinbase outpoints (already covered by step 2.55, but belt-and-suspenders)
+            if outpoint.is_coinbase() {
+                return Err(MempoolError::StructuralValidation(
+                    "coinbase input not allowed in mempool".into(),
+                ));
             }
-        } else {
-            None
-        };
+
+            // Check for in-mempool double-spend
+            if self.spent_by_mempool.contains(outpoint) {
+                return Err(MempoolError::StructuralValidation(
+                    format!("input {}:{} already spent by mempool tx", outpoint.txid, outpoint.vout),
+                ));
+            }
+
+            // Verify UTXO exists on-chain and is mature
+            match utxos.get_utxo(outpoint) {
+                Some((value, is_coinbase, creation_height)) => {
+                    // Coinbase maturity check
+                    if is_coinbase && chain_height < creation_height + noble_core::COINBASE_MATURITY {
+                        return Err(MempoolError::StructuralValidation(
+                            format!(
+                                "coinbase UTXO {}:{} not mature (created at {}, current {}, need {})",
+                                outpoint.txid, outpoint.vout,
+                                creation_height, chain_height,
+                                creation_height + noble_core::COINBASE_MATURITY
+                            ),
+                        ));
+                    }
+                    input_value_sum = input_value_sum.saturating_add(value);
+                }
+                None => {
+                    return Err(MempoolError::StructuralValidation(
+                        format!("input {}:{} references unknown or spent UTXO", outpoint.txid, outpoint.vout),
+                    ));
+                }
+            }
+        }
+
+        // Compute implicit fee: sum(inputs) - sum(outputs)
+        let output_value_sum = tx.total_output_value();
+        let fee = input_value_sum.checked_sub(output_value_sum).ok_or_else(|| {
+            MempoolError::StructuralValidation(format!(
+                "outputs ({output_value_sum}) exceed inputs ({input_value_sum})"
+            ))
+        })?;
 
         // Step 7: Fee check
         tracing::trace!("mempool step 7: fee check");
         let min_fee = self.dynamic_min_fee();
-        if tx.fee < min_fee {
+        if fee < min_fee {
             return Err(MempoolError::FeeTooLow {
-                fee: tx.fee,
+                fee,
                 min_fee,
             });
         }
@@ -412,9 +444,8 @@ impl Mempool {
             tx: tx.clone(),
             tx_id,
             size_bytes,
-            fee: tx.fee,
+            fee,
             received_at: current_time,
-            debit_address: resolved_debit_addr,
         };
 
         self.insert_entry(entry);
@@ -463,6 +494,11 @@ impl Mempool {
                     self.by_sender.remove(&sender_wire);
                 }
             }
+        }
+
+        // Unmark spent outpoints
+        for input in &entry.tx.inputs {
+            self.spent_by_mempool.remove(&input.prev_output);
         }
 
         self.total_size_bytes -= entry.size_bytes;
@@ -571,6 +607,11 @@ impl Mempool {
             self.by_sender.entry(sender_wire).or_default().insert(tx_id);
         }
 
+        // Mark input outpoints as spent by mempool
+        for input in &entry.tx.inputs {
+            self.spent_by_mempool.insert(input.prev_output.clone());
+        }
+
         self.by_id.insert(tx_id, entry);
         self.by_fee.entry(fee).or_default().insert(tx_id);
         self.by_checksum.entry(checksum).or_default().insert(tx_id);
@@ -581,7 +622,7 @@ impl Mempool {
         self.total_size_bytes += size;
     }
 
-    /// Sum of `(amount + fee)` for all of sender's in-mempool transfer transactions.
+    /// Sum of `(total_output_value + fee)` for all of sender's in-mempool transactions.
     fn pending_debits_for_sender(&self, sender_wire: &[u8]) -> u64 {
         let Some(tx_ids) = self.by_sender.get(sender_wire) else {
             return 0;
@@ -589,10 +630,9 @@ impl Mempool {
         tx_ids
             .iter()
             .filter_map(|id| self.by_id.get(id))
-            .filter(|e| e.tx.tx_type == TX_TYPE_TRANSFER)
             .fold(0u64, |acc, e| {
-                acc.saturating_add(e.tx.amount.unwrap_or(0))
-                    .saturating_add(e.tx.fee)
+                acc.saturating_add(e.tx.total_output_value())
+                    .saturating_add(e.fee)
             })
     }
 
@@ -630,23 +670,43 @@ impl Mempool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::{MetadataEntry, Transaction, MIN_TX_FEE, PROTOCOL_VERSION};
+    use noble_core::{MetadataEntry, TxIn, TxOut, OutPoint, Transaction, MIN_TX_FEE, PROTOCOL_VERSION};
+    use noble_core::address::NobleAddress;
     use noble_crypto::{
-        ed25519, sha256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+        ed25519, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
     };
     use noble_test_utils::fixtures::test_chain_id;
 
+    /// Counter for generating unique outpoints in tests.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static OUTPOINT_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+    /// Generate a unique fake outpoint for test transactions.
+    fn unique_outpoint() -> OutPoint {
+        let vout = OUTPOINT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        OutPoint {
+            txid: Hash256::from_bytes([0xAA; 32]),
+            vout,
+        }
+    }
+
+    /// Build a signed notarization tx (UTXO model).
+    /// `fee` = input_value - change_output_value (input_value is fixed at 1_000_000).
     fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], fee: u64) -> Transaction {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = NobleAddress::Noble(pub_key.clone());
         let checksum = sha256(doc);
+        let input_value = 1_000_000u64; // Fixed input UTXO value for tests
+        let change = input_value.saturating_sub(fee);
+
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: 0,
+            tx_type: 0, // notarization
+            inputs: vec![TxIn { prev_output: unique_outpoint() }],
+            outputs: vec![TxOut { value: change, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -657,7 +717,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -692,7 +751,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&tx_id));
@@ -706,7 +765,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         assert_eq!(pool.len(), 1);
 
@@ -729,9 +788,9 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
 
-        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
@@ -750,7 +809,7 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let chain = ConfirmedChain(tx_id);
-        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
@@ -763,7 +822,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.version = 99;
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::UnrecognizedVersion(99))));
     }
 
@@ -776,7 +835,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.publisher_sig.scheme_id = 0xFF;
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
@@ -785,15 +844,16 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(b"meta_doc");
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn { prev_output: unique_outpoint() }],
+            outputs: vec![TxOut { value: 999_000, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -813,12 +873,11 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
@@ -831,7 +890,7 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
         tx.publisher_sig.signature = vec![0u8; 64]; // Corrupt signature
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
@@ -846,7 +905,7 @@ mod tests {
             signature: vec![0u8; 64],
         });
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
@@ -856,16 +915,21 @@ mod tests {
     fn step7_reject_low_fee() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
+        // Fee = 0 (input_value == output_value). Use a custom UTXO lookup.
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(b"low_fee_doc");
+        let outpoint = unique_outpoint();
+        let input_value = 1_000u64;
+        // output = input_value (fee = 0 < MIN_TX_FEE)
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn { prev_output: outpoint.clone() }],
+            outputs: vec![TxOut { value: input_value, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE - 1,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -876,12 +940,20 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        // Custom UTXO lookup that returns the exact input value
+        struct ExactUtxoLookup { outpoint: OutPoint, value: u64 }
+        impl UtxoLookup for ExactUtxoLookup {
+            fn get_utxo(&self, op: &OutPoint) -> Option<(u64, bool, u64)> {
+                if *op == self.outpoint { Some((self.value, false, 0)) } else { None }
+            }
+        }
+        let utxo = ExactUtxoLookup { outpoint, value: input_value };
+
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxo, 0);
         assert!(matches!(result, Err(MempoolError::FeeTooLow { .. })));
     }
 
@@ -896,10 +968,10 @@ mod tests {
         let tx2 = make_signed_tx(&sk, &pk, b"other_doc", MIN_TX_FEE);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         let _id2 = pool
-            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         let checksum = sha256(b"same_doc");
@@ -919,11 +991,11 @@ mod tests {
         let tx_mid = make_signed_tx(&sk, &pk, b"mid", MIN_TX_FEE * 5);
         let tx_high = make_signed_tx(&sk, &pk, b"high", MIN_TX_FEE * 10);
 
-        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
-        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
-        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         let fees: Vec<u64> = pool.iter_by_fee_desc().map(|e| e.fee).collect();
@@ -945,15 +1017,15 @@ mod tests {
         let tx4 = make_signed_tx(&sk, &pk, b"doc4", MIN_TX_FEE * 4);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
-        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
-        pool.admit(&tx3, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         // tx4 triggers eviction of tx1 (lowest fee)
-        pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         assert_eq!(pool.len(), 3);
         assert!(!pool.contains(&id1), "lowest fee tx should be evicted");
@@ -972,10 +1044,10 @@ mod tests {
         let tx2 = make_signed_tx(&sk, &pk, b"new", MIN_TX_FEE);
 
         let id1 = pool
-            .admit(&tx1, 1_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx1, 1_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         let id2 = pool
-            .admit(&tx2, 5_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx2, 5_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         assert_eq!(pool.len(), 2);
 
@@ -997,7 +1069,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"cached", MIN_TX_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         // Verify the sig cache has the tx_id
@@ -1021,13 +1093,13 @@ mod tests {
         let tx3 = make_signed_tx(&sk, &pk, b"c3", MIN_TX_FEE);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         let id2 = pool
-            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
         let id3 = pool
-            .admit(&tx3, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            .admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         pool.remove_confirmed(&[id1, id3]);
@@ -1037,46 +1109,43 @@ mod tests {
         assert!(!pool.contains(&id3));
     }
 
-    // --- Step 6.5: Balance sufficiency ---
+    // --- Step 6.5: UTXO validation ---
 
-    /// Fixed-balance lookup for testing balance checks.
-    struct FixedBalanceLookup(u64);
-
-    impl BalanceLookup for FixedBalanceLookup {
-        fn get_balance(&self, _address: &noble_core::NobleAddress) -> u64 {
-            self.0
+    /// A UTXO lookup that returns None for all outpoints (nothing exists).
+    struct EmptyUtxoLookup;
+    impl UtxoLookup for EmptyUtxoLookup {
+        fn get_utxo(&self, _outpoint: &OutPoint) -> Option<(u64, bool, u64)> {
+            None
         }
     }
 
-    fn make_signed_transfer(
+    /// Build a signed transfer tx (UTXO model) with a specific outpoint.
+    fn make_signed_transfer_with_outpoint(
         sk: &[u8],
         pk: &[u8],
         recipient_pk: &[u8],
+        outpoint: OutPoint,
         amount: u64,
-        fee: u64,
-    ) -> Transaction {
-        make_signed_transfer_salt(sk, pk, recipient_pk, amount, fee, b"default")
-    }
-
-    fn make_signed_transfer_salt(
-        sk: &[u8],
-        pk: &[u8],
-        recipient_pk: &[u8],
-        amount: u64,
-        fee: u64,
-        salt: &[u8],
+        change: u64,
     ) -> Transaction {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = noble_crypto::NoblePublicKey::Ed25519(recipient_pk.to_vec());
-        let checksum = sha256(salt);
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let sender_addr = NobleAddress::Noble(pub_key);
+        let recip_addr = NobleAddress::Noble(recipient);
+
+        let mut outputs = vec![TxOut { value: amount, address: recip_addr }];
+        if change > 0 {
+            outputs.push(TxOut { value: change, address: sender_addr });
+        }
+
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: 1,
-            checksum,
+            tx_type: noble_core::TX_TYPE_TRANSFER,
+            inputs: vec![TxIn { prev_output: outpoint }],
+            outputs,
+            checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee,
-            recipient: Some(noble_core::NobleAddress::Noble(recipient)),
-            amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1087,7 +1156,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1095,101 +1163,80 @@ mod tests {
     }
 
     #[test]
-    fn step65_reject_insufficient_balance() {
+    fn step65_reject_unknown_utxo() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let (_, recip) = ed25519::generate_keypair();
 
-        let tx = make_signed_transfer(&sk, &pk, &recip, 500_000, MIN_TX_FEE);
-        // Balance is 100_000, need 500_000 + MIN_TX_FEE = 501_000
-        let bal = FixedBalanceLookup(100_000);
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal, 0);
+        let outpoint = unique_outpoint();
+        let tx = make_signed_transfer_with_outpoint(&sk, &pk, &recip, outpoint, 500_000, 499_000);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &EmptyUtxoLookup, 0);
         assert!(
-            matches!(
-                result,
-                Err(MempoolError::InsufficientBalance { have: 100_000, .. })
-            ),
-            "expected InsufficientBalance, got {:?}",
+            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("unknown or spent UTXO")),
+            "expected unknown UTXO error, got {:?}",
             result
         );
     }
 
     #[test]
-    fn step65_accept_sufficient_balance() {
+    fn step65_accept_valid_utxo() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let (_, recip) = ed25519::generate_keypair();
 
-        let tx = make_signed_transfer(&sk, &pk, &recip, 500_000, MIN_TX_FEE);
-        // Balance is exactly amount + fee
-        let bal = FixedBalanceLookup(500_000 + MIN_TX_FEE);
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal, 0);
+        let tx = make_signed_tx(&sk, &pk, b"utxo_ok", MIN_TX_FEE);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
 
     #[test]
-    fn step65_skip_for_notarization() {
+    fn step65_reject_double_spend_in_mempool() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
+        let (_, recip) = ed25519::generate_keypair();
 
-        // Notarization tx — balance check should be skipped
-        let tx = make_signed_tx(&sk, &pk, b"doc_nota", MIN_TX_FEE);
-        let bal = FixedBalanceLookup(0); // zero balance
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal, 0);
+        // Both txs spend the same outpoint
+        let shared_outpoint = unique_outpoint();
+        let tx1 = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recip, shared_outpoint.clone(), 500_000, 499_000,
+        );
+        let tx2 = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recip, shared_outpoint, 400_000, 599_000,
+        );
+
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .unwrap();
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
-            result.is_ok(),
-            "notarization must skip balance check, got {:?}",
+            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("already spent by mempool")),
+            "double spend should be rejected, got {:?}",
             result
         );
     }
 
     #[test]
-    fn step65_pending_debits_counted() {
+    fn step65_spent_outpoints_cleared_on_remove() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let (_, recip) = ed25519::generate_keypair();
 
-        let bal = FixedBalanceLookup(200_000);
-
-        // First transfer: amount=100_000, fee=1_000 → need 101_000, balance 200_000 → OK
-        let tx1 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"tx1");
-        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &bal, 0)
-            .unwrap();
-
-        // Second transfer: amount=100_000, fee=1_000 → need 101_000 + pending 101_000 = 202_000
-        // but balance is only 200_000 → reject
-        let tx2 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"tx2");
-        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &bal, 0);
-        assert!(
-            matches!(result, Err(MempoolError::InsufficientBalance { .. })),
-            "second transfer should fail due to pending debits, got {:?}",
-            result
+        let shared_outpoint = unique_outpoint();
+        let tx1 = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recip, shared_outpoint.clone(), 500_000, 499_000,
         );
-    }
-
-    #[test]
-    fn step65_pending_debits_cleared_on_remove() {
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recip) = ed25519::generate_keypair();
-
-        let bal = FixedBalanceLookup(200_000);
-
-        // Admit first transfer
-        let tx1 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"rm1");
-        let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &bal, 0)
+        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
-        // Remove it (e.g., confirmed in a block)
+        // Remove it
         pool.remove(&id1);
 
-        // Now second transfer should succeed (pending debits are cleared)
-        let tx2 = make_signed_transfer_salt(&sk, &pk, &recip, 100_000, MIN_TX_FEE, b"rm2");
-        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &bal, 0);
+        // Same outpoint can now be spent again
+        let tx2 = make_signed_transfer_with_outpoint(
+            &sk, &pk, &recip, shared_outpoint, 400_000, 599_000,
+        );
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
             result.is_ok(),
-            "after remove, second transfer should succeed, got {:?}",
+            "after remove, outpoint should be spendable again, got {:?}",
             result
         );
     }
@@ -1206,13 +1253,13 @@ mod tests {
         // Admit 3 txs (at the limit)
         for i in 0..3 {
             let tx = make_signed_tx(&sk, &pk, format!("rate{i}").as_bytes(), MIN_TX_FEE);
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .unwrap();
         }
 
         // 4th should be rejected
         let tx4 = make_signed_tx(&sk, &pk, b"rate3", MIN_TX_FEE);
-        let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
             matches!(
                 result,
@@ -1233,14 +1280,14 @@ mod tests {
         // Sender 1: 2 txs (at limit)
         for i in 0..2 {
             let tx = make_signed_tx(&sk1, &pk1, format!("s1_{i}").as_bytes(), MIN_TX_FEE);
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .unwrap();
         }
 
         // Sender 2 should still be able to submit
         let tx = make_signed_tx(&sk2, &pk2, b"s2_0", MIN_TX_FEE);
         assert!(
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .is_ok(),
             "different sender should not be rate-limited"
         );
@@ -1260,11 +1307,11 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
-        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         let tx2 = make_signed_tx(&sk, &pk, b"doc2", MIN_TX_FEE * 3);
-        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0)
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
         let (min_f, max_f, avg_f) = pool.fee_stats();
@@ -1283,23 +1330,6 @@ mod tests {
         assert_eq!(pool.pending_debit(&pubkey), 0);
     }
 
-    #[test]
-    fn pending_debit_for_address_noble() {
-        let pool = Mempool::new(test_config());
-        let (_sk, pk) = ed25519::generate_keypair();
-        let pubkey = noble_crypto::NoblePublicKey::Ed25519(pk.to_vec());
-        let addr = noble_core::NobleAddress::Noble(pubkey.clone());
-        // Should delegate to pending_debit for Noble addresses
-        assert_eq!(pool.pending_debit_for_address(&addr), 0);
-    }
-
-    #[test]
-    fn pending_debit_for_address_bitcoin_zero() {
-        let pool = Mempool::new(test_config());
-        let h160_addr = noble_core::NobleAddress::BitcoinHash160([0xAA; 20]);
-        assert_eq!(pool.pending_debit_for_address(&h160_addr), 0);
-    }
-
     // --- Step 2.6: Version chain validation ---
 
     fn make_versioned_notarization(
@@ -1311,7 +1341,11 @@ mod tests {
         prev_checksum: Option<&str>,
     ) -> Transaction {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(doc);
+        let input_value = 1_000_000u64;
+        let change = input_value.saturating_sub(fee);
         let mut metadata = vec![];
         if let Some(v) = version {
             metadata.push(MetadataEntry {
@@ -1328,11 +1362,10 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn { prev_output: unique_outpoint() }],
+            outputs: vec![TxOut { value: change, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1343,7 +1376,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -1357,7 +1389,7 @@ mod tests {
         let prev_hex = "aa".repeat(32);
         let tx =
             make_versioned_notarization(&sk, &pk, b"v2doc", MIN_TX_FEE, Some("2"), Some(&prev_hex));
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
             matches!(result, Err(MempoolError::PrevChecksumNotFound(_))),
             "expected PrevChecksumNotFound, got: {result:?}"
@@ -1389,7 +1421,7 @@ mod tests {
             Some("2"),
             Some(&prev_hex),
         );
-        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoUtxoLookup, 0);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -1399,58 +1431,30 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         // Normal notarization without any version metadata
         let tx = make_signed_tx(&sk, &pk, b"normal_doc", MIN_TX_FEE);
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
-    // --- Finding 2B: Hash160 balance fallback test ---
+    // --- Coinbase rejection ---
 
     #[test]
-    fn balance_check_hash160_fallback() {
-        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
-
-        // Custom balance lookup that returns 0 for Noble addresses
-        // but 100_000 for the Hash160 address of the secp256k1 key
-        struct Hash160BalanceLookup {
-            hash160_addr: noble_core::NobleAddress,
-        }
-        impl BalanceLookup for Hash160BalanceLookup {
-            fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-                if address == &self.hash160_addr {
-                    100_000 // balance exists only in Hash160 bucket
-                } else {
-                    0 // Noble bucket is empty
-                }
-            }
-        }
-
+    fn reject_coinbase_in_mempool() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk_bytes) = secp256k1::generate_keypair();
-        let sender_pk = noble_crypto::NoblePublicKey::Secp256k1(pk_bytes.clone());
-
-        // Derive the Hash160 address for this secp256k1 key
-        let hash160_addr =
-            noble_core::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
-        let balance = Hash160BalanceLookup { hash160_addr };
-
-        // Build a transfer tx with secp256k1 key
-        let priv_key = NoblePrivateKey::Secp256k1(sk);
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recip_addr = noble_core::NobleAddress::Noble(
-            noble_crypto::NoblePublicKey::Ed25519(recip_pk),
-        );
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let addr = NobleAddress::Noble(pub_key);
 
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: sha256(b"transfer_test"),
+            tx_type: noble_core::TX_TYPE_COINBASE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: vec![TxOut { value: 100_000_000, address: addr }],
+            checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recip_addr),
-            amount: Some(10_000),
             publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_bytes.to_vec(),
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
                 signature: vec![],
             },
             additional_sigs: vec![],
@@ -1458,271 +1462,14 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.publisher_sig = priv_key.sign(&msg).unwrap();
 
-        // Admit should succeed because Hash160 balance covers the transfer
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &balance, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
-            result.is_ok(),
-            "secp256k1 sender with Hash160 balance should pass: {result:?}"
-        );
-    }
-
-    // --- S35 F2/F4: Bucket-aware mempool pending ---
-
-    #[test]
-    fn pending_debit_for_address_uses_resolved_bucket() {
-        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
-
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk_raw) = secp256k1::generate_keypair();
-        let sender_pk = noble_crypto::NoblePublicKey::Secp256k1(pk_raw.clone());
-        let noble_addr = noble_core::NobleAddress::Noble(sender_pk.clone());
-        let h160_addr = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
-
-        let (_, recip) = ed25519::generate_keypair();
-        let recip_addr =
-            noble_core::NobleAddress::Noble(noble_crypto::NoblePublicKey::Ed25519(recip.to_vec()));
-
-        // Balance lookup: both buckets have enough
-        struct DualBucketLookup {
-            noble: noble_core::NobleAddress,
-            h160: noble_core::NobleAddress,
-        }
-        impl BalanceLookup for DualBucketLookup {
-            fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-                if *address == self.noble || *address == self.h160 {
-                    1_000_000
-                } else {
-                    0
-                }
-            }
-        }
-        let bal = DualBucketLookup {
-            noble: noble_addr.clone(),
-            h160: h160_addr.clone(),
-        };
-
-        // Tx1: explicit source_address = Noble
-        let mut tx1 = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: sha256(b"bucket_tx1"),
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recip_addr.clone()),
-            amount: Some(50_000),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_raw.clone(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(noble_addr.to_wire_bytes()),
-        };
-        let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx1.publisher_sig.signature = noble_crypto::secp256k1::sign(&sk, &msg1).unwrap();
-
-        // Tx2: explicit source_address = Hash160
-        let mut tx2 = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: sha256(b"bucket_tx2"),
-            timestamp: 1_700_000_001,
-            fee: MIN_TX_FEE,
-            recipient: Some(recip_addr.clone()),
-            amount: Some(30_000),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_raw.clone(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(h160_addr.to_wire_bytes()),
-        };
-        let msg2 = tx2.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx2.publisher_sig.signature = noble_crypto::secp256k1::sign(&sk, &msg2).unwrap();
-
-        // Admit both
-        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &bal, 0)
-            .expect("tx1 should be admitted");
-        pool.admit(&tx2, 1_700_000_001, &NoChainLookup, &bal, 0)
-            .expect("tx2 should be admitted");
-
-        // Verify bucket-specific pending
-        let noble_pending = pool.pending_debit_for_address(&noble_addr);
-        let h160_pending = pool.pending_debit_for_address(&h160_addr);
-
-        assert_eq!(
-            noble_pending,
-            50_000 + MIN_TX_FEE,
-            "Noble bucket should have tx1's debit"
-        );
-        assert_eq!(
-            h160_pending,
-            30_000 + MIN_TX_FEE,
-            "Hash160 bucket should have tx2's debit"
-        );
-    }
-
-    // --- Step 6.3: Source address validation (T31/T32) ---
-
-    #[test]
-    fn step63_reject_source_address_on_non_transfer() {
-        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
-
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk_raw) = secp256k1::generate_keypair();
-        let sender_pk = noble_crypto::NoblePublicKey::Secp256k1(pk_raw.clone());
-        let noble_addr = noble_core::NobleAddress::Noble(sender_pk);
-
-        // Build a notarization (tx_type=0) with source_address set — T31b violation
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_NOTARIZATION,
-            checksum: sha256(b"t31b_test"),
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_raw.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(noble_addr.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig.signature = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
-        assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("source_address")),
-            "notarization with source_address should be rejected (T31b), got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn step63_reject_forged_source_address() {
-        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
-
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk_raw) = secp256k1::generate_keypair();
-
-        // Generate a different key's Hash160 address (forged)
-        let (_, other_pk_raw) = secp256k1::generate_keypair();
-        let other_pk = noble_crypto::NoblePublicKey::Secp256k1(other_pk_raw);
-        let forged_addr = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(&other_pk).unwrap();
-
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recip_addr = noble_core::NobleAddress::Noble(
-            noble_crypto::NoblePublicKey::Ed25519(recip_pk),
-        );
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: sha256(b"t31_forged"),
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recip_addr),
-            amount: Some(1_000),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_raw.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(forged_addr.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig.signature = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoBalanceLookup, 0);
-        assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("source_address")),
-            "transfer with forged source_address should be rejected (T31), got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn step63_accept_valid_source_address() {
-        use noble_crypto::{secp256k1, SCHEME_SECP256K1};
-
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk_raw) = secp256k1::generate_keypair();
-        let sender_pk = noble_crypto::NoblePublicKey::Secp256k1(pk_raw.clone());
-        let h160_addr = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
-
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recip_addr = noble_core::NobleAddress::Noble(
-            noble_crypto::NoblePublicKey::Ed25519(recip_pk),
-        );
-
-        // Balance lookup that covers the transfer from Hash160 bucket
-        struct H160BalanceLookup {
-            h160: noble_core::NobleAddress,
-        }
-        impl BalanceLookup for H160BalanceLookup {
-            fn get_balance(&self, addr: &noble_core::NobleAddress) -> u64 {
-                if *addr == self.h160 {
-                    1_000_000
-                } else {
-                    0
-                }
-            }
-        }
-        let bal = H160BalanceLookup {
-            h160: h160_addr.clone(),
-        };
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: sha256(b"t31_valid"),
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recip_addr),
-            amount: Some(1_000),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_SECP256K1,
-                public_key: pk_raw.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(h160_addr.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig.signature = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &bal, 0);
-        assert!(
-            result.is_ok(),
-            "transfer with valid Hash160 source_address should be admitted, got: {result:?}"
+            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("coinbase")),
+            "coinbase tx should be rejected, got: {result:?}"
         );
     }
 }

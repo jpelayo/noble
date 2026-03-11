@@ -67,6 +67,17 @@ pub const TX_TYPE_BADGE_VOTE: u8 = 0x04;
 /// Transaction type: badge revocation (propose revoking an existing badge).
 pub const TX_TYPE_BADGE_REVOCATION: u8 = 0x05;
 
+/// Transaction type: coinbase (block reward + collected fees).
+/// Always the first transaction (index 0) in every block.
+/// Has a single null input (`OutPoint::COINBASE_PREVOUT`) and outputs carrying
+/// `subsidy_at_height(height) + total_block_fees`.
+pub const TX_TYPE_COINBASE: u8 = 0x10;
+
+/// Number of confirmations before coinbase outputs are spendable.
+/// Prevents cascading invalidation if a reorg orphans the coinbase block.
+/// Bitcoin uses 100; NOBLE uses 6 (aligned with finality threshold).
+pub const COINBASE_MATURITY: u64 = 6;
+
 /// Minimum presence time (seconds) before a node can be proposed for a badge.
 /// Default: 7 days = 604,800 seconds. Short-lived chains: 2 days = 172,800 seconds.
 pub const BADGE_MIN_PRESENCE_SECS: u64 = 604_800;

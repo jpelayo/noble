@@ -71,22 +71,23 @@ fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), Val
         )));
     }
 
-    // Reconstruct the canonical message from tx fields
+    // Reconstruct the canonical message from tx fields (UTXO model).
+    // For BIP-137, we use output[0] as recipient and total_output_value as amount.
+    // Fee is implicit (not in the BIP-137 message — the signature commits via SigningPayload).
     let message = if tx.tx_type == TX_TYPE_TRANSFER {
-        let recipient_hex = tx
-            .recipient
-            .as_ref()
-            .map(|r| hex::encode(r.to_wire_bytes()))
+        let recipient_hex = tx.outputs.first()
+            .map(|o| hex::encode(o.address.to_wire_bytes()))
             .unwrap_or_default();
+        let amount = tx.outputs.first().map_or(0, |o| o.value);
         bip137::transfer_message(
             &recipient_hex,
-            tx.amount.unwrap_or(0),
+            amount,
             tx.timestamp,
-            tx.fee,
+            0, // fee is implicit in UTXO model
             tx.version,
         )
     } else {
-        bip137::notarization_message(&tx.checksum.to_string(), tx.timestamp, tx.fee, tx.version)
+        bip137::notarization_message(&tx.checksum.to_string(), tx.timestamp, 0, tx.version)
     };
 
     // Recover the public key from the BIP-137 signature
@@ -236,50 +237,66 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
     if tx.tx_type != TX_TYPE_NOTARIZATION
         && tx.tx_type != TX_TYPE_TRANSFER
         && tx.tx_type != TX_TYPE_KEY_ROTATION
+        && tx.tx_type != TX_TYPE_COINBASE
+        && tx.tx_type != TX_TYPE_BADGE_PROPOSAL
+        && tx.tx_type != TX_TYPE_BADGE_VOTE
+        && tx.tx_type != TX_TYPE_BADGE_REVOCATION
     {
         return Err(ValidationError::UnknownTxType(tx.tx_type));
     }
     tracing::trace!(tx_type = tx.tx_type, "T13: tx_type recognized");
 
-    // T14: Transfer requires recipient
-    if tx.tx_type == TX_TYPE_TRANSFER && tx.recipient.is_none() {
+    // U4: Coinbase must have exactly one null input
+    if tx.tx_type == TX_TYPE_COINBASE {
+        if tx.inputs.len() != 1 || !tx.inputs[0].prev_output.is_coinbase() {
+            return Err(ValidationError::Internal("U4: coinbase must have exactly one null input".into()));
+        }
+    }
+
+    // U10: Non-coinbase must NOT have null inputs
+    if tx.tx_type != TX_TYPE_COINBASE {
+        for input in &tx.inputs {
+            if input.prev_output.is_coinbase() {
+                return Err(ValidationError::Internal("U10: non-coinbase tx has null input".into()));
+            }
+        }
+    }
+
+    // U2: No duplicate inputs within transaction
+    {
+        let mut seen = HashSet::new();
+        for input in &tx.inputs {
+            if !seen.insert(&input.prev_output) {
+                return Err(ValidationError::Internal("U2: duplicate input outpoint".into()));
+            }
+        }
+    }
+
+    // U8: All output values must be > 0 and <= MAX_SUPPLY
+    for out in &tx.outputs {
+        if out.value == 0 {
+            return Err(ValidationError::Internal("U7: output value is zero".into()));
+        }
+        if out.value > MAX_SUPPLY {
+            return Err(ValidationError::Internal("U8: output value exceeds MAX_SUPPLY".into()));
+        }
+    }
+
+    // U-transfer: Transfer must have at least one output (recipient)
+    if tx.tx_type == TX_TYPE_TRANSFER && tx.outputs.is_empty() {
         return Err(ValidationError::TransferMissingRecipient);
     }
-    tracing::trace!("T14: transfer recipient check passed");
 
-    // T15: Transfer requires amount > 0
-    if tx.tx_type == TX_TYPE_TRANSFER && matches!(tx.amount, None | Some(0)) {
-        return Err(ValidationError::TransferInvalidAmount);
+    // Non-coinbase must have at least one input
+    if tx.tx_type != TX_TYPE_COINBASE && tx.inputs.is_empty() {
+        return Err(ValidationError::Internal("non-coinbase tx has no inputs".into()));
     }
-    tracing::trace!("T15: transfer amount check passed");
 
-    // T27: Transfer must have zero checksum (document registration field is meaningless)
+    // T27: Transfer must have zero checksum
     if tx.tx_type == TX_TYPE_TRANSFER && tx.checksum != Hash256::ZERO {
         return Err(ValidationError::TransferWithNonZeroChecksum);
     }
     tracing::trace!("T27: transfer checksum check passed");
-
-    // T16: Balance check is deferred to commit time (needs chain state)
-
-    // T24: Self-transfer rejection (C-self) — prevents balance inflation
-    if tx.tx_type == TX_TYPE_TRANSFER {
-        if let Some(ref recipient) = tx.recipient {
-            let sender_pk = tx.publisher_sig.to_noble_public_key().map_err(|e| {
-                tracing::debug!("sender key extraction failed: {e}");
-                ValidationError::Internal("sender key extraction failed".into())
-            })?;
-            if *recipient == crate::address::NobleAddress::Noble(sender_pk) {
-                return Err(ValidationError::SelfTransfer);
-            }
-        }
-    }
-    tracing::trace!("T24: self-transfer check passed");
-
-    // T17: Notarization must NOT have recipient or amount
-    if tx.tx_type == TX_TYPE_NOTARIZATION && (tx.recipient.is_some() || tx.amount.is_some()) {
-        return Err(ValidationError::NotarizationHasTransferFields);
-    }
-    tracing::trace!("T17: notarization transfer-field check passed");
 
     // T28: Notarization must have non-zero checksum (the whole point of a notarization)
     if tx.tx_type == TX_TYPE_NOTARIZATION && tx.checksum == Hash256::ZERO {
@@ -299,16 +316,12 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
     }
     tracing::trace!("T23: external_attestations check passed");
 
-    // T17b: Key rotation must NOT have amount (prevents spurious fund transfers)
-    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.amount.is_some() {
-        return Err(ValidationError::KeyRotationHasAmount);
-    }
-
-    // T21: Key rotation requires new key in recipient field
-    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.recipient.is_none() {
+    // T21: Key rotation: the new key is now conveyed in outputs[0].address
+    // (previously via the `recipient` field)
+    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.outputs.is_empty() {
         return Err(ValidationError::KeyRotationMissingNewKey);
     }
-    tracing::trace!("T17b/T21: key rotation checks passed");
+    tracing::trace!("T21: key rotation check passed");
 
     // T27b: Non-document types (key rotation, badge proposal/vote/revocation) must have zero checksum
     if matches!(
@@ -372,14 +385,10 @@ pub fn validate_transaction(
     }
     tracing::trace!("T10: tx_id verification passed");
 
-    // T11: Fee check
-    if tx.fee < MIN_TX_FEE {
-        return Err(ValidationError::FeeTooLow {
-            fee: tx.fee,
-            min_fee: MIN_TX_FEE,
-        });
-    }
-    tracing::trace!(fee = tx.fee, "T11: fee check passed");
+    // T11: Fee check — in UTXO model, fee = sum(inputs) - sum(outputs).
+    // This is a STATEFUL check (needs UTXO values). Deferred to commit_block / mempool.
+    // Stateless: only verify that non-coinbase txs have inputs (fee > 0 requires inputs).
+    tracing::trace!("T11: fee check deferred to stateful validation");
 
     // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
     // which is called in T6 and T7 above.
@@ -395,102 +404,16 @@ pub fn validate_transaction(
     Ok(())
 }
 
-/// T31/T32: Validate source_address ownership proof and activation enforcement (S34).
+/// Validate source address — NO-OP in UTXO model.
 ///
-/// If `source_address` is present:
-/// - T31b: only allowed on transfer transactions
-/// - T31c: must be valid wire bytes
-/// - T31: ownership proof:
-///   - Noble(pk): must equal publisher key
-///   - BitcoinHash160(h160): publisher must be secp256k1, h160 == HASH160(pubkey)
-///   - BitcoinTaproot(xonly): publisher must be secp256k1, xonly == BIP-341 tweaked output key
-///
-/// If `source_address` is absent AND height >= SOURCE_ADDRESS_ACTIVATION_HEIGHT:
-/// - T32: secp256k1 transfer transactions MUST include source_address
-pub fn validate_source_address(tx: &Transaction, chain_height: u64) -> Result<(), ValidationError> {
-    let wire = match tx.source_address {
-        Some(ref w) => w,
-        None => {
-            // T32: post-activation, secp256k1 transfers must include source_address
-            if chain_height >= SOURCE_ADDRESS_ACTIVATION_HEIGHT
-                && tx.tx_type == TX_TYPE_TRANSFER
-            {
-                if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
-                    if matches!(sender, noble_crypto::NoblePublicKey::Secp256k1(_)) {
-                        return Err(ValidationError::SourceAddressRequired);
-                    }
-                }
-            }
-            return Ok(());
-        }
-    };
-
-    // T31b: only allowed on transfers
-    if tx.tx_type != TX_TYPE_TRANSFER {
-        return Err(ValidationError::SourceAddressOnNonTransfer);
-    }
-
-    // T31c: must decode to a valid NobleAddress
-    let source_addr = crate::NobleAddress::from_wire_bytes(wire).map_err(|e| {
-        ValidationError::InvalidSourceAddress(format!("invalid wire bytes: {e}"))
-    })?;
-
-    // Extract publisher key
-    let sender_pk = tx.publisher_sig.to_noble_public_key().map_err(|e| {
-        ValidationError::Internal(format!("sender key extraction failed: {e}"))
-    })?;
-
-    // T31: ownership proof
-    match &source_addr {
-        crate::NobleAddress::Noble(pk) => {
-            if *pk != sender_pk {
-                return Err(ValidationError::InvalidSourceAddress(
-                    "Noble source address does not match publisher key".into(),
-                ));
-            }
-        }
-        crate::NobleAddress::BitcoinHash160(h160) => {
-            let expected = crate::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk)
-                .ok_or_else(|| {
-                    ValidationError::InvalidSourceAddress(
-                        "Hash160 source requires secp256k1 publisher".into(),
-                    )
-                })?;
-            if let crate::NobleAddress::BitcoinHash160(expected_h160) = expected {
-                if *h160 != expected_h160 {
-                    return Err(ValidationError::InvalidSourceAddress(
-                        "Hash160 does not match HASH160(publisher_pubkey)".into(),
-                    ));
-                }
-            }
-        }
-        crate::NobleAddress::BitcoinTaproot(xonly) => {
-            let expected = crate::address::NobleAddress::bitcoin_taproot_for_pubkey(&sender_pk)
-                .ok_or_else(|| {
-                    ValidationError::InvalidSourceAddress(
-                        "Taproot source requires secp256k1 publisher".into(),
-                    )
-                })?;
-            if let crate::NobleAddress::BitcoinTaproot(expected_xonly) = expected {
-                if *xonly != expected_xonly {
-                    return Err(ValidationError::InvalidSourceAddress(
-                        "Taproot output key does not match BIP-341 tweaked publisher key".into(),
-                    ));
-                }
-            }
-        }
-    }
-
-    // T24 extension: reject source == recipient (self-transfer via source address)
-    if let Some(ref recipient) = tx.recipient {
-        if *recipient == source_addr {
-            return Err(ValidationError::SelfTransfer);
-        }
-    }
-
-    tracing::trace!("T31: source_address validation passed");
+/// In the account model, `source_address` indicated which balance bucket to debit.
+/// In the UTXO model, the debit source is determined by which UTXOs are in the inputs.
+/// This function is retained for API compatibility but does nothing.
+pub fn validate_source_address(_tx: &Transaction, _chain_height: u64) -> Result<(), ValidationError> {
+    // UTXO model: no source_address field. Debit is implicit from input UTXOs.
     Ok(())
 }
+
 
 /// Compute the median of a slice of timestamps.
 ///
@@ -683,6 +606,26 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
 
     // B10: One block per cycle — deferred to consensus layer (needs cycle state)
 
+    // U9: Coinbase enforcement (skip genesis blocks at height 0 — they have no transactions)
+    if header.height > 0 {
+        // U9: Block must have at least one transaction (the coinbase)
+        if block.transactions.is_empty() {
+            return Err(ValidationError::Internal("block has no transactions (missing coinbase)".into()));
+        }
+        // U9: First transaction must be coinbase
+        if !block.transactions[0].is_coinbase() {
+            return Err(ValidationError::Internal("U9: first transaction must be coinbase".into()));
+        }
+        // U9: Only one coinbase per block
+        let coinbase_count = block.transactions.iter().filter(|tx| tx.is_coinbase()).count();
+        if coinbase_count != 1 {
+            return Err(ValidationError::Internal(format!(
+                "U9: block must have exactly 1 coinbase, found {coinbase_count}"
+            )));
+        }
+        tracing::trace!("U9: coinbase structure validated (1 coinbase at index 0)");
+    }
+
     // B11: All transactions valid
     for (i, tx) in block.transactions.iter().enumerate() {
         let tx_id = tx.compute_tx_id(ctx.chain_id).map_err(|e| {
@@ -726,6 +669,7 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
 mod tests {
     use super::*;
     use crate::genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
+    use crate::utxo::{OutPoint, TxIn, TxOut};
     use noble_crypto::{
         ed25519, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
     };
@@ -746,16 +690,16 @@ mod tests {
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let checksum = sha256(b"test document");
         let timestamp = 1_700_000_000u64;
-        let fee = MIN_TX_FEE;
 
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum,
             timestamp,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -766,7 +710,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
 
         let msg = tx
@@ -904,18 +847,14 @@ mod tests {
     // --- T11: Fee ---
 
     #[test]
-    fn t11_fee_too_low() {
+    fn t11_fee_deferred_to_stateful_validation() {
+        // In the UTXO model, fee = sum(inputs) - sum(outputs) and is checked
+        // during stateful validation (requires UTXO lookup). Stateless validation
+        // only verifies that non-coinbase txs have inputs.
         let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let (mut tx, _) = make_signed_tx(&sk, &pk);
-        tx.fee = MIN_TX_FEE - 1;
-        let msg = tx
-            .compute_signing_message_for_chain(test_chain_id())
-            .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(matches!(result, Err(ValidationError::FeeTooLow { .. })));
+        let (tx, tx_id) = make_signed_tx(&sk, &pk);
+        // Stateless validation should pass — fee check is deferred.
+        assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
 
     #[test]
@@ -1100,11 +1039,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x02; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100_000,
+                address: crate::NobleAddress::Noble(recipient),
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1115,7 +1058,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1162,11 +1104,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x03; 32]), vout: 0 },
+            }],
+            outputs: vec![], // No outputs = missing recipient
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: Some(100_000),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1177,7 +1120,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1192,7 +1134,8 @@ mod tests {
     }
 
     #[test]
-    fn t15_transfer_missing_amount() {
+    fn t15_transfer_zero_output_value_rejected() {
+        // In UTXO model, a zero-value output is rejected by U7.
         let (sk, pk) = ed25519::generate_keypair();
         let (_, recipient_pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
@@ -1200,11 +1143,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x04; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 0, // zero value
+                address: crate::NobleAddress::Noble(recipient),
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1215,121 +1162,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
-        };
-        let msg = tx
-            .compute_signing_message_for_chain(test_chain_id())
-            .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(matches!(
-            result,
-            Err(ValidationError::TransferInvalidAmount)
-        ));
-    }
-
-    #[test]
-    fn t15_transfer_zero_amount() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: 1,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(0),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: None,
-        };
-        let msg = tx
-            .compute_signing_message_for_chain(test_chain_id())
-            .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(matches!(
-            result,
-            Err(ValidationError::TransferInvalidAmount)
-        ));
-    }
-
-    #[test]
-    fn t17_notarization_with_recipient() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: 0,
-            checksum: sha256(b"test document"),
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: None,
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: None,
-        };
-        let msg = tx
-            .compute_signing_message_for_chain(test_chain_id())
-            .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(matches!(
-            result,
-            Err(ValidationError::NotarizationHasTransferFields)
-        ));
-    }
-
-    #[test]
-    fn t24_self_transfer_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        // Recipient is the same as the sender
-        let recipient = NoblePublicKey::Ed25519(pk.to_vec());
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1338,23 +1170,25 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
-            matches!(result, Err(ValidationError::SelfTransfer)),
-            "self-transfer must be rejected: {result:?}"
+            result.is_err(),
+            "transfer with zero-value output must be rejected: {result:?}"
         );
     }
 
     #[test]
-    fn t17_notarization_with_amount() {
+    fn t15_transfer_empty_outputs_rejected() {
+        // In UTXO model, a transfer with no outputs has no recipient.
         let (sk, pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
-            tx_type: 0,
-            checksum: sha256(b"test document"),
+            tx_type: 1,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x05; 32]), vout: 0 },
+            }],
+            outputs: vec![], // no outputs
+            checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: Some(100),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1365,7 +1199,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1375,8 +1208,118 @@ mod tests {
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
             result,
-            Err(ValidationError::NotarizationHasTransferFields)
+            Err(ValidationError::TransferMissingRecipient)
         ));
+    }
+
+    #[test]
+    fn t17_notarization_with_change_output_accepted() {
+        // In UTXO model, notarizations can have outputs (change back to sender).
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let sender = NoblePublicKey::Ed25519(pk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x06; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 99_000, // change output
+                address: crate::NobleAddress::Noble(sender),
+            }],
+            checksum: sha256(b"test document"),
+            timestamp: 1_700_000_000,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(test_chain_id())
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(result.is_ok(), "notarization with change output should pass: {result:?}");
+    }
+
+    #[test]
+    fn t24_self_transfer_allowed_in_utxo() {
+        // In UTXO model, sending to your own address is valid (consolidating UTXOs).
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let self_addr = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x07; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100_000,
+                address: self_addr,
+            }],
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(test_chain_id())
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(result.is_ok(), "self-transfer is valid in UTXO model: {result:?}");
+    }
+
+    #[test]
+    fn t17_notarization_without_outputs_accepted() {
+        // In UTXO model, notarization can have zero outputs (entire input is fee).
+        let (sk, pk) = ed25519::generate_keypair();
+        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x08; 32]), vout: 0 },
+            }],
+            outputs: vec![],
+            checksum: sha256(b"test document"),
+            timestamp: 1_700_000_000,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519,
+                public_key: pk.to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let msg = tx
+            .compute_signing_message_for_chain(test_chain_id())
+            .unwrap();
+        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        assert!(result.is_ok(), "notarization without outputs should pass: {result:?}");
     }
 
     // --- validate_block_timestamp (B5/B6/B13) ---
@@ -1474,11 +1417,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x09; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100_000,
+                address: crate::NobleAddress::Noble(recipient),
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1489,7 +1436,6 @@ mod tests {
             encrypted_locator: Some(locator),
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1522,11 +1468,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0A; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1537,7 +1484,6 @@ mod tests {
             encrypted_locator: Some(locator),
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1566,11 +1512,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0B; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100_000,
+                address: crate::NobleAddress::Noble(recipient),
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1581,7 +1531,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![attestation],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1610,11 +1559,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0C; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: sha256(b"attested document"),
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1625,7 +1575,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![attestation],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1752,19 +1701,19 @@ mod tests {
     }
 
     #[test]
-    fn t17b_key_rotation_with_amount_rejected() {
+    fn t17b_key_rotation_missing_new_key_rejected() {
+        // In UTXO model, key rotation requires at least one output (new key in outputs[0].address).
         let (sk, pk) = ed25519::generate_keypair();
-        let (_, new_pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0D; 32]), vout: 0 },
+            }],
+            outputs: vec![], // Missing new key output
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000), // Spurious amount on key rotation
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1775,7 +1724,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1784,25 +1732,30 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
-            matches!(result, Err(ValidationError::KeyRotationHasAmount)),
-            "key rotation with amount must be rejected: {result:?}"
+            matches!(result, Err(ValidationError::KeyRotationMissingNewKey)),
+            "key rotation without outputs must be rejected: {result:?}"
         );
     }
 
     #[test]
-    fn t17b_key_rotation_without_amount_accepted() {
+    fn t17b_key_rotation_with_new_key_accepted() {
+        // In UTXO model, key rotation carries the new key in outputs[0].address.
         let (sk, pk) = ed25519::generate_keypair();
         let (_, new_pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0E; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 1, // dust output carrying the new key
+                address: crate::NobleAddress::Noble(new_key),
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: None, // No amount — correct for key rotation
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1813,7 +1766,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1827,12 +1779,8 @@ mod tests {
     fn b11_invalid_tx_in_block() {
         let (sk, pk) = ed25519::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
-        tx.fee = 0; // Invalid fee, but don't re-sign (will fail T11)
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx
-            .compute_signing_message_for_chain(test_chain_id())
-            .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        // Corrupt the signature to make it invalid (T6)
+        tx.publisher_sig.signature = vec![0u8; 64];
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let (block, _) = make_valid_block(vec![(tx, tx_id)]);
@@ -1862,11 +1810,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x0F; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: sha256(b"gw-valid"),
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1877,7 +1826,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: Some(gw_wire),
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1896,11 +1844,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x10; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: sha256(b"gw-invalid"),
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -1911,7 +1860,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: Some(vec![0xFF, 0x01, 0x02]), // invalid wire bytes
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1938,20 +1886,21 @@ mod tests {
 
         let checksum = sha256(b"bip137 test document");
         let timestamp = 1_700_000_000u64;
-        let fee = MIN_TX_FEE;
 
+        // In UTXO model, fee is implicit (0 in BIP-137 message).
         let message =
-            bip137::notarization_message(&checksum.to_string(), timestamp, fee, PROTOCOL_VERSION);
+            bip137::notarization_message(&checksum.to_string(), timestamp, 0, PROTOCOL_VERSION);
         let sig = bip137::sign_bip137(&sk, &message).unwrap();
 
         let tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x11; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum,
             timestamp,
-            fee,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_BIP137,
                 public_key: compressed_pk,
@@ -1962,7 +1911,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
@@ -1999,11 +1947,12 @@ mod tests {
         let tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x12; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_BIP137,
                 public_key: compressed_pk,
@@ -2014,7 +1963,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -2035,11 +1983,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x13; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100_000,
+                address: crate::NobleAddress::Noble(recipient),
+            }],
             checksum: sha256(b"should not be here"), // non-zero checksum on transfer
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: Some(100_000),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -2050,7 +2002,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2073,11 +2024,12 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x14; 32]), vout: 0 },
+            }],
+            outputs: vec![],
             checksum: Hash256::ZERO, // zero checksum on notarization
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: None,
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -2088,7 +2040,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2109,15 +2060,19 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let (_, new_pk) = ed25519::generate_keypair();
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x15; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 1,
+                address: crate::NobleAddress::Noble(new_key),
+            }],
             checksum: sha256(b"should not be here"), // non-zero checksum on key rotation
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(crate::NobleAddress::Noble(recipient)),
-            amount: None,
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -2128,7 +2083,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2230,7 +2184,6 @@ mod tests {
     fn make_secp_transfer(
         recipient: crate::NobleAddress,
         amount: u64,
-        source_address: Option<Vec<u8>>,
     ) -> (Transaction, Hash256, Vec<u8>) {
         use noble_crypto::SCHEME_SECP256K1;
 
@@ -2241,11 +2194,15 @@ mod tests {
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x16; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: amount,
+                address: recipient,
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(amount),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_SECP256K1,
                 public_key: compressed_pk.clone(),
@@ -2256,7 +2213,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address,
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -2266,135 +2222,39 @@ mod tests {
         (tx, tx_id, compressed_pk)
     }
 
-    #[test]
-    fn t31_noble_source_address_matches_publisher() {
-        let (ed_sk, ed_pk) = ed25519::generate_keypair();
-        let (mut tx, _) = make_signed_tx(&ed_sk, &ed_pk);
-
-        // Convert to transfer with source_address = Noble(publisher)
-        tx.tx_type = TX_TYPE_TRANSFER;
-        tx.checksum = Hash256::ZERO;
-        tx.recipient = Some(crate::NobleAddress::Noble(
-            NoblePublicKey::Ed25519(ed_pk.to_vec()),
-        ));
-        tx.amount = Some(100);
-        let noble_addr = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(ed_pk.to_vec()));
-        tx.source_address = Some(noble_addr.to_wire_bytes());
-
-        // Re-sign
-        let priv_key = NoblePrivateKey::Ed25519(ed_sk.to_vec());
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-
-        // T24 would reject self-transfer, so use a different recipient
-        let (_, other_pk) = ed25519::generate_keypair();
-        tx.recipient = Some(crate::NobleAddress::Noble(
-            NoblePublicKey::Ed25519(other_pk.to_vec()),
-        ));
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(result.is_ok(), "T31 Noble owner match should pass: {result:?}");
-    }
+    // --- T31/T32: Source address validation removed in UTXO model ---
+    // In UTXO model, the debit source is determined by input UTXOs, not a source_address field.
+    // These tests verify that secp256k1 transfers work correctly.
 
     #[test]
-    fn t31_hash160_source_address_secp256k1() {
+    fn t31_secp256k1_transfer_passes() {
+        // secp256k1 transfer in UTXO model (no source_address needed).
         let (_, other_pk) = ed25519::generate_keypair();
         let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-
-        let (sk, _) = noble_crypto::secp256k1::generate_keypair();
-        let signing_key = k256::ecdsa::SigningKey::from_slice(&sk).unwrap();
-        let cpk = signing_key.verifying_key().to_sec1_bytes().to_vec();
-        let sender_pk = NoblePublicKey::Secp256k1(cpk.clone());
-        let h160 = crate::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(100),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: noble_crypto::SCHEME_SECP256K1,
-                public_key: cpk.clone(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(h160.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        let sig = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-        tx.publisher_sig.signature = sig;
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
+        let (tx, tx_id, _) = make_secp_transfer(recipient, 100);
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(result.is_ok(), "T31 Hash160 secp256k1 should pass: {result:?}");
+        assert!(result.is_ok(), "secp256k1 transfer should pass: {result:?}");
     }
 
     #[test]
-    fn t31_taproot_source_address_secp256k1() {
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-
-        let (sk, _) = noble_crypto::secp256k1::generate_keypair();
-        let signing_key = k256::ecdsa::SigningKey::from_slice(&sk).unwrap();
-        let cpk = signing_key.verifying_key().to_sec1_bytes().to_vec();
-        let sender_pk = NoblePublicKey::Secp256k1(cpk.clone());
-        let taproot = crate::NobleAddress::bitcoin_taproot_for_pubkey(&sender_pk).unwrap();
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(100),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: noble_crypto::SCHEME_SECP256K1,
-                public_key: cpk.clone(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(taproot.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        let sig = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-        tx.publisher_sig.signature = sig;
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(result.is_ok(), "T31 Taproot secp256k1 should pass: {result:?}");
-    }
-
-    #[test]
-    fn t31_wrong_noble_source_address_rejected() {
+    fn t32_ed25519_transfer_passes() {
+        // Ed25519 transfer in UTXO model.
         let (sk, pk) = ed25519::generate_keypair();
         let (_, other_pk) = ed25519::generate_keypair();
         let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
 
-        let wrong_addr = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: Hash256::from_bytes([0x17; 32]), vout: 0 },
+            }],
+            outputs: vec![TxOut {
+                value: 100,
+                address: recipient,
+            }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(100),
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
@@ -2405,7 +2265,6 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: Some(wrong_addr.to_wire_bytes()),
         };
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -2413,183 +2272,6 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(
-            matches!(result, Err(ValidationError::InvalidSourceAddress(_))),
-            "Wrong Noble source should be rejected: {result:?}"
-        );
-    }
-
-    #[test]
-    fn t31b_source_address_on_notarization_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (mut tx, _) = make_signed_tx(&sk, &pk);
-
-        // Notarization with source_address = should fail T31b
-        let noble_addr = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
-        tx.source_address = Some(noble_addr.to_wire_bytes());
-
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(
-            matches!(result, Err(ValidationError::SourceAddressOnNonTransfer)),
-            "Source address on notarization should be rejected: {result:?}"
-        );
-    }
-
-    #[test]
-    fn t31_hash160_ed25519_rejected() {
-        // Ed25519 sender trying to use Hash160 source_address — should fail
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-        let fake_h160 = crate::NobleAddress::BitcoinHash160([0xAA; 20]);
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(100),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(fake_h160.to_wire_bytes()),
-        };
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(
-            matches!(result, Err(ValidationError::InvalidSourceAddress(_))),
-            "Ed25519 with Hash160 source should be rejected: {result:?}"
-        );
-    }
-
-    #[test]
-    fn t31_source_equals_recipient_rejected() {
-        // source_address == recipient → T24 extension
-        let (sk, _) = noble_crypto::secp256k1::generate_keypair();
-        let signing_key = k256::ecdsa::SigningKey::from_slice(&sk).unwrap();
-        let cpk = signing_key.verifying_key().to_sec1_bytes().to_vec();
-        let sender_pk = NoblePublicKey::Secp256k1(cpk.clone());
-        let h160 = crate::NobleAddress::bitcoin_hash160_for_pubkey(&sender_pk).unwrap();
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(h160.clone()), // same as source!
-            amount: Some(100),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: noble_crypto::SCHEME_SECP256K1,
-                public_key: cpk.clone(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: Some(h160.to_wire_bytes()),
-        };
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        let sig = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-        tx.publisher_sig.signature = sig;
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(
-            matches!(result, Err(ValidationError::SelfTransfer)),
-            "Source == recipient should be rejected: {result:?}"
-        );
-    }
-
-    #[test]
-    fn t32_secp256k1_no_source_at_activation_rejected() {
-        // Post-activation: secp256k1 transfer without source_address → T32
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-        let (tx, tx_id, _) = make_secp_transfer(recipient, 100, None);
-
-        let ctx = TxValidationContext {
-            chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
-            chain_height: SOURCE_ADDRESS_ACTIVATION_HEIGHT, // at activation
-        };
-        let result = validate_transaction(&tx, &tx_id, &ctx);
-        assert!(
-            matches!(result, Err(ValidationError::SourceAddressRequired)),
-            "T32: secp256k1 without source at activation should be rejected: {result:?}"
-        );
-    }
-
-    #[test]
-    fn t32_ed25519_no_source_at_activation_passes() {
-        // Post-activation: Ed25519 transfer without source_address → OK (only secp256k1 affected)
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-
-        let mut tx = Transaction {
-            version: PROTOCOL_VERSION,
-            tx_type: TX_TYPE_TRANSFER,
-            checksum: Hash256::ZERO,
-            timestamp: 1_700_000_000,
-            fee: MIN_TX_FEE,
-            recipient: Some(recipient),
-            amount: Some(100),
-            publisher_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
-                public_key: pk.to_vec(),
-                signature: vec![],
-            },
-            additional_sigs: vec![],
-            metadata: vec![],
-            encrypted_locator: None,
-            external_attestations: vec![],
-            gateway_address: None,
-            source_address: None,
-        };
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
-        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
-
-        let ctx = TxValidationContext {
-            chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
-            chain_height: SOURCE_ADDRESS_ACTIVATION_HEIGHT,
-        };
-        let result = validate_transaction(&tx, &tx_id, &ctx);
-        assert!(result.is_ok(), "Ed25519 should not need source_address: {result:?}");
-    }
-
-    #[test]
-    fn t32_secp256k1_below_activation_passes() {
-        // Below activation: secp256k1 transfer without source_address → OK
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
-        let (tx, tx_id, _) = make_secp_transfer(recipient, 100, None);
-
-        // chain_height 0 is well below u64::MAX activation
-        let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(result.is_ok(), "Below activation should pass: {result:?}");
+        assert!(result.is_ok(), "Ed25519 transfer should pass: {result:?}");
     }
 }

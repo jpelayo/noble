@@ -20,15 +20,25 @@ struct GetTransactionParams: Encodable, Sendable {
     let tx_id: String
 }
 
+struct TxInputDTO: Decodable, Sendable {
+    let txid: String
+    let vout: UInt32
+}
+
+struct TxOutputDTO: Decodable, Sendable {
+    let value: UInt64
+    let address: String
+}
+
 struct TransactionDTO: Decodable, Sendable {
     let tx_id: String?
     let tx_type: String?
     let checksum: String?
     let timestamp: UInt64?
-    let fee: UInt64?
+    let total_output: UInt64?
+    let inputs: [TxInputDTO]?
+    let outputs: [TxOutputDTO]?
     let signer: String?
-    let recipient: String?
-    let amount: UInt64?
     let metadata: [MetadataDTO]?
     let has_encrypted_locator: Bool?
     let attestation_count: Int?

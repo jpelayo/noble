@@ -9,7 +9,7 @@ pub mod sigcache;
 
 pub use error::MempoolError;
 pub use pool::{
-    BalanceLookup, ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoBalanceLookup,
-    NoChainLookup,
+    ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoChainLookup,
+    NoUtxoLookup, UtxoLookup,
 };
 pub use sigcache::SigCache;

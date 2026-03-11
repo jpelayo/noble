@@ -9,8 +9,10 @@
 use noble_codec::NobleCbor;
 use noble_crypto::keys::NoblePublicKey;
 use noble_crypto::SCHEME_ED25519;
-use noble_wallet::builder::TransactionBuilder;
+use noble_wallet::builder::{SelectedUtxo, TransactionBuilder};
 use noble_wallet::KeyStore;
+
+use crate::rpc_client::NodeRpcClient;
 
 /// A self-contained faucet wallet backed by a local keystore directory.
 pub struct FaucetWallet {
@@ -33,7 +35,9 @@ impl FaucetWallet {
             KeyStore::new(keystore_dir).map_err(|e| format!("keystore init: {e}"))?;
 
         // Try unlock first (may already have keys).
-        let _ = keystore.unlock(passphrase);
+        if let Err(e) = keystore.unlock(passphrase) {
+            tracing::debug!("initial unlock attempt: {e}");
+        }
 
         // Check if we already have a key.
         let keys = keystore
@@ -70,17 +74,67 @@ impl FaucetWallet {
 
     /// Build a signed transfer transaction and return its hex-encoded CBOR.
     ///
-    /// The returned string can be submitted via `noble_submitTransaction`.
-    pub fn build_transfer(
+    /// Queries the node for available UTXOs via `getAddressUtxos` RPC,
+    /// selects enough to cover `amount + fee`, and creates a proper
+    /// UTXO-model transfer with change output.
+    pub async fn build_transfer(
         &self,
+        rpc: &NodeRpcClient,
         recipient_hex: &str,
         amount: u64,
         fee: u64,
+        chain_height: u64,
     ) -> Result<String, String> {
         let recipient = noble_core::NobleAddress::from_wire_bytes(
             &hex::decode(recipient_hex).map_err(|e| format!("bad recipient hex: {e}"))?,
         )
         .map_err(|e| format!("bad recipient: {e}"))?;
+
+        let change_address =
+            noble_core::NobleAddress::Noble(self.signer.clone());
+
+        // Query real UTXOs from the node
+        let utxos = rpc.get_address_utxos(&self.address()).await
+            .map_err(|e| format!("get UTXOs: {e}"))?;
+
+        if utxos.is_empty() {
+            return Err("faucet has no UTXOs (dry)".into());
+        }
+
+        // Select UTXOs (largest-first) until we have enough
+        let required = amount.saturating_add(fee);
+        let mut selected = Vec::new();
+        let mut total = 0u64;
+        // Filter out immature coinbase UTXOs, then sort by value descending
+        let mut sorted: Vec<_> = utxos.into_iter().filter(|u| {
+            !u.is_coinbase || chain_height >= u.height + noble_core::COINBASE_MATURITY
+        }).collect();
+        sorted.sort_by(|a, b| b.value.cmp(&a.value));
+
+        if sorted.is_empty() {
+            return Err("faucet has no mature UTXOs (all coinbase UTXOs are immature)".into());
+        }
+
+        for utxo in &sorted {
+            selected.push(SelectedUtxo {
+                outpoint: noble_core::OutPoint {
+                    txid: noble_crypto::Hash256::from_hex(&utxo.txid)
+                        .map_err(|e| format!("bad utxo txid {}: {e}", utxo.txid))?,
+                    vout: utxo.vout,
+                },
+                value: utxo.value,
+            });
+            total = total.saturating_add(utxo.value);
+            if total >= required {
+                break;
+            }
+        }
+
+        if total < required {
+            return Err(format!(
+                "insufficient UTXOs: have {total}, need {required}"
+            ));
+        }
 
         let tx = TransactionBuilder::build_transfer(
             &self.keystore,
@@ -89,8 +143,9 @@ impl FaucetWallet {
             amount,
             fee,
             None,
-            None,
             self.chain_id,
+            &selected,
+            &change_address,
         )
         .map_err(|e| format!("build transfer: {e}"))?;
 

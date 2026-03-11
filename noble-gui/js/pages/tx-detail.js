@@ -137,10 +137,10 @@ export function init(root, ctx) {
       <dt>Transaction ID</dt><dd class="mono">${txResult.tx_id}</dd>
       <dt>Version</dt><dd>${tx.version}</dd>
       <dt>Timestamp</dt><dd>${formatTimestamp(tx.timestamp)}</dd>
-      <dt>Fee</dt><dd>${formatFee(tx.fee)} (${tx.fee} atomic)</dd>
-      ${tx.gateway_address ? `
+      <dt>Total Output</dt><dd>${formatFee(tx.total_output)} (${tx.total_output} atomic)</dd>
+      <dt>Fee</dt><dd title="Fee is implicit in UTXO model (sum of inputs - sum of outputs)">&mdash;</dd>
+      ${(tx.gateway_address || null) ? `
       <dt>Gateway</dt><dd class="mono" title="This node receives 50% of the fee">${truncateHash(tx.gateway_address, 12)}</dd>
-      <dt>Fee Split</dt><dd>Validator: ${Math.ceil(tx.fee / 2)} &middot; Gateway: ${Math.floor(tx.fee / 2)}</dd>
       ` : ''}
       <dt>Status</dt><dd><span class="badge confirmed">${txResult.status}</span></dd>
       <dt>Block Height</dt><dd><a href="#/block/${txResult.block_height}">${txResult.block_height}</a></dd>
@@ -148,27 +148,77 @@ export function init(root, ctx) {
     `;
     root.appendChild(grid);
 
-    // Publisher signature
+    // ── Inputs panel ──
+    const inputs = tx.inputs || [];
+    if (inputs.length > 0) {
+      const inputPanel = document.createElement('div');
+      inputPanel.className = 'panel';
+      const isCoinbase = inputs.length === 1 && inputs[0].txid === '0'.repeat(64);
+      let inputHtml = `<div class="panel-header">Inputs (${inputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Previous Tx</th><th>Output Index</th></tr></thead><tbody>`;
+      inputs.forEach((inp, i) => {
+        const txLink = isCoinbase
+          ? '<span class="badge coinbase">Coinbase (new coins)</span>'
+          : `<a href="#/tx/${inp.txid}" class="mono">${truncateHash(inp.txid)}</a>`;
+        inputHtml += `<tr><td>${i}</td><td>${txLink}</td><td>${isCoinbase ? '&mdash;' : inp.vout}</td></tr>`;
+      });
+      inputHtml += '</tbody></table></div>';
+      inputPanel.innerHTML = inputHtml;
+      root.appendChild(inputPanel);
+    }
+
+    // ── Outputs panel ──
+    const outputs = tx.outputs || [];
+    if (outputs.length > 0) {
+      const outputPanel = document.createElement('div');
+      outputPanel.className = 'panel';
+      let outputHtml = `<div class="panel-header">Outputs (${outputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Value</th><th>Address</th></tr></thead><tbody>`;
+      outputs.forEach((out, i) => {
+        outputHtml += `<tr><td>${i}</td><td>${formatFee(out.value)}</td><td class="mono">${truncateHash(out.address, 16)}</td></tr>`;
+      });
+      outputHtml += '</tbody></table></div>';
+      outputPanel.innerHTML = outputHtml;
+      root.appendChild(outputPanel);
+    }
+
+    // Publisher signature / signer
     const sigPanel = document.createElement('div');
     sigPanel.className = 'panel';
-    sigPanel.innerHTML = `
-      <div class="panel-header">Publisher Signature</div>
-      <div class="panel-body">
-        <dl class="detail-grid">
-          <dt>Scheme</dt><dd>${formatScheme(tx.publisher_sig.scheme_id)}</dd>
-          <dt>Public Key</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${bytesToHex(tx.publisher_sig.public_key)}" title="View all documents by this publisher">${bytesToHex(tx.publisher_sig.public_key)}</a></dd>
-          <dt>Signature</dt><dd class="mono">${bytesToHex(tx.publisher_sig.signature)}</dd>
-        </dl>
-      </div>
-    `;
+    if (tx.signer) {
+      // UTXO-model RPC returns a flat `signer` hex string
+      sigPanel.innerHTML = `
+        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-body">
+          <dl class="detail-grid">
+            <dt>Signer</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${tx.signer}" title="View all documents by this publisher">${tx.signer}</a></dd>
+          </dl>
+        </div>
+      `;
+    } else if (tx.publisher_sig) {
+      sigPanel.innerHTML = `
+        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-body">
+          <dl class="detail-grid">
+            <dt>Scheme</dt><dd>${formatScheme(tx.publisher_sig.scheme_id)}</dd>
+            <dt>Public Key</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${bytesToHex(tx.publisher_sig.public_key)}" title="View all documents by this publisher">${bytesToHex(tx.publisher_sig.public_key)}</a></dd>
+            <dt>Signature</dt><dd class="mono">${bytesToHex(tx.publisher_sig.signature)}</dd>
+          </dl>
+        </div>
+      `;
+    } else {
+      sigPanel.innerHTML = `
+        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-body"><em>Not available</em></div>
+      `;
+    }
     root.appendChild(sigPanel);
 
     // Additional signatures
-    if (tx.additional_sigs.length > 0) {
+    if ((tx.additional_sigs || []).length > 0) {
       const addSigPanel = document.createElement('div');
       addSigPanel.className = 'panel';
-      let sigHtml = '<div class="panel-header">Additional Signatures (' + tx.additional_sigs.length + ')</div><div class="panel-body">';
-      tx.additional_sigs.forEach((sig, i) => {
+      const addSigs = tx.additional_sigs || [];
+      let sigHtml = '<div class="panel-header">Additional Signatures (' + addSigs.length + ')</div><div class="panel-body">';
+      addSigs.forEach((sig, i) => {
         sigHtml += `
           <dl class="detail-grid" style="margin-bottom:var(--gap)">
             <dt>Sig #${i + 1} Scheme</dt><dd>${formatScheme(sig.scheme_id)}</dd>

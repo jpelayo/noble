@@ -9,7 +9,7 @@
 //! 3. tx_id determinism: same tx → same tx_id
 
 use noble_codec::NobleCbor;
-use noble_core::{MetadataEntry, Transaction};
+use noble_core::{MetadataEntry, OutPoint, Transaction, TxIn, TxOut};
 use noble_core::genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
 
 fn test_chain_id() -> u32 {
@@ -57,27 +57,27 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
     (
         arb_hash256(),                                          // checksum
         1_600_000_000u64..1_800_000_000u64,                     // timestamp
-        1_000u64..100_000u64,                                   // fee
+        arb_hash256(),                                          // input txid
         arb_signature_envelope(),                               // publisher_sig
         prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
         prop::collection::vec(arb_metadata_entry(), 0..=4),     // metadata
     )
         .prop_map(
-            |(checksum, timestamp, fee, publisher_sig, additional_sigs, metadata)| Transaction {
+            |(checksum, timestamp, input_txid, publisher_sig, additional_sigs, metadata)| Transaction {
                 version: 1,
                 tx_type: 0,
+                inputs: vec![TxIn {
+                    prev_output: OutPoint { txid: input_txid, vout: 0 },
+                }],
+                outputs: vec![],
                 checksum,
                 timestamp,
-                fee,
-                recipient: None,
-                amount: None,
                 publisher_sig,
                 additional_sigs,
                 metadata,
                 encrypted_locator: None,
                 external_attestations: vec![],
                 gateway_address: None,
-                source_address: None,
             },
         )
 }
@@ -207,8 +207,8 @@ proptest! {
 fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
     (
         1_600_000_000u64..1_800_000_000u64, // timestamp
-        1_000u64..100_000u64,               // fee
         1u64..1_000_000u64,                 // amount (> 0)
+        arb_hash256(),                      // input txid
         arb_signature_envelope(),           // publisher_sig
         prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
         prop::collection::vec(arb_metadata_entry(), 0..=4), // metadata
@@ -217,8 +217,8 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
         .prop_map(
             |(
                 timestamp,
-                fee,
                 amount,
+                input_txid,
                 publisher_sig,
                 additional_sigs,
                 metadata,
@@ -227,18 +227,21 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                 Transaction {
                     version: 1,
                     tx_type: 1,
+                    inputs: vec![TxIn {
+                        prev_output: OutPoint { txid: input_txid, vout: 0 },
+                    }],
+                    outputs: vec![TxOut {
+                        value: amount,
+                        address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes)),
+                    }],
                     checksum: Hash256::ZERO,
                     timestamp,
-                    fee,
-                    recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes))),
-                    amount: Some(amount),
                     publisher_sig,
                     additional_sigs,
                     metadata,
                     encrypted_locator: None,
                     external_attestations: vec![],
                     gateway_address: None,
-                    source_address: None,
                 }
             },
         )
@@ -272,22 +275,23 @@ fn signed_transaction_roundtrip_100() {
         } else {
             sha256(&i.to_be_bytes())
         };
+        let outputs = if is_transfer {
+            vec![TxOut {
+                value: 1_000 * i + 1,
+                address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())),
+            }]
+        } else {
+            vec![]
+        };
         let mut tx = Transaction {
             version: 1,
             tx_type: if is_transfer { 1 } else { 0 },
+            inputs: vec![TxIn {
+                prev_output: OutPoint { txid: sha256(&i.to_le_bytes()), vout: 0 },
+            }],
+            outputs,
             checksum,
             timestamp: 1_700_000_000 + i,
-            fee: 1_000 + i,
-            recipient: if is_transfer {
-                Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())))
-            } else {
-                None
-            },
-            amount: if is_transfer {
-                Some(1_000 * i + 1)
-            } else {
-                None
-            },
             publisher_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.clone(),
@@ -298,7 +302,6 @@ fn signed_transaction_roundtrip_100() {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            source_address: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -329,15 +332,18 @@ fn signing_message_includes_tx_type() {
     let (_, recipient_pk) = ed25519::generate_keypair();
     let priv_key = NoblePrivateKey::Ed25519(sk);
 
+    let input = TxIn {
+        prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
+    };
+
     // Notarization tx
     let mut tx0 = Transaction {
         version: 1,
         tx_type: 0,
+        inputs: vec![input.clone()],
+        outputs: vec![],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: None,
-        amount: None,
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -348,20 +354,21 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
     let msg0 = tx0.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
 
-    // Transfer tx (same timestamp/fee but different type)
+    // Transfer tx (same timestamp but different type)
     let mut tx1 = Transaction {
         version: 1,
         tx_type: 1,
+        inputs: vec![input],
+        outputs: vec![TxOut {
+            value: 50_000,
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())),
+        }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone()))),
-        amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -372,7 +379,6 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
@@ -388,14 +394,20 @@ fn signing_message_includes_recipient() {
     let (_, r1_pk) = ed25519::generate_keypair();
     let (_, r2_pk) = ed25519::generate_keypair();
 
+    let input = TxIn {
+        prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
+    };
+
     let tx1 = Transaction {
         version: 1,
         tx_type: 1,
+        inputs: vec![input.clone()],
+        outputs: vec![TxOut {
+            value: 50_000,
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r1_pk)),
+        }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r1_pk))),
-        amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -406,17 +418,18 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
 
     let tx2 = Transaction {
         version: 1,
         tx_type: 1,
+        inputs: vec![input],
+        outputs: vec![TxOut {
+            value: 50_000,
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r2_pk)),
+        }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: Some(noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r2_pk))),
-        amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -427,7 +440,6 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -444,16 +456,22 @@ fn signing_message_includes_recipient() {
 fn signing_message_includes_amount() {
     let (_sk, pk) = ed25519::generate_keypair();
     let (_, r_pk) = ed25519::generate_keypair();
-    let recipient = NoblePublicKey::Ed25519(r_pk);
+    let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r_pk));
+
+    let input = TxIn {
+        prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
+    };
 
     let tx1 = Transaction {
         version: 1,
         tx_type: 1,
+        inputs: vec![input.clone()],
+        outputs: vec![TxOut {
+            value: 50_000,
+            address: recipient.clone(),
+        }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: Some(noble_core::NobleAddress::Noble(recipient.clone())),
-        amount: Some(50_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -464,17 +482,18 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
 
     let tx2 = Transaction {
         version: 1,
         tx_type: 1,
+        inputs: vec![input],
+        outputs: vec![TxOut {
+            value: 100_000,
+            address: recipient,
+        }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        fee: 1_000,
-        recipient: Some(noble_core::NobleAddress::Noble(recipient)),
-        amount: Some(100_000),
         publisher_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
@@ -485,7 +504,6 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();

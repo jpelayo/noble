@@ -10,7 +10,7 @@ use noble_consensus::{
     ConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo, CyclePhase,
     ValidatorList, VotingStrategy,
 };
-use noble_core::{Block, BlockHeader, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION};
+use noble_core::{Block, BlockHeader, OutPoint, TxIn, TxOut, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION};
 use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{
     ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
@@ -70,87 +70,150 @@ fn storage_only_indexes_notarization_checksums() {
     let val_priv = NoblePrivateKey::Ed25519(sk.to_vec());
     let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
 
+    let val_addr = noble_core::NobleAddress::Noble(val_pub.clone());
+
+    // Helper to build and commit a coinbase-only block
+    let mut prev_hash = Hash256::ZERO;
+    let mut first_coinbase_id = Hash256::ZERO;
+
+    // ── Blocks 1-7: coinbase only (7 blocks for maturity) ──
+    for h in 1..=7u64 {
+        let subsidy_h = noble_core::subsidy_at_height(h);
+        let mut cb = noble_core::Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: noble_core::TX_TYPE_COINBASE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: vec![TxOut { value: subsidy_h, address: val_addr.clone() }],
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000 + h,
+            publisher_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            },
+            additional_sigs: vec![], metadata: vec![], encrypted_locator: None,
+            external_attestations: vec![], gateway_address: None,
+        };
+        let msg = cb.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        cb.publisher_sig = priv_key.sign(&msg).unwrap();
+        let cb_id = cb.compute_tx_id(test_chain_id()).unwrap();
+        if h == 1 { first_coinbase_id = cb_id; }
+
+        let ids = vec![cb_id];
+        let mr = noble_core::compute_merkle_root(&ids);
+        let mut hdr = BlockHeader {
+            version: PROTOCOL_VERSION, prev_block_hash: prev_hash, merkle_root: mr,
+            timestamp: 1_700_000_000 + h, height: h, tx_count: 1,
+            validator_id: val_pub.clone(),
+            validator_sig: SignatureEnvelope {
+                scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            },
+        };
+        let msg = hdr.compute_signing_message().unwrap();
+        hdr.validator_sig = val_priv.sign(&msg).unwrap();
+        let blk = Block { header: hdr, transactions: vec![cb] };
+        let bh = blk.header.compute_block_hash().unwrap();
+        storage.commit_block(&blk, &bh, &ids).unwrap_or_else(|e| panic!("block {h}: {e}"));
+        prev_hash = bh;
+    }
+
+    let subsidy = noble_core::subsidy_at_height(1);
+
+    // ── Block 8: notarization + key rotation spending mature coinbase ──
+
     // Notarization tx (real checksum — should be indexed)
+    // Spends the coinbase output from block 1 (now mature after 7 blocks)
     let doc_hash = sha256(b"test-document-for-integration");
     let mut notarization = noble_core::Transaction {
         version: PROTOCOL_VERSION,
         tx_type: TX_TYPE_NOTARIZATION,
+        inputs: vec![TxIn {
+            prev_output: OutPoint { txid: first_coinbase_id, vout: 0 },
+        }],
+        outputs: vec![TxOut { value: subsidy - 2, address: val_addr.clone() }], // change
         checksum: doc_hash,
-        timestamp: 1_700_000_000,
-        fee: noble_core::MIN_TX_FEE,
-        recipient: None,
-        amount: None,
+        timestamp: 1_700_000_008,
         publisher_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: pk.to_vec(),
-            signature: vec![],
+            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
-    let msg = notarization
-        .compute_signing_message_for_chain(test_chain_id())
-        .unwrap();
+    let msg = notarization.compute_signing_message_for_chain(test_chain_id()).unwrap();
     notarization.publisher_sig = priv_key.sign(&msg).unwrap();
     let notarization_id = notarization.compute_tx_id(test_chain_id()).unwrap();
 
     // Key rotation tx (zero checksum — should NOT be indexed)
+    // Uses the change output from the notarization (in-block spending)
     let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
     let mut key_rotation = noble_core::Transaction {
         version: PROTOCOL_VERSION,
         tx_type: noble_core::TX_TYPE_KEY_ROTATION,
+        inputs: vec![TxIn {
+            prev_output: OutPoint { txid: notarization_id, vout: 0 }, // spend notarization change
+        }],
+        outputs: vec![TxOut {
+            value: subsidy - 3, // change after another 1 atomic fee
+            address: noble_core::NobleAddress::Noble(new_key),
+        }],
         checksum: Hash256::ZERO,
-        timestamp: 1_700_000_000,
-        fee: noble_core::MIN_TX_FEE,
-        recipient: Some(noble_core::NobleAddress::Noble(new_key)),
-        amount: None,
+        timestamp: 1_700_000_008,
         publisher_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: pk.to_vec(),
-            signature: vec![],
+            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
         metadata: vec![],
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-        source_address: None,
     };
-    let msg = key_rotation
-        .compute_signing_message_for_chain(test_chain_id())
-        .unwrap();
+    let msg = key_rotation.compute_signing_message_for_chain(test_chain_id()).unwrap();
     key_rotation.publisher_sig = priv_key.sign(&msg).unwrap();
     let key_rotation_id = key_rotation.compute_tx_id(test_chain_id()).unwrap();
 
-    // Build and commit block at height 1 (genesis height 0 has zero subsidy)
-    let transactions = vec![notarization, key_rotation];
-    let tx_ids = vec![notarization_id, key_rotation_id];
+    // Block 2 with coinbase + notarization + key rotation
+    let subsidy_2 = noble_core::subsidy_at_height(8);
+    let total_fees = 2 + 1; // notarization fee + key_rotation fee
+    let mut coinbase2 = noble_core::Transaction {
+        version: PROTOCOL_VERSION,
+        tx_type: noble_core::TX_TYPE_COINBASE,
+        inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+        outputs: vec![TxOut { value: subsidy_2 + total_fees, address: val_addr }],
+        checksum: Hash256::ZERO,
+        timestamp: 1_700_000_008,
+        publisher_sig: SignatureEnvelope {
+            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
+        gateway_address: None,
+    };
+    let msg = coinbase2.compute_signing_message_for_chain(test_chain_id()).unwrap();
+    coinbase2.publisher_sig = priv_key.sign(&msg).unwrap();
+    let coinbase2_id = coinbase2.compute_tx_id(test_chain_id()).unwrap();
+
+    let transactions = vec![coinbase2, notarization, key_rotation];
+    let tx_ids = vec![coinbase2_id, notarization_id, key_rotation_id];
     let merkle_root = noble_core::compute_merkle_root(&tx_ids);
 
     let mut header = BlockHeader {
         version: PROTOCOL_VERSION,
-        prev_block_hash: Hash256::ZERO,
+        prev_block_hash: prev_hash,
         merkle_root,
-        timestamp: 1_700_000_000,
-        height: 1,
-        tx_count: 2,
+        timestamp: 1_700_000_008,
+        height: 8,
+        tx_count: 3,
         validator_id: val_pub,
         validator_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: pk.to_vec(),
-            signature: vec![],
+            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
     };
     let msg = header.compute_signing_message().unwrap();
     header.validator_sig = val_priv.sign(&msg).unwrap();
-    let block = Block {
-        header,
-        transactions,
-    };
+    let block = Block { header, transactions };
     let block_hash = block.header.compute_block_hash().unwrap();
 
     storage

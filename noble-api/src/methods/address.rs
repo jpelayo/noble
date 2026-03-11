@@ -35,6 +35,13 @@ pub trait AddressApi {
         limit: u32,
     ) -> Result<AddressHistoryResponse, ErrorObjectOwned>;
 
+    /// Get all unspent transaction outputs (UTXOs) for an address.
+    #[method(name = "getAddressUtxos")]
+    async fn get_address_utxos(
+        &self,
+        address: String,
+    ) -> Result<AddressUtxosResponse, ErrorObjectOwned>;
+
     /// Validate whether a string is a valid NOBLE or Bitcoin address.
     #[method(name = "validateAddress")]
     async fn validate_address(
@@ -100,6 +107,31 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             total,
             page,
             limit: clamped_limit,
+        })
+    }
+
+    async fn get_address_utxos(
+        &self,
+        address: String,
+    ) -> Result<AddressUtxosResponse, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let storage = self.storage.read();
+        let utxos = storage.get_address_utxos(&addr).map_err(ApiError::from)?;
+
+        let entries: Vec<UtxoResponse> = utxos
+            .iter()
+            .map(|(outpoint, entry)| UtxoResponse {
+                txid: hash_to_hex(&outpoint.txid),
+                vout: outpoint.vout,
+                value: entry.value,
+                height: entry.height,
+                is_coinbase: entry.is_coinbase,
+            })
+            .collect();
+
+        Ok(AddressUtxosResponse {
+            address,
+            utxos: entries,
         })
     }
 

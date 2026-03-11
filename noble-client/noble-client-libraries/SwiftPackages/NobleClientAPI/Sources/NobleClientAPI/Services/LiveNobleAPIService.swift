@@ -235,18 +235,20 @@ public struct LiveNobleAPIService: NobleAPIService {
             ?? NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
         let txType: TransactionType = (dto?.tx_type ?? "notarization") == "transfer" ? .transfer : .notarization
         let status: TransactionStatus = (receipt?.status ?? "pending") == "confirmed" ? .confirmed : .pending
-        let recipient = dto?.recipient.flatMap { NobleAddress(wireHex: $0) }
         let checksum = dto?.checksum.flatMap { Hash256(hex: $0) }
         let timestamp = dto?.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+
+        let inputs = (dto?.inputs ?? []).map { TxInput(txid: $0.txid, vout: $0.vout) }
+        let outputs = (dto?.outputs ?? []).map { TxOutput(value: $0.value, address: $0.address) }
 
         return TransactionRecord(
             txId: txId,
             txType: txType,
             status: status,
-            from: signer,
-            to: recipient,
-            amount: NobleAmount(atomic: dto?.amount ?? 0),
-            fee: NobleAmount(atomic: dto?.fee ?? 0),
+            signer: signer,
+            totalOutput: dto?.total_output ?? 0,
+            inputs: inputs,
+            outputs: outputs,
             blockHeight: receipt?.block_height,
             timestamp: timestamp,
             checksum: checksum

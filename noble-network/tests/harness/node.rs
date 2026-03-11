@@ -12,7 +12,7 @@ use noble_consensus::{
 use noble_core::{Block, BlockHeader, Transaction};
 use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
-use noble_mempool::{Mempool, MempoolConfig, NoBalanceLookup, NoChainLookup};
+use noble_mempool::{Mempool, MempoolConfig, NoUtxoLookup, NoChainLookup};
 use noble_network::config::NetworkConfig;
 use noble_network::messages::{NetworkCommand, NetworkEvent};
 use noble_network::service::NetworkHandle;
@@ -145,6 +145,10 @@ impl TestNode {
             .take(100)
             .map(|e| e.tx.clone())
             .collect();
+        struct NoopLookup;
+        impl noble_consensus::proposal::UtxoValueLookup for NoopLookup {
+            fn utxo_value(&self, _: &noble_core::OutPoint) -> Option<u64> { None }
+        }
         noble_consensus::propose_block(
             &txs,
             tip_hash,
@@ -154,6 +158,7 @@ impl TestNode {
             &self.private_key,
             &self.public_key,
             4 * 1024 * 1024,
+            &NoopLookup,
         )
     }
 
@@ -196,7 +201,7 @@ impl TestNode {
                 for tx in &txs {
                     let _ = self
                         .mempool
-                        .admit(tx, now, &NoChainLookup, &NoBalanceLookup, 0);
+                        .admit(tx, now, &NoChainLookup, &NoUtxoLookup, 0);
                 }
             }
             CycleIo::EvictTransactions(tx_ids) => {

@@ -277,13 +277,16 @@ impl<S: StorageEngine> noble_mempool::ChainLookup for BadgeChainLookup<'_, S> {
     }
 }
 
-struct BadgeBalanceLookup<'a, S: StorageEngine> {
+struct BadgeUtxoLookup<'a, S: StorageEngine> {
     storage: &'a S,
 }
 
-impl<S: StorageEngine> noble_mempool::BalanceLookup for BadgeBalanceLookup<'_, S> {
-    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-        self.storage.get_balance(address).unwrap_or(0)
+impl<S: StorageEngine> noble_mempool::UtxoLookup for BadgeUtxoLookup<'_, S> {
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<(u64, bool, u64)> {
+        match self.storage.get_utxo(outpoint) {
+            Ok(Some(entry)) => Some((entry.value, entry.is_coinbase, entry.height)),
+            _ => None,
+        }
     }
 }
 
@@ -322,11 +325,10 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
     let tx = noble_core::Transaction {
         version: noble_core::PROTOCOL_VERSION,
         tx_type,
+        inputs: vec![], // Badge txs have no UTXO inputs (zero-fee governance)
+        outputs: vec![],
         checksum: Hash256::ZERO,
         timestamp: now,
-        fee: 0,
-        recipient: None,
-        amount: None,
         publisher_sig: noble_crypto::SignatureEnvelope {
             scheme_id: pk.scheme_id(),
             public_key: pk.key_bytes().to_vec(),
@@ -337,7 +339,6 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
         encrypted_locator: None,
         external_attestations: Vec::new(),
         gateway_address: None,
-        source_address: None,
     };
 
     // Sign the transaction.
@@ -362,11 +363,11 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
             .map(|t| t.height)
             .unwrap_or(0);
         let chain_lookup = BadgeChainLookup { storage: &*storage };
-        let balance_lookup = BadgeBalanceLookup { storage: &*storage };
+        let utxo_lookup = BadgeUtxoLookup { storage: &*storage };
 
         let mut mempool = state.mempool.lock();
         mempool
-            .admit(&signed_tx, now, &chain_lookup, &balance_lookup, chain_height)
+            .admit(&signed_tx, now, &chain_lookup, &utxo_lookup, chain_height)
             .map_err(|e| ApiError::TxRejected(e.to_string()))?
     };
 

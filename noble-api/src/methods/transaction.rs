@@ -11,7 +11,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use noble_codec::NobleCbor;
 use noble_core::Transaction;
 use noble_crypto::Hash256;
-use noble_mempool::{BalanceLookup, ChainLookup};
+use noble_mempool::{UtxoLookup, ChainLookup};
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
 
@@ -34,14 +34,17 @@ impl<S: StorageEngine> ChainLookup for StorageChainLookup<'_, S> {
     }
 }
 
-/// Adapter that implements `BalanceLookup` by querying the storage engine.
-struct StorageBalanceLookup<'a, S: StorageEngine> {
+/// Adapter that implements `UtxoLookup` by querying the storage engine.
+struct StorageUtxoLookup<'a, S: StorageEngine> {
     storage: &'a S,
 }
 
-impl<S: StorageEngine> BalanceLookup for StorageBalanceLookup<'_, S> {
-    fn get_balance(&self, address: &noble_core::NobleAddress) -> u64 {
-        self.storage.get_balance(address).unwrap_or(0)
+impl<S: StorageEngine> UtxoLookup for StorageUtxoLookup<'_, S> {
+    fn get_utxo(&self, outpoint: &noble_core::OutPoint) -> Option<(u64, bool, u64)> {
+        match self.storage.get_utxo(outpoint) {
+            Ok(Some(entry)) => Some((entry.value, entry.is_coinbase, entry.height)),
+            _ => None,
+        }
     }
 }
 
@@ -105,11 +108,11 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
                 .map(|t| t.height)
                 .unwrap_or(0);
             let chain_lookup = StorageChainLookup { storage: &*storage };
-            let balance_lookup = StorageBalanceLookup { storage: &*storage };
+            let utxo_lookup = StorageUtxoLookup { storage: &*storage };
 
             let mut mempool = self.mempool.lock();
             mempool
-                .admit(&tx, now, &chain_lookup, &balance_lookup, chain_height)
+                .admit(&tx, now, &chain_lookup, &utxo_lookup, chain_height)
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 

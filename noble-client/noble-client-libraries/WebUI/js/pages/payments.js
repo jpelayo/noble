@@ -159,7 +159,7 @@ export function init(root, ctx) {
         for (const tx of txs) {
             const dir = txDirection(tx);
             const counterparty = tx.counterparty ? truncate(tx.counterparty, 8) : '\u2014';
-            const amount = tx.amount ? formatAmount(tx.amount) : '\u2014';
+            const amount = tx.total_output ? formatAmount(tx.total_output) : (tx.outputs?.[0]?.value ? formatAmount(tx.outputs[0].value) : '\u2014');
             const status = tx.confirmations >= 6 ? 'confirmed' : (tx.confirmations > 0 ? 'pending' : 'pending');
             const ago = timeAgo(tx.timestamp);
             const isExpanded = expandedTx === tx.txId;
@@ -242,12 +242,20 @@ export function init(root, ctx) {
     }
 
     function renderTxDetail(tx) {
+        const outputsHtml = (tx.outputs || []).map((o, i) =>
+            `<dt>Output #${i}</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">\u25C6 ${formatAmount(o.value)} \u2192 ${esc(o.address)}</dd>`
+        ).join('');
+        const inputsHtml = (tx.inputs || []).map((inp, i) =>
+            `<dt>Input #${i}</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(inp.txid)}:${inp.vout}</dd>`
+        ).join('');
         return `<div class="detail-grid" style="padding:var(--gap-sm) 0">
             <dt>TX ID</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.txId)}</dd>
             <dt>Block Height</dt><dd>${tx.blockHeight || '\u2014'}</dd>
             <dt>Confirmations</dt><dd>${tx.confirmations}</dd>
             <dt>Type</dt><dd>${esc(tx.type)}</dd>
-            <dt>Fee</dt><dd class="mono">\u25C6 ${formatAmount(tx.fee || 0)}</dd>
+            <dt>Total Output</dt><dd class="mono">\u25C6 ${formatAmount(tx.total_output || 0)}</dd>
+            ${outputsHtml}
+            ${inputsHtml}
             ${tx.counterparty ? `<dt>Counterparty</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.counterparty)}</dd>` : ''}
             <dt>Time</dt><dd>${new Date(tx.timestamp * 1000).toLocaleString()}</dd>
         </div>`;

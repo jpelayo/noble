@@ -308,15 +308,38 @@ final class WebBridgeHandler {
         var dict: [String: Any] = [
             "txId": tx.txId.hex,
             "txType": tx.txType.label,
+            "type": tx.txType.label,
             "status": tx.status.rawValue,
-            "from": tx.from.wireHex,
-            "amount": tx.amount.atomic,
-            "fee": tx.fee.atomic,
+            "signer": tx.signer.wireHex,
+            "total_output": tx.totalOutput,
+            "inputs": tx.inputs.map { ["txid": $0.txid, "vout": $0.vout] as [String: Any] },
+            "outputs": tx.outputs.map { ["value": $0.value, "address": $0.address] as [String: Any] },
         ]
-        if let to = tx.to { dict["to"] = to.wireHex }
         if let h = tx.blockHeight { dict["blockHeight"] = h }
         if let t = tx.timestamp { dict["timestamp"] = t.timeIntervalSince1970 }
         if let c = tx.checksum { dict["checksum"] = c.hex }
+
+        // Derived fields for WebUI compatibility
+        let walletAddr = appState.walletAddress ?? ""
+        let firstOutputAddr = tx.outputs.first?.address ?? ""
+        if tx.txType == .transfer {
+            if tx.signer.wireHex == walletAddr {
+                dict["direction"] = "outgoing"
+                // Counterparty is the first output that isn't us
+                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? firstOutputAddr
+                dict["counterparty"] = counterparty
+            } else {
+                dict["direction"] = "incoming"
+                dict["counterparty"] = tx.signer.wireHex
+            }
+        }
+        // Confirmations: compute from current block height if possible
+        if let txHeight = tx.blockHeight {
+            let tipHeight = UInt64(appState.blockHeight)
+            dict["confirmations"] = tipHeight >= txHeight ? (tipHeight - txHeight + 1) : 0
+        } else {
+            dict["confirmations"] = 0
+        }
         return dict
     }
 
@@ -356,16 +379,24 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let feeAtomic = params["fee"] as? UInt64 ?? 2000
+            guard let feeAtomic = params["fee"] as? UInt64 else {
+                throw BridgeError.missingParam("fee")
+            }
             let metadata = params["metadata"] as? [[String: String]] ?? []
             let metadataItems = metadata.map {
                 MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
             }
 
+            // Parse UTXOs from JS params
+            let utxos = try parseUtxoParams(params)
+            let changeAddress = walletChangeAddress()
+
             let txHex = try appState.transactionSigner.signNotarization(
                 checksum: checksum,
                 metadata: metadataItems,
                 fee: NobleAmount(atomic: feeAtomic),
+                utxos: utxos,
+                changeAddress: changeAddress,
                 privateKey: privateKey,
                 chainId: NobleProtocol.primaryChainId
             )
@@ -382,21 +413,59 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let feeAtomic = params["fee"] as? UInt64 ?? 2000
+            guard let feeAtomic = params["fee"] as? UInt64 else {
+                throw BridgeError.missingParam("fee")
+            }
+
+            // Parse UTXOs from JS params
+            let utxos = try parseUtxoParams(params)
+            let changeAddress = walletChangeAddress()
 
             let txHex = try appState.transactionSigner.signTransfer(
                 to: to,
                 amount: NobleAmount(atomic: amountAtomic),
                 fee: NobleAmount(atomic: feeAtomic),
+                utxos: utxos,
+                changeAddress: changeAddress,
                 privateKey: privateKey,
-                chainId: NobleProtocol.primaryChainId,
-                sourceAddress: nil
+                chainId: NobleProtocol.primaryChainId
             )
             return ["txHex": txHex]
 
         default:
             throw BridgeError.unknownAction(action)
         }
+    }
+
+    // MARK: - UTXO Helpers
+
+    /// Parse UTXO array from JS bridge params.
+    /// Expects params["utxos"] as [[String: Any]] with keys: txid (hex), vout (UInt32), value (UInt64).
+    private func parseUtxoParams(_ params: [String: Any]) throws -> [UtxoOutpoint] {
+        guard let utxoArr = params["utxos"] as? [[String: Any]] else {
+            throw BridgeError.missingParam("utxos")
+        }
+        return utxoArr.compactMap { dict in
+            guard let txidHex = dict["txid"] as? String,
+                  let vout = dict["vout"] as? UInt32,
+                  let value = dict["value"] as? UInt64 else { return nil }
+            return UtxoOutpoint(txidHex: txidHex, vout: vout, value: value)
+        }
+    }
+
+    /// Get the wallet's change address as wire bytes (hex-decoded wallet address).
+    private func walletChangeAddress() -> [UInt8] {
+        guard let addrHex = appState.walletAddress else { return [] }
+        var bytes = [UInt8]()
+        var idx = addrHex.startIndex
+        while idx < addrHex.endIndex {
+            let next = addrHex.index(idx, offsetBy: 2, limitedBy: addrHex.endIndex) ?? addrHex.endIndex
+            if let byte = UInt8(addrHex[idx..<next], radix: 16) {
+                bytes.append(byte)
+            }
+            idx = next
+        }
+        return bytes
     }
 
     // MARK: - Security Handler

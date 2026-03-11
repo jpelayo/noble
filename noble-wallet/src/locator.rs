@@ -66,6 +66,14 @@ mod tests {
         ks.unlock("test-pass-long").unwrap();
         let signer = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
 
+        let addr = noble_core::NobleAddress::Noble(signer.clone());
+        let utxo = crate::builder::SelectedUtxo {
+            outpoint: noble_core::OutPoint {
+                txid: sha256(signer.key_bytes()),
+                vout: 0,
+            },
+            value: 100_000,
+        };
         crate::builder::TransactionBuilder::build_notarization_with_locator(
             &ks,
             &signer,
@@ -76,6 +84,8 @@ mod tests {
             recipients,
             attestations,
             test_chain_id(),
+            &[utxo],
+            &addr,
         )
         .unwrap()
     }

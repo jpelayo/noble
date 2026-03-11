@@ -227,30 +227,30 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             let nb = storage
                 .get_balance(&noble_core::NobleAddress::Noble(pk.clone()))
                 .unwrap_or(0);
-            noble_bal += nb;
-            total_balance += nb;
+            noble_bal = noble_bal.saturating_add(nb);
+            total_balance = total_balance.saturating_add(nb);
 
             // Hash160 + Taproot buckets (secp256k1 keys only)
             if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
                 let hb = storage.get_balance(&h160_addr).unwrap_or(0);
-                hash160_bal += hb;
-                total_balance += hb;
+                hash160_bal = hash160_bal.saturating_add(hb);
+                total_balance = total_balance.saturating_add(hb);
             }
             if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
                 let tb = storage.get_balance(&tap_addr).unwrap_or(0);
-                taproot_bal += tb;
-                total_balance += tb;
+                taproot_bal = taproot_bal.saturating_add(tb);
+                total_balance = total_balance.saturating_add(tb);
             }
 
             // Pending debits per bucket (bucket-aware)
             let noble_addr = noble_core::NobleAddress::Noble(pk.clone());
-            total_pending += mempool.pending_debit_for_address(&noble_addr);
+            total_pending = total_pending.saturating_add(mempool.pending_debit_for_address(&noble_addr));
 
             if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
-                total_pending += mempool.pending_debit_for_address(&h160_addr);
+                total_pending = total_pending.saturating_add(mempool.pending_debit_for_address(&h160_addr));
             }
             if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
-                total_pending += mempool.pending_debit_for_address(&tap_addr);
+                total_pending = total_pending.saturating_add(mempool.pending_debit_for_address(&tap_addr));
             }
         }
         drop(mempool);

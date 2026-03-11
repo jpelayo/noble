@@ -4,7 +4,7 @@
 import Foundation
 import NobleClientCore
 
-/// Live implementation of ``TransactionSigning`` using ``TransactionBuilder``.
+/// Live implementation of ``TransactionSigning`` using ``TransactionBuilder`` (UTXO model).
 public struct LiveTransactionSigner: TransactionSigning {
     private let builder = TransactionBuilder()
 
@@ -14,17 +14,19 @@ public struct LiveTransactionSigner: TransactionSigning {
         to: NobleAddress,
         amount: NobleAmount,
         fee: NobleAmount,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
         privateKey: Data,
-        chainId: UInt32 = NobleProtocol.primaryChainId,
-        sourceAddress: Data? = nil
+        chainId: UInt32 = NobleProtocol.primaryChainId
     ) throws -> String {
         try builder.buildTransfer(
             to: to,
             amount: amount,
             fee: fee,
+            utxos: utxos,
+            changeAddress: changeAddress,
             privateKey: privateKey,
-            chainId: chainId,
-            sourceAddress: sourceAddress
+            chainId: chainId
         )
     }
 
@@ -32,6 +34,8 @@ public struct LiveTransactionSigner: TransactionSigning {
         checksum: Hash256,
         metadata: [MetadataItem],
         fee: NobleAmount,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
         privateKey: Data,
         chainId: UInt32 = NobleProtocol.primaryChainId
     ) throws -> String {
@@ -39,6 +43,8 @@ public struct LiveTransactionSigner: TransactionSigning {
             checksum: checksum,
             metadata: metadata,
             fee: fee,
+            utxos: utxos,
+            changeAddress: changeAddress,
             privateKey: privateKey,
             chainId: chainId
         )
