@@ -121,13 +121,15 @@ export function init(root, ctx) {
         const actions = document.createElement('div');
         actions.style.cssText = 'display:flex;gap:var(--gap-xs);align-items:center;';
 
-        // Edit (Resume)
+        // Resume
         const editBtn = document.createElement('button');
         editBtn.className = 'btn btn-primary btn-sm';
-        editBtn.textContent = 'Edit';
+        editBtn.textContent = 'Resume';
         editBtn.title = 'Resume editing this draft';
         editBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            // Store draft ID so documents page picks it up on init
+            if (window.App) window.App._pendingDraftId = d.id;
             Bridge.call('noble_app', 'navigateTo', { section: 'documents' });
         });
         actions.appendChild(editBtn);

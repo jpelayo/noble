@@ -54,8 +54,22 @@ const App = {
 
     /** Push a state patch to the current page. */
     updateState(patch) {
+        const wasConnected = appState.isConnected;
+        const hadWallet = appState.hasWallet;
         Object.assign(appState, patch);
         App._updateChainBar();
+
+        // If connection or wallet state changed, re-mount the page so it re-renders
+        // from scratch (pages check isConnected on init and bail early if false).
+        if (wasConnected !== appState.isConnected || hadWallet !== appState.hasWallet) {
+            if (currentRoute) {
+                const route = currentRoute;
+                currentRoute = null; // force navigateTo to re-mount
+                App.navigateTo(route);
+            }
+            return;
+        }
+
         if (currentPage && currentPage.refresh) {
             currentPage.refresh(appState);
         }
@@ -115,25 +129,26 @@ window.App = App;
 
 // Initialize on load
 async function boot() {
+    // Start with NativeConfig (injected synchronously by Swift before scripts run)
+    if (window.NativeConfig) {
+        Object.assign(appState, window.NativeConfig);
+    }
+
+    // Then fetch full state from bridge (may have more fields like walletAddress)
     try {
         const state = await Bridge.call('noble_app', 'getState');
-        appState = state;
+        Object.assign(appState, state);
     } catch {
-        appState = {
-            isConnected: false,
-            hasWallet: false,
-            walletAddress: '',
-            network: '',
-            blockHeight: 0,
-            selectedSection: 'home'
-        };
+        // NativeConfig already provides the basics; fill in any missing defaults
+        if (appState.isConnected === undefined) appState.isConnected = false;
+        if (appState.hasWallet === undefined) appState.hasWallet = false;
     }
 
     // Show chain bar if connected
     App._updateChainBar();
 
     // Use NativeConfig initial route if available, otherwise default to home
-    const initialRoute = (window.NativeConfig && window.NativeConfig.initialRoute) || appState.selectedSection || 'home';
+    const initialRoute = appState.initialRoute || appState.selectedSection || 'home';
     App.navigateTo(initialRoute);
 }
 

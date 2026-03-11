@@ -28,17 +28,23 @@ export function init(root, ctx) {
     let editingDraftId = null;  // ID of draft being resumed
     let balanceData = null;     // cached balance { available }
 
-    // Drafts
-    let drafts = [];
-    loadDrafts();
+    // Check if we're resuming a draft (set by drafts page)
+    if (window.App && window.App._pendingDraftId) {
+        resumePendingDraft(window.App._pendingDraftId);
+    }
 
-    async function loadDrafts() {
+    async function resumePendingDraft(draftId) {
+        window.App._pendingDraftId = null;
         try {
             const res = await Bridge.call('noble_app', 'getDrafts');
             if (!alive) return;
-            drafts = res.drafts || [];
-            if (step === -1) render();
-        } catch { drafts = []; }
+            const draft = (res.drafts || []).find(d => d.id === draftId);
+            if (draft && draft.state) {
+                editingDraftId = draft.id;
+                restoreWizardState(draft.state);
+                render();
+            }
+        } catch { /* draft not found, stay on landing */ }
     }
 
     function getWizardState() {
@@ -77,13 +83,6 @@ export function init(root, ctx) {
         } catch { /* best effort */ }
         editingDraftId = null;
         resetWizard();
-        await loadDrafts();
-        render();
-    }
-
-    async function deleteDraft(id) {
-        try { await Bridge.call('noble_app', 'deleteDraft', { id }); } catch {}
-        drafts = drafts.filter(d => d.id !== id);
         render();
     }
 
@@ -121,117 +120,70 @@ export function init(root, ctx) {
 
     function renderLanding() {
         root.classList.add('page-content');
-        const header = document.createElement('div');
-        header.className = 'page-header';
-        header.innerHTML = '<h1>Documents</h1><p>Register documents on the NOBLE blockchain</p>';
-        root.appendChild(header);
 
-        // Drafts section
-        if (drafts.length > 0) {
-            const draftsSection = document.createElement('div');
-            draftsSection.style.marginBottom = 'var(--gap-lg)';
-
-            const draftsHeader = document.createElement('h3');
-            draftsHeader.style.cssText = 'font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap-sm);';
-            draftsHeader.textContent = `Drafts (${drafts.length})`;
-            draftsSection.appendChild(draftsHeader);
-
-            for (const d of drafts) {
-                const card = document.createElement('div');
-                card.className = 'panel';
-                card.style.cssText = 'padding:var(--gap-sm) var(--gap);margin-bottom:var(--gap-xs);cursor:pointer;';
-                card.addEventListener('mouseenter', () => { card.style.borderColor = 'var(--accent)'; });
-                card.addEventListener('mouseleave', () => { card.style.borderColor = ''; });
-
-                const row = document.createElement('div');
-                row.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);';
-
-                const icon = document.createElement('span');
-                icon.textContent = '\u{1F4DD}';
-                row.appendChild(icon);
-
-                const info = document.createElement('div');
-                info.style.flex = '1';
-                info.innerHTML = `<div style="font-weight:500;font-size:var(--font-size-sm)">${esc(d.name)}${d.fileCount > 1 ? ` (+${d.fileCount - 1})` : ''}</div>`;
-                if (d.reason) {
-                    info.innerHTML += `<div style="font-size:var(--font-size-xs);color:var(--warning)">${esc(d.reason)}</div>`;
-                }
-                const stepLabel = d.state && d.state.step >= 0 ? STEP_NAMES[d.state.step] : '';
-                if (stepLabel) {
-                    info.innerHTML += `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">Paused at: ${stepLabel}</div>`;
-                }
-                row.appendChild(info);
-
-                const resumeBtn = document.createElement('button');
-                resumeBtn.className = 'btn btn-primary btn-sm';
-                resumeBtn.textContent = 'Resume';
-                resumeBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    editingDraftId = d.id;
-                    restoreWizardState(d.state);
-                    render();
-                });
-                row.appendChild(resumeBtn);
-
-                const delBtn = document.createElement('button');
-                delBtn.className = 'btn btn-sm';
-                delBtn.textContent = '\u2715';
-                delBtn.style.cssText = 'color:var(--text-muted);min-height:auto;padding:2px 8px;';
-                delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteDraft(d.id); });
-                row.appendChild(delBtn);
-
-                card.appendChild(row);
-                card.addEventListener('click', () => {
-                    editingDraftId = d.id;
-                    restoreWizardState(d.state);
-                    render();
-                });
-                draftsSection.appendChild(card);
-            }
-            root.appendChild(draftsSection);
-        }
-
-        // New registration button
         const disabled = !state.isConnected || !state.hasWallet;
-        if (drafts.length === 0) {
-            root.appendChild(emptyState({
-                icon: '\u{1F4C4}',
-                title: 'Register a Document',
-                subtitle: disabled
-                    ? 'Connect to a node and set up a wallet to register documents.'
-                    : 'Anchor the SHA-256 checksum of any file permanently on-chain.',
-                cta: 'Register Document',
-                disabled,
-                onCta: () => { step = 0; render(); }
-            }));
-        } else {
-            const newBtn = document.createElement('button');
-            newBtn.className = 'btn btn-primary';
-            newBtn.textContent = '+ New Registration';
-            newBtn.disabled = disabled;
-            newBtn.addEventListener('click', () => { step = 0; render(); });
-            root.appendChild(newBtn);
-        }
+
+        root.appendChild(emptyState({
+            icon: '\u{1F4C4}',
+            title: 'Register a Document',
+            subtitle: disabled
+                ? 'Connect to a node and set up a wallet to register documents.'
+                : 'Anchor the SHA-256 checksum of any file permanently on-chain.',
+            cta: 'New Registration',
+            disabled,
+            onCta: () => { step = 0; render(); }
+        }));
     }
 
     // ── Wizard Shell ──
 
     function renderWizard() {
-        // Step indicators
-        const indicators = document.createElement('div');
-        indicators.className = 'wizard-steps';
-        indicators.setAttribute('role', 'progressbar');
-        indicators.setAttribute('aria-valuenow', step + 1);
-        indicators.setAttribute('aria-valuemin', '1');
-        indicators.setAttribute('aria-valuemax', String(STEP_NAMES.length));
-        indicators.setAttribute('aria-label', `Step ${step + 1} of ${STEP_NAMES.length}: ${STEP_NAMES[step]}`);
+        // ── Top bar: [← PrevName]  ●●●●●●●  [NextName →] ──
+        const topBar = document.createElement('div');
+        topBar.className = 'wizard-top-bar';
+
+        // Left: back button with previous step name
+        const backBtn = document.createElement('button');
+        backBtn.className = 'wizard-top-btn wizard-top-back';
+        if (step === 0) {
+            backBtn.textContent = '\u2190 Cancel';
+        } else {
+            backBtn.textContent = `\u2190 ${STEP_NAMES[step - 1]}`;
+        }
+        backBtn.addEventListener('click', () => {
+            if (step === 0) { resetWizard(); } else { step--; }
+            render();
+        });
+        // Hide back on submit step
+        if (step >= 6) backBtn.style.visibility = 'hidden';
+        topBar.appendChild(backBtn);
+
+        // Center: dots
+        const dots = document.createElement('div');
+        dots.className = 'wizard-dots';
+        dots.setAttribute('role', 'progressbar');
+        dots.setAttribute('aria-valuenow', step + 1);
+        dots.setAttribute('aria-valuemax', String(STEP_NAMES.length));
+        dots.setAttribute('aria-label', `Step ${step + 1} of ${STEP_NAMES.length}: ${STEP_NAMES[step]}`);
         for (let i = 0; i < STEP_NAMES.length; i++) {
             const dot = document.createElement('div');
             dot.className = 'step-indicator' + (i === step ? ' active' : '') + (i < step ? ' completed' : '');
             dot.title = STEP_NAMES[i];
-            indicators.appendChild(dot);
+            dots.appendChild(dot);
         }
-        root.appendChild(indicators);
+        topBar.appendChild(dots);
+
+        // Right: next step name hint
+        const nextHint = document.createElement('span');
+        nextHint.className = 'wizard-top-btn wizard-top-next';
+        if (step < 6) {
+            nextHint.textContent = `${STEP_NAMES[Math.min(step + 1, STEP_NAMES.length - 1)]} \u2192`;
+        }
+        // Invisible placeholder to keep dots centered when no next hint
+        if (step >= 6) nextHint.style.visibility = 'hidden';
+        topBar.appendChild(nextHint);
+
+        root.appendChild(topBar);
 
         // Step title
         const title = document.createElement('h2');
@@ -253,9 +205,9 @@ export function init(root, ctx) {
             case 6: renderStepSubmit(content); break;
         }
 
-        // Navigation (except submit step)
+        // Bottom navigation (except submit step)
         if (step < 6) {
-            // Save Draft row (above nav, subtle)
+            // Save Draft row
             if (files.length > 0) {
                 const draftRow = document.createElement('div');
                 draftRow.style.cssText = 'margin-top:var(--gap);text-align:center;';
@@ -271,38 +223,26 @@ export function init(root, ctx) {
             nav.className = 'wizard-nav';
 
             // Left: Back button with previous step name
-            const leftGroup = document.createElement('div');
-            leftGroup.className = 'wizard-nav-group';
-            const backBtn = document.createElement('button');
-            backBtn.className = 'btn btn-secondary';
+            const navBackBtn = document.createElement('button');
+            navBackBtn.className = 'btn btn-secondary';
             if (step === 0) {
-                backBtn.textContent = 'Cancel';
+                navBackBtn.textContent = '\u2190 Cancel';
             } else {
-                backBtn.innerHTML = `\u2190 ${STEP_NAMES[step - 1]}`;
+                navBackBtn.textContent = `\u2190 ${STEP_NAMES[step - 1]}`;
             }
-            backBtn.addEventListener('click', () => {
+            navBackBtn.addEventListener('click', () => {
                 if (step === 0) { resetWizard(); } else { step--; }
                 render();
             });
-            leftGroup.appendChild(backBtn);
-            nav.appendChild(leftGroup);
+            nav.appendChild(navBackBtn);
 
-            // Right: Next step name label + Next button
-            const rightGroup = document.createElement('div');
-            rightGroup.className = 'wizard-nav-group';
-            if (step < 5) {
-                const nextLabel = document.createElement('span');
-                nextLabel.className = 'wizard-nav-hint';
-                nextLabel.textContent = STEP_NAMES[step + 1];
-                rightGroup.appendChild(nextLabel);
-            }
+            // Right: Next button with next step name
             const nextBtn = document.createElement('button');
             nextBtn.className = 'btn btn-primary';
-            nextBtn.textContent = step === 5 ? 'Sign & Submit' : 'Next \u2192';
+            nextBtn.textContent = step === 5 ? 'Sign & Submit' : `${STEP_NAMES[step + 1]} \u2192`;
             nextBtn.disabled = !canAdvance();
             nextBtn.addEventListener('click', () => { step++; render(); });
-            rightGroup.appendChild(nextBtn);
-            nav.appendChild(rightGroup);
+            nav.appendChild(nextBtn);
 
             root.appendChild(nav);
         }
@@ -327,13 +267,46 @@ export function init(root, ctx) {
 
     // ── Step 0: File Selection ──
 
+    // Handle native file drops from Swift (DroppableWebView)
+    window._nobleHandleFileDrop = function(droppedFiles) {
+        if (step !== 0 || !alive) return;
+        for (const f of droppedFiles) {
+            if (files.length >= 100) break;
+            if (!files.some(x => x.path === f.path)) {
+                files.push(f);
+            }
+        }
+        render();
+    };
+
     function renderStepFiles(container) {
         const zone = document.createElement('div');
         zone.className = 'drop-zone';
         zone.setAttribute('role', 'button');
-        zone.setAttribute('aria-label', 'Select files to register');
+        zone.setAttribute('aria-label', 'Drag files here or click to browse');
         zone.setAttribute('tabindex', '0');
-        zone.innerHTML = '<div style="font-size:2rem; margin-bottom:var(--gap-sm)">\u{1F4C1}</div><div>Click to select files</div><div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">Up to 100 files</div>';
+        zone.innerHTML = '<div style="font-size:2rem; margin-bottom:var(--gap-sm)">\u{1F4C1}</div><div>Drag files here or click to browse</div><div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">Up to 100 files</div>';
+
+        // Drag-and-drop visual feedback
+        zone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'copy';
+            zone.classList.add('drag-over');
+        });
+        zone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+        });
+        zone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+            // Note: actual file handling is done via native Swift drop (window._nobleHandleFileDrop)
+            // HTML5 drop does not give file paths in WKWebView
+        });
+
         zone.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zone.click(); }
         });
@@ -663,33 +636,22 @@ export function init(root, ctx) {
 
     function buildMetadataRow(index) {
         const m = metadata[index];
+        if (!m.recipients) m.recipients = [];
         const fieldDef = METADATA_FIELDS.find(f => f.key === m.fieldKey) || METADATA_FIELDS[METADATA_FIELDS.length - 1];
         const isEncrypted = m.mode === 'encrypted';
 
         const row = document.createElement('div');
-        row.className = 'panel';
-        row.style.padding = 'var(--gap-sm) var(--gap)';
+        row.className = 'panel metadata-row';
 
-        // Header: label + encrypt toggle + remove
+        // Header: label + remove
         const header = document.createElement('div');
-        header.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-xs);';
+        header.className = 'metadata-row-header';
 
         const label = document.createElement('span');
-        label.style.cssText = 'font-weight:600;font-size:var(--font-size-sm);';
+        label.className = 'metadata-row-label';
         label.textContent = fieldDef.label;
         if (m.fieldKey === 'custom' && m.key) label.textContent = m.key;
         header.appendChild(label);
-
-        // Encrypt / Plaintext toggle
-        const modeBtn = document.createElement('button');
-        modeBtn.style.cssText = `font-size:var(--font-size-xs);padding:1px 8px;border-radius:var(--radius-pill);border:1px solid ${isEncrypted ? 'var(--accent)' : 'var(--border)'};background:${isEncrypted ? 'var(--accent-subtle)' : 'transparent'};color:${isEncrypted ? 'var(--accent)' : 'var(--text-muted)'};cursor:pointer;`;
-        modeBtn.textContent = isEncrypted ? '\u{1F512} Encrypted' : '\u{1F513} Public';
-        modeBtn.title = isEncrypted ? 'Click to make public (plaintext)' : 'Click to encrypt';
-        modeBtn.addEventListener('click', () => {
-            m.mode = isEncrypted ? 'plaintext' : 'encrypted';
-            render();
-        });
-        header.appendChild(modeBtn);
 
         const spacer = document.createElement('span');
         spacer.style.flex = '1';
@@ -710,7 +672,7 @@ export function init(root, ctx) {
             keyInput.placeholder = 'Field name';
             keyInput.maxLength = 64;
             keyInput.value = m.key;
-            keyInput.style.marginBottom = 'var(--gap-xs)';
+            keyInput.style.marginBottom = 'var(--gap-sm)';
             keyInput.addEventListener('input', () => { m.key = keyInput.value; });
             row.appendChild(keyInput);
         }
@@ -751,7 +713,202 @@ export function init(root, ctx) {
         }
 
         row.appendChild(valRow);
+
+        // ── Visibility toggle: Public / Encrypted (segmented) ──
+        const visSection = document.createElement('div');
+        visSection.className = 'metadata-visibility';
+
+        const visLabel = document.createElement('span');
+        visLabel.className = 'metadata-vis-label';
+        visLabel.textContent = 'Visibility';
+        visSection.appendChild(visLabel);
+
+        const seg = document.createElement('div');
+        seg.className = 'segmented-control segmented-control-sm';
+        for (const opt of [
+            { key: 'plaintext', label: 'Public',    icon: '\u{1F513}' },
+            { key: 'encrypted', label: 'Encrypted', icon: '\u{1F512}' },
+        ]) {
+            const btn = document.createElement('button');
+            btn.className = m.mode === opt.key ? 'active' : '';
+            btn.innerHTML = `${opt.icon} ${opt.label}`;
+            btn.addEventListener('click', () => {
+                m.mode = opt.key;
+                if (opt.key === 'plaintext') m.recipients = [];
+                render();
+            });
+            seg.appendChild(btn);
+        }
+        visSection.appendChild(seg);
+        row.appendChild(visSection);
+
+        // ── Encrypted: warning + recipient picker ──
+        if (isEncrypted) {
+            const encBlock = document.createElement('div');
+            encBlock.className = 'metadata-enc-block';
+
+            const warn = document.createElement('div');
+            warn.className = 'metadata-enc-notice';
+            warn.textContent = 'Only selected recipients will be able to read this field.';
+            encBlock.appendChild(warn);
+
+            // Recipient chips
+            if (m.recipients.length > 0) {
+                const chips = document.createElement('div');
+                chips.className = 'metadata-enc-chips';
+                for (let ri = 0; ri < m.recipients.length; ri++) {
+                    const r = m.recipients[ri];
+                    const chip = document.createElement('span');
+                    chip.className = 'metadata-enc-chip';
+                    chip.innerHTML = `${esc(r.displayName || r.email)} <button class="chip-remove">\u2715</button>`;
+                    chip.querySelector('.chip-remove').addEventListener('click', () => {
+                        m.recipients.splice(ri, 1);
+                        render();
+                    });
+                    chips.appendChild(chip);
+                }
+                encBlock.appendChild(chips);
+            }
+
+            // Add recipient button
+            const addRecip = document.createElement('button');
+            addRecip.className = 'btn btn-secondary btn-sm';
+            addRecip.textContent = '+ Add Recipient';
+            addRecip.addEventListener('click', async () => {
+                try {
+                    const res = await Bridge.call('noble_storage', 'getContacts');
+                    if (!alive) return;
+                    const contacts = (res.contacts || []).filter(c => c.email || c.publicKey);
+                    if (!contacts.length) {
+                        showRecipientManualEntry(m);
+                        return;
+                    }
+                    showRecipientPicker(contacts, m);
+                } catch {
+                    showRecipientManualEntry(m);
+                }
+            });
+            encBlock.appendChild(addRecip);
+
+            row.appendChild(encBlock);
+        }
+
         return row;
+    }
+
+    function showRecipientPicker(contacts, metaEntry) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+
+        const panel = document.createElement('div');
+        panel.className = 'modal-panel';
+
+        const title = document.createElement('h3');
+        title.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-base);';
+        title.textContent = 'Select Recipient';
+        panel.appendChild(title);
+
+        for (const c of contacts) {
+            const already = metaEntry.recipients.some(r => r.email === c.email || r.publicKey === c.publicKey);
+            const row = document.createElement('button');
+            row.className = 'modal-list-item';
+            if (already) row.classList.add('modal-list-item-disabled');
+            row.innerHTML = `<span style="font-weight:500;">${esc(c.displayName || c.name || 'Unknown')}</span><span style="font-size:var(--font-size-xs);color:var(--text-secondary);">${esc(c.email || c.publicKey || '')}</span>`;
+            if (!already) {
+                row.addEventListener('click', () => {
+                    metaEntry.recipients.push({
+                        displayName: c.displayName || c.name || c.email,
+                        email: c.email || '',
+                        publicKey: c.publicKey || ''
+                    });
+                    overlay.remove();
+                    render();
+                });
+            }
+            panel.appendChild(row);
+        }
+
+        // Manual entry option
+        const manualBtn = document.createElement('button');
+        manualBtn.className = 'btn btn-secondary';
+        manualBtn.textContent = 'Enter manually...';
+        manualBtn.style.cssText = 'margin-top:var(--gap);width:100%;';
+        manualBtn.addEventListener('click', () => {
+            overlay.remove();
+            showRecipientManualEntry(metaEntry);
+        });
+        panel.appendChild(manualBtn);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'margin-top:var(--gap-xs);width:100%;';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+        panel.appendChild(cancelBtn);
+
+        overlay.appendChild(panel);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+    }
+
+    function showRecipientManualEntry(metaEntry) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+
+        const panel = document.createElement('div');
+        panel.className = 'modal-panel';
+
+        const title = document.createElement('h3');
+        title.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-base);';
+        title.textContent = 'Add Recipient';
+        panel.appendChild(title);
+
+        const nameGroup = document.createElement('div');
+        nameGroup.className = 'form-group';
+        nameGroup.innerHTML = '<label>Name (optional)</label>';
+        const nameInput = document.createElement('input');
+        nameInput.className = 'form-input';
+        nameInput.placeholder = 'Recipient name';
+        nameGroup.appendChild(nameInput);
+        panel.appendChild(nameGroup);
+
+        const keyGroup = document.createElement('div');
+        keyGroup.className = 'form-group';
+        keyGroup.innerHTML = '<label>Public key or email</label>';
+        const keyInput = document.createElement('input');
+        keyInput.className = 'form-input';
+        keyInput.placeholder = 'Public key hex or email address';
+        keyGroup.appendChild(keyInput);
+        panel.appendChild(keyGroup);
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn btn-primary';
+        addBtn.textContent = 'Add';
+        addBtn.style.cssText = 'margin-top:var(--gap);width:100%;';
+        addBtn.addEventListener('click', () => {
+            const val = keyInput.value.trim();
+            if (!val) return;
+            const isEmail = val.includes('@');
+            metaEntry.recipients.push({
+                displayName: nameInput.value.trim() || val,
+                email: isEmail ? val : '',
+                publicKey: isEmail ? '' : val
+            });
+            overlay.remove();
+            render();
+        });
+        panel.appendChild(addBtn);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'margin-top:var(--gap-xs);width:100%;';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+        panel.appendChild(cancelBtn);
+
+        overlay.appendChild(panel);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
     }
 
     function renderAddFieldButton(container) {
@@ -829,10 +986,10 @@ export function init(root, ctx) {
 
     function showContactPicker(contacts, onSelect) {
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center;';
+        overlay.className = 'modal-overlay';
 
         const panel = document.createElement('div');
-        panel.style.cssText = 'background:var(--bg-surface);border-radius:var(--radius);padding:var(--gap);min-width:280px;max-width:400px;max-height:60vh;overflow-y:auto;';
+        panel.className = 'modal-panel';
 
         const title = document.createElement('h3');
         title.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-base);';
@@ -841,9 +998,7 @@ export function init(root, ctx) {
 
         for (const c of contacts) {
             const row = document.createElement('button');
-            row.style.cssText = 'display:flex;flex-direction:column;width:100%;padding:var(--gap-sm);border:none;background:none;color:var(--text-primary);cursor:pointer;text-align:left;border-radius:var(--radius-sm);';
-            row.addEventListener('mouseenter', () => { row.style.background = 'var(--bg-tertiary)'; });
-            row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
+            row.className = 'modal-list-item';
             row.innerHTML = `<span style="font-weight:500;">${esc(c.displayName)}</span><span style="font-size:var(--font-size-xs);color:var(--text-secondary);">${esc(c.email)}</span>`;
             row.addEventListener('click', () => {
                 onSelect(c.email);
@@ -1131,7 +1286,6 @@ export function init(root, ctx) {
             doneBtn.style.marginTop = 'var(--gap)';
             doneBtn.addEventListener('click', () => {
                 resetWizard();
-                loadDrafts();
                 render();
             });
             summary.appendChild(doneBtn);

@@ -92,14 +92,15 @@ pub const BADGE_VOTE_WINDOW_CYCLES: u64 = 48;
 /// 48 cycles = 24 hours at 30-min cycles.
 pub const KEY_ROTATION_GRACE_CYCLES: u64 = 48;
 
-/// Initial block subsidy in atomic units (50 NOBLE = 50_000_000 with 6 decimals).
-pub const INITIAL_SUBSIDY: u64 = 50_000_000;
+/// Initial block subsidy in atomic units (100 NOBLE = 100_000_000 with 6 decimals).
+pub const INITIAL_SUBSIDY: u64 = 100_000_000;
 
-/// Number of blocks between halving events (~12 years at 30-min cycles).
-pub const HALVING_INTERVAL: u64 = 210_000;
+/// Number of blocks between halving events (~3.8 years at 20-min cycles).
+pub const HALVING_INTERVAL: u64 = 100_000;
 
-/// Maximum total supply in atomic units (21 million NOBLE = 21_000_000_000_000).
-pub const MAX_SUPPLY: u64 = 21_000_000_000_000;
+/// Maximum total supply in atomic units (~20 million NOBLE = 20_000_000_000_000).
+/// Actual emission: 19,999,898,800,000 after 27 halvings.
+pub const MAX_SUPPLY: u64 = 20_000_000_000_000;
 
 /// Maximum reorg depth allowed (144 blocks ≈ 3 days at 30-min cycles).
 pub const MAX_REORG_DEPTH: u64 = 144;
@@ -268,7 +269,7 @@ mod tests {
             if subsidy == 0 {
                 break;
             }
-            // Epoch 0 has 209,999 blocks (height 0 excluded), epochs 1+ have 210,000
+            // Epoch 0 has 99,999 blocks (height 0 excluded), epochs 1+ have 100,000
             let blocks = if epoch == 0 {
                 HALVING_INTERVAL - 1
             } else {
@@ -276,7 +277,7 @@ mod tests {
             };
             total += subsidy as u128 * blocks as u128;
         }
-        assert_eq!(total, 20_999_947_480_000u128);
+        assert_eq!(total, 19_999_898_800_000u128);
         assert!(total < MAX_SUPPLY as u128);
     }
 

@@ -78,6 +78,70 @@ final class WebUISchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
+// MARK: - DroppableWebView
+
+/// WKWebView subclass that accepts file drops from Finder and forwards paths to JavaScript.
+final class DroppableWebView: WKWebView {
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) {
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) {
+            return .copy
+        }
+        return super.draggingUpdated(sender)
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        super.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else {
+            return super.performDragOperation(sender)
+        }
+        let fileURLs = urls.filter { $0.isFileURL }
+        guard !fileURLs.isEmpty else { return super.performDragOperation(sender) }
+
+        // Build JS array of {name, path, size}
+        var entries: [[String: Any]] = []
+        for url in fileURLs {
+            let name = url.lastPathComponent
+            let path = url.path
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+            entries.append(["name": name, "path": path, "size": size])
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: entries),
+              let json = String(data: data, encoding: .utf8) else { return false }
+
+        let script = "if(window._nobleHandleFileDrop) window._nobleHandleFileDrop(\(json));"
+        evaluateJavaScript(script, completionHandler: nil)
+        return true
+    }
+}
+
 // MARK: - WebContentView
 
 /// NSViewRepresentable wrapping a WKWebView that hosts the portable web UI.
@@ -117,7 +181,7 @@ struct WebContentView: NSViewRepresentable {
         )
         config.userContentController.addUserScript(userScript)
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = DroppableWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground") // Transparent background
 
         #if DEBUG

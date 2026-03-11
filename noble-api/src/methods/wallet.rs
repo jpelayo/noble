@@ -209,7 +209,20 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let mut hash160_bal = 0u64;
         let mut taproot_bal = 0u64;
 
-        for pk in &keys {
+        // Collect all keys to query: wallet keystore keys + validator key (if not already included).
+        let mut all_keys: Vec<noble_crypto::NoblePublicKey> = keys.clone();
+        if let Some(ref vk_hex) = self.validator_pubkey {
+            if let Ok(vk_bytes) = hex::decode(vk_hex) {
+                if let Ok(vk) = noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
+                    let already = all_keys.iter().any(|k| k.to_wire_bytes() == vk.to_wire_bytes());
+                    if !already {
+                        all_keys.push(vk);
+                    }
+                }
+            }
+        }
+
+        for pk in &all_keys {
             // Noble bucket (all key types)
             let nb = storage
                 .get_balance(&noble_core::NobleAddress::Noble(pk.clone()))

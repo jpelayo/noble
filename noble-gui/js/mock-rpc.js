@@ -1024,8 +1024,8 @@ export class MockRpcClient {
         // Address = first 20 bytes of public key hex, prefixed with "noble1"
         const address = 'noble1' + keyHex.slice(0, 40);
         const blocksValidated = this.#validators[0].blocks_produced;
-        // Subsidy: 50 NOBLE (50_000_000 atomic) per block
-        const subsidyPerBlock = 50_000_000;
+        // Subsidy: 100 NOBLE (100_000_000 atomic) per block
+        const subsidyPerBlock = 100_000_000;
         // Average fee per block ~15,000 atomic
         const avgFeePerBlock = 15_000;
         const totalSubsidy = blocksValidated * subsidyPerBlock;
@@ -1070,7 +1070,7 @@ export class MockRpcClient {
         const txs = [];
         const now = Math.floor(Date.now() / 1000);
         const chainHeight = this.chainHeight;
-        const subsidyPerBlock = 50_000_000;
+        const subsidyPerBlock = 100_000_000;
         let runningBalance = 0;
 
         // Generate transaction history from validated blocks
@@ -1148,11 +1148,11 @@ export class MockRpcClient {
         // Outgoing transfers: mix of payment_sent and doc_registration
         const outgoing = [
           { amount: 200_000_000, desc: 'Payment to noble1b7e2...f4a9', ago: 86400 * 5, id: 1001, type: 'payment_sent' },
-          { amount: 150_000_000, desc: 'Payment to noble1c3d8...e2b7', ago: 86400 * 3, id: 1002, type: 'payment_sent' },
+          { amount: 1100_000_000, desc: 'Payment to noble1c3d8...e2b7', ago: 86400 * 3, id: 1002, type: 'payment_sent' },
           { amount: 1_050_000, desc: 'Document registration: a8f3c2d1...', ago: 86400 * 2, id: 1005, type: 'doc_registration' },
           { amount: 100_000_000, desc: 'Payment to noble1d9f1...a3c5', ago: 86400, id: 1003, type: 'payment_sent' },
           { amount: 1_050_000, desc: 'Document registration: 7b2e9f04...', ago: 3600 * 12, id: 1006, type: 'doc_registration' },
-          { amount: 50_000_000, desc: 'Payment to noble1e4a7...d8f2', ago: 3600 * 6, id: 1004, type: 'payment_sent' },
+          { amount: 100_000_000, desc: 'Payment to noble1e4a7...d8f2', ago: 3600 * 6, id: 1004, type: 'payment_sent' },
         ];
 
         for (const out of outgoing) {

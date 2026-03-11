@@ -469,6 +469,45 @@ input, textarea, select, button {
 }
 
 /* ── Wizard Steps ── */
+/* ── Wizard Top Bar: [← Prev]  ●●●●●●●  [Next →] ── */
+.wizard-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  margin-bottom: var(--gap-lg);
+  padding-bottom: var(--gap);
+  border-bottom: 1px solid var(--border);
+}
+.wizard-top-btn {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--gap-xs) var(--gap-sm);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  min-width: 90px;
+}
+.wizard-top-back {
+  text-align: left;
+}
+.wizard-top-back:hover {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+.wizard-top-next {
+  text-align: right;
+  cursor: default;
+  opacity: 0.5;
+}
+.wizard-dots {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+
 .wizard-steps {
   display: flex;
   align-items: center;
@@ -506,7 +545,8 @@ input, textarea, select, button {
 }
 
 .drop-zone:hover,
-.drop-zone.dragover {
+.drop-zone.dragover,
+.drop-zone.drag-over {
   border-color: var(--accent);
   background: var(--accent-subtle);
   color: var(--accent);
@@ -759,25 +799,124 @@ input, textarea, select, button {
 }
 
 /* ── Metadata Editor ── */
+/* ── Metadata Row (redesigned) ── */
 .metadata-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
+  padding: var(--gap-sm) var(--gap);
+}
+.metadata-row-header {
+  display: flex;
+  align-items: center;
   gap: var(--gap-sm);
   margin-bottom: var(--gap-sm);
-  align-items: start;
+}
+.metadata-row-label {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
 }
 
-.metadata-row .form-input:first-child {
-  grid-column: 1 / -1;
+/* Visibility toggle section */
+.metadata-visibility {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
+  padding-top: var(--gap-sm);
+  border-top: 1px solid var(--border);
+}
+.metadata-vis-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
-@container panel (min-width: 32rem) {
-  .metadata-row {
-    grid-template-columns: 180px 1fr auto;
-  }
-  .metadata-row .form-input:first-child {
-    grid-column: auto;
-  }
+/* Small segmented control variant */
+.segmented-control-sm {
+  font-size: var(--font-size-xs);
+}
+.segmented-control-sm button {
+  padding: 4px 12px;
+  font-size: var(--font-size-xs);
+}
+
+/* Encrypted block */
+.metadata-enc-block {
+  margin-top: var(--gap-sm);
+  padding: var(--gap-sm);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.metadata-enc-notice {
+  font-size: var(--font-size-xs);
+  color: var(--accent);
+  margin-bottom: var(--gap-sm);
+}
+.metadata-enc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-xs);
+  margin-bottom: var(--gap-sm);
+}
+.metadata-enc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+.metadata-enc-chip .chip-remove {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.7);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.7rem;
+}
+.metadata-enc-chip .chip-remove:hover {
+  color: #fff;
+}
+
+/* Modal overlay + panel (reusable) */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-panel {
+  background: var(--bg-surface);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  min-width: 280px;
+  max-width: 400px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.modal-list-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: var(--gap-sm);
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+.modal-list-item:hover {
+  background: var(--bg-tertiary);
+}
+.modal-list-item-disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .metadata-counter {

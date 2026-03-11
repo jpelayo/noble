@@ -8,30 +8,36 @@ struct ConnectionStatusBar: View {
     let appState: AppState
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(appState.isConnected ? Color.green : Color(.systemRed))
-                .frame(width: 7, height: 7)
-                .accessibilityLabel(appState.isConnected ? "Connected" : "Disconnected")
+        VStack(spacing: 4) {
+            // Connection status
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(appState.isConnected ? Color.green : Color(.systemRed))
+                    .frame(width: 7, height: 7)
 
-            if appState.isConnected {
-                if !appState.chainId.isEmpty {
-                    Text(appState.chainId)
-                        .font(.caption.monospaced().bold())
-                }
-                Spacer()
-                Text("Block \(appState.blockHeight)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            } else {
-                Text("Disconnected")
+                Text(appState.isConnected ? "Connected to node" : "Disconnected from node")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(appState.isConnected ? .secondary : .primary)
+
                 Spacer()
+            }
+
+            // Balance + chain (only when connected)
+            if appState.isConnected, !appState.chainId.isEmpty {
+                HStack(spacing: 4) {
+                    if let bal = appState.walletBalance {
+                        Text("\(bal) NOBLE")
+                            .font(.caption.monospacedDigit().bold())
+                    }
+                    Spacer()
+                    Text(appState.chainId)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .accessibilityElement(children: .combine)
-        .padding(.horizontal)
+        .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.bar)
     }
