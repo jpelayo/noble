@@ -3,6 +3,7 @@ import { Bridge } from './bridge.js';
 import { emptyState } from './components/empty-state.js';
 import { init as initHome } from './pages/home.js';
 import { init as initDocuments } from './pages/documents.js';
+import { init as initDrafts } from './pages/drafts.js';
 import { init as initVerify } from './pages/verify.js';
 import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
@@ -11,6 +12,7 @@ import { init as initSettings } from './pages/settings.js';
 const pages = {
     home:      initHome,
     documents: initDocuments,
+    drafts:    initDrafts,
     verify:    initVerify,
     payments:  initPayments,
     contacts:  initContacts,
@@ -53,6 +55,7 @@ const App = {
     /** Push a state patch to the current page. */
     updateState(patch) {
         Object.assign(appState, patch);
+        App._updateChainBar();
         if (currentPage && currentPage.refresh) {
             currentPage.refresh(appState);
         }
@@ -90,6 +93,20 @@ const App = {
     _hideDisconnectedBanner() {
         const banner = document.getElementById('disconnected-banner');
         if (banner) banner.remove();
+    },
+
+    /** Update the persistent chain ID bar at the top. */
+    _updateChainBar() {
+        const bar = document.getElementById('chain-bar');
+        if (!bar) return;
+        if (appState.isConnected && appState.chainId) {
+            bar.hidden = false;
+            const height = appState.blockHeight ? ` \u00B7 Block ${Number(appState.blockHeight).toLocaleString()}` : '';
+            bar.innerHTML = `<span class="chain-dot"></span><span class="chain-label">Chain</span> ${appState.chainId}${height}`;
+        } else {
+            bar.hidden = true;
+            bar.innerHTML = '';
+        }
     }
 };
 
@@ -111,6 +128,9 @@ async function boot() {
             selectedSection: 'home'
         };
     }
+
+    // Show chain bar if connected
+    App._updateChainBar();
 
     // Use NativeConfig initial route if available, otherwise default to home
     const initialRoute = (window.NativeConfig && window.NativeConfig.initialRoute) || appState.selectedSection || 'home';

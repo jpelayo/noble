@@ -71,6 +71,7 @@ export function init(root, ctx) {
         const dot = isConn ? '\u{1F7E2}' : '\u{1F534}';
         const statusText = isConn ? 'Connected' : 'Disconnected';
         const nodeURL = settings.nodeURL || state.nodeURL || 'https://localhost:8783';
+        const connChainId = nodeInfo.chainId || state.chainId || '';
         const authMode = settings.authMode || 'none';
         const fingerprint = settings.tlsFingerprint || 'Not available';
 
@@ -79,7 +80,7 @@ export function init(root, ctx) {
             <div class="panel-body">
                 <div class="settings-row">
                     <span class="settings-label">Status</span>
-                    <span>${dot} ${esc(statusText)}</span>
+                    <span>${dot} ${esc(statusText)}${isConn && connChainId ? ` &mdash; <span class="mono" style="font-weight:600">${esc(connChainId)}</span>` : ''}</span>
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Node URL</span>
@@ -121,9 +122,12 @@ export function init(root, ctx) {
                 testBtn.textContent = 'Testing\u2026';
                 resultDiv.innerHTML = '';
                 try {
-                    await Bridge.call('noble_app', 'testConnection', { url });
+                    const info = await Bridge.call('noble_app', 'testConnection', { url });
                     resultDiv.setAttribute('role', 'status');
-                    resultDiv.innerHTML = '<span style="color: var(--success)">Connection successful</span>';
+                    const chainId = info.chainId || '';
+                    const height = info.blockHeight ? ` \u00B7 Block ${Number(info.blockHeight).toLocaleString()}` : '';
+                    resultDiv.innerHTML = `<span style="color: var(--success)">\u2713 Connected</span>`
+                        + (chainId ? `<div style="margin-top:var(--gap-xs);font-size:var(--font-size-sm)"><span style="color:var(--text-muted)">Chain:</span> <span class="mono" style="font-weight:600">${esc(chainId)}</span>${height}</div>` : '');
                 } catch (e) {
                     resultDiv.setAttribute('role', 'alert');
                     resultDiv.innerHTML = `<span style="color: var(--error)">Failed: ${esc(e.message || 'Unknown error')}</span>`;
@@ -241,9 +245,14 @@ export function init(root, ctx) {
         const inbound = networkInfo.inbound || 0;
         const outbound = networkInfo.outbound || 0;
 
+        const chainIdStr = nodeInfo.chainId || state.chainId || '';
         card.innerHTML = `
             <div class="panel-header">Blockchain Info</div>
             <div class="panel-body">
+                ${chainIdStr ? `<div class="settings-row">
+                    <span class="settings-label">Chain ID</span>
+                    <span class="mono" style="font-weight:600">${esc(chainIdStr)}</span>
+                </div>` : ''}
                 <div class="settings-row">
                     <span class="settings-label">Block Height</span>
                     <span class="mono">${Number(height).toLocaleString()}</span>

@@ -10,25 +10,23 @@ struct ConnectionStatusBar: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(appState.isConnected ? Color.accentColor : Color(.systemRed))
-                .frame(width: 6, height: 6)
+                .fill(appState.isConnected ? Color.green : Color(.systemRed))
+                .frame(width: 7, height: 7)
                 .accessibilityLabel(appState.isConnected ? "Connected" : "Disconnected")
 
             if appState.isConnected {
-                Text(appState.chainId.isEmpty ? "Connected" : appState.chainId)
-                    .font(.caption)
-
+                if !appState.chainId.isEmpty {
+                    Text(appState.chainId)
+                        .font(.caption.monospaced().bold())
+                }
                 Spacer()
-
                 Text("Block \(appState.blockHeight)")
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
             } else {
                 Text("Disconnected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-
                 Spacer()
             }
         }

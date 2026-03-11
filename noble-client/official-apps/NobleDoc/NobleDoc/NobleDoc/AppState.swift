@@ -138,6 +138,7 @@ final class AppState {
     private static let reAuthForSendsKey = "nobledoc.settings.reAuthForSends"
     private static let autoConnectKey = "nobledoc.settings.autoConnect"
     private static let onboardingCompleteKey = "nobledoc.onboardingComplete"
+    private static let draftsKey = "nobledoc.documentDrafts"
 
     // MARK: - Lifecycle
 
@@ -269,6 +270,16 @@ final class AppState {
         let rpcClient = JSONRPCClient(baseURL: nodeURL)
         let service = LiveNobleAPIService(client: rpcClient)
         _ = try await service.getNodeInfo()
+    }
+
+    /// Test connection and return the node info for display (chain ID, version, etc.).
+    func testConnectionWithInfo(url: String) async throws -> NodeInfo {
+        guard let nodeURL = URL(string: url) else {
+            throw RPCClientError.connectionFailed(underlying: "Invalid URL")
+        }
+        let rpcClient = JSONRPCClient(baseURL: nodeURL)
+        let service = LiveNobleAPIService(client: rpcClient)
+        return try await service.getNodeInfo()
     }
 
     /// Disconnect from the current node.
@@ -412,6 +423,42 @@ final class AppState {
         }
         if defaults.object(forKey: Self.autoConnectKey) != nil {
             autoConnect = defaults.bool(forKey: Self.autoConnectKey)
+        }
+    }
+
+    // MARK: - Document Drafts
+
+    /// Load all drafts from UserDefaults as raw JSON arrays.
+    func loadDrafts() -> [[String: Any]] {
+        guard let data = UserDefaults.standard.data(forKey: Self.draftsKey),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return array
+    }
+
+    /// Save a draft (upsert by id).
+    func saveDraft(_ draft: [String: Any]) {
+        var all = loadDrafts()
+        if let id = draft["id"] as? String,
+           let idx = all.firstIndex(where: { ($0["id"] as? String) == id })
+        {
+            all[idx] = draft
+        } else {
+            all.append(draft)
+        }
+        persistDrafts(all)
+    }
+
+    /// Delete a draft by id.
+    func deleteDraft(id: String) {
+        var all = loadDrafts()
+        all.removeAll { ($0["id"] as? String) == id }
+        persistDrafts(all)
+    }
+
+    private func persistDrafts(_ drafts: [[String: Any]]) {
+        if let data = try? JSONSerialization.data(withJSONObject: drafts) {
+            UserDefaults.standard.set(data, forKey: Self.draftsKey)
         }
     }
 

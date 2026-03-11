@@ -463,11 +463,36 @@ final class WebBridgeHandler {
             guard let url = params["url"] as? String else {
                 throw BridgeError.missingParam("url")
             }
-            try await appState.testConnection(url: url)
-            return ["ok": true]
+            let info = try await appState.testConnectionWithInfo(url: url)
+            return [
+                "ok": true,
+                "chainId": info.chainId,
+                "version": info.version,
+                "blockHeight": info.blockHeight,
+            ] as [String: Any]
 
         case "disconnectNode":
             appState.disconnect()
+            return ["ok": true]
+
+        // MARK: Document Drafts
+
+        case "getDrafts":
+            let drafts = appState.loadDrafts()
+            return ["drafts": drafts]
+
+        case "saveDraft":
+            guard let draft = params["draft"] as? [String: Any] else {
+                throw BridgeError.missingParam("draft")
+            }
+            appState.saveDraft(draft)
+            return ["ok": true]
+
+        case "deleteDraft":
+            guard let id = params["id"] as? String else {
+                throw BridgeError.missingParam("id")
+            }
+            appState.deleteDraft(id: id)
             return ["ok": true]
 
         default:

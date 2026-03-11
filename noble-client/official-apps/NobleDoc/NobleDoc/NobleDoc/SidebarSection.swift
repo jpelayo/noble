@@ -7,6 +7,7 @@ import SwiftUI
 enum SidebarSection: String, CaseIterable, Identifiable {
     case home
     case documents
+    case drafts
     case verify
     case payments
     case contacts
@@ -21,6 +22,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "Home"
         case .documents: "Documents"
+        case .drafts: "Drafts"
         case .verify: "Verify"
         case .payments: "Payments"
         case .contacts: "Contacts"
@@ -32,6 +34,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: "house.fill"
         case .documents: "doc.text.fill"
+        case .drafts: "tray.fill"
         case .verify: "checkmark.seal.fill"
         case .payments: "creditcard.fill"
         case .contacts: "person.2.fill"

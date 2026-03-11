@@ -108,6 +108,38 @@ body {
   min-height: 100dvh;
 }
 
+/* ── Chain ID Bar ── */
+.chain-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm) var(--gap);
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  user-select: all;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.chain-bar[hidden] { display: none; }
+.chain-bar .chain-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #6ee7b7;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px #6ee7b7;
+}
+.chain-bar .chain-label {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 /* ── Typography ── */
 .mono {
   font-family: var(--font-mono);
@@ -167,6 +199,10 @@ input, textarea, select, button {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  margin-bottom: var(--gap);
+}
+.panel:last-child {
+  margin-bottom: 0;
 }
 
 @supports (container-type: inline-size) {
@@ -214,6 +250,20 @@ input, textarea, select, button {
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
+}
+
+.kpi-card .kpi-sub {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.chain-note {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  padding: var(--gap-sm) var(--gap);
+  border-top: 1px solid var(--border);
+  line-height: 1.4;
 }
 
 /* ── Data Table ── */
@@ -739,10 +789,21 @@ input, textarea, select, button {
 /* ── Wizard Navigation ── */
 .wizard-nav {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  margin-top: var(--gap-lg);
+  gap: var(--gap-sm);
+  margin-top: var(--gap);
   padding-top: var(--gap);
   border-top: 1px solid var(--border);
+}
+.wizard-nav-group {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+}
+.wizard-nav-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
 }
 
 /* ── Warning Box ── */

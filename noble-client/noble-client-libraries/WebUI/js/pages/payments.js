@@ -112,11 +112,13 @@ export function init(root, ctx) {
 
     function renderBalance(container, balance) {
         container.innerHTML = '';
+        const chainId = state.chainId || '';
         const html = `
             <div class="kpi-grid">
                 <div class="kpi-card">
                     <div class="kpi-label">Total Balance</div>
                     <div class="kpi-value">\u25C6 ${formatAmount(balance.balance)}</div>
+                    ${chainId ? `<div class="kpi-sub mono">Chain: ${esc(chainId)}</div>` : ''}
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Available</div>
@@ -131,6 +133,7 @@ export function init(root, ctx) {
                     <div class="kpi-value">${balance.txCount}</div>
                 </div>
             </div>
+            <div class="chain-note">\u26A0\uFE0F Make sure you always work within the same chain your balance resides in. If you connect to a different chain, you cannot access your balance.</div>
         `;
         container.appendChild(nobleCard('Balance Summary', html));
     }
