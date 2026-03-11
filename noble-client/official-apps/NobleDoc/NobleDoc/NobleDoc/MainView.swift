@@ -17,17 +17,35 @@ struct MainView: View {
         .navigationTitle(appState.selectedSection?.label ?? "NobleDoc")
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Circle()
-                        .fill(appState.isConnected ? Color.accentColor : Color(.systemRed))
-                        .frame(width: 8, height: 8)
-                    Text(appState.isConnected ? "Block \(appState.blockHeight)" : "Offline")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .fill(appState.isConnected ? Color.green : Color(.systemRed))
+                        .frame(width: 7, height: 7)
+
+                    if appState.isConnected {
+                        if let bal = appState.walletBalance {
+                            Text("\(bal) NOBLE")
+                                .font(.caption.monospacedDigit().bold())
+                                .foregroundStyle(.primary)
+                        }
+                        if !appState.chainId.isEmpty {
+                            Text(appState.chainId)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                        }
+                    } else {
+                        Text("Disconnected")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .padding(.horizontal, 4)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(appState.isConnected ? "Connected, block \(appState.blockHeight)" : "Offline")
+                .accessibilityLabel(
+                    appState.isConnected
+                        ? "Connected, \(appState.walletBalance ?? "0") NOBLE on \(appState.chainId)"
+                        : "Disconnected"
+                )
             }
         }
         .frame(minWidth: 700, minHeight: 500)

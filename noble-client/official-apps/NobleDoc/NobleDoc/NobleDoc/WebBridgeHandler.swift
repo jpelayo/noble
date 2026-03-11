@@ -229,9 +229,77 @@ final class WebBridgeHandler {
                 "valid": valid,
             ]
 
+        case "faucetStatus":
+            return try await handleFaucetStatus()
+
+        case "faucetRequest":
+            guard let address = params["address"] as? String else {
+                throw BridgeError.missingParam("address")
+            }
+            return try await handleFaucetRequest(address: address)
+
         default:
             throw BridgeError.unknownAction(action)
         }
+    }
+
+    // MARK: - Faucet HTTP
+
+    /// Derive faucet URL from the node URL (same host, port 8786).
+    private func faucetBaseURL() -> URL? {
+        guard let nodeURL = URL(string: appState.nodeURL),
+              let host = nodeURL.host else { return nil }
+        return URL(string: "http://\(host):8786")
+    }
+
+    /// URLSession that accepts self-signed certs (faucet may be local).
+    private static let faucetSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        return URLSession(configuration: config)
+    }()
+
+    private func handleFaucetStatus() async throws -> Any {
+        guard let base = faucetBaseURL() else {
+            throw BridgeError.faucetUnavailable
+        }
+        let url = base.appendingPathComponent("api/faucet/status")
+        let (data, response) = try await Self.faucetSession.data(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw BridgeError.faucetUnavailable
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw BridgeError.faucetUnavailable
+        }
+        return json
+    }
+
+    private func handleFaucetRequest(address: String) async throws -> Any {
+        guard let base = faucetBaseURL() else {
+            throw BridgeError.faucetUnavailable
+        }
+        let url = base.appendingPathComponent("api/faucet")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = try JSONSerialization.data(withJSONObject: ["address": address])
+        request.httpBody = body
+
+        let (data, response) = try await Self.faucetSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw BridgeError.faucetUnavailable
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw BridgeError.faucetUnavailable
+        }
+
+        // Forward rate-limit errors as bridge errors with the server's message
+        if http.statusCode == 429 || http.statusCode >= 400 {
+            let msg = json["message"] as? String ?? "Faucet request failed"
+            throw BridgeError.faucetError(msg)
+        }
+
+        return json
     }
 
     // MARK: - Serialization Helpers
@@ -660,6 +728,8 @@ enum BridgeError: LocalizedError {
     case missingParam(String)
     case notConnected
     case noPrivateKey
+    case faucetUnavailable
+    case faucetError(String)
 
     var errorDescription: String? {
         switch self {
@@ -668,6 +738,8 @@ enum BridgeError: LocalizedError {
         case .missingParam(let p): "Missing parameter: \(p)"
         case .notConnected: "Not connected to a NOBLE node"
         case .noPrivateKey: "No private key available"
+        case .faucetUnavailable: "Faucet service is not available"
+        case .faucetError(let msg): msg
         }
     }
 }

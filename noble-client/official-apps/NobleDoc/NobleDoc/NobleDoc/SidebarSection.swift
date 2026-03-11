@@ -9,6 +9,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case documents
     case drafts
     case verify
+    case faucet
     case payments
     case contacts
     case settings
@@ -24,6 +25,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .documents: "Documents"
         case .drafts: "Drafts"
         case .verify: "Verify"
+        case .faucet: "Faucet"
         case .payments: "Payments"
         case .contacts: "Contacts"
         case .settings: "Settings"
@@ -36,6 +38,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .documents: "doc.text.fill"
         case .drafts: "tray.fill"
         case .verify: "checkmark.seal.fill"
+        case .faucet: "drop.fill"
         case .payments: "creditcard.fill"
         case .contacts: "person.2.fill"
         case .settings: "gearshape.fill"

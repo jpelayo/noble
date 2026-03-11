@@ -8,6 +8,7 @@ import { init as initVerify } from './pages/verify.js';
 import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
 import { init as initSettings } from './pages/settings.js';
+import { init as initFaucet } from './pages/faucet.js';
 
 const pages = {
     home:      initHome,
@@ -17,6 +18,7 @@ const pages = {
     payments:  initPayments,
     contacts:  initContacts,
     settings:  initSettings,
+    faucet:    initFaucet,
 };
 
 let currentPage = null;
@@ -115,8 +117,7 @@ const App = {
         if (!bar) return;
         if (appState.isConnected && appState.chainId) {
             bar.hidden = false;
-            const height = appState.blockHeight ? ` \u00B7 Block ${Number(appState.blockHeight).toLocaleString()}` : '';
-            bar.innerHTML = `<span class="chain-dot"></span><span class="chain-label">Chain</span> ${appState.chainId}${height}`;
+            bar.innerHTML = `<span class="chain-dot"></span><span class="chain-label">Chain</span> ${appState.chainId}`;
         } else {
             bar.hidden = true;
             bar.innerHTML = '';
