@@ -5,7 +5,6 @@
 import { formatNumber, truncateHash, timeAgo } from '../utils.js';
 
 const PAGE_SIZE = 50;
-const CYCLE_SECS = 1200; // 4 × 300s phases (used only for gap-cycle time estimate)
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -63,54 +62,26 @@ export function init(root, ctx) {
       // Blocks come in ascending order; reverse for newest-first display.
       const desc = blocks.reverse();
 
-      // Fetch cycle history to distinguish "no proposals" from "no consensus"
-      // in gap rows. Build a lookup by cycle number.
-      const cycleHistoryMap = new Map();
-      try {
-        const hist = await rpc.call('noble_getCycleHistory', [100]);
-        for (const e of (hist.entries || [])) {
-          cycleHistoryMap.set(e.cycle_number, e);
-        }
-      } catch { /* non-critical — fall back to generic label */ }
-
       tbody.innerHTML = '';
 
       // Insert gap rows ABOVE the first block — from the current active
-      // cycle down to the first block's cycle.  This surfaces the
-      // "no consensus" / "no proposals" cycles between the chain tip
-      // and the live consensus cycle.
+      // cycle down to the first block's cycle.  Uses only chain data
+      // (committed blocks + current cycle number) so all synced nodes
+      // show identical results.
       if (currentPage === 0 && desc.length > 0 && desc[0].cycle != null) {
         const topBlockCycle = desc[0].cycle;
-        // Get current cycle from consensus engine; fall back to highest in history.
         let highestCycle = topBlockCycle;
         try {
           const cs = await rpc.call('noble_getCycleStatus');
           if (cs.cycle_number != null) highestCycle = cs.cycle_number;
         } catch { /* fall back */ }
-        if (highestCycle <= topBlockCycle) {
-          for (const [cn] of cycleHistoryMap) {
-            if (cn > highestCycle) highestCycle = cn;
-          }
-        }
         // Start from highestCycle - 1: the active cycle is still in progress.
         for (let gap = highestCycle - 1; gap > topBlockCycle; gap--) {
-          const hist = cycleHistoryMap.get(gap);
-          let label, color;
-          if (hist && hist.status === 'indeterminate') {
-            label = 'no consensus';
-            color = 'var(--warning, #e8a435)';
-          } else if (hist || cycleHistoryMap.size > 0) {
-            label = 'no proposals';
-            color = 'var(--text-muted)';
-          } else {
-            label = 'no block';
-            color = 'var(--text-muted)';
-          }
           const gapTr = document.createElement('tr');
           gapTr.style.cssText = 'opacity:0.45';
           gapTr.innerHTML = `
             <td style="color:var(--text-muted)">${gap}</td>
-            <td colspan="3" style="color:${color};font-style:italic;text-align:center">${label}</td>
+            <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no block</td>
             <td></td>
             <td></td>
           `;
@@ -122,33 +93,16 @@ export function init(root, ctx) {
         const b = desc[i];
         const cycle = b.cycle != null ? b.cycle : '—';
 
-        // Insert empty-cycle rows for any gap between this block and the next
-        // (next = lower height, older). If the previous block's cycle is more
-        // than 1 ahead, cycles in between produced no block.
+        // Insert empty-cycle rows for any gap between this block and the next.
+        // Derived purely from committed block cycle numbers — identical on all nodes.
         if (i > 0 && desc[i - 1].cycle != null && b.cycle != null) {
           const prevCycle = desc[i - 1].cycle;
           for (let gap = prevCycle - 1; gap > b.cycle; gap--) {
-            // Check cycle history: was this an indeterminate cycle (had
-            // proposals but no consensus) or a truly empty cycle?
-            const hist = cycleHistoryMap.get(gap);
-            let label, color;
-            if (hist && hist.status === 'indeterminate') {
-              label = 'no consensus';
-              color = 'var(--warning, #e8a435)';
-            } else if (hist || cycleHistoryMap.size > 0) {
-              // History available and this cycle has no entry → truly empty
-              label = 'no proposals';
-              color = 'var(--text-muted)';
-            } else {
-              // History unavailable — don't claim a cause
-              label = 'no block';
-              color = 'var(--text-muted)';
-            }
             const gapTr = document.createElement('tr');
             gapTr.style.cssText = 'opacity:0.45';
             gapTr.innerHTML = `
               <td style="color:var(--text-muted)">${gap}</td>
-              <td colspan="3" style="color:${color};font-style:italic;text-align:center">${label}</td>
+              <td colspan="3" style="color:var(--text-muted);font-style:italic;text-align:center">no block</td>
               <td></td>
               <td></td>
             `;

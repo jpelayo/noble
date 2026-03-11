@@ -1013,6 +1013,8 @@ export function init(root, ctx) {
 
   /** Transform flat API entry into the phase-based format renderTimeline expects. */
   function apiEntryToCycle(entry, isCurrent) {
+    // Gap placeholder — no proposals, no votes, just an empty marker.
+    if (entry._gap) return entry;
     // If already has phases (mock data), pass through.
     if (entry.phases) return entry;
     const hasWinner = !!entry.winner;
@@ -1061,72 +1063,181 @@ export function init(root, ctx) {
 
   async function loadTimeline() {
     try {
-      // Fetch history, current cycle status, and tallies in parallel.
-      const [history, cycleStatus, tallies] = await Promise.all([
-        rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]),
+      // ── Build timeline from CHAIN DATA (committed blocks), not local history ──
+      // try_sync_import does NOT write cycle history, so nodes that synced from
+      // peers have no local history for those cycles.  Committed blocks ARE
+      // chain data — identical on every synced node.  We use blocks as the
+      // backbone and overlay local cycle history for enrichment (proposals,
+      // votes, disambiguation).
+      const [blockCount, cycleStatus, tallies, history] = await Promise.all([
+        rpc.call('noble_getBlockCount'),
         rpc.call('noble_getCycleStatus').catch(() => null),
         rpc.call('noble_getVoteTallies').catch(() => null),
+        rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]).catch(() => ({ entries: [] })),
       ]);
-      let allEntries = (history.entries || history.cycles || []);
 
-      // Filter stale entries from previous chains: entries arrive newest-first.
-      // If a gap > 20 appears between consecutive entries, the older group is the
-      // current chain and the isolated high-numbered entry is from a previous chain.
-      // Keep only the largest contiguous group.
-      if (allEntries.length >= 2) {
-        for (let i = 1; i < allEntries.length; i++) {
-          const gap = allEntries[i - 1].cycle_number - allEntries[i].cycle_number;
-          if (gap > 20) {
-            // Entries [0..i-1] are isolated outliers, [i..] is the real chain
-            // unless the outlier group is larger (unlikely after reset).
-            if (i <= allEntries.length - i) {
-              allEntries = allEntries.slice(i); // drop high outliers, keep low contiguous
-            } else {
-              allEntries = allEntries.slice(0, i); // keep high group
+      const tipHeight = blockCount.height || 0;
+      if (tipHeight === 0 && !cycleStatus) {
+        csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
+        return;
+      }
+
+      // Fetch recent blocks from the chain — enough to fill TIMELINE_LIMIT cycles.
+      // Each block carries its cycle number; this is chain truth.
+      const fetchCount = Math.min(tipHeight, TIMELINE_LIMIT * 3);
+      let recentBlocks = [];
+      if (fetchCount > 0) {
+        const startH = Math.max(1, tipHeight - fetchCount + 1);
+        recentBlocks = await rpc.call('noble_getBlockRange', [startH, tipHeight - startH + 1]);
+      }
+
+      // Build cycle→block mapping from committed blocks (newest first).
+      // Each cycle produces at most one committed block.
+      const cycleBlockMap = new Map(); // cycle_number → block info
+      for (let i = recentBlocks.length - 1; i >= 0; i--) {
+        const b = recentBlocks[i];
+        if (b.cycle != null && !cycleBlockMap.has(b.cycle)) {
+          cycleBlockMap.set(b.cycle, b);
+        }
+      }
+
+      // Build local cycle history lookup for enrichment.
+      const historyEntries = (history.entries || history.cycles || []);
+      const historyMap = new Map(); // cycle_number → history entry
+      for (const e of historyEntries) {
+        historyMap.set(e.cycle_number, e);
+      }
+
+      // Determine the cycle range for the timeline.
+      let highestCycle = 0;
+      if (cycleStatus && cycleStatus.cycle_number != null) {
+        highestCycle = cycleStatus.cycle_number;
+      }
+      for (const [c] of cycleBlockMap) {
+        if (c > highestCycle) highestCycle = c;
+      }
+
+      // Collect finalized cycle numbers from blocks (newest first).
+      const blockCycles = [...cycleBlockMap.keys()].sort((a, b) => b - a);
+
+      // Build timeline entries: active cycle + recent finalized + gaps.
+      const allEntries = [];
+
+      // 1) Active cycle (live state — same on all nodes since it's time-derived).
+      if (cycleStatus && cycleStatus.cycle_number != null) {
+        const liveCycle = cycleStatus.cycle_number;
+        const liveProposals = (tallies?.tallies || []).map(t => ({
+          validator: t.validator || t.block_hash,
+          block_hash: t.block_hash,
+          tx_count: 0,
+        }));
+        const liveVotes = (tallies?.tallies || []).map(t => ({
+          block_hash: t.block_hash,
+          validator: t.validator || '',
+          vote_count: t.vote_count || 0,
+          r2_vote_count: t.r2_vote_count || 0,
+        }));
+        allEntries.push({
+          cycle_number: liveCycle,
+          status: 'active',
+          proposals: liveProposals,
+          votes: liveVotes,
+          winner: null,
+          winning_hash: null,
+          disambiguation: null,
+          finalized_at: null,
+        });
+      }
+
+      // 2) Past cycles: walk down from highestCycle-1, collect up to TIMELINE_LIMIT
+      //    finalized cycles (from blocks) with gap rows in between.
+      let collected = 0;
+      const lowestBlockCycle = blockCycles.length > 0 ? blockCycles[blockCycles.length - 1] : highestCycle;
+      const startCycle = allEntries.length > 0 ? allEntries[0].cycle_number - 1 : highestCycle;
+
+      for (let c = startCycle; c >= lowestBlockCycle && collected < TIMELINE_LIMIT; c--) {
+        const block = cycleBlockMap.get(c);
+        if (block) {
+          // Committed block exists — this cycle is FINALIZED (chain truth).
+          // Enrich with local history if available, but chain truth wins:
+          // if history says indeterminate but chain has a committed block,
+          // force winner/winning_hash from the block.
+          const hist = historyMap.get(c);
+          if (hist) {
+            if (!hist.winner && block) {
+              hist.winner = block.validator_id || '';
+              hist.winning_hash = block.hash || '';
+              hist.status = 'finalized';
+              hist.finalized_at = hist.finalized_at || block.timestamp || null;
             }
-            break;
+            allEntries.push(hist);
+          } else {
+            // No local history — synthesize minimal entry from block data.
+            allEntries.push({
+              cycle_number: c,
+              status: 'finalized',
+              proposals: [{
+                validator: block.validator_id || '',
+                block_hash: block.hash || '',
+                tx_count: block.tx_count || 0,
+              }],
+              votes: [],
+              winner: block.validator_id || '',
+              winning_hash: block.hash || '',
+              disambiguation: null,
+              finalized_at: block.timestamp || null,
+            });
+          }
+          collected++;
+        } else {
+          // No committed block for this cycle — gap row ("no block").
+          // This is chain truth: no block exists at this cycle on any synced node.
+        }
+      }
+
+      if (allEntries.length === 0) {
+        csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
+        return;
+      }
+
+      // Insert gap placeholders between consecutive entries (newest-first).
+      const filled = [];
+      for (let i = 0; i < allEntries.length; i++) {
+        filled.push(allEntries[i]);
+        if (i < allEntries.length - 1) {
+          const hi = allEntries[i].cycle_number;
+          const lo = allEntries[i + 1].cycle_number;
+          if (hi - lo <= 1) continue;
+          // Cap individual gap rows at 10, then summary.
+          const gapStart = hi - 1;
+          const gapEnd = Math.max(lo + 1, hi - 10);
+          for (let g = gapStart; g >= gapEnd; g--) {
+            filled.push({
+              cycle_number: g,
+              status: 'no_consensus',
+              proposals: [],
+              votes: [],
+              winner: null,
+              winning_hash: null,
+              _gap: true,
+            });
+          }
+          if (hi - lo > 11) {
+            filled.push({
+              cycle_number: null,
+              status: 'gap_summary',
+              _gapCount: hi - lo - 1,
+              _gapFrom: lo + 1,
+              _gapTo: hi - 1,
+              proposals: [],
+              votes: [],
+              _gap: true,
+            });
           }
         }
       }
 
-      // Inject the current active cycle if it's not already in history.
-      // getCycleHistory only returns completed cycles; the live cycle must be
-      // synthesized from getCycleStatus + getVoteTallies so the timeline always
-      // shows the ongoing cycle.
-      if (cycleStatus && cycleStatus.cycle_number != null) {
-        const liveCycle = cycleStatus.cycle_number;
-        const alreadyPresent = allEntries.some(e => e.cycle_number === liveCycle);
-        if (!alreadyPresent) {
-          const liveProposals = (tallies?.tallies || []).map(t => ({
-            validator: t.validator || t.block_hash,
-            block_hash: t.block_hash,
-            tx_count: 0,
-          }));
-          const liveVotes = (tallies?.tallies || []).map(t => ({
-            block_hash: t.block_hash,
-            validator: t.validator || '',
-            vote_count: t.vote_count || 0,
-            r2_vote_count: t.r2_vote_count || 0,
-          }));
-          allEntries.unshift({
-            cycle_number: liveCycle,
-            status: 'active',
-            proposals: liveProposals,
-            votes: liveVotes,
-            winner: null,
-            winning_hash: null,
-            disambiguation: null,
-            finalized_at: null,
-          });
-        }
-      }
-
-      const raw = allEntries.slice(0, TIMELINE_LIMIT);
-      if (raw.length === 0) {
-        csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
-        return;
-      }
-      const cycles = raw.map((e, i) =>
+      const cycles = filled.map((e, i) =>
         apiEntryToCycle(e, i === 0 && (e.status === 'active' || !e.finalized_at))
       );
 
@@ -1173,6 +1284,23 @@ export function init(root, ctx) {
     const participantMap = new Map(); // validator_name → { role[], cycles[] }
 
     for (const cycle of cycles) {
+      // ── Gap placeholder (empty cycle) ──
+      if (cycle._gap) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:var(--gap-xs);opacity:0.4;padding:4px 0';
+        if (cycle.status === 'gap_summary') {
+          row.innerHTML = `<span style="font-size:var(--font-size-xs);color:var(--text-muted);font-style:italic">… ${cycle._gapCount} empty cycles (#${formatNumber(cycle._gapFrom)}–#${formatNumber(cycle._gapTo)}) …</span>`;
+        } else {
+          // Gap rows are derived from chain data: no committed block exists for
+          // this cycle.  Always "no block" — identical on all synced nodes.
+          const label = 'no block';
+          const color = 'var(--text-muted)';
+          row.innerHTML = `<span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span> <span style="font-size:var(--font-size-xs);color:${color};font-weight:600">${label}</span>`;
+        }
+        csTimeline.appendChild(row);
+        continue;
+      }
+
       const row = document.createElement('div');
       row.style.cssText = 'margin-bottom:var(--gap-lg)';
 
