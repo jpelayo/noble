@@ -315,6 +315,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_capacity_bytes,
             data_dir: data_dir_str,
             validator_pubkey: self.validator_pubkey.clone(),
+            validator_pubkey_display: self.validator_pubkey.as_ref().and_then(|hex_str| {
+                let bytes = hex::decode(hex_str).ok()?;
+                noble_crypto::noble_addr::encode_wire_bytes(&bytes)
+            }),
             sync_behind,
             sync_target_height,
         })

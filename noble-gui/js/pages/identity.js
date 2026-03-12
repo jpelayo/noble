@@ -411,9 +411,9 @@ export function init(root, ctx) {
         container.innerHTML = '<p style="color:var(--text-secondary)">No keys in wallet. Create or import a key on the Wallet page.</p>';
         return;
       }
-      const validatorHex = nodeInfo.validator_pubkey || '';
+      const validatorDisplay = nodeInfo.validator_pubkey_display || nodeInfo.validator_pubkey || '';
       container.innerHTML = keys.map(k => {
-        const isValidator = validatorHex && k.pubkey_hex === validatorHex;
+        const isValidator = validatorDisplay && k.pubkey_hex === validatorDisplay;
         const badge = isValidator ? ' <span class="badge-pki-verified">Validator</span>' : '';
         const schemeBadge = k.scheme === 'secp256k1'
           ? '<span style="color:var(--warning)">secp256k1</span>'

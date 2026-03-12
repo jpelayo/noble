@@ -540,9 +540,12 @@ pub struct NodeInfoResponse {
     /// Path to the data directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
-    /// Hex-encoded validator public key, if configured.
+    /// Hex-encoded validator public key (wire format), if configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_pubkey: Option<String>,
+    /// Bech32 display address (`nbl1q…` / `nbl1p…`) of the validator key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_pubkey_display: Option<String>,
     /// True when the node is catching up blocks from a peer.
     pub sync_behind: bool,
     /// Target height the node is syncing towards (0 when not syncing).
@@ -1005,7 +1008,7 @@ pub struct NodeIdentityResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetNodeIdentityResponse {
     pub success: bool,
-    /// Hex-encoded wire pubkey of the auto-generated (or existing) validator key.
+    /// Bech32-encoded validator public key (nbl1q.../nbl1p...) of the auto-generated (or existing) validator key.
     /// Only present when `wants_to_validate = true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_pubkey: Option<String>,

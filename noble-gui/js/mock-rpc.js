@@ -1029,6 +1029,7 @@ export class MockRpcClient {
           data_dir: '/var/noble/data',
           totp_enabled: this.#authEnabled,
           validator_pubkey: selfKeyHex,
+          validator_pubkey_display: selfKeyHex, // mock: same as hex (real API returns bech32)
           peer_id: '12D3KooWMockPeerIdForDevMode',
           network_name: '34E9E7A4',
           latest_network_version: null,
@@ -1053,11 +1054,8 @@ export class MockRpcClient {
             first_active: null,
           };
         }
-        const walletKey = this.#validators[0].public_key;
-        const keyBytes = walletKey.Ed25519 || walletKey.Secp256k1 || [];
-        const keyHex = keyBytes.map(b => b.toString(16).padStart(2, '0')).join('');
-        // Address = first 20 bytes of public key hex, prefixed with "noble1"
-        const address = 'noble1' + keyHex.slice(0, 40);
+        const walletKey = this.#validators[0].public_key; // bech32 string (nbl1q...)
+        const address = walletKey; // real API returns bech32 address
         const blocksValidated = this.#validators[0].blocks_produced;
         // Subsidy: 100 NOBLE (100_000_000 atomic) per block
         const subsidyPerBlock = 100_000_000;
@@ -1089,16 +1087,9 @@ export class MockRpcClient {
       }
 
       case 'noble_listAddresses': {
-        const walletKey = this.#validators[0].public_key;
-        const keyBytes = walletKey.Ed25519 || walletKey.Secp256k1 || [];
-        const wireHex = (walletKey.Secp256k1 ? '01' : '00') + keyBytes.map(b => b.toString(16).padStart(2, '0')).join('');
-        const scheme = walletKey.Secp256k1 ? 'secp256k1' : 'ed25519';
-        const btcAddrs = walletKey.Secp256k1 ? [
-          { address_type: 'p2pkh', address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa' },
-          { address_type: 'p2wpkh', address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4' },
-          { address_type: 'p2tr', address: 'bc1p5cyxnuxmeuwuvkwfem96lqzszee2456ypqv9q33' },
-        ] : [];
-        return { keys: [{ pubkey_hex: wireHex, scheme, bitcoin_addresses: btcAddrs }] };
+        const walletKey = this.#validators[0].public_key; // bech32 string
+        // Real API returns bech32 pubkey_hex via pk.to_address()
+        return { keys: [{ pubkey_hex: walletKey, scheme: 'ed25519', bitcoin_addresses: [] }] };
       }
 
       case 'noble_getWalletTransactions': {
@@ -1402,7 +1393,7 @@ export class MockRpcClient {
           const now = Math.floor(Date.now() / 1000);
           this.#peerMemory = [
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(200),
               first_seen: now - 86400 * 10,
               last_seen: now - 120,
               connection_count: 47,
@@ -1415,7 +1406,7 @@ export class MockRpcClient {
               wants_to_vote: true,
             },
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(201),
               first_seen: now - 86400 * 30,
               last_seen: now - 300,
               connection_count: 120,
@@ -1428,7 +1419,7 @@ export class MockRpcClient {
               wants_to_vote: true,
             },
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(202),
               first_seen: now - 86400 * 5,
               last_seen: now - 60,
               connection_count: 12,
@@ -1441,7 +1432,7 @@ export class MockRpcClient {
               wants_to_vote: false,
             },
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(203),
               first_seen: now - 86400 * 60,
               last_seen: now - 86400 * 8,
               connection_count: 3,
@@ -1454,7 +1445,7 @@ export class MockRpcClient {
               wants_to_vote: false,
             },
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(204),
               first_seen: now - 86400 * 15,
               last_seen: now - 45,
               connection_count: 34,
@@ -1467,7 +1458,7 @@ export class MockRpcClient {
               wants_to_vote: false,
             },
             {
-              identity_key: randomHex(32),
+              identity_key: makePublicKey(205),
               first_seen: now - 86400 * 20,
               last_seen: now - 180,
               connection_count: 67,

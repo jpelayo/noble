@@ -36,8 +36,18 @@ export function init(root, ctx) {
           if (r.identity_key && r.node_name) nameMap.set(r.identity_key, r.node_name);
         }
       }
-      if (nodeInfo.validator_pubkey && identity.node_name) {
-        nameMap.set(nodeInfo.validator_pubkey, identity.node_name);
+      const selfDisplay = nodeInfo.validator_pubkey_display || nodeInfo.validator_pubkey;
+      if (selfDisplay && identity.node_name) {
+        nameMap.set(selfDisplay, identity.node_name);
+      }
+
+      // Also index vote witnesses by hex key (votes use hex, nameMap uses bech32).
+      if (votes) {
+        for (const v of [...(votes.r1_voters || []), ...(votes.r2_voters || [])]) {
+          if (v.validator_key && v.name && !nameMap.has(v.validator_key)) {
+            nameMap.set(v.validator_key, v.name);
+          }
+        }
       }
 
       /** Resolve a validator key to a friendly name. */

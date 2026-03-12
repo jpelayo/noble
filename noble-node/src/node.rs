@@ -2387,12 +2387,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     task = "peer_tracking",
                     "Connection rejected: {hex_pid} at {addr} — {reason}",
                 );
-                let _ = peer_update_tx.send(serde_json::json!({
-                    "event": "rejected",
-                    "peer_id": hex_pid,
-                    "addr": addr,
-                    "reason": reason,
-                }));
+                // Suppress WebSocket events for banned-peer reconnection attempts.
+                // The initial PeerBanned event already informed the GUI; repeated
+                // "rejected" events from reconnection loops are noise that floods
+                // the connectivity log.
+                if !reason.starts_with("peer is banned") {
+                    let _ = peer_update_tx.send(serde_json::json!({
+                        "event": "rejected",
+                        "peer_id": hex_pid,
+                        "addr": addr,
+                        "reason": reason,
+                    }));
+                }
             }
             NetworkEvent::PeerScoreUpdated { peer_id, ban_score, categories, last_category, last_reason } => {
                 let hex_pid = hex::encode(peer_id);
@@ -2423,7 +2429,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
                     let banned_until = now_unix + 86_400; // 24h default ban duration
                     let storage = self.storage.read();
-                    let _ = storage.store_ban(&peer_id, banned_until, *category, evidence_hash.as_ref());
+                    if let Err(e) = storage.store_ban(&peer_id, banned_until, *category, evidence_hash.as_ref()) {
+                        tracing::error!(
+                            peer = %hex::encode(&peer_id),
+                            "FAILED to persist ban to storage: {e} — ban is memory-only, lost on restart"
+                        );
+                    }
                 }
                 let hex_pid = hex::encode(peer_id);
                 tracing::warn!(

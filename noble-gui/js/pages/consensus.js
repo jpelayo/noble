@@ -38,7 +38,7 @@ export function init(root, ctx) {
   let countdownInterval = null;
 
   // Helper: extract display key from ValidatorEntry.public_key
-  // Live API returns a nbl1… bech32 string; mock returns { Ed25519: [u8] } or { Secp256k1: [u8] }.
+  // Both live API and mock return nbl1… bech32 strings. Legacy object format handled for safety.
   function valKey(pk) {
     if (typeof pk === 'string') return pk;
     const k = pk.Ed25519 || pk.Secp256k1 || [];
@@ -1691,7 +1691,7 @@ export function init(root, ctx) {
         rpc.call('noble_getNodeIdentity').catch(() => ({})),
         rpc.call('noble_getPeerInfo').catch(() => []),
       ]);
-      const selfKey = nodeInfo.validator_pubkey || null;
+      const selfKey = nodeInfo.validator_pubkey_display || nodeInfo.validator_pubkey || null;
       const validators = result?.validators || [];
       const priorityOrder = result.priority_order || [];
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
@@ -2263,11 +2263,11 @@ export function init(root, ctx) {
       );
 
       // Inject SELF if this node is a validator candidate but not yet accepted
-      const selfKey = nodeInfo.validator_pubkey;
-      if (selfKey && !validatorKeys.has(selfKey)) {
+      const selfKey2 = nodeInfo.validator_pubkey_display || nodeInfo.validator_pubkey;
+      if (selfKey2 && !validatorKeys.has(selfKey2)) {
         const now = Math.floor(Date.now() / 1000);
         candidates.unshift({
-          identity_key: selfKey,
+          identity_key: selfKey2,
           node_name: identity.node_name || 'This Node',
           org_type: identity.org_type || null,
           node_role: identity.node_role || null,

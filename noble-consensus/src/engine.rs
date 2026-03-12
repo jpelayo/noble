@@ -1082,18 +1082,26 @@ impl CycleEngine {
                 .list_all()
                 .into_iter()
                 .filter_map(|(k, v)| {
-                    noble_codec::to_canonical_cbor(v)
-                        .ok()
-                        .map(|cbor| (k.clone(), cbor))
+                    match noble_codec::to_canonical_cbor(v) {
+                        Ok(cbor) => Some((k.clone(), cbor)),
+                        Err(e) => {
+                            warn!("badge CBOR encode failed for key {}: {e}", hex::encode(&k));
+                            None
+                        }
+                    }
                 })
                 .collect();
             let proposals: Vec<(String, Vec<u8>)> = self
                 .badge_proposals
                 .iter()
                 .filter_map(|(k, v)| {
-                    noble_codec::to_canonical_cbor(v)
-                        .ok()
-                        .map(|cbor| (k.clone(), cbor))
+                    match noble_codec::to_canonical_cbor(v) {
+                        Ok(cbor) => Some((k.clone(), cbor)),
+                        Err(e) => {
+                            warn!("badge proposal CBOR encode failed for {k}: {e}");
+                            None
+                        }
+                    }
                 })
                 .collect();
             if !badges.is_empty() || !proposals.is_empty() {
@@ -1478,15 +1486,30 @@ impl CycleEngine {
 
                 if let Some(existing_entry) = self.candidate_tracker.get(&existing_hash) {
                     existing_ts = existing_entry.block.header.timestamp;
-                    let evidence = noble_core::DoubleProposalEvidence::new(
-                        existing_entry.block.header.clone(),
-                        new_header,
-                    );
-                    if evidence.verify().is_ok() {
-                        outputs.push(CycleIo::PublishEvidence(Box::new(
-                            noble_core::MisbehaviorEvidence::DoubleProposal(evidence),
-                        )));
-                        evidence_verified = true;
+
+                    // Cross-cycle guard: compute the cycle number for each block's
+                    // timestamp.  If they fall in different cycles, this is NOT a
+                    // double proposal — it happens when a block arrives between tick
+                    // fires and the candidate_tracker hasn't been cleared yet.
+                    let existing_cycle = self.cycle_mgr.current_cycle(existing_ts);
+                    let new_cycle = self.cycle_mgr.current_cycle(new_ts);
+                    if existing_cycle != new_cycle {
+                        debug!(
+                            "cross-cycle proposal from same validator — NOT a double proposal \
+                             (existing ts {} cycle {}, new ts {} cycle {})",
+                            existing_ts, existing_cycle, new_ts, new_cycle
+                        );
+                    } else {
+                        let evidence = noble_core::DoubleProposalEvidence::new(
+                            existing_entry.block.header.clone(),
+                            new_header,
+                        );
+                        if evidence.verify().is_ok() {
+                            outputs.push(CycleIo::PublishEvidence(Box::new(
+                                noble_core::MisbehaviorEvidence::DoubleProposal(evidence),
+                            )));
+                            evidence_verified = true;
+                        }
                     }
                 }
 
@@ -1507,13 +1530,13 @@ impl CycleEngine {
                     )));
                 } else {
                     // Insufficient evidence — could be a stale delivery edge case,
-                    // relay race, or tracker state inconsistency.  Reject the block
-                    // but do NOT ban the peer.  Log with full forensic detail so
-                    // operators can investigate.
+                    // relay race, cross-cycle proposal, or tracker state inconsistency.
+                    // Reject the block but do NOT ban the peer.  Log with full forensic
+                    // detail so operators can investigate.
                     outputs.push(CycleIo::Log(format!(
-                        "WARNING: rejected potential double proposal without verified \
-                         evidence — NOT banning (existing: {}, new: {}, validator: {})",
-                        existing_hash, block_hash, new_validator,
+                        "rejected potential double proposal without ban \
+                         (existing: {} ts {}, new: {} ts {}, validator: {})",
+                        existing_hash, existing_ts, block_hash, new_ts, new_validator,
                     )));
                 }
             }

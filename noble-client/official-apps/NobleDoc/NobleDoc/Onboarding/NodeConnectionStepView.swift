@@ -107,9 +107,16 @@ struct NodeConnectionStepView: View {
     /// Build a full node URL from whatever the user typed — bare IP, hostname, or full URL.
     private static func buildNodeURL(from input: String) -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Already a full URL — use as-is
-        if let url = URL(string: trimmed), url.scheme != nil, url.host != nil {
+        // Already a full URL with scheme + host — use as-is
+        if let url = URL(string: trimmed), url.scheme?.hasPrefix("http") == true, url.host != nil {
             return trimmed
+        }
+        // User may have typed "host:port" — try prepending https:// to parse it
+        if trimmed.contains(":") {
+            let candidate = "https://\(trimmed)"
+            if let url = URL(string: candidate), url.host != nil {
+                return candidate
+            }
         }
         // Bare IP or hostname — wrap with https and default port
         return "https://\(trimmed):8783"

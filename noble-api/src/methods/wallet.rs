@@ -197,7 +197,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let keystore = self.wallet_keystore.lock();
         let state = self.wallet_state.lock();
 
-        let keys = keystore.list_keys().unwrap_or_default();
+        let keys = keystore.list_keys().map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("keystore read failed: {e}"), None::<()>)
+        })?;
         let key_count = keys.len();
 
         // Sum balances across all wallet keys and all address buckets
@@ -212,13 +214,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         // Collect all keys to query: wallet keystore keys + validator key (if not already included).
         let mut all_keys: Vec<noble_crypto::NoblePublicKey> = keys.clone();
         if let Some(ref vk_hex) = self.validator_pubkey {
-            if let Ok(vk_bytes) = hex::decode(vk_hex) {
-                if let Ok(vk) = noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
-                    let already = all_keys.iter().any(|k| k.to_wire_bytes() == vk.to_wire_bytes());
-                    if !already {
-                        all_keys.push(vk);
+            match hex::decode(vk_hex) {
+                Ok(vk_bytes) => match noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
+                    Ok(vk) => {
+                        let already = all_keys.iter().any(|k| k.to_wire_bytes() == vk.to_wire_bytes());
+                        if !already {
+                            all_keys.push(vk);
+                        }
                     }
-                }
+                    Err(e) => tracing::warn!("validator_pubkey wire decode failed: {e}"),
+                },
+                Err(e) => tracing::warn!("validator_pubkey hex decode failed: {e}"),
             }
         }
 
@@ -226,18 +232,27 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             // Noble bucket (all key types)
             let nb = storage
                 .get_balance(&noble_core::NobleAddress::Noble(pk.clone()))
-                .unwrap_or(0);
+                .unwrap_or_else(|e| {
+                    tracing::warn!("balance read failed for Noble bucket: {e}");
+                    0
+                });
             noble_bal = noble_bal.saturating_add(nb);
             total_balance = total_balance.saturating_add(nb);
 
             // Hash160 + Taproot buckets (secp256k1 keys only)
             if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
-                let hb = storage.get_balance(&h160_addr).unwrap_or(0);
+                let hb = storage.get_balance(&h160_addr).unwrap_or_else(|e| {
+                    tracing::warn!("balance read failed for Hash160 bucket: {e}");
+                    0
+                });
                 hash160_bal = hash160_bal.saturating_add(hb);
                 total_balance = total_balance.saturating_add(hb);
             }
             if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
-                let tb = storage.get_balance(&tap_addr).unwrap_or(0);
+                let tb = storage.get_balance(&tap_addr).unwrap_or_else(|e| {
+                    tracing::warn!("balance read failed for Taproot bucket: {e}");
+                    0
+                });
                 taproot_bal = taproot_bal.saturating_add(tb);
                 total_balance = total_balance.saturating_add(tb);
             }
