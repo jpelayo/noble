@@ -137,6 +137,19 @@ export function init(root, ctx) {
     </div>
     <div id="s-wk-modal"></div>
 
+    <!-- Faucet -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Faucet</span>
+        <span id="s-faucet-badge" class="badge" style="background:var(--text-muted)">Checking...</span>
+      </div>
+      <div class="panel-body">
+        <dl class="detail-grid" id="s-faucet-info">
+          <dt style="grid-column:1/-1;color:var(--text-muted)">Detecting faucet...</dt>
+        </dl>
+      </div>
+    </div>
+
     <!-- Seed Nodes -->
     <div class="panel">
       <div class="panel-header">
@@ -414,6 +427,10 @@ export function init(root, ctx) {
   const wkError = root.querySelector('#s-wk-error');
   const wkMsg = root.querySelector('#s-wk-msg');
   const wkModal = root.querySelector('#s-wk-modal');
+
+  // Faucet refs
+  const faucetBadge = root.querySelector('#s-faucet-badge');
+  const faucetInfo = root.querySelector('#s-faucet-info');
 
   // Seed node refs
   const seedBadge = root.querySelector('#s-seed-badge');
@@ -1176,14 +1193,56 @@ export function init(root, ctx) {
     }
   });
 
+  // ── Faucet status ──
+  async function loadFaucet() {
+    const host = window.location.hostname || '127.0.0.1';
+    const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+    const faucetUrl = `${proto}://${host}:8786/api/faucet/status`;
+    try {
+      const resp = await fetch(faucetUrl, { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      faucetBadge.textContent = 'Running';
+      faucetBadge.style.background = 'var(--success)';
+      const bal = (data.faucet_balance / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const drip = (data.drip_amount / 1_000_000).toLocaleString();
+      const cap = (data.daily_cap / 1_000_000).toLocaleString();
+      const todayDist = (data.today_distributed / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      faucetInfo.innerHTML = `
+        <dt>Address</dt><dd class="mono" style="word-break:break-all">${data.faucet_address} <button class="btn-copy" data-copy="${data.faucet_address}" title="Copy faucet address">&#128203;</button></dd>
+        <dt>Balance</dt><dd>${bal} NOBLE</dd>
+        <dt>Drip Amount</dt><dd>${drip} NOBLE</dd>
+        <dt>Distributed Today</dt><dd>${todayDist} NOBLE</dd>
+        <dt>Distributions</dt><dd>${data.distribution_count.toLocaleString()}</dd>
+        <dt>Daily Cap</dt><dd>${cap} NOBLE</dd>
+        <dt>IP Cooldown</dt><dd>${data.ip_cooldown_hours}h</dd>
+        <dt>Address Cooldown</dt><dd>${data.address_cooldown_hours}h</dd>
+      `;
+      // Wire copy button
+      faucetInfo.querySelectorAll('.btn-copy').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigator.clipboard.writeText(btn.dataset.copy).catch(() => {});
+          btn.textContent = '\u2713';
+          setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
+        });
+      });
+    } catch (_) {
+      faucetBadge.textContent = 'Not detected';
+      faucetBadge.style.background = 'var(--text-muted)';
+      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">No faucet running on port 8786. Start noble-faucet to enable token distribution.</dt>`;
+    }
+  }
+
   async function loadSettings() {
-    // Load TLS cert, encryption status, seeds, wallet keys, and reward address in parallel.
+    // Load TLS cert, encryption status, seeds, wallet keys, reward address, and faucet in parallel.
     loadTlsCert();
     loadEncryptionStatus();
     loadSeeds();
     loadMaxPeers();
     loadWalletKeys();
     loadRewardAddress();
+    loadFaucet();
 
     try {
       const [ipResult, nodeInfo, vkeyInfo] = await Promise.all([
