@@ -485,7 +485,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Source</span>
-                    <span>This software is open source (available at <a href="https://github.com/jpelayo/noble" target="_blank" rel="noopener" style="color:var(--accent)">github.com/jpelayo/noble</a>)</span>
+                    <span>This software is open source (available at https://github.com/jpelayo/noble)</span>
                 </div>
             </div>
         `;
