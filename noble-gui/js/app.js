@@ -397,6 +397,11 @@ async function updateForkStatus() {
       detailText = behind > 0
         ? `wrong fork, ${behind} block${behind !== 1 ? 's' : ''} behind`
         : 'wrong fork';
+    } else if (behind === 0 && myHeight === 0) {
+      // All peers also at height 0 — no chain formed yet.
+      severity = 'syncing';
+      statusText = 'Bootstrap';
+      detailText = `forming chain \u00b7 ${peerCount} peer${peerCount !== 1 ? 's' : ''}`;
     } else if (behind === 0) {
       // On the same chain as peers, fully caught up.
       severity = 'zero';

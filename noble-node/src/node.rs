@@ -1125,7 +1125,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // compute_validator_key_info would fail after migration renames validator.key.
         let (validator_pubkey_str, validator_scheme_str, validator_key_path_str) =
             if let Some((ref _sk, ref pk)) = self.announce_keypair {
-                let pubkey_hex = pk.to_address();
+                let pubkey_hex = hex::encode(pk.to_wire_bytes());
                 let scheme = match pk {
                     noble_crypto::NoblePublicKey::Ed25519(_) => "ed25519",
                     noble_crypto::NoblePublicKey::Secp256k1(_) => "secp256k1",

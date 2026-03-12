@@ -288,7 +288,17 @@ final class AppState {
             startPolling()
         } catch {
             isConnected = false
-            connectionError = error.localizedDescription
+            let desc = error.localizedDescription
+            if desc.localizedCaseInsensitiveContains("TLS")
+                || desc.localizedCaseInsensitiveContains("certificate")
+                || desc.localizedCaseInsensitiveContains("secure connection")
+            {
+                connectionError = "Could not establish a secure connection. Verify the node is running and reachable."
+            } else if desc.localizedCaseInsensitiveContains("Could not connect") || desc.localizedCaseInsensitiveContains("network") {
+                connectionError = "Could not reach the node. Check the IP address and that the node is running."
+            } else {
+                connectionError = desc
+            }
         }
     }
 

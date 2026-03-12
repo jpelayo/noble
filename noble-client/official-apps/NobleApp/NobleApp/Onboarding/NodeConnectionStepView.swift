@@ -6,6 +6,7 @@ import SwiftUI
 /// Step 3: Connect to a NOBLE node.
 struct NodeConnectionStepView: View {
     @Bindable var appState: AppState
+    @State private var nodeIP = "localhost"
     @State private var isConnecting = false
 
     var body: some View {
@@ -14,21 +15,22 @@ struct NodeConnectionStepView: View {
                 .font(.title)
                 .bold()
 
-            Text("Enter the URL of your NOBLE node. The default works if you're running a node locally.")
+            Text("Enter the IP address of your NOBLE node. The default works if you're running a node locally.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Node URL")
+                Text("Node IP Address")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                TextField("https://localhost:8783", text: $appState.nodeURL)
+                TextField("localhost", text: $nodeIP)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
-                    .keyboardType(.URL)
+                    .keyboardType(.numbersAndPunctuation)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onSubmit { testConnection() }
@@ -38,6 +40,7 @@ struct NodeConnectionStepView: View {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(Color(.systemRed))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if appState.isConnected {
@@ -63,7 +66,7 @@ struct NodeConnectionStepView: View {
                         testConnection()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isConnecting || appState.nodeURL.isEmpty)
+                    .disabled(isConnecting || nodeIP.isEmpty)
                 }
             }
 
@@ -75,6 +78,12 @@ struct NodeConnectionStepView: View {
             .font(.caption)
         }
         .padding()
+        .onAppear {
+            // Extract IP from saved URL if present
+            if let url = URL(string: appState.nodeURL), let host = url.host {
+                nodeIP = host
+            }
+        }
     }
 
     private var connectedInfo: some View {
@@ -99,7 +108,21 @@ struct NodeConnectionStepView: View {
         .clipShape(.rect(cornerRadius: 8))
     }
 
+    /// Build a full node URL from whatever the user typed — bare IP, hostname, or full URL.
+    private static func buildNodeURL(from input: String) -> String {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Already a full URL — use as-is
+        if let url = URL(string: trimmed), url.scheme != nil, url.host != nil {
+            return trimmed
+        }
+        // Bare IP or hostname — wrap with https and default port
+        return "https://\(trimmed):8783"
+    }
+
     private func testConnection() {
+        let input = nodeIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+        appState.nodeURL = Self.buildNodeURL(from: input)
         isConnecting = true
         Task {
             await appState.connectToNode()

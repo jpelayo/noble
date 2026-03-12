@@ -120,6 +120,7 @@ struct WalletSetupStepView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
             TextEditor(text: $importText)
                 .font(.body.monospaced())
