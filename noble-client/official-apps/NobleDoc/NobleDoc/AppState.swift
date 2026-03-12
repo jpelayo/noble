@@ -69,12 +69,20 @@ final class AppState {
     /// Error message from last connection attempt.
     var connectionError: String?
 
+    /// Chain ID as UInt32 for transaction signing.
+    /// Parses the string chain ID (hex like "4E4F424C" or "0x4E4F424C") to a numeric value.
+    /// Falls back to primary chain ID if parsing fails.
+    var resolvedChainId: UInt32 {
+        let hex = chainId.hasPrefix("0x") ? String(chainId.dropFirst(2)) : chainId
+        return UInt32(hex, radix: 16) ?? NobleProtocol.primaryChainId
+    }
+
     // MARK: - Wallet
 
     /// Whether a wallet is stored in the Keychain.
     var hasWallet = false
 
-    /// The wallet's NOBLE address (hex wire format).
+    /// The wallet's NOBLE address (nbl1 bech32 display format, or hex wire for non-Noble).
     var walletAddress: String?
 
     /// Display-formatted wallet balance.
@@ -182,7 +190,7 @@ final class AppState {
         try keychainService.storeKey(mnemonicData, label: Self.mnemonicLabel)
 
         hasWallet = true
-        walletAddress = address.wireHex
+        walletAddress = address.nobleBech32
     }
 
     /// Import a wallet from an existing mnemonic.
@@ -200,7 +208,7 @@ final class AppState {
                 return
             }
             let address = try mnemonicProvider.deriveAddress(privateKey: privateKey)
-            walletAddress = address.wireHex
+            walletAddress = address.nobleBech32
         } catch {
             // Silently fail — address display is non-critical
         }
@@ -211,6 +219,7 @@ final class AppState {
         do {
             return try keychainService.loadKey(label: Self.privateKeyLabel)
         } catch {
+            print("[AppState] Failed to load private key from Keychain: \(error.localizedDescription)")
             return nil
         }
     }
@@ -220,7 +229,11 @@ final class AppState {
     /// Save the node URL to Keychain for persistence.
     func saveNodeURL(_ url: String) {
         nodeURL = url
-        try? keychainService.storeKey(Data(url.utf8), label: Self.nodeURLLabel)
+        do {
+            try keychainService.storeKey(Data(url.utf8), label: Self.nodeURLLabel)
+        } catch {
+            print("[AppState] Failed to save node URL to Keychain: \(error.localizedDescription)")
+        }
     }
 
     /// Load saved node URL from Keychain.

@@ -28,6 +28,9 @@ public protocol NobleAPIService: Sendable {
     /// Fetch connected peers.
     func getPeers() async throws -> [PeerInfo]
 
+    /// Fetch network info (peer count, clock offset).
+    func getNetworkInfo() async throws -> NetworkInfo
+
     // MARK: - Wallet
 
     /// Fetch wallet state from the node.

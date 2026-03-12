@@ -66,7 +66,7 @@ final class WebBridgeHandler {
             }
             let balance = try await api.getBalance(address: address)
             return [
-                "address": balance.address.wireHex,
+                "address": balance.address.nobleBech32,
                 "balance": balance.balance.atomic,
                 "available": balance.available.atomic,
                 "pending": balance.pending.atomic,
@@ -167,11 +167,12 @@ final class WebBridgeHandler {
             let peers = try await api.getPeers()
             let inbound = peers.filter { $0.direction == "inbound" }.count
             let outbound = peers.filter { $0.direction == "outbound" }.count
+            let networkInfo = try? await api.getNetworkInfo()
             return [
                 "peer_count": peers.count,
                 "inbound": inbound,
                 "outbound": outbound,
-                "clock_offset_ms": 0,
+                "clock_offset_ms": networkInfo?.clockOffsetMs ?? 0,
             ] as [String: Any]
 
         case "getPeers":
@@ -310,7 +311,7 @@ final class WebBridgeHandler {
             "txType": tx.txType.label,
             "type": tx.txType.label,
             "status": tx.status.rawValue,
-            "signer": tx.signer.wireHex,
+            "signer": tx.signer.nobleBech32,
             "total_output": tx.totalOutput,
             "inputs": tx.inputs.map { ["txid": $0.txid, "vout": $0.vout] as [String: Any] },
             "outputs": tx.outputs.map { ["value": $0.value, "address": $0.address] as [String: Any] },
@@ -323,14 +324,14 @@ final class WebBridgeHandler {
         let walletAddr = appState.walletAddress ?? ""
         let firstOutputAddr = tx.outputs.first?.address ?? ""
         if tx.txType == .transfer {
-            if tx.signer.wireHex == walletAddr {
+            if tx.signer.nobleBech32 == walletAddr {
                 dict["direction"] = "outgoing"
                 // Counterparty is the first output that isn't us
                 let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? firstOutputAddr
                 dict["counterparty"] = counterparty
             } else {
                 dict["direction"] = "incoming"
-                dict["counterparty"] = tx.signer.wireHex
+                dict["counterparty"] = tx.signer.nobleBech32
             }
         }
         // Confirmations: compute from current block height if possible
@@ -347,7 +348,7 @@ final class WebBridgeHandler {
         [
             "txId": r.txId.hex,
             "checksum": r.checksum.hex,
-            "publisher": r.publisher.wireHex,
+            "publisher": r.publisher.nobleBech32,
             "blockHeight": r.blockHeight,
             "timestamp": r.timestamp.timeIntervalSince1970,
             "fee": r.fee.atomic,
@@ -359,7 +360,7 @@ final class WebBridgeHandler {
         var dict: [String: Any] = [
             "checksum": v.checksum.hex,
             "txId": v.txId.hex,
-            "publisher": v.publisher.wireHex,
+            "publisher": v.publisher.nobleBech32,
             "blockHeight": v.blockHeight,
             "timestamp": v.timestamp.timeIntervalSince1970,
         ]
@@ -391,6 +392,8 @@ final class WebBridgeHandler {
             let utxos = try parseUtxoParams(params)
             let changeAddress = walletChangeAddress()
 
+            let chainId = appState.resolvedChainId
+
             let txHex = try appState.transactionSigner.signNotarization(
                 checksum: checksum,
                 metadata: metadataItems,
@@ -398,7 +401,7 @@ final class WebBridgeHandler {
                 utxos: utxos,
                 changeAddress: changeAddress,
                 privateKey: privateKey,
-                chainId: NobleProtocol.primaryChainId
+                chainId: chainId
             )
             return ["txHex": txHex]
 
@@ -421,6 +424,8 @@ final class WebBridgeHandler {
             let utxos = try parseUtxoParams(params)
             let changeAddress = walletChangeAddress()
 
+            let chainId = appState.resolvedChainId
+
             let txHex = try appState.transactionSigner.signTransfer(
                 to: to,
                 amount: NobleAmount(atomic: amountAtomic),
@@ -428,7 +433,7 @@ final class WebBridgeHandler {
                 utxos: utxos,
                 changeAddress: changeAddress,
                 privateKey: privateKey,
-                chainId: NobleProtocol.primaryChainId
+                chainId: chainId
             )
             return ["txHex": txHex]
 
@@ -445,22 +450,33 @@ final class WebBridgeHandler {
         guard let utxoArr = params["utxos"] as? [[String: Any]] else {
             throw BridgeError.missingParam("utxos")
         }
-        return utxoArr.compactMap { dict in
+        var result = [UtxoOutpoint]()
+        for (i, dict) in utxoArr.enumerated() {
             guard let txidHex = dict["txid"] as? String,
                   let vout = dict["vout"] as? UInt32,
-                  let value = dict["value"] as? UInt64 else { return nil }
-            return UtxoOutpoint(txidHex: txidHex, vout: vout, value: value)
+                  let value = dict["value"] as? UInt64 else {
+                print("[Bridge] Skipping malformed UTXO at index \(i): \(dict)")
+                continue
+            }
+            result.append(UtxoOutpoint(txidHex: txidHex, vout: vout, value: value))
         }
+        guard !result.isEmpty else {
+            throw BridgeError.missingParam("utxos (all entries malformed)")
+        }
+        return result
     }
 
-    /// Get the wallet's change address as wire bytes (hex-decoded wallet address).
+    /// Get the wallet's change address as wire bytes.
+    /// Handles both nbl1 bech32 and hex wire format via NobleAddress.
     private func walletChangeAddress() -> [UInt8] {
-        guard let addrHex = appState.walletAddress else { return [] }
+        guard let addrStr = appState.walletAddress,
+              let addr = NobleAddress(wireHex: addrStr) else { return [] }
+        let hex = addr.wireHex
         var bytes = [UInt8]()
-        var idx = addrHex.startIndex
-        while idx < addrHex.endIndex {
-            let next = addrHex.index(idx, offsetBy: 2, limitedBy: addrHex.endIndex) ?? addrHex.endIndex
-            if let byte = UInt8(addrHex[idx..<next], radix: 16) {
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+            if let byte = UInt8(hex[idx..<next], radix: 16) {
                 bytes.append(byte)
             }
             idx = next

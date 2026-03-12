@@ -93,6 +93,11 @@ public struct MockAPIService: NobleAPIService {
         ]
     }
 
+    public func getNetworkInfo() async throws -> NetworkInfo {
+        await simulateDelay()
+        return NetworkInfo(peerCount: 3, inbound: 1, outbound: 2, clockOffsetMs: -45)
+    }
+
     // MARK: - Wallet
 
     public func getWalletInfo() async throws -> WalletInfo {

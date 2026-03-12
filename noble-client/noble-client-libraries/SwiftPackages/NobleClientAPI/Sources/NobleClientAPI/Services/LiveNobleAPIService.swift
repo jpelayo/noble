@@ -68,6 +68,16 @@ public struct LiveNobleAPIService: NobleAPIService {
         }
     }
 
+    public func getNetworkInfo() async throws -> NetworkInfo {
+        let dto = try await client.call(method: "noble_getNetworkInfo", expecting: NetworkInfoDTO.self)
+        return NetworkInfo(
+            peerCount: dto.peer_count,
+            inbound: dto.inbound ?? 0,
+            outbound: dto.outbound ?? 0,
+            clockOffsetMs: dto.clock_offset_ms ?? 0
+        )
+    }
+
     // MARK: - Wallet
 
     public func getWalletInfo() async throws -> WalletInfo {
@@ -215,8 +225,8 @@ public struct LiveNobleAPIService: NobleAPIService {
         return (dto.versions ?? []).compactMap { v in
             guard let cs = v.checksum.flatMap({ Hash256(hex: $0) }),
                   let txId = v.tx_id.flatMap({ Hash256(hex: $0) }) else { return nil }
-            // Publisher not available in version DTO — use a placeholder
-            let publisher = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
+            // Publisher not available in version DTO — placeholder (API limitation)
+            let publisher = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
             return VersionEntry(
                 checksum: cs,
                 previousChecksum: nil,
@@ -233,8 +243,13 @@ public struct LiveNobleAPIService: NobleAPIService {
     private static func mapTransaction(dto: TransactionDTO?, receipt: TransactionReceiptDTO?) -> TransactionRecord {
         let txIdStr = dto?.tx_id ?? receipt?.transaction?.tx_id ?? ""
         let txId = Hash256(hex: txIdStr) ?? Hash256(hex: String(repeating: "0", count: 64))!
-        let signer = dto?.signer.flatMap { NobleAddress(wireHex: $0) }
-            ?? NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
+        let signer: NobleAddress
+        if let signerStr = dto?.signer, let parsed = NobleAddress(wireHex: signerStr) {
+            signer = parsed
+        } else {
+            print("[NobleAPI] Warning: could not parse signer '\(dto?.signer ?? "nil")' — using placeholder")
+            signer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
+        }
         let txType: TransactionType = (dto?.tx_type ?? "notarization") == "transfer" ? .transfer : .notarization
         let status: TransactionStatus = (receipt?.status ?? "pending") == "confirmed" ? .confirmed : .pending
         let checksum = dto?.checksum.flatMap { Hash256(hex: $0) }
@@ -275,8 +290,13 @@ public struct LiveNobleAPIService: NobleAPIService {
     private static func mapRegistration(dto: RegistrationRecordDTO, checksum: String) -> RegistrationRecord? {
         guard let txId = dto.tx_id.flatMap({ Hash256(hex: $0) }),
               let cs = Hash256(hex: checksum) else { return nil }
-        let publisher = dto.publisher.flatMap { NobleAddress(wireHex: $0) }
-            ?? NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
+        let publisher: NobleAddress
+        if let pubStr = dto.publisher, let parsed = NobleAddress(wireHex: pubStr) {
+            publisher = parsed
+        } else {
+            print("[NobleAPI] Warning: could not parse publisher '\(dto.publisher ?? "nil")' — using placeholder")
+            publisher = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
+        }
         let metadata = (dto.metadata ?? []).map { MetadataItem(key: $0.key, value: $0.value) }
         let timestamp = dto.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? .now
 

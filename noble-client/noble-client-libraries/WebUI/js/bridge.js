@@ -71,7 +71,7 @@ class MockBridge {
                 isConnected: true,
                 hasWallet: true,
                 walletAddress: addr,
-                chain_id: '4E4F424C',
+                chainId: '4E4F424C',
                 blockHeight: 1234,
                 selectedSection: 'home'
             };
@@ -113,7 +113,7 @@ class MockBridge {
                 synced: true, currentHeight: 1234, highestKnown: 1234
             };
             if (action === 'getCycleStatus') return {
-                cycle: 42, phase: 'Proposal', phaseProgress: 0.6, timeRemaining: 120
+                cycleNumber: 42, phase: 'Proposal', phaseRemainingSecs: 180, cycleRemainingSecs: 780
             };
             if (action === 'getTransactionHistory') return {
                 transactions: [

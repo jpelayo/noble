@@ -54,6 +54,26 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
         return "\(start)…\(end)"
     }
 
+    /// Noble bech32 display string (`nbl1q…` or `nbl1p…`).
+    ///
+    /// If already bech32, returns as-is.
+    /// If hex wire format with Ed25519 (0x01) or secp256k1 (0x02) prefix, encodes to bech32.
+    /// For non-Noble addresses (Bitcoin, unknown), returns `raw` unchanged.
+    public var nobleBech32: String {
+        if isNobleBech32 { return raw }
+        // Only encode Noble native schemes
+        guard schemeId == 0x01 || schemeId == 0x02 else { return raw }
+        let wireBytes = Self.hexToBytes(raw)
+        guard wireBytes.count >= 2 else { return raw }
+        let keyBytes = Array(wireBytes.dropFirst()) // strip scheme_id
+        let witnessVersion: UInt8 = schemeId == 0x01 ? 0 : 1
+        let useBech32m = witnessVersion >= 1
+        guard let encoded = Self.encodeBech32(hrp: "nbl", witnessVersion: witnessVersion, program: keyBytes, bech32m: useBech32m) else {
+            return raw
+        }
+        return encoded
+    }
+
     /// Wire-format hex string (scheme_id + key bytes).
     ///
     /// If the address is bech32 `nbl1…`, decodes back to wire hex.
@@ -99,6 +119,89 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
             }
         }
         return result
+    }
+
+    /// Encode a witness program to bech32/bech32m.
+    private static func encodeBech32(hrp: String, witnessVersion: UInt8, program: [UInt8], bech32m: Bool) -> String? {
+        let charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+        // Convert 8-bit bytes to 5-bit groups
+        var data5 = [UInt8]()
+        var acc: UInt32 = 0
+        var bits: UInt32 = 0
+        for byte in program {
+            acc = (acc << 8) | UInt32(byte)
+            bits += 8
+            while bits >= 5 {
+                bits -= 5
+                data5.append(UInt8((acc >> bits) & 0x1F))
+            }
+        }
+        if bits > 0 {
+            data5.append(UInt8((acc << (5 - bits)) & 0x1F))
+        }
+
+        // Prepend witness version
+        let values = [witnessVersion] + data5
+
+        // Compute checksum
+        let checksumConst: UInt32 = bech32m ? 0x2BC830A3 : 1
+        let checksum = bech32Checksum(hrp: hrp, values: values, const: checksumConst)
+
+        // Build result string
+        var result = hrp + "1"
+        for v in values + checksum {
+            let idx = charset.index(charset.startIndex, offsetBy: Int(v))
+            result.append(charset[idx])
+        }
+        return result
+    }
+
+    /// Compute bech32/bech32m checksum.
+    private static func bech32Checksum(hrp: String, values: [UInt8], const: UInt32) -> [UInt8] {
+        let polymod = bech32Polymod(hrpExpand(hrp) + values + [0, 0, 0, 0, 0, 0]) ^ const
+        var result = [UInt8]()
+        for i in 0..<6 {
+            result.append(UInt8((polymod >> (5 * (5 - i))) & 0x1F))
+        }
+        return result
+    }
+
+    private static func hrpExpand(_ hrp: String) -> [UInt8] {
+        var result = [UInt8]()
+        for c in hrp.utf8 { result.append(c >> 5) }
+        result.append(0)
+        for c in hrp.utf8 { result.append(c & 31) }
+        return result
+    }
+
+    private static func bech32Polymod(_ values: [UInt8]) -> UInt32 {
+        let gen: [UInt32] = [0x3B6A_57B2, 0x2650_8E6D, 0x1EA1_19FA, 0x3D42_33DD, 0x2A14_62B3]
+        var chk: UInt32 = 1
+        for v in values {
+            let top = chk >> 25
+            chk = ((chk & 0x1FF_FFFF) << 5) ^ UInt32(v)
+            for i in 0..<5 {
+                if (top >> i) & 1 == 1 {
+                    chk ^= gen[i]
+                }
+            }
+        }
+        return chk
+    }
+
+    /// Hex string to byte array.
+    private static func hexToBytes(_ hex: String) -> [UInt8] {
+        var bytes = [UInt8]()
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+            if let byte = UInt8(hex[idx..<next], radix: 16) {
+                bytes.append(byte)
+            }
+            idx = next
+        }
+        return bytes
     }
 
     /// Failable initializer — accepts bech32 `nbl1…`, Bitcoin `bc1…`, or hex wire format.
