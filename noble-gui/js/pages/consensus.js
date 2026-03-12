@@ -1229,9 +1229,8 @@ export function init(root, ctx) {
 
       // Fetch per-block vote witnesses for recent blocks.
       // These survive ClearCycleHistory and carry individual voter names.
+      // Uses tipHeight from noble_getBlockCount (already fetched above).
       try {
-        const tipInfo = await rpc.call('noble_getSyncStatus', []);
-        const tipHeight = tipInfo ? tipInfo.current_height : 0;
         const votePromises = [];
         for (let h = tipHeight; h >= Math.max(1, tipHeight - TIMELINE_LIMIT); h--) {
           votePromises.push(rpc.call('noble_getBlockVotes', [h]).catch(() => null));
@@ -1242,28 +1241,28 @@ export function init(root, ctx) {
           const match = cycles.find(c => c.cycle_number === bv.cycle_number);
           if (match) match._blockVotes = bv;
         }
+      } catch (_) { /* getBlockVotes not available */ }
 
-        // Enrich empty voting phases from blockVotes witness data.
-        // Synced nodes and genesis blocks may lack local vote tallies,
-        // but noble_getBlockVotes always has the committed witness data.
-        for (const cycle of cycles) {
-          if (!cycle._blockVotes) continue;
-          const votingPhase = cycle.phases[1];
-          if (votingPhase.votes && votingPhase.votes.length > 0) continue;
+      // Enrich empty voting phases from blockVotes witness data.
+      // Synced nodes and genesis blocks may lack local vote tallies,
+      // but noble_getBlockVotes always has the committed witness data.
+      for (const cycle of cycles) {
+        if (!cycle._blockVotes) continue;
+        const votingPhase = cycle.phases[1];
+        if (votingPhase.votes && votingPhase.votes.length > 0) continue;
 
-          const bv = cycle._blockVotes;
-          const winningHash = cycle.winning_hash || (cycle.phases[2] && cycle.phases[2].winning_hash);
-          if (winningHash) {
-            votingPhase.votes = [{
-              block_hash: winningHash,
-              validator: cycle.winner || '',
-              vote_count: bv.r1_voters.length,
-              r2_vote_count: bv.r2_voters.length,
-            }];
-            votingPhase.total_voters = bv.voter_count;
-          }
+        const bv = cycle._blockVotes;
+        const winningHash = cycle.winning_hash || (cycle.phases[2] && cycle.phases[2].winning_hash);
+        if (winningHash) {
+          votingPhase.votes = [{
+            block_hash: winningHash,
+            validator: cycle.winner || '',
+            vote_count: bv.r1_voters.length,
+            r2_vote_count: bv.r2_voters.length,
+          }];
+          votingPhase.total_voters = bv.voter_count;
         }
-      } catch (_) { /* getSyncStatus or getBlockVotes not available */ }
+      }
 
       // Fetch finality status for per-block finality badges.
       let finalityStatus = null;
