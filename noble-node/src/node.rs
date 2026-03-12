@@ -2983,16 +2983,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 if block.header.height <= tip_height {
                     // Already have this block — ignore.
-                } else if block.header.height == tip_height + 1 && we_are_behind && tip_height > 0 {
+                } else if block.header.height == tip_height + 1 && we_are_behind {
                     // Sync import: committed block from peer ahead of us.
                     // Takes priority over live proposals — the network already has
                     // this block, we should import it rather than propose our own.
                     //
-                    // IMPORTANT: Block 1 (tip_height == 0) is NEVER sync-imported.
-                    // It must always go through consensus with Dual-Witness validation
-                    // (min_unique_voters >= 2).  This prevents phantom chain resurrection
-                    // after noble-tool reset-chain — without this guard, a reset node
-                    // would automatically re-import the deleted chain from its peers.
+                    // Block 1 (tip_height == 0) is also sync-imported.  Without this,
+                    // a fresh node joining an existing chain can never acquire block 1:
+                    // B6 past-skew (MAX_BLOCK_PAST_SKEW=3600s) rejects it through the
+                    // live consensus path once the block is >1 hour old, and the two
+                    // nodes end up on divergent cycle timelines (different genesis
+                    // timestamps).  The block is fully validated (B4/B8/B9/B11) and
+                    // came from a peer that already committed it via consensus.
                     self.try_sync_import(
                         block.clone(),
                         peer_id,
@@ -3990,7 +3992,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let tx_ids: Vec<noble_crypto::Hash256> = block
             .transactions
             .iter()
-            .filter_map(|tx| tx.compute_tx_id(self.get_chain_id()).ok())
+            .filter_map(|tx| {
+                tx.compute_tx_id(self.get_chain_id()).map_err(|e| {
+                    tracing::warn!(task = "sync_import", "tx_id computation failed: {e}");
+                }).ok()
+            })
             .collect();
 
         if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
@@ -4007,6 +4013,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         {
             let mut engine = self.consensus.write();
             engine.update_tip_with_header(block.header.clone());
+        }
+
+        // Block 1 sync-import: clear stale cycle history from the bootstrap epoch.
+        // Parity with the consensus CommitBlock path (CycleIo::ClearCycleHistory).
+        // The cycle numbers from the GENESIS_TIMESTAMP epoch are meaningless after
+        // the epoch shifts to block 1's real timestamp.
+        if block.header.height == 1 {
+            let storage = self.storage.read();
+            if let Err(e) = storage.clear_cycle_history() {
+                tracing::warn!(
+                    task = "sync_import",
+                    "failed to clear stale cycle history after block 1 epoch change: {e}"
+                );
+            } else {
+                tracing::info!(
+                    task = "sync_import",
+                    "cleared stale cycle history (block 1 epoch change via sync-import)"
+                );
+            }
+            drop(storage);
         }
 
         // Decay-weighted vote accumulation during sync import.
@@ -4054,12 +4080,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         );
 
         // Emit sync_progress to event viewer so the GUI shows each imported block.
-        let _ = cycle_phase_tx.send(serde_json::json!({
+        if cycle_phase_tx.send(serde_json::json!({
             "event": "sync_progress",
             "height": block.header.height,
             "hash": hex::encode(block_hash.as_bytes()),
             "tx_count": tx_ids.len(),
-        }));
+        })).is_err() {
+            tracing::debug!(task = "sync_import", "sync_progress broadcast: no subscribers");
+        }
 
         // S53: Clear active proposal on tip advancement.
         *self.last_proposed.lock() = None;
