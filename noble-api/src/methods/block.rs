@@ -67,7 +67,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             .ok_or_else(|| ApiError::BlockNotFound("chain is empty".into()))?;
 
         let block = storage.get_block(&tip.block_hash).map_err(ApiError::from)?;
-        Ok(block_to_response(&block, &tip.block_hash, self.chain_id))
+        Ok(block_to_response(&block, &tip.block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed)))
     }
 
     async fn get_block_count(&self) -> Result<BlockCountResponse, ErrorObjectOwned> {
@@ -108,7 +108,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             .into());
         };
 
-        Ok(block_to_response(&block, &block_hash, self.chain_id))
+        Ok(block_to_response(&block, &block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed)))
     }
 
     async fn get_block_header(
@@ -207,7 +207,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         Ok(ChainStatsResponse {
             height,
             total_transactions: total_tx,
-            chain_id: self.chain_id,
+            chain_id: self.chain_id.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 }

@@ -87,7 +87,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         wallet_keystore,
         wallet_state,
         network_stats,
-        chain_id: test_chain_id(),
+        chain_id: Arc::new(std::sync::atomic::AtomicU32::new(test_chain_id())),
         start_time: Instant::now(),
         max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
         rate_limiter: None,   // disabled in tests

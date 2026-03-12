@@ -343,7 +343,7 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
 
     // Sign the transaction.
     let signing_msg = tx
-        .compute_signing_message_for_chain(state.chain_id)
+        .compute_signing_message_for_chain(state.chain_id.load(std::sync::atomic::Ordering::Relaxed))
         .map_err(|e| ApiError::Internal(format!("signing message error: {e}")))?;
     let sig_envelope = keystore
         .sign(pk, &signing_msg)

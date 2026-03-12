@@ -196,6 +196,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             let mempool = self.mempool.lock();
             if let Some(entry) = mempool.get(&tx_id_hash) {
                 return Ok(TransactionReceiptResponse {
+                    tx_id: tx_id.clone(),
                     transaction: tx_to_response(&entry.tx, &tx_id),
                     status: "pending".to_string(),
                     block_height: None,
@@ -222,6 +223,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         let confirmations = tip.map(|t| t.height - height + 1);
 
         Ok(TransactionReceiptResponse {
+            tx_id: tx_id.clone(),
             transaction: tx_to_response(&tx, &tx_id),
             status: "confirmed".to_string(),
             block_height: Some(height),

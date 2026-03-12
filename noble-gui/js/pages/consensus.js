@@ -537,7 +537,7 @@ export function init(root, ctx) {
     switch (data.event) {
       case 'block_committed': {
         const who = data.proposer_name || vName(data.proposer) || '';
-        return `Block #${data.height} committed${who ? ` by ${who}` : ''} (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
+        return `Block #${data.height} committed${who ? ` by ${who}` : ''} {${truncateHash(data.hash || '')}} (${data.tx_count} tx)`;
       }
       case 'block_proposed':
         return `Proposed block #${data.height}`;
@@ -571,7 +571,7 @@ export function init(root, ctx) {
       case 'sync_started':
         return `Behind by ${data.blocks_behind} block${data.blocks_behind > 1 ? 's' : ''} (height ${data.our_height} \u2192 ${data.peer_height}) \u2014 syncing`;
       case 'sync_progress':
-        return `Sync-imported block #${data.height} (${truncateHash(data.hash || '')}, ${data.tx_count} tx)`;
+        return `Sync-imported block #${data.height} {${truncateHash(data.hash || '')}} (${data.tx_count} tx)`;
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received': {
@@ -582,7 +582,7 @@ export function init(root, ctx) {
       case 'evidence_published': {
         const etypes = { vote_equivocation: 'Vote equivocation', double_proposal: 'Double-proposal', invalid_block: 'Invalid block', announce_equivocation: 'Announce equivocation' };
         const etype = etypes[data.type] || data.type;
-        return `${etype} evidence published ({${truncateHash(data.evidence_hash || '')}})`;
+        return `${etype} evidence published {${truncateHash(data.evidence_hash || '')}}`;
       }
       case 'peer_wrong_chain':
         return `Kicked ${data.peer_name || hashLabel(data.peer_id)} \u2014 wrong chain (${data.their_chain_id})`;
@@ -745,7 +745,7 @@ export function init(root, ctx) {
       // Events with enriched follow-up messages: push the enriched version only
       // (skip the raw event to avoid duplicate log lines).
       if (data.event === 'block_proposed' && data.hash) {
-        pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height || '?'} (${truncateHash(data.hash)})` });
+        pushActivity({ event: 'block_proposed', message: `This node proposed block #${data.height || '?'} {${truncateHash(data.hash)}}` });
       } else if (data.event === 'vote_broadcast') {
         const target = data.candidate_name || hashLabel(data.block_hash || '');
         pushActivity({ event: 'vote_broadcast', message: `This node voted for ${target} (R${data.round || 1})` });
@@ -764,11 +764,11 @@ export function init(root, ctx) {
       // Push follow-up context for enriched phase transitions.
       if (data.event === 'phase_change') {
         if (data.phase === 'Reflection' && data.total_votes != null) {
-          const leader = data.leader_name || truncateHash(data.leader_hash || '', 6);
+          const leader = data.leader_name || (data.leader_key ? getValidatorDisplayName(data.leader_key, 8) : hashLabel(data.leader_hash));
           pushActivity({ event: 'consensus_log', message: `Voting results favor ${leader} with ${data.leader_pct ?? 0}% of votes (${data.total_votes} total)` });
         }
         if (data.phase === 'Propagation' && (data.winner_name || data.winner_hash)) {
-          const winner = data.winner_name || truncateHash(data.winner_hash || '', 6);
+          const winner = data.winner_name || (data.winner_key ? getValidatorDisplayName(data.winner_key, 8) : hashLabel(data.winner_hash));
           pushActivity({ event: 'consensus_log', message: `Winning proposer: ${winner}` });
         }
       }
@@ -1513,11 +1513,11 @@ export function init(root, ctx) {
           const witnessDiv = document.createElement('div');
           witnessDiv.style.cssText = 'margin-top:var(--gap-xs);padding:var(--gap-sm);border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)';
           const allVoters = new Map();
-          for (const v of bv.r1_voters || []) allVoters.set(v.validator_key, { name: v.name || v.validator_key.slice(0, 8), r1: true, r2: false });
+          for (const v of bv.r1_voters || []) allVoters.set(v.validator_key, { name: v.name || getValidatorDisplayName(v.validator_key, 8), r1: true, r2: false });
           for (const v of bv.r2_voters || []) {
             const existing = allVoters.get(v.validator_key);
             if (existing) { existing.r2 = true; }
-            else allVoters.set(v.validator_key, { name: v.name || v.validator_key.slice(0, 8), r1: false, r2: true });
+            else allVoters.set(v.validator_key, { name: v.name || getValidatorDisplayName(v.validator_key, 8), r1: false, r2: true });
           }
           const voterList = [...allVoters.values()].map(v => {
             const rounds = [v.r1 ? 'R1' : '', v.r2 ? 'R2' : ''].filter(Boolean).join('+');

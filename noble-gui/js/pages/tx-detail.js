@@ -12,35 +12,39 @@ export function init(root, ctx) {
   root.innerHTML = `
     <div class="page-header">
       <h1>Transaction Detail</h1>
-      <p class="mono">${truncateHash(txid, 16)}</p>
+      <p class="mono" style="word-break:break-all">${esc(txid)}</p>
     </div>
     <div id="tx-loading" class="empty-state">Loading...</div>
   `;
 
   async function load() {
-    let txResult = null;
+    let receipt = null;
 
     try {
-      // Try as tx_id
-      txResult = await rpc.call('noble_getTransaction', { tx_id: txid });
+      // Try as tx_id — use getTransactionReceipt for full context
+      receipt = await rpc.call('noble_getTransactionReceipt', { tx_id: txid });
     } catch {
       // Try as checksum lookup
       try {
         const lookup = await rpc.call('noble_lookupChecksum', { checksum: txid });
         if (lookup.found && lookup.records.length > 0) {
-          txResult = await rpc.call('noble_getTransaction', { tx_id: lookup.records[0].tx_id });
+          receipt = await rpc.call('noble_getTransactionReceipt', { tx_id: lookup.records[0].tx_id });
         }
-      } catch { /* give up */ }
+      } catch (e2) {
+        console.warn('tx-detail: checksum lookup failed:', e2);
+      }
     }
 
     root.querySelector('#tx-loading')?.remove();
 
-    if (!txResult) {
+    if (!receipt) {
       root.innerHTML += '<div class="empty-state">Transaction not found</div>';
       return;
     }
 
-    const tx = txResult.tx;
+    // Normalize: real API returns { transaction, status, ... }, mock returns { tx, tx_id, ... }
+    const tx = receipt.transaction || receipt.tx;
+    const txId = receipt.tx_id || tx.tx_id || txid;
     const isZeroChecksum = /^0+$/.test(tx.checksum);
 
     // ── Checksum hero block ──
@@ -125,26 +129,30 @@ export function init(root, ctx) {
       locatorEl.innerHTML = `
         <span class="badge badge-encrypted">Encrypted Locator</span>
         Available (${recipientCount} recipient${recipientCount !== 1 ? 's' : ''})
-        &mdash; <a href="#/verify?tab=locator&tx=${txResult.tx_id}">Decrypt &rarr;</a>
+        &mdash; <a href="#/verify?tab=locator&tx=${txId}">Decrypt &rarr;</a>
       `;
       heroEl.appendChild(locatorEl);
     }
 
     // ── Detail grid (checksum removed — shown in hero above) ──
+    const status = receipt.status || 'unknown';
+    const blockHeight = receipt.block_height;
+    const confirmations = receipt.confirmations;
+
     const grid = document.createElement('dl');
     grid.className = 'detail-grid';
     grid.innerHTML = `
-      <dt>Transaction ID</dt><dd class="mono">${txResult.tx_id}</dd>
-      <dt>Version</dt><dd>${tx.version}</dd>
+      <dt>Transaction ID</dt><dd class="mono" style="word-break:break-all">${esc(txId)}</dd>
+      <dt>Type</dt><dd>${tx.tx_type != null ? formatTxType(tx.tx_type) : (tx.version || '&mdash;')}</dd>
       <dt>Timestamp</dt><dd>${formatTimestamp(tx.timestamp)}</dd>
       <dt>Total Output</dt><dd>${formatFee(tx.total_output)} (${tx.total_output} atomic)</dd>
       <dt>Fee</dt><dd title="Fee is implicit in UTXO model (sum of inputs - sum of outputs)">&mdash;</dd>
       ${(tx.gateway_address || null) ? `
       <dt>Gateway</dt><dd class="mono" title="This node receives 50% of the fee">${truncateHash(tx.gateway_address, 12)}</dd>
       ` : ''}
-      <dt>Status</dt><dd><span class="badge confirmed">${txResult.status}</span></dd>
-      <dt>Block Height</dt><dd><a href="#/block/${txResult.block_height}">${txResult.block_height}</a></dd>
-      <dt>Confirmations</dt><dd>${txResult.confirmations}</dd>
+      <dt>Status</dt><dd><span class="badge ${status === 'confirmed' ? 'confirmed' : ''}">${esc(status)}</span></dd>
+      ${blockHeight != null ? `<dt>Block Height</dt><dd><a href="#/block/${blockHeight}">${blockHeight}</a></dd>` : ''}
+      ${confirmations != null ? `<dt>Confirmations</dt><dd>${confirmations}</dd>` : ''}
     `;
     root.appendChild(grid);
 
@@ -264,6 +272,20 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+/** Format a tx_type byte into a human-readable label */
+function formatTxType(txType) {
+  switch (txType) {
+    case 0x00: return 'Notarization';
+    case 0x01: return 'Transfer';
+    case 0x02: return 'Key Rotation';
+    case 0x03: return 'Badge Proposal';
+    case 0x04: return 'Badge Vote';
+    case 0x05: return 'Badge Revocation';
+    case 0x10: return '<span class="badge coinbase">Coinbase</span>';
+    default: return `Type 0x${txType.toString(16).padStart(2, '0')}`;
+  }
 }
 
 /** Decode a metadata value that may be hex-encoded UTF-8 or an array of byte values */

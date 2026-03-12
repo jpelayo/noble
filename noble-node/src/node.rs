@@ -83,8 +83,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub network_stats: Arc<RwLock<NetworkStats>>,
     /// Live connected peer info (H-004). **Lock order: 6 (PeerInfo).**
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
-    /// Active chain ID (mutable via AtomicU32 for cross-chain adoption).
-    pub chain_id: std::sync::atomic::AtomicU32,
+    /// Active chain ID (mutable via AtomicU32 for cross-chain adoption). Shared with ApiState.
+    pub chain_id: Arc<std::sync::atomic::AtomicU32>,
     /// Chain label (hex chain ID or "pre-genesis").
     pub network_name: String,
     /// Timestamp when the node was started.
@@ -176,8 +176,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         };
 
-        // Create mempool.
-        let mempool = Arc::new(Mutex::new(Mempool::with_defaults()));
+        // Create shared chain_id Arc (shared by Node, ApiState, and Mempool).
+        let chain_id_arc = Arc::new(std::sync::atomic::AtomicU32::new(chain_id));
+
+        // Create mempool with shared chain_id.
+        let mut mempool_config = noble_mempool::MempoolConfig::default();
+        mempool_config.chain_id = chain_id_arc.clone();
+        let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
 
         // Determine chain tip for the consensus engine.
         let tip = storage
@@ -191,7 +196,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
         let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
             let s = storage.read();
-            s.get_block_header(&tip.block_hash).ok()
+            match s.get_block_header(&tip.block_hash) {
+                Ok(header) => Some(header),
+                Err(e) => {
+                    tracing::warn!(
+                        task = "startup",
+                        height = tip.height,
+                        "failed to load tip block header — B2/B3/B5/B6 validation degraded: {e}"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -204,10 +219,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // When tip.height == 0, genesis_timestamp = None → engine sets wall-clock-aligned epoch on first tick.
         let genesis_timestamp = if tip.height >= 1 {
             let s = storage.read();
-            s.get_block_hash_by_height(1)
-                .ok()
-                .and_then(|hash| s.get_block_header(&hash).ok())
-                .map(|h| h.timestamp)
+            match s.get_block_hash_by_height(1) {
+                Ok(hash) => match s.get_block_header(&hash) {
+                    Ok(header) => Some(header.timestamp),
+                    Err(e) => {
+                        tracing::error!(task = "startup", "failed to load block-1 header for cycle epoch: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(task = "startup", "failed to load block-1 hash for cycle epoch: {e}");
+                    None
+                }
+            }
         } else {
             tracing::info!(
                 task = "startup",
@@ -481,7 +505,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             wallet_state,
             network_stats,
             peer_info,
-            chain_id: std::sync::atomic::AtomicU32::new(chain_id),
+            chain_id: chain_id_arc,
             network_name: if chain_id != 0 { format!("{:08X}", chain_id) } else { "pre-genesis".to_string() },
             start_time: std::time::Instant::now(),
             pki_attestation,
@@ -990,7 +1014,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 .unwrap_or_default()
                 .as_secs();
             let storage = self.storage.read();
-            let all_records = storage.list_peer_records().unwrap_or_default();
+            let all_records = storage.list_peer_records().unwrap_or_else(|e| {
+                tracing::warn!(task = "node_startup", "failed to load peer records: {e}");
+                Vec::new()
+            });
             drop(storage);
 
             // Primary: recent peers with known multiaddr (existing behavior)
@@ -1005,7 +1032,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 for record in &records {
                     if let Some(ref addr_str) = record.last_addr {
                         if let Ok(addr) = addr_str.parse::<noble_network::Multiaddr>() {
-                            let _ = network_cmd.try_send(NetworkCommand::DialPeer(addr, None));
+                            if let Err(e) = network_cmd.try_send(NetworkCommand::DialPeer(addr, None)) {
+                                tracing::debug!(task = "node_startup", "dial command backpressure: {e}");
+                            }
                         }
                     }
                 }
@@ -1043,7 +1072,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             format!("/ip4/{}/tcp/8780", addr)
                         };
                         if let Ok(maddr) = normalized.parse::<noble_network::Multiaddr>() {
-                            let _ = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None));
+                            if let Err(e) = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None)) {
+                                tracing::debug!(task = "node_startup", "dial command backpressure: {e}");
+                            }
                             dialed += 1;
                         }
                     }
@@ -1073,7 +1104,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         format!("/ip4/{}/tcp/8780", addr)
                     };
                     if let Ok(maddr) = normalized.parse::<noble_network::Multiaddr>() {
-                        let _ = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None));
+                        if let Err(e) = network_cmd.try_send(NetworkCommand::DialPeer(maddr, None)) {
+                            tracing::debug!(task = "node_startup", "dial command backpressure: {e}");
+                        }
                         cbor_dialed += 1;
                     }
                 }
@@ -1507,7 +1540,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             wallet_keystore: self.wallet_keystore.clone(),
             wallet_state: self.wallet_state.clone(),
             network_stats: self.network_stats.clone(),
-            chain_id: self.get_chain_id(),
+            chain_id: self.chain_id.clone(),
             start_time: self.start_time,
             max_network_version: Arc::new(RwLock::new(noble_core::SOFTWARE_VERSION.to_string())),
             rate_limiter: Some(Arc::new(noble_api::rate_limit::RpcRateLimiter::new(
@@ -2140,7 +2173,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
-        let _ = network_cmd.try_send(NetworkCommand::Shutdown);
+        if let Err(e) = network_cmd.try_send(NetworkCommand::Shutdown) {
+            tracing::debug!(task = "shutdown", "network shutdown command failed: {e}");
+        }
         server_handles
             .rpc_handle
             .stop()
@@ -2531,7 +2566,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Graceful disconnect — they're on a different chain.
                     // Blockchain info + peer IP are persisted above BEFORE disconnect.
                     // No ban: different chain is not misbehavior.
-                    let _ = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone()));
+                    if let Err(e) = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone())) {
+                        tracing::debug!(task = "peer_management", "disconnect command backpressure: {e}");
+                    }
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "peer_wrong_chain",
                         "peer_name": announce.node_name,
@@ -2698,9 +2735,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                     tracing::warn!(task = "evidence", "failed to store evidence: {e}");
                                 }
                                 self.consensus.write().reputation_mut().record_misbehavior(&identity_wire);
-                                let _ = network_cmd.try_send(NetworkCommand::PublishEvidence(
+                                if let Err(e) = network_cmd.try_send(NetworkCommand::PublishEvidence(
                                     Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
-                                ));
+                                )) {
+                                    tracing::warn!(task = "evidence", "failed to publish evidence: {e}");
+                                }
                             }
                         }
                     }
@@ -3190,9 +3229,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Auto-update chain_id after first block commit (fixes pre-genesis → real chain).
                     // Consensus-bootstrapped chains have no block 0 — the first committed block
                     // is height 1.  We derive chain_id from whatever the first block's hash is.
+                    // CRITICAL: Must update BOTH the Node atomic AND the network service config.
+                    // Without the network update, GetStatus responses still report chain_id=0,
+                    // causing mismatch disconnections when the remote node restarts with the
+                    // real chain_id loaded from storage.
                     if self.get_chain_id() == 0 {
                         let new_chain_id = noble_core::derive_chain_id(&block_hash);
                         self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
+                        if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateChainId(new_chain_id)) {
+                            tracing::warn!(task = "block_commit", "failed to update network chain_id: {e}");
+                        }
                         tracing::info!(
                             task = "block_commit",
                             "chain_id updated to {:#010X} after block {} commit",
@@ -3253,12 +3299,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
 
                     let storage = self.storage.read();
-                    let chain_height = storage
-                        .get_chain_tip()
-                        .ok()
-                        .flatten()
-                        .map(|t| t.height)
-                        .unwrap_or(0);
+                    let chain_height = match storage.get_chain_tip() {
+                        Ok(Some(t)) => t.height,
+                        Ok(None) => 0,
+                        Err(e) => {
+                            tracing::warn!(task = "consensus", "failed to read chain tip for tx readmission: {e}");
+                            0
+                        }
+                    };
                     let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
                     let utxo_lookup = StorageUtxoLookupAdapter { storage: &*storage };
                     let mut mempool = self.mempool.lock();
@@ -3270,10 +3318,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::Log(msg) => {
                     tracing::info!(task = "consensus", "[consensus] {msg}");
-                    let _ = cycle_phase_tx.send(serde_json::json!({
+                    if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                         "event": "consensus_log",
                         "message": msg,
-                    }));
+                    })) {
+                        tracing::debug!(task = "consensus", "phase broadcast send failed: {e}");
+                    }
                 }
                 CycleIo::EmitMetric { name, value } => {
                     tracing::debug!(task = "consensus", "metric: {name} = {value}");
@@ -3399,6 +3449,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             if let Some((best_hash, best_count)) = best {
                                 let pct = if total_votes > 0 { (best_count * 100) / total_votes } else { 0 };
                                 // Resolve name: validator list first, then peer records fallback.
+                                let validator_wire_for_key = validator_wire.clone();
                                 let name = name_from_list.or_else(|| {
                                     validator_wire.and_then(|wire| {
                                         let storage = self.storage.read();
@@ -3412,6 +3463,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 });
                                 event["leader_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["leader_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
+                                if let Some(ref w) = validator_wire_for_key {
+                                    event["leader_key"] = serde_json::json!(hex::encode(w));
+                                }
                                 event["leader_pct"] = serde_json::json!(pct);
                                 event["total_votes"] = serde_json::json!(total_votes);
                             }
@@ -3450,6 +3504,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             }; // consensus lock released
                             let (best, name_from_list, _label) = best_info;
                             if let Some(best_hash) = best {
+                                let wire_bytes_for_key = wire_bytes.clone();
                                 let name = name_from_list.or_else(|| {
                                     wire_bytes.and_then(|wire| {
                                         let storage = self.storage.read();
@@ -3463,6 +3518,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 });
                                 event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
+                                if let Some(ref w) = wire_bytes_for_key {
+                                    event["winner_key"] = serde_json::json!(hex::encode(w));
+                                }
                             }
                         }
                         _ => {}
@@ -3790,10 +3848,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                     self.persist_discovered_blockchains();
                     // 3. Tell network service to update its config chain_id + clear cooldowns.
-                    let _ = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0));
+                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0)) {
+                        tracing::warn!(task = "chain_hop", "failed to send UpdateChainId(0): {e}");
+                    }
                     // 4. Reset consensus engine to height 0, no chain tip.
                     {
-                        let _ = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true);
+                        if let Err(e) = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true) {
+                            tracing::error!(task = "chain_hop", "failed to reset consensus tip: {e}");
+                        }
                     }
                     // 5. Clear stale proposals and request sync.
                     if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
@@ -4047,9 +4109,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Auto-update chain_id after first sync-import (same as CommitBlock handler).
         // Consensus-bootstrapped chains start at height 1 (no block 0), so we
         // derive chain_id from the first block we successfully import, any height.
+        // CRITICAL: Must update BOTH the Node atomic AND the network service config.
         if self.get_chain_id() == 0 {
             let new_chain_id = noble_core::derive_chain_id(&block_hash);
             self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateChainId(new_chain_id)) {
+                tracing::warn!(task = "sync_import", "failed to update network chain_id: {e}");
+            }
             tracing::info!(
                 task = "sync_import",
                 "chain_id updated to {:#010X} after block {} sync-import",

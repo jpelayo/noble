@@ -644,6 +644,7 @@ pub struct TransactionStatusResponse {
 /// Response for `noble_getTransactionReceipt`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TransactionReceiptResponse {
+    pub tx_id: String,
     pub transaction: TransactionResponse,
     pub status: String,
     pub block_height: Option<u64>,

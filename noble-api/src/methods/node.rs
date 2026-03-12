@@ -291,7 +291,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let data_dir_str = self.data_dir.as_ref().map(|d| d.display().to_string());
 
         // Chain identity: chain_id from config, genesis_hash from storage (empty if no chain).
-        let chain_id = self.chain_id;
+        let chain_id = self.chain_id.load(std::sync::atomic::Ordering::Relaxed);
         let network_name = self.network_name.clone();
         let genesis_hash = self.genesis_hash.clone();
 
@@ -1363,7 +1363,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         {
             let storage = self.storage.read();
             storage
-                .force_reset_to_genesis(self.chain_id)
+                .force_reset_to_genesis(self.chain_id.load(std::sync::atomic::Ordering::Relaxed))
                 .map_err(|e| ApiError::Internal(format!("reset chain: {e}")))?;
             // Clear stale cycle history from the old chain — the new chain
             // will produce its own history starting from block 1.

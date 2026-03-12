@@ -190,14 +190,19 @@ function makeTransaction(seed, timestamp) {
     inputs.push({ txid: deterministicHash(seed * 73), vout: (seed + 1) % 3 });
   }
 
+  // signer = hex-encoded public key (matches real API TransactionResponse.signer)
+  const sigEnv = makeSignatureEnvelope(seed);
+  const signerHex = bytesToHexLocal(sigEnv.public_key);
+
   return {
-    version: PROTOCOL_VERSION,
+    tx_type: 0x00, // notarization (matches real API)
     checksum: deterministicHash(seed * 17),
     timestamp,
     total_output: totalOutput,
     inputs,
     outputs,
-    publisher_sig: makeSignatureEnvelope(seed),
+    signer: signerHex,
+    publisher_sig: sigEnv, // kept for backward compat with legacy GUI paths
     additional_sigs: seed % 4 === 0 ? [makeSignatureEnvelope(seed + 1000)] : [],
     metadata,
     has_encrypted_locator: hasLocator,
@@ -598,6 +603,20 @@ export class MockRpcClient {
           block_height: entry.block_height,
           confirmations: this.chainHeight - entry.block_height + 1,
           status: 'confirmed',
+        };
+      }
+
+      case 'noble_getTransactionReceipt': {
+        const entry = this.#chain.txIndex.get(params.tx_id);
+        if (!entry) throw { code: -32602, message: 'Transaction not found' };
+        return {
+          transaction: entry.tx,
+          tx_id: entry.tx_id,
+          status: 'confirmed',
+          block_height: entry.block_height,
+          block_hash: this.#chain.blocks[entry.block_height]?.hash || null,
+          tx_index: 0,
+          confirmations: this.chainHeight - entry.block_height + 1,
         };
       }
 

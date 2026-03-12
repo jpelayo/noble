@@ -542,7 +542,8 @@ async fn run_event_loop(
                         .iter()
                         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
                     {
-                        tracing::debug!(task = "peer_discovery", %worst_pid, "rotating worst outbound peer");
+                        tracing::info!(task = "peer_discovery", %worst_pid, "rotating worst outbound peer");
+                        disconnect_reasons.insert(*worst_pid, "peer rotation (worst outbound score)".to_string());
                         let _ = swarm.disconnect_peer_id(*worst_pid);
                         // Trigger Kademlia walk to find a replacement.
                         if config.enable_kademlia {
@@ -599,11 +600,14 @@ async fn handle_swarm_event(
                         %peer_id,
                         "suppressing connection — chain/protocol mismatch cooldown active"
                     );
-                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                    if let Err(e) = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr.clone(),
                         reason: "chain/protocol mismatch cooldown".to_string(),
-                    });
+                    }) {
+                        tracing::debug!(task = "peer_management", "event channel full: {e}");
+                    }
+                    disconnect_reasons.insert(peer_id, "chain/protocol mismatch cooldown".to_string());
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 } else {
@@ -630,11 +634,13 @@ async fn handle_swarm_event(
                     config.max_outbound_per_subnet,
                 ) {
                     tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting outbound: subnet diversity");
-                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                    if let Err(e) = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr.clone(),
                         reason: "outbound subnet diversity limit".to_string(),
-                    });
+                    }) {
+                        tracing::debug!(task = "peer_management", "event channel full: {e}");
+                    }
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -649,11 +655,13 @@ async fn handle_swarm_event(
                     diversity::MAX_INBOUND_PER_SUBNET,
                 ) {
                     tracing::debug!(task = "peer_management", %peer_id, %remote_addr, "rejecting inbound: subnet diversity (>4 from same /16)");
-                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                    if let Err(e) = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr.clone(),
                         reason: "inbound subnet diversity limit".to_string(),
-                    });
+                    }) {
+                        tracing::debug!(task = "peer_management", "event channel full: {e}");
+                    }
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -730,11 +738,13 @@ async fn handle_swarm_event(
                 }
                 Err(reason) => {
                     tracing::debug!(task = "peer_management", %peer_id, %reason, "peer rejected");
-                    let _ = event_tx.try_send(NetworkEvent::PeerRejected {
+                    if let Err(e) = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr,
                         reason,
-                    });
+                    }) {
+                        tracing::debug!(task = "peer_management", "event channel full: {e}");
+                    }
                     let _ = swarm.disconnect_peer_id(peer_id);
                 }
             }
@@ -754,12 +764,25 @@ async fn handle_swarm_event(
                 tx_rate_limiter.remove_peer(&peer_id);
                 // Resolve disconnect reason: explicit reason (chain mismatch, ban)
                 // takes priority over the libp2p cause.
-                let reason = disconnect_reasons.remove(&peer_id).unwrap_or_else(|| {
+                let explicit_reason = disconnect_reasons.remove(&peer_id);
+                let reason = if let Some(ref r) = explicit_reason {
+                    r.clone()
+                } else {
                     match &cause {
                         Some(e) => format!("{e}"),
-                        None => "connection closed".to_string(),
+                        None => "remote closed connection (no error)".to_string(),
                     }
-                });
+                };
+                // Always log disconnections at info level — silent disconnects
+                // are unacceptable for diagnosing network issues.
+                tracing::info!(
+                    task = "peer_disconnect",
+                    %peer_id,
+                    was_tracked,
+                    explicit = explicit_reason.is_some(),
+                    cause_is_some = cause.is_some(),
+                    "peer disconnected: {reason}",
+                );
                 // Only emit PeerDisconnected if this peer was actually accepted
                 // and tracked.  Peers rejected at connection time (subnet
                 // diversity, limit, banned) cause a ConnectionClosed but were
@@ -1172,11 +1195,13 @@ async fn handle_swarm_event(
                                     let ancestor_hash = block_provider
                                         .get_block_hash_by_height(ancestor_height)
                                         .unwrap_or([0; 32]);
-                                    let _ = event_tx.try_send(NetworkEvent::CommonAncestorFound {
+                                    if let Err(e) = event_tx.try_send(NetworkEvent::CommonAncestorFound {
                                         peer_id: peer.to_bytes().to_vec(),
                                         ancestor_height,
                                         ancestor_hash,
-                                    });
+                                    }) {
+                                        tracing::debug!(task = "ancestor", "event channel full: {e}");
+                                    }
                                     *ancestor_finder = None;
                                 }
                                 Ok(None) => {
@@ -1215,10 +1240,12 @@ async fn handle_swarm_event(
             ..
         })) => {
             handle_ping_event(peer_manager, &peer, rtt);
-            let _ = event_tx.try_send(NetworkEvent::PeerLatencyUpdated {
+            if let Err(e) = event_tx.try_send(NetworkEvent::PeerLatencyUpdated {
                 peer_id: peer.to_bytes().to_vec(),
                 latency_ms: rtt.as_millis() as u64,
-            });
+            }) {
+                tracing::debug!(task = "peer_management", "event channel full: {e}");
+            }
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {
@@ -1501,12 +1528,14 @@ fn handle_gossip_node_announce(
                     let tip_hash = announce.chain_tip_hash.unwrap_or([0u8; 32]);
                     peer_manager.update_chain_tip(source, height, tip_hash);
                     let median = peer_manager.median_clock_offset_ms();
-                    let _ = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
+                    if let Err(e) = event_tx.try_send(NetworkEvent::PeerChainTipUpdated {
                         peer_id: peer_bytes.clone(),
                         height,
                         tip_hash,
                         median_clock_offset_ms: median,
-                    });
+                    }) {
+                        tracing::debug!(task = "peer_management", "event channel full: {e}");
+                    }
                 }
             }
 
@@ -1542,21 +1571,25 @@ fn emit_misbehavior_event(
     let peer_bytes = peer_id.to_bytes().to_vec();
     match outcome {
         MisbehaviorOutcome::Banned { category, evidence_hash } => {
-            let _ = event_tx.try_send(NetworkEvent::PeerBanned {
+            if let Err(e) = event_tx.try_send(NetworkEvent::PeerBanned {
                 peer_id: peer_bytes,
                 reason: reason.to_string(),
                 category: *category,
                 evidence_hash: *evidence_hash,
-            });
+            }) {
+                tracing::debug!(task = "peer_management", "event channel full: {e}");
+            }
         }
         MisbehaviorOutcome::ScoreUpdated { ban_score, categories, last_category, last_reason } => {
-            let _ = event_tx.try_send(NetworkEvent::PeerScoreUpdated {
+            if let Err(e) = event_tx.try_send(NetworkEvent::PeerScoreUpdated {
                 peer_id: peer_bytes,
                 ban_score: *ban_score,
                 categories: categories.clone(),
                 last_category: *last_category,
                 last_reason: last_reason.clone(),
-            });
+            }) {
+                tracing::debug!(task = "peer_management", "event channel full: {e}");
+            }
         }
         MisbehaviorOutcome::Suppressed => {}
     }

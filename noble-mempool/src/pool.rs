@@ -50,8 +50,8 @@ pub struct MempoolConfig {
     pub expiry_secs: u64,
     /// Signature cache capacity.
     pub sig_cache_size: usize,
-    /// Chain ID for tx_id computation.
-    pub chain_id: u32,
+    /// Chain ID for tx_id computation. Shared with Node so updates propagate.
+    pub chain_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Maximum transactions per sender in the mempool.
     pub max_per_sender: usize,
 }
@@ -63,7 +63,7 @@ impl Default for MempoolConfig {
             max_count: DEFAULT_MAX_COUNT,
             expiry_secs: DEFAULT_EXPIRY_SECS,
             sig_cache_size: crate::sigcache::DEFAULT_SIG_CACHE_SIZE,
-            chain_id: 0,
+            chain_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }
@@ -300,7 +300,7 @@ impl Mempool {
 
         // Compute tx_id (needed for step 2+)
         let tx_id = tx
-            .compute_tx_id(self.config.chain_id)
+            .compute_tx_id(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
         // Step 2: Duplicate check
@@ -562,7 +562,7 @@ impl Mempool {
     fn verify_signatures(&self, tx: &Transaction) -> Result<(), MempoolError> {
         // AUD3-D7: Chain-aware signing message prevents cross-chain replay.
         let signing_msg = tx
-            .compute_signing_message_for_chain(self.config.chain_id)
+            .compute_signing_message_for_chain(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
         // T6: Publisher signature
@@ -729,7 +729,7 @@ mod tests {
             max_size_bytes: 1024 * 1024,
             expiry_secs: 3600,
             sig_cache_size: 100,
-            chain_id: test_chain_id(),
+            chain_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(test_chain_id())),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
         }
     }

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -124,8 +125,8 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub wallet_state: Arc<Mutex<WalletState>>,
     /// Network statistics (updated by the node event loop). **Lock order: 5 (NetworkStats).**
     pub network_stats: Arc<RwLock<NetworkStats>>,
-    /// Chain ID for tx_id computation and validation.
-    pub chain_id: u32,
+    /// Chain ID for tx_id computation and validation. Shared with Node so updates propagate.
+    pub chain_id: Arc<AtomicU32>,
     /// Server start time (for uptime reporting).
     pub start_time: Instant,
     /// Highest software version observed across all peer NodeAnnounce messages. **Lock order: 8 (MaxNetworkVersion).**
