@@ -483,6 +483,10 @@ export function init(root, ctx) {
                     <span class="settings-label">License</span>
                     <span>Apache-2.0</span>
                 </div>
+                <div class="settings-row">
+                    <span class="settings-label">Source</span>
+                    <span>This software is open source (available at <a href="https://github.com/jpelayo/noble" target="_blank" rel="noopener" style="color:var(--accent)">github.com/jpelayo/noble</a>)</span>
+                </div>
             </div>
         `;
         root.appendChild(card);

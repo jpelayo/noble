@@ -45,10 +45,16 @@ struct ConnectionStatusBar: View {
                 .padding(.vertical, 2)
 
             VStack(spacing: 2) {
-                Text("v\(appVersion) \u{00B7} Apache-2.0")
+                Text("Copyright")
                     .font(.caption2)
                     .foregroundStyle(.quaternary)
-                Text("\u{00A9} 2026 InfiniteContext.com")
+                Text("(2026) InfiniteContext.com")
+                    .font(.caption2)
+                    .foregroundStyle(.quaternary)
+                Text("License: Apache-2.0")
+                    .font(.caption2)
+                    .foregroundStyle(.quaternary)
+                Text("Version \(appVersion)")
                     .font(.caption2)
                     .foregroundStyle(.quaternary)
             }
