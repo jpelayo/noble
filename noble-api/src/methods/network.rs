@@ -260,7 +260,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let mut result: Vec<PeerRecordResponse> = records
             .into_iter()
             .map(|rec| {
-                let key = hex::encode(&rec.identity_key);
+                let key = noble_crypto::noble_addr::encode_wire_bytes(&rec.identity_key)
+                    .unwrap_or_else(|| hex::encode(&rec.identity_key));
                 seen_keys.insert(key.clone());
                 let announce = rec.last_announce.as_ref();
                 PeerRecordResponse {
@@ -285,11 +286,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         // This ensures candidate discovery survives chain resets (PeerRecords wiped).
         let engine = self.consensus.read();
         for (key_hex, peer) in engine.validator_list().known_peers() {
-            if seen_keys.contains(key_hex) {
+            // Convert hex wire key to nbl1 display format for consistency.
+            let display_key = hex::decode(key_hex).ok()
+                .and_then(|wire| noble_crypto::noble_addr::encode_wire_bytes(&wire))
+                .unwrap_or_else(|| key_hex.clone());
+            if seen_keys.contains(&display_key) {
                 continue;
             }
             result.push(PeerRecordResponse {
-                identity_key: key_hex.clone(),
+                identity_key: display_key,
                 first_seen: peer.first_seen,
                 last_seen: peer.last_seen,
                 connection_count: 0,

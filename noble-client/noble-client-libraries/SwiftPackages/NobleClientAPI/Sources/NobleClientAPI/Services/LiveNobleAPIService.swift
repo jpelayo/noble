@@ -86,7 +86,9 @@ public struct LiveNobleAPIService: NobleAPIService {
             params: Params(address: address),
             expecting: AddressBalanceDTO.self
         )
-        let addr = NobleAddress(wireHex: dto.public_key ?? address) ?? NobleAddress(wireHex: "0200")!
+        guard let addr = NobleAddress(wireHex: dto.public_key ?? address) ?? NobleAddress(wireHex: address) else {
+            throw NSError(domain: "NobleAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid address format: \(address)"])
+        }
         return AddressBalance(
             address: addr,
             balance: NobleAmount(atomic: dto.balance),

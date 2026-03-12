@@ -334,14 +334,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 tracing::info!(
                     task = "config_load",
                     "Self-registered as validator: {}",
-                    hex::encode(pk.to_wire_bytes()),
+                    pk.to_address(),
                 );
             } else if !config.identity.wants_to_validate && validator_list.is_validator(pk) {
                 validator_list.remove_validator(pk);
                 tracing::info!(
                     task = "config_load",
                     "Removed self from validator list (wants_to_validate=false): {}",
-                    hex::encode(pk.to_wire_bytes()),
+                    pk.to_address(),
                 );
             }
             // Always refresh the friendly name from the canonical identity source.
@@ -957,7 +957,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tracing::info!(
                             task = "config_load",
                             "Re-registered as validator from identity.json: {}",
-                            hex::encode(pk.to_wire_bytes()),
+                            pk.to_address(),
                         );
                     }
                 }
@@ -1125,7 +1125,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // compute_validator_key_info would fail after migration renames validator.key.
         let (validator_pubkey_str, validator_scheme_str, validator_key_path_str) =
             if let Some((ref _sk, ref pk)) = self.announce_keypair {
-                let pubkey_hex = hex::encode(pk.to_wire_bytes());
+                let pubkey_hex = pk.to_address();
                 let scheme = match pk {
                     noble_crypto::NoblePublicKey::Ed25519(_) => "ed25519",
                     noble_crypto::NoblePublicKey::Secp256k1(_) => "secp256k1",
@@ -1598,7 +1598,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // clearly a Noble address, not a Bitcoin address.
                     let ks = self.wallet_keystore.lock();
                     let auto = ks.list_keys().ok().and_then(|keys| {
-                        keys.into_iter().next().map(|pk| hex::encode(pk.to_wire_bytes()))
+                        keys.into_iter().next().map(|pk| pk.to_address())
                     });
                     if auto.is_some() {
                         tracing::info!(
@@ -3285,7 +3285,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "height": block.header.height,
                         "hash": hex::encode(block_hash.as_bytes()),
                         "tx_count": tx_ids.len(),
-                        "proposer": hex::encode(block.header.validator_id.to_wire_bytes()),
+                        "proposer": block.header.validator_id.to_address(),
                         "proposer_name": proposer_name.as_deref().unwrap_or(""),
                     }));
 
@@ -3464,7 +3464,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 event["leader_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["leader_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
                                 if let Some(ref w) = validator_wire_for_key {
-                                    event["leader_key"] = serde_json::json!(hex::encode(w));
+                                    event["leader_key"] = serde_json::json!(
+                                        noble_crypto::noble_addr::encode_wire_bytes(w)
+                                            .unwrap_or_else(|| hex::encode(w))
+                                    );
                                 }
                                 event["leader_pct"] = serde_json::json!(pct);
                                 event["total_votes"] = serde_json::json!(total_votes);
@@ -3519,7 +3522,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
                                 event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
                                 if let Some(ref w) = wire_bytes_for_key {
-                                    event["winner_key"] = serde_json::json!(hex::encode(w));
+                                    event["winner_key"] = serde_json::json!(
+                                        noble_crypto::noble_addr::encode_wire_bytes(w)
+                                            .unwrap_or_else(|| hex::encode(w))
+                                    );
                                 }
                             }
                         }
@@ -4263,7 +4269,7 @@ fn load_validator_from_keystore(
         tracing::info!(
             task = "config_load",
             "Validator mode enabled (from unified keystore): {}",
-            hex::encode(pk.to_wire_bytes())
+            pk.to_address()
         );
         return Some((sk, pk));
     }
@@ -4274,7 +4280,7 @@ fn load_validator_from_keystore(
         tracing::info!(
             task = "config_load",
             "Validator mode enabled (from unified keystore): {}",
-            hex::encode(pk.to_wire_bytes())
+            pk.to_address()
         );
         return Some((sk, pk));
     }
@@ -4417,7 +4423,7 @@ fn load_validator_key(
     tracing::info!(
         task = "config_load",
         "Validator mode enabled: {}",
-        hex::encode(public_key.to_wire_bytes())
+        public_key.to_address()
     );
     Some((private_key, public_key))
 }

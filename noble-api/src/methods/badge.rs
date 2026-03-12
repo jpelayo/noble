@@ -65,7 +65,8 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
             .list_all()
             .into_iter()
             .map(|(pubkey_wire, badge)| {
-                let pubkey_hex = hex::encode(pubkey_wire);
+                let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(pubkey_wire)
+                    .unwrap_or_else(|| hex::encode(pubkey_wire));
                 // Try to find the node name from connected peers.
                 let node_name = peer_info.values().find_map(|p| {
                     if p.identity_key.as_deref() == Some(pubkey_wire) {
@@ -159,11 +160,19 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
         reason: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Validate target pubkey.
-        let target_wire = hex::decode(&target_pubkey)
-            .map_err(|_| ApiError::InvalidParam("invalid hex target_pubkey".into()))?;
-        if target_wire.len() < 2 {
-            return Err(ApiError::InvalidParam("target_pubkey too short".into()).into());
-        }
+        // Accept both nbl1… bech32 and hex wire bytes for target_pubkey.
+        let target_wire = if noble_crypto::noble_addr::is_noble_address(target_pubkey.trim()) {
+            let pk = noble_crypto::noble_addr::decode(target_pubkey.trim())
+                .map_err(|e| ApiError::InvalidParam(format!("invalid target_pubkey: {e}")))?;
+            pk.to_wire_bytes()
+        } else {
+            let bytes = hex::decode(&target_pubkey)
+                .map_err(|_| ApiError::InvalidParam("invalid hex target_pubkey".into()))?;
+            if bytes.len() < 2 {
+                return Err(ApiError::InvalidParam("target_pubkey too short".into()).into());
+            }
+            bytes
+        };
 
         // Determine proposal type byte.
         let ptype_byte = match proposal_type.as_str() {

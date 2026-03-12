@@ -52,7 +52,10 @@ function deterministicHash(seed) {
 function makePublicKey(seed) {
   const bytes = [];
   for (let i = 0; i < 32; i++) bytes.push((seed * 3 + i * 7) % 256);
-  return { Ed25519: bytes };
+  // Real API returns nbl1q… bech32 string for Ed25519 keys.
+  // Mock produces a fake nbl1q… string from the deterministic bytes.
+  const hex = bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  return 'nbl1q' + hex;
 }
 
 function makeSignatureEnvelope(seed) {
@@ -788,14 +791,12 @@ export class MockRpcClient {
         if (!hexKey || hexKey.length !== 64) throw { code: -32602, message: 'Invalid public key: expected 64 hex characters (Ed25519)' };
         const keyBytes = [];
         for (let i = 0; i < hexKey.length; i += 2) keyBytes.push(parseInt(hexKey.slice(i, i + 2), 16));
-        const exists = this.#validators.find(v => {
-          const k = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-          return k.map(b => b.toString(16).padStart(2, '0')).join('') === hexKey;
-        });
+        const mockNbl1Key = 'nbl1q' + hexKey;
+        const exists = this.#validators.find(v => v.public_key === mockNbl1Key);
         if (exists) throw { code: -32602, message: `Validator already in list: ${exists.name}` };
         const now = Math.floor(Date.now() / 1000);
         const newValidator = {
-          public_key: { Ed25519: keyBytes },
+          public_key: mockNbl1Key,
           name: params.name || `validator-${hexKey.slice(0, 8)}`,
           host_address: null,
           country_code: null,
@@ -819,21 +820,14 @@ export class MockRpcClient {
 
       case 'noble_removeValidator': {
         const pubkey = params.public_key;
-        const idx = this.#validators.findIndex(v => {
-          const k = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-          return k.map(b => b.toString(16).padStart(2, '0')).join('') === pubkey;
-        });
+        const idx = this.#validators.findIndex(v => v.public_key === pubkey);
         if (idx === -1) throw { code: -32602, message: 'Validator not found in list' };
         const removed = this.#validators.splice(idx, 1)[0];
         return { success: true, removed_name: removed.name };
       }
 
       case 'noble_getReputationScore': {
-        const validator = this.#validators.find(v => {
-          const key = v.public_key.Ed25519 || v.public_key.Secp256k1 || [];
-          const hex = key.map(b => b.toString(16).padStart(2, '0')).join('');
-          return hex === params.pubkey;
-        });
+        const validator = this.#validators.find(v => v.public_key === params.pubkey);
         if (!validator) throw { code: -32602, message: 'Validator not found' };
         return {
           validator: params.pubkey,
@@ -1019,8 +1013,7 @@ export class MockRpcClient {
       case 'noble_getNodeInfo': {
         // validator_pubkey: use the first validator's key hex (simulates this node being a validator)
         const selfVal = this.#validators[0];
-        const selfKeyBytes = selfVal ? (selfVal.public_key.Ed25519 || selfVal.public_key.Secp256k1 || []) : [];
-        const selfKeyHex = selfKeyBytes.map(b => b.toString(16).padStart(2, '0')).join('') || null;
+        const selfKeyHex = selfVal ? selfVal.public_key : null;
         return {
           version: window.NOBLE_VERSION || '0.0.0',
           software_version: window.NOBLE_VERSION || '0.0.0',

@@ -18,6 +18,7 @@ pub mod error;
 pub mod file_encrypt;
 pub mod hash;
 pub mod keys;
+pub mod noble_addr;
 pub mod schemes;
 pub mod secp256k1;
 pub mod signature;

@@ -15,7 +15,7 @@ export function timeAgo(timestamp) {
 }
 
 export function truncate(s, len) {
-    if (!s || s.length <= len * 2 + 1) return s || '';
+    if (!s || s.length <= len + len + 1) return s || '';
     return s.slice(0, len) + '\u2026' + s.slice(-len);
 }
 

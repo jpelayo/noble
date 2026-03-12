@@ -408,12 +408,16 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         public_key: String,
     ) -> Result<RotateGatewayKeyResponse, ErrorObjectOwned> {
         // Parse and validate the new key.
-        let new_key_bytes = ::hex::decode(&public_key)
-            .map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
-
-        // Verify the key exists in the wallet keystore.
-        let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&new_key_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        // Parse key: accept both nbl1… bech32 and hex wire bytes.
+        let pk = if noble_crypto::noble_addr::is_noble_address(public_key.trim()) {
+            noble_crypto::noble_addr::decode(public_key.trim())
+                .map_err(|e| ApiError::InvalidAddress(e.to_string()))?
+        } else {
+            let new_key_bytes = ::hex::decode(&public_key)
+                .map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
+            noble_crypto::NoblePublicKey::from_wire_bytes(&new_key_bytes)
+                .map_err(|e| ApiError::InvalidAddress(e.to_string()))?
+        };
         {
             let ks = self.wallet_keystore.lock();
             let keys = ks
@@ -430,7 +434,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         // Update the in-memory gateway key.
         {
             let mut gw = self.gateway_key.write();
-            *gw = Some(new_key_bytes.clone());
+            *gw = Some(pk.to_wire_bytes());
         }
 
         // Persist to disk if a key_path is configured.
@@ -865,7 +869,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Persist to noble.toml via set_config_value if available.
         if let Some(ref set_fn) = self.set_config_value {
-            let _ = set_fn("rewards", "reward_address", &trimmed);
+            if let Err(e) = set_fn("rewards", "reward_address", &trimmed) {
+                tracing::warn!("failed to persist reward_address: {e}");
+            }
         }
 
         tracing::info!(task = "rewards", "Reward address set: {address_type} → {wire_hex}");
@@ -1116,7 +1122,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Persist mode to noble.toml
         if let Some(ref set_fn) = self.set_config_value {
-            let _ = set_fn("security", "encryption_mode", &mode);
+            if let Err(e) = set_fn("security", "encryption_mode", &mode) {
+                tracing::warn!("failed to persist encryption_mode: {e}");
+            }
         }
 
         let message = format!("Encryption mode switched to '{mode}'. Restart recommended.");
@@ -1519,7 +1527,7 @@ fn generate_validator_key(
         );
     }
     let private_key = noble_crypto::NoblePrivateKey::Ed25519(secret_bytes);
-    Ok(hex::encode(private_key.public_key().to_wire_bytes()))
+    Ok(private_key.public_key().to_address())
 }
 
 /// Calculate the total size of a directory recursively.
@@ -1597,7 +1605,7 @@ fn derive_display_address(addr: &noble_core::NobleAddress, original: &str) -> St
                 noble_crypto::bitcoin_addr::xonly_to_p2tr(xonly, true)
             }
         }
-        noble_core::NobleAddress::Noble(pk) => hex::encode(pk.to_wire_bytes()),
+        noble_core::NobleAddress::Noble(pk) => pk.to_address(),
     }
 }
 
@@ -1622,7 +1630,7 @@ fn read_validator_pubkey(path: &std::path::Path, chain_meta: &[u8; 32]) -> Optio
         SCHEME_SECP256K1 => noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec()),
         _ => return None,
     };
-    Some(hex::encode(private_key.public_key().to_wire_bytes()))
+    Some(private_key.public_key().to_address())
 }
 
 /// Decode CBOR evidence into (type, validator_hex) for list display.
@@ -1631,16 +1639,16 @@ fn decode_evidence_summary(cbor: &[u8]) -> Option<(String, String)> {
     let evidence = noble_core::MisbehaviorEvidence::from_cbor(cbor).ok()?;
     let (ty, validator) = match &evidence {
         noble_core::MisbehaviorEvidence::DoubleProposal(e) => {
-            ("double_proposal".to_string(), hex::encode(e.validator_id.to_wire_bytes()))
+            ("double_proposal".to_string(), e.validator_id.to_address())
         }
         noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
-            ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()))
+            ("vote_equivocation".to_string(), e.voter_pubkey.to_address())
         }
         noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
-            ("invalid_block".to_string(), hex::encode(e.block.header.validator_id.to_wire_bytes()))
+            ("invalid_block".to_string(), e.block.header.validator_id.to_address())
         }
         noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
-            ("announce_equivocation".to_string(), hex::encode(e.identity_key.to_wire_bytes()))
+            ("announce_equivocation".to_string(), e.identity_key.to_address())
         }
     };
     Some((ty, validator))
@@ -1660,7 +1668,7 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
                 "header_b_hash": e.header_b.compute_block_hash()
                     .map(|h| hex::encode(h.as_bytes())).unwrap_or_default(),
             });
-            ("double_proposal".to_string(), hex::encode(e.validator_id.to_wire_bytes()), detail)
+            ("double_proposal".to_string(), e.validator_id.to_address(), detail)
         }
         noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
             let detail = serde_json::json!({
@@ -1669,7 +1677,7 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
                 "candidate_a": hex::encode(e.candidate_a.as_bytes()),
                 "candidate_b": hex::encode(e.candidate_b.as_bytes()),
             });
-            ("vote_equivocation".to_string(), hex::encode(e.voter_pubkey.to_wire_bytes()), detail)
+            ("vote_equivocation".to_string(), e.voter_pubkey.to_address(), detail)
         }
         noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
             let detail = serde_json::json!({
@@ -1678,7 +1686,7 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
                     .map(|h| hex::encode(h.as_bytes())).unwrap_or_default(),
                 "failure_code": format!("{:?}", e.failure_code),
             });
-            ("invalid_block".to_string(), hex::encode(e.block.header.validator_id.to_wire_bytes()), detail)
+            ("invalid_block".to_string(), e.block.header.validator_id.to_address(), detail)
         }
         noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
             let detail = serde_json::json!({
@@ -1686,7 +1694,7 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
                 "announce_a_timestamp": e.announce_a.timestamp,
                 "announce_b_timestamp": e.announce_b.timestamp,
             });
-            ("announce_equivocation".to_string(), hex::encode(e.identity_key.to_wire_bytes()), detail)
+            ("announce_equivocation".to_string(), e.identity_key.to_address(), detail)
         }
     };
     Some((ty, validator, detail))

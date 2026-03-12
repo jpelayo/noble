@@ -975,7 +975,7 @@ fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Er
         fs::write(key_path, &raw)?;
     }
 
-    let pubkey_hex = hex::encode(private_key.public_key().to_wire_bytes());
+    let pubkey_hex = private_key.public_key().to_address();
 
     println!();
     println!("  Validator key written to: {path}  (permissions: 0600)");
@@ -1000,7 +1000,7 @@ fn read_validator_pubkey(key_path: &Path) -> Option<String> {
         SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
         _ => return None,
     };
-    Some(hex::encode(private_key.public_key().to_wire_bytes()))
+    Some(private_key.public_key().to_address())
 }
 
 /// Infer the role selection index from existing config values.

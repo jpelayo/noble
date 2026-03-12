@@ -857,7 +857,8 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
             let wire = pk.to_wire_bytes();
             let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
             let mut obj = serde_json::json!({
-                "pubkey_hex": hex::encode(&wire),
+                "pubkey_hex": noble_crypto::noble_addr::encode_wire_bytes(&wire)
+                    .unwrap_or_else(|| hex::encode(&wire)),
                 "scheme": scheme,
             });
             if pk.scheme_id() == SCHEME_SECP256K1 {
@@ -881,9 +882,9 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
         println!("=== Wallet Keys ({}) ===", keys.len());
         println!();
         for pk in keys {
-            let wire_hex = hex::encode(pk.to_wire_bytes());
+            let display_addr = pk.to_address();
             let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
-            println!("[{scheme}] {wire_hex}");
+            println!("[{scheme}] {display_addr}");
             if pk.scheme_id() == SCHEME_SECP256K1 {
                 let kb = pk.key_bytes();
                 if kb.len() == 33 {

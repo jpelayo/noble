@@ -108,6 +108,11 @@ impl NoblePublicKey {
         wire
     }
 
+    /// Human-readable address: `nbl1q…` (Ed25519) or `nbl1p…` (secp256k1).
+    pub fn to_address(&self) -> String {
+        crate::noble_addr::encode(self)
+    }
+
     /// Decode from wire format: `[scheme_id || key_bytes]` (GAP-H11).
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.is_empty() {

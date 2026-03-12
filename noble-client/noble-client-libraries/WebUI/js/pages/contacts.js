@@ -366,8 +366,10 @@ export function init(root, ctx) {
             if (f.key === 'noblePubkey') {
                 input.addEventListener('blur', () => {
                     const pk = form.noblePubkey;
-                    if (pk && (!/^[0-9a-fA-F]+$/.test(pk) || pk.length % 2 !== 0)) {
-                        error.textContent = 'Must be even-length hex';
+                    const isNbl1 = pk && pk.toLowerCase().startsWith('nbl1');
+                    const isValidHex = pk && /^[0-9a-fA-F]+$/.test(pk) && pk.length % 2 === 0;
+                    if (pk && !isNbl1 && !isValidHex) {
+                        error.textContent = 'Must be a Noble address (nbl1…) or even-length hex';
                         error.style.display = '';
                     } else {
                         error.style.display = 'none';

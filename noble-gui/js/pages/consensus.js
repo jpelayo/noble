@@ -37,9 +37,9 @@ export function init(root, ctx) {
   const unsubs = [];
   let countdownInterval = null;
 
-  // Helper: extract hex key from ValidatorEntry.public_key
-  // Live API returns a hex string; mock returns { Ed25519: [u8] } or { Secp256k1: [u8] }.
-  function valKeyHex(pk) {
+  // Helper: extract display key from ValidatorEntry.public_key
+  // Live API returns a nbl1… bech32 string; mock returns { Ed25519: [u8] } or { Secp256k1: [u8] }.
+  function valKey(pk) {
     if (typeof pk === 'string') return pk;
     const k = pk.Ed25519 || pk.Secp256k1 || [];
     return k.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1709,7 +1709,7 @@ export function init(root, ctx) {
       }
       // Layer 3: validator list names (highest priority — operator-set).
       for (const v of validators) {
-        const keyHex = valKeyHex(v.public_key);
+        const keyHex = valKey(v.public_key);
         const name = v.name || (selfKey && keyHex === selfKey ? (identity.node_name || 'This Node') : null);
         if (name) validatorNameMap.set(keyHex, name);
       }
@@ -1731,15 +1731,15 @@ export function init(root, ctx) {
       csValAvgRep.textContent = avgRep.toFixed(3);
 
       // Order by priority_order from server, unlisted validators appended
-      const byKey = new Map(validators.map(v => [valKeyHex(v.public_key), v]));
+      const byKey = new Map(validators.map(v => [valKey(v.public_key), v]));
       const ordered = [];
       for (const key of priorityOrder) {
         if (byKey.has(key)) ordered.push(byKey.get(key));
       }
       for (const v of validators) {
-        if (!priorityOrder.includes(valKeyHex(v.public_key))) ordered.push(v);
+        if (!priorityOrder.includes(valKey(v.public_key))) ordered.push(v);
       }
-      currentDisplayOrder = ordered.map(v => valKeyHex(v.public_key));
+      currentDisplayOrder = ordered.map(v => valKey(v.public_key));
 
       // ── Connectivity score lookups ──
       // Map identity_key → peer memory record (connection_count, first_seen, last_seen).
@@ -1883,7 +1883,7 @@ export function init(root, ctx) {
       let dragSrcIdx = null;
 
       ordered.forEach((v, i) => {
-        const keyHex = valKeyHex(v.public_key);
+        const keyHex = valKey(v.public_key);
         const br = v.reputation_breakdown;
         const statusClass = v.status === 'alive' ? 'inbound' : 'pending';
         const isSelf = selfKey && keyHex === selfKey;
@@ -1976,7 +1976,7 @@ export function init(root, ctx) {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           const pubkey = btn.dataset.pubkey;
-          const name = ordered.find(v => valKeyHex(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
+          const name = ordered.find(v => valKey(v.public_key) === pubkey)?.name || pubkey.slice(0, 16);
           showRemoveConfirmation(pubkey, name, selfKey);
         });
       });
@@ -2030,9 +2030,9 @@ export function init(root, ctx) {
   }
 
   function showValidatorDetail(v) {
-    const keyHex = valKeyHex(v.public_key);
+    const keyHex = valKey(v.public_key);
     const scheme = typeof v.public_key === 'string'
-      ? (v.public_key.startsWith('00') ? 'Ed25519' : 'secp256k1')
+      ? (v.public_key.startsWith('nbl1q') ? 'Ed25519' : 'secp256k1')
       : (v.public_key.Ed25519 ? 'Ed25519' : 'secp256k1');
     const br = v.reputation_breakdown;
 
@@ -2099,8 +2099,8 @@ export function init(root, ctx) {
             </p>
             <div class="form-group">
               <label for="cs-add-key">Node ID (Public Key)</label>
-              <input id="cs-add-key" type="text" placeholder="64-character hex string (Ed25519)" maxlength="64" spellcheck="false" autocomplete="off">
-              <div class="form-hint">Ed25519 public key, 64 hex characters. Example: a1b2c3d4e5...64 chars</div>
+              <input id="cs-add-key" type="text" placeholder="nbl1q… address or 64-char hex key" maxlength="128" spellcheck="false" autocomplete="off">
+              <div class="form-hint">Noble address (nbl1q…) or 64-character hex public key</div>
               <div class="form-error" id="cs-add-error"></div>
             </div>
             <div class="form-group">
@@ -2131,13 +2131,16 @@ export function init(root, ctx) {
 
     submitBtn.addEventListener('click', async () => {
       errorEl.textContent = '';
-      const hexKey = keyInput.value.trim().toLowerCase();
+      const keyInput_ = keyInput.value.trim();
       const name = nameInput.value.trim();
+      const isNbl1 = keyInput_.toLowerCase().startsWith('nbl1');
+      const isHex64 = /^[0-9a-fA-F]{64}$/.test(keyInput_);
 
-      if (hexKey.length !== 64 || !/^[0-9a-f]{64}$/.test(hexKey)) {
-        errorEl.textContent = 'Invalid key: must be exactly 64 hexadecimal characters.';
+      if (!isNbl1 && !isHex64) {
+        errorEl.textContent = 'Invalid key: enter a Noble address (nbl1q…) or 64 hex characters.';
         return;
       }
+      const hexKey = isHex64 ? keyInput_.toLowerCase() : keyInput_;
 
       try {
         submitBtn.disabled = true;
@@ -2251,7 +2254,7 @@ export function init(root, ctx) {
 
       // Build set of validator identity keys for exclusion
       const validatorKeys = new Set(
-        valResult.validators.map(v => valKeyHex(v.public_key))
+        valResult.validators.map(v => valKey(v.public_key))
       );
 
       // Filter: wants to participate AND not already a validator

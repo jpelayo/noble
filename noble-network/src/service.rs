@@ -980,14 +980,17 @@ async fn handle_swarm_event(
                         }
                     }
                     // Accept valid message for propagation.
-                    let _ = swarm
+                    if let Err(e) = swarm
                         .behaviour_mut()
                         .gossip
                         .report_message_validation_result(
                             &message_id,
                             &propagation_source,
                             libp2p::gossipsub::MessageAcceptance::Accept,
-                        );
+                        )
+                    {
+                        tracing::debug!(task = "gossip_receive", %propagation_source, %e, "failed to report message acceptance");
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(task = "gossip_receive", %propagation_source, err = %e, "invalid gossip message");
@@ -1001,16 +1004,21 @@ async fn handle_swarm_event(
                     );
                     emit_misbehavior_event(&outcome, &propagation_source, &reason_text, &event_tx);
                     if outcome.is_banned() {
-                        let _ = swarm.disconnect_peer_id(propagation_source);
+                        if swarm.disconnect_peer_id(propagation_source).is_err() {
+                            tracing::debug!(task = "gossip_receive", %propagation_source, "disconnect failed (already disconnected)");
+                        }
                     }
-                    let _ = swarm
+                    if let Err(e) = swarm
                         .behaviour_mut()
                         .gossip
                         .report_message_validation_result(
                             &message_id,
                             &propagation_source,
                             libp2p::gossipsub::MessageAcceptance::Reject,
-                        );
+                        )
+                    {
+                        tracing::debug!(task = "gossip_receive", %propagation_source, %e, "failed to report message rejection");
+                    }
                 }
             }
         }
@@ -1024,10 +1032,14 @@ async fn handle_swarm_event(
             ..
         })) => {
             let response = handle_sync_request(&request, block_provider, config, pending_proposals);
-            let _ = swarm
+            if swarm
                 .behaviour_mut()
                 .sync_rpc
-                .send_response(channel, response);
+                .send_response(channel, response)
+                .is_err()
+            {
+                tracing::debug!(task = "network", "sync RPC send_response failed (channel closed)");
+            }
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::SyncRpc(request_response::Event::Message {
@@ -1703,10 +1715,14 @@ fn handle_tx_rpc_request(
     swarm: &mut Swarm<NobleBehaviour>,
 ) {
     let tx = tx_provider.get_transaction(&request.tx_id);
-    let _ = swarm
+    if swarm
         .behaviour_mut()
         .tx_rpc
-        .send_response(channel, TxResponse { transaction: tx });
+        .send_response(channel, TxResponse { transaction: tx })
+        .is_err()
+    {
+        tracing::debug!(task = "network", "tx RPC send_response failed (channel closed)");
+    }
 }
 
 /// Handle a ping event by updating peer latency.

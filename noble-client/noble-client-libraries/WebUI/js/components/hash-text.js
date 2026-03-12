@@ -11,7 +11,7 @@ export function hashText(hex, opts = {}) {
     el.style.cursor = 'pointer';
     el.title = hex;
 
-    if (full || hex.length <= len * 2 + 1) {
+    if (full || hex.length <= len + len + 1) {
         el.textContent = hex;
     } else {
         el.textContent = hex.slice(0, len) + '\u2026' + hex.slice(-len);

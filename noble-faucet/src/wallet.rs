@@ -61,15 +61,15 @@ impl FaucetWallet {
 
         tracing::info!(
             "Faucet wallet ready: {}",
-            hex::encode(signer.to_wire_bytes())
+            signer.to_address()
         );
 
         Ok(Self { keystore, signer, chain_id })
     }
 
-    /// Return the hex-encoded wire public key (used as the faucet address).
+    /// Return the human-readable Noble address (nbl1…).
     pub fn address(&self) -> String {
-        hex::encode(self.signer.to_wire_bytes())
+        self.signer.to_address()
     }
 
     /// Build a signed transfer transaction and return its hex-encoded CBOR.
@@ -163,9 +163,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let w = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
         let addr = w.address();
-        // Ed25519: 1 byte scheme + 32 bytes key = 33 bytes = 66 hex chars
-        assert_eq!(addr.len(), 66, "address should be 66 hex chars");
-        assert!(addr.starts_with("01"), "should be Ed25519 scheme prefix");
+        // Ed25519: nbl1q… bech32 address (63 chars: nbl1q + 52 data + 6 checksum)
+        assert!(addr.starts_with("nbl1q"), "should be Noble Ed25519 address (nbl1q…), got: {addr}");
+        // Verify roundtrip
+        let decoded = noble_crypto::noble_addr::decode(&addr).unwrap();
+        assert_eq!(decoded.scheme_id(), noble_crypto::SCHEME_ED25519);
     }
 
     #[test]

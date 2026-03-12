@@ -143,7 +143,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             merkle_root: hash_to_hex(&header.merkle_root),
             timestamp: header.timestamp,
             tx_count: header.tx_count,
-            validator_id: hex::encode(header.validator_id.to_wire_bytes()),
+            validator_id: header.validator_id.to_address(),
             cycle,
         })
     }
@@ -170,7 +170,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
                             merkle_root: hash_to_hex(&header.merkle_root),
                             timestamp: header.timestamp,
                             tx_count: header.tx_count,
-                            validator_id: hex::encode(header.validator_id.to_wire_bytes()),
+                            validator_id: header.validator_id.to_address(),
                             cycle,
                         });
                     }

@@ -145,6 +145,23 @@ impl NobleAddress {
         hex::encode(self.to_wire_bytes())
     }
 
+    /// Human-readable display address.
+    ///
+    /// - Noble native keys → `nbl1q…` (Ed25519) or `nbl1p…` (secp256k1)
+    /// - Bitcoin Hash160 → `bc1q…` (P2WPKH)
+    /// - Bitcoin Taproot → `bc1p…` (P2TR)
+    pub fn to_display_address(&self) -> String {
+        match self {
+            NobleAddress::Noble(pk) => noble_crypto::noble_addr::encode(pk),
+            NobleAddress::BitcoinHash160(hash) => {
+                noble_crypto::bitcoin_addr::hash160_to_p2wpkh(hash, true)
+            }
+            NobleAddress::BitcoinTaproot(xonly) => {
+                noble_crypto::bitcoin_addr::xonly_to_p2tr(xonly, true)
+            }
+        }
+    }
+
     /// For a secp256k1 public key, derive the corresponding BitcoinHash160 address.
     /// Returns None for Ed25519 keys (no Bitcoin address mapping).
     pub fn bitcoin_hash160_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {

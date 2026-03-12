@@ -13,6 +13,21 @@ use noble_consensus::{ConsensusStateMachine, VotingStrategy};
 use noble_crypto::NoblePublicKey;
 use noble_storage::StorageEngine;
 
+/// Parse a public key that may be either hex wire bytes or a `nbl1…` bech32 address.
+fn parse_pubkey_input(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
+    let trimmed = input.trim();
+    // Try nbl1… bech32 address first
+    if noble_crypto::noble_addr::is_noble_address(trimmed) {
+        return noble_crypto::noble_addr::decode(trimmed)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
+    }
+    // Fall back to hex wire bytes
+    let wire_bytes =
+        hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+    NoblePublicKey::from_wire_bytes(&wire_bytes)
+        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
+}
+
 /// Convert a `VotingStrategy` to a (name, params) pair for RPC responses.
 fn strategy_to_response(strategy: &VotingStrategy) -> (String, serde_json::Value) {
     let name = strategy.name().to_string();
@@ -210,7 +225,9 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                         now,
                     );
                     rec.last_addr = Some(entry.addr.clone());
-                    let _ = storage.store_peer_record(&rec);
+                    if let Err(e) = storage.store_peer_record(&rec) {
+                        tracing::warn!("backfill peer_record failed: {e}");
+                    }
                     peer_records.push(rec);
                 }
             }
@@ -338,9 +355,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 let mut country = ann_cc.or(val_cc);
 
                 // Fallback: for our own validator, use the node's identity data.
+                let key_display = noble_crypto::noble_addr::encode_wire_bytes(&wire)
+                    .unwrap_or_else(|| hex::encode(&wire));
                 if host_addr.is_none() && country.is_none() {
                     if let Some(ref self_pk) = self.validator_pubkey {
-                        if hex::encode(&wire) == *self_pk {
+                        if key_display == *self_pk {
                             let id = self.node_identity.read();
                             if !id.host_address.is_empty() {
                                 host_addr = Some(id.host_address.clone());
@@ -353,11 +372,12 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 }
 
                 // Determine wants_to_validate from known_peers or peer_records.
+                // known_peers map is keyed by hex wire bytes (internal format).
                 let key_hex = hex::encode(&wire);
                 let is_self = self
                     .validator_pubkey
                     .as_deref()
-                    .map_or(false, |s| key_hex == *s);
+                    .map_or(false, |s| key_display == *s);
                 let wants_validate = if is_self {
                     // Self always wants to validate (we're in the list).
                     true
@@ -369,7 +389,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 };
 
                 ValidatorEntry {
-                    public_key: key_hex.clone(),
+                    public_key: key_display.clone(),
                     name: friendly_name,
                     status: liveness.as_str().to_string(),
                     weight,
@@ -459,7 +479,10 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .validator_list()
             .priority_order()
             .iter()
-            .map(hex::encode)
+            .map(|wire| {
+                noble_crypto::noble_addr::encode_wire_bytes(wire)
+                    .unwrap_or_else(|| hex::encode(wire))
+            })
             .collect();
 
         Ok(ValidatorListResponse {
@@ -474,17 +497,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         &self,
         pubkey: String,
     ) -> Result<ReputationScoreResponse, ErrorObjectOwned> {
-        let wire_bytes =
-            hex::decode(&pubkey).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let pk = parse_pubkey_input(&pubkey)?;
 
         let consensus = self.consensus.read();
         if !consensus.validator_list().is_validator(&pk) {
             return Err(ApiError::ValidatorNotFound(pubkey).into());
         }
 
-        let rep_data = consensus.reputation().get(&wire_bytes);
+        let rep_data = consensus.reputation().get(&pk.to_wire_bytes());
         let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
         let (
             blocks_accepted,
@@ -585,10 +605,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         name: Option<String>,
         weight: Option<u64>,
     ) -> Result<bool, ErrorObjectOwned> {
-        let wire_bytes =
-            hex::decode(&public_key).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let pk = parse_pubkey_input(&public_key)?;
 
         let effective_weight = weight.unwrap_or(100);
         let now = std::time::SystemTime::now()
@@ -610,10 +627,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn remove_validator(&self, public_key: String) -> Result<bool, ErrorObjectOwned> {
-        let wire_bytes =
-            hex::decode(&public_key).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        let pk = NoblePublicKey::from_wire_bytes(&wire_bytes)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        let pk = parse_pubkey_input(&public_key)?;
 
         let mut consensus = self.consensus.write();
         let removed = consensus.validator_list_mut().remove_validator(&pk);
@@ -666,12 +680,16 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // Persist strategy to noble.toml so it survives restarts.
         if let Some(ref set_fn) = self.set_config_value {
             let key = if round == 1 { "voting_strategy" } else { "confirmation_strategy" };
-            let _ = set_fn("consensus", key, &strategy);
+            if let Err(e) = set_fn("consensus", key, &strategy) {
+                tracing::warn!("failed to persist {key}={strategy}: {e}");
+            }
             // Also persist params if applicable.
             if strategy == "fixed_validator" {
                 if let Some(ref p) = params {
                     if let Some(vk) = p.get("validator_key").and_then(|v| v.as_str()) {
-                        let _ = set_fn("consensus", "voting_preferred_validator", vk);
+                        if let Err(e) = set_fn("consensus", "voting_preferred_validator", vk) {
+                            tracing::warn!("failed to persist voting_preferred_validator: {e}");
+                        }
                     }
                 }
             } else if strategy == "subset_rotation" {
@@ -681,7 +699,9 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                             .filter_map(|v| v.as_str())
                             .collect::<Vec<_>>()
                             .join(",");
-                        let _ = set_fn("consensus", "voting_subset", &csv);
+                        if let Err(e) = set_fn("consensus", "voting_subset", &csv) {
+                            tracing::warn!("failed to persist voting_subset: {e}");
+                        }
                     }
                 }
             }
@@ -740,7 +760,8 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 // Look up proposer: friendly name from validator list,
                 // then peer announce name, then self-node identity, else hex pubkey
                 let validator = candidate_tracker.validator_of(&h).map(|wire| {
-                    let hex_wire = hex::encode(&wire);
+                    let display_key = noble_crypto::noble_addr::encode_wire_bytes(&wire)
+                        .unwrap_or_else(|| hex::encode(&wire));
                     validator_list
                         .find_by_wire(&wire)
                         .map(|v| v.name())
@@ -748,14 +769,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                         .or_else(|| peer_name_map.get(&wire).cloned())
                         .or_else(|| {
                             self_validator_name.as_ref().and_then(|(pk, name)| {
-                                if *pk == hex_wire && !name.is_empty() {
+                                if *pk == display_key && !name.is_empty() {
                                     Some(name.clone())
                                 } else {
                                     None
                                 }
                             })
                         })
-                        .unwrap_or(hex_wire)
+                        .unwrap_or(display_key)
                 });
                 VoteTallyEntry {
                     block_hash: hash_to_hex(&h),
@@ -885,15 +906,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         &self,
         order: Vec<String>,
     ) -> Result<bool, ErrorObjectOwned> {
-        // Convert hex strings to wire bytes
+        // Convert hex or nbl1 strings to wire bytes
         let wire_order: Vec<Vec<u8>> = order
             .iter()
-            .map(|hex_str| {
-                hex::decode(hex_str)
-                    .map_err(|_| ApiError::InvalidAddress(format!("invalid hex: {hex_str}")))
+            .map(|key_str| {
+                let pk = parse_pubkey_input(key_str)?;
+                Ok(pk.to_wire_bytes())
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ErrorObjectOwned::from)?;
+            .collect::<Result<Vec<_>, ErrorObjectOwned>>()?;
 
         let mut consensus = self.consensus.write();
         consensus

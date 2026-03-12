@@ -152,7 +152,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         };
 
         Ok(CreateAddressResponse {
-            address: hex::encode(pubkey.to_wire_bytes()),
+            address: pubkey.to_address(),
             scheme_id: pubkey.scheme_id(),
             bitcoin_addresses,
         })
@@ -333,7 +333,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         Ok(GenerateMnemonicResponse {
             mnemonic,
-            address: hex::encode(pubkey.to_wire_bytes()),
+            address: pubkey.to_address(),
             scheme_id: pubkey.scheme_id(),
             word_count: wc,
             private_key: private_key_hex,
@@ -368,7 +368,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     (String::new(), vec![])
                 };
             return Ok(ImportKeyResponse {
-                public_key: hex::encode(existing_pk.to_wire_bytes()),
+                public_key: existing_pk.to_address(),
                 bitcoin_address,
                 bitcoin_addresses,
             });
@@ -394,7 +394,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             };
 
         Ok(ImportKeyResponse {
-            public_key: hex::encode(pubkey.to_wire_bytes()),
+            public_key: pubkey.to_address(),
             bitcoin_address,
             bitcoin_addresses,
         })
@@ -423,7 +423,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     vec![]
                 };
                 WalletKeyEntry {
-                    pubkey_hex: hex::encode(pk.to_wire_bytes()),
+                    pubkey_hex: pk.to_address(),
                     scheme: scheme.to_string(),
                     bitcoin_addresses,
                 }
@@ -464,7 +464,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             };
 
         Ok(ImportMnemonicResponse {
-            address: hex::encode(pubkey.to_wire_bytes()),
+            address: pubkey.to_address(),
             scheme_id: pubkey.scheme_id(),
             already_exists,
             private_key: None, // Private key stays in keystore

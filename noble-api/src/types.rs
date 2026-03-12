@@ -21,9 +21,16 @@ pub fn hash_to_hex(h: &Hash256) -> String {
 }
 
 /// Parse a hex-encoded wire-format public key, returning a JSON-RPC error on failure.
-pub fn parse_pubkey(hex_str: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
+pub fn parse_pubkey(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
+    let trimmed = input.trim();
+    // Try nbl1… bech32 address first
+    if noble_crypto::noble_addr::is_noble_address(trimmed) {
+        return noble_crypto::noble_addr::decode(trimmed)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
+    }
+    // Fall back to hex wire bytes
     let bytes =
-        hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
+        hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
     NoblePublicKey::from_wire_bytes(&bytes)
         .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
 }
@@ -31,13 +38,21 @@ pub fn parse_pubkey(hex_str: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
 /// Parse an address string into a `NobleAddress`.
 ///
 /// Accepts:
+/// - Noble native addresses: `nbl1q…` (Ed25519), `nbl1p…` (secp256k1)
 /// - Hex-encoded wire-format NOBLE public keys (Ed25519: 0x01, secp256k1: 0x02)
 /// - Bitcoin addresses: P2PKH (1...), P2WPKH (bc1q...), P2TR (bc1p...)
 /// - Hex-encoded Bitcoin address wire bytes (0x80, 0x81 prefix)
 pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
     let trimmed = input.trim();
 
-    // Try Bitcoin address formats first (bc1q..., bc1p..., 1..., tb1...)
+    // Try Noble native address format (nbl1q…, nbl1p…)
+    if noble_crypto::noble_addr::is_noble_address(trimmed) {
+        let pk = noble_crypto::noble_addr::decode(trimmed)
+            .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
+        return Ok(NobleAddress::Noble(pk));
+    }
+
+    // Try Bitcoin address formats (bc1q..., bc1p..., 1..., tb1...)
     if trimmed.starts_with("bc1")
         || trimmed.starts_with("BC1")
         || trimmed.starts_with("tb1")
@@ -108,7 +123,7 @@ pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> 
         merkle_root: hash_to_hex(&block.header.merkle_root),
         timestamp: block.header.timestamp,
         tx_count: block.header.tx_count,
-        validator_id: hex::encode(block.header.validator_id.to_wire_bytes()),
+        validator_id: block.header.validator_id.to_address(),
         transactions: txs,
     }
 }
@@ -133,9 +148,10 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         }).collect(),
         outputs: tx.outputs.iter().map(|o| TxOutputResponse {
             value: o.value,
-            address: hex::encode(o.address.to_wire_bytes()),
+            address: o.address.to_display_address(),
         }).collect(),
-        signer: hex::encode(&tx.publisher_sig.public_key),
+        signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.publisher_sig.public_key)
+            .unwrap_or_else(|| hex::encode(&tx.publisher_sig.public_key)),
         metadata: tx
             .metadata
             .iter()
