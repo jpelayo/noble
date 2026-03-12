@@ -198,10 +198,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Read block-1 timestamp for cycle counting.
         // Cycles only start once the first consensus block is committed.
-        // Before that the engine uses GENESIS_TIMESTAMP as the epoch.
+        // Before that the engine uses a wall-clock-aligned epoch (cycle 0).
         //
         // When tip.height >= 1, block 1's timestamp is the cycle epoch.
-        // When tip.height == 0, genesis_timestamp = None → engine sets GENESIS_TIMESTAMP on first tick.
+        // When tip.height == 0, genesis_timestamp = None → engine sets wall-clock-aligned epoch on first tick.
         let genesis_timestamp = if tip.height >= 1 {
             let s = storage.read();
             s.get_block_hash_by_height(1)
@@ -211,7 +211,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         } else {
             tracing::info!(
                 task = "startup",
-                "no blocks yet — epoch will be set to GENESIS_TIMESTAMP on first tick"
+                "no blocks yet — epoch will be wall-clock-aligned on first tick"
             );
             // Purge stale cycle history from previous runs.
             if let Err(e) = storage.read().clear_cycle_history() {
@@ -3363,8 +3363,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
                     // Hide cycle number during pre-genesis (tip_height == 0) —
-                    // the raw number is derived from GENESIS_TIMESTAMP and is
-                    // meaningless to operators.  Matches getCycleStatus RPC.
+                    // the chain has no blocks yet.  Matches getCycleStatus RPC.
                     let tip_h = self.consensus.read().chain_tip().0;
                     let cycle_val: serde_json::Value = if tip_h == 0 {
                         serde_json::Value::Null
@@ -4017,7 +4016,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Block 1 sync-import: clear stale cycle history from the bootstrap epoch.
         // Parity with the consensus CommitBlock path (CycleIo::ClearCycleHistory).
-        // The cycle numbers from the GENESIS_TIMESTAMP epoch are meaningless after
+        // The cycle numbers from the wall-clock-aligned epoch are meaningless after
         // the epoch shifts to block 1's real timestamp.
         if block.header.height == 1 {
             let storage = self.storage.read();

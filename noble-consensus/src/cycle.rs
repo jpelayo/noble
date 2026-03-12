@@ -61,6 +61,11 @@ impl CycleManager {
         self.genesis_timestamp
     }
 
+    /// Return the cycle duration in seconds.
+    pub fn cycle_duration(&self) -> u64 {
+        self.cycle_duration
+    }
+
     /// Elapsed seconds since genesis (saturating — returns 0 before genesis).
     fn elapsed(&self, now: u64) -> u64 {
         now.saturating_sub(self.genesis_timestamp)

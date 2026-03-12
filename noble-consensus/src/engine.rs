@@ -216,8 +216,8 @@ impl CycleEngine {
 
     /// Human-readable cycle label for log messages.
     ///
-    /// Before genesis (`tip_height == 0`) the cycle number is derived from
-    /// `GENESIS_TIMESTAMP` and is meaningless to operators, so we display
+    /// Before genesis (`tip_height == 0`) the cycle number is wall-clock-aligned
+    /// (typically 0) but the chain has no blocks yet, so we display
     /// `"pre-genesis"` instead.
     fn cycle_label(&self) -> String {
         if self.tip_height == 0 {
@@ -376,10 +376,11 @@ impl CycleEngine {
         self.r1_vote_cast = false;
         self.r2_vote_cast = false;
         // When hopping to a new chain (height 0), clear the cycle epoch.
-        // Next tick sets epoch to GENESIS_TIMESTAMP; the new chain's block 1
+        // Next tick sets a wall-clock-aligned epoch; the new chain's block 1
         // resets it to the real timestamp when committed.
         if height == 0 {
             self.cycle_mgr.set_genesis_timestamp(u64::MAX);
+            self.vote_mgr.set_bootstrap_tolerance(true);
             self.tracked_cycle = u64::MAX;
             self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
@@ -449,8 +450,9 @@ impl CycleEngine {
         let timestamp = header.timestamp;
         self.tip_height = height;
         self.tip_timestamp = timestamp;
-        if let Ok(h) = header.compute_block_hash() {
-            self.tip_hash = h;
+        match header.compute_block_hash() {
+            Ok(h) => self.tip_hash = h,
+            Err(e) => warn!("failed to compute block hash for tip at height {height}: {e}"),
         }
         self.tip_header = Some(header);
 
@@ -461,6 +463,7 @@ impl CycleEngine {
         if height == 1 {
             info!("block 1 tip update — cycle epoch set to {}", timestamp);
             self.cycle_mgr.set_genesis_timestamp(timestamp);
+            self.vote_mgr.set_bootstrap_tolerance(false);
             self.first_tick = true;
             // Cache the chain owner (block 1 validator) for fork resolution.
             self.chain_owner_key = Some(
@@ -472,17 +475,17 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // No genesis block yet — set epoch to GENESIS_TIMESTAMP so all nodes
-        // compute identical cycle numbers (required for vote cycle matching).
-        // Using `now`-aligned epochs would break if nodes start in different
-        // 1200-second windows (they'd disagree on cycle numbers → WrongCycle
-        // vote rejection).  The resulting high cycle number (days since
-        // GENESIS_TIMESTAMP / 1200) is cosmetic — it resets to 0 when block 1
-        // is committed and the epoch is set to block 1's timestamp.
+        // No genesis block yet — use a wall-clock-aligned epoch so bootstrap
+        // always starts at cycle 0.  `aligned = floor(now / cycle_duration) * cycle_duration`.
+        // All nodes starting within the same 1200s window compute the same epoch.
+        // Nodes in adjacent windows differ by ±1 cycle, handled by
+        // bootstrap_tolerance on VoteManager.
         if !self.cycle_mgr.has_genesis() {
-            self.cycle_mgr
-                .set_genesis_timestamp(noble_core::GENESIS_TIMESTAMP);
-            debug!("cycle engine: bootstrap epoch set to GENESIS_TIMESTAMP (no blocks yet)");
+            let cd = self.cycle_mgr.cycle_duration();
+            let aligned = (now / cd) * cd;
+            self.cycle_mgr.set_genesis_timestamp(aligned);
+            self.vote_mgr.set_bootstrap_tolerance(true);
+            debug!("cycle engine: bootstrap epoch set to wall-clock-aligned {aligned} (cycle 0)");
         }
 
         let new_cycle = self.cycle_mgr.current_cycle(now);
@@ -798,8 +801,8 @@ impl CycleEngine {
                             self.tip_timestamp = block.header.timestamp;
                             self.tip_header = Some(block.header.clone());
                             // Block 1 committed — (re)set cycle epoch to the block's
-                            // real timestamp.  Bootstrap used epoch=0; this converges
-                            // all nodes on the same real epoch.
+                            // real timestamp.  Bootstrap used wall-clock-aligned epoch;
+                            // this converges all nodes on the same real epoch.
                             if new_height == 1 {
                                 info!(
                                     "block 1 committed — cycle epoch set to {}",
@@ -807,6 +810,7 @@ impl CycleEngine {
                                 );
                                 self.cycle_mgr
                                     .set_genesis_timestamp(block.header.timestamp);
+                                self.vote_mgr.set_bootstrap_tolerance(false);
                                 self.first_tick = true;
                                 // Cache chain owner for fork resolution.
                                 self.chain_owner_key = Some(
@@ -847,10 +851,13 @@ impl CycleEngine {
                             let unique_witness =
                                 self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
                             let dual_required = self.tip_height < 1;
+                            // For block 1, the bootstrap-era cycle number is meaningless
+                            // (it resets when the epoch changes). Store cycle 0 instead.
+                            let vote_cycle = if new_height == 1 { 0 } else { completed_cycle };
                             outputs.push(CycleIo::StoreBlockVotes {
                                 height: new_height,
                                 votes: Box::new(crate::history::BlockVotes {
-                                    cycle_number: completed_cycle,
+                                    cycle_number: vote_cycle,
                                     voter_count,
                                     strength: format!("{:?}", strength),
                                     r1_voters,
@@ -2695,10 +2702,8 @@ mod tests {
 
     #[test]
     fn bootstrap_epoch_initializes_cycle_machinery() {
-        // Engine with genesis_timestamp=None → first tick sets epoch=GENESIS_TIMESTAMP.
-        // All nodes use the same fixed epoch so vote cycle numbers match.
-        // The cycle number is high (days since GENESIS_TIMESTAMP / 1200) but
-        // that's cosmetic — it resets to 0 when block 1 is committed.
+        // Engine with genesis_timestamp=None → first tick sets a wall-clock-aligned epoch.
+        // `aligned = floor(now / 1200) * 1200`, so `current_cycle(now)` is 0 or 1.
         let (vp, vpub) = make_validator();
         let val_list = ValidatorList::new();
         let mut engine = CycleEngine::new(
@@ -2720,10 +2725,111 @@ mod tests {
             has_set_timer(&outputs),
             "bootstrap should enable normal timer"
         );
-        let expected_cycle = (now - noble_core::GENESIS_TIMESTAMP) / 1200;
+        // Wall-clock-aligned epoch: cycle should be 0 (within the same window)
+        assert!(
+            engine.tracked_cycle <= 1,
+            "bootstrap cycle should be 0 or 1 (wall-clock-aligned), got {}",
+            engine.tracked_cycle,
+        );
+        // Verify the genesis timestamp is wall-clock aligned
+        let expected_epoch = (now / 1200) * 1200;
         assert_eq!(
-            engine.tracked_cycle, expected_cycle,
-            "bootstrap cycle should use GENESIS_TIMESTAMP epoch for cross-node consistency"
+            engine.cycle_mgr.genesis_ts(),
+            expected_epoch,
+            "bootstrap epoch should be floor(now/1200)*1200"
+        );
+    }
+
+    #[test]
+    fn wall_clock_aligned_epoch_produces_cycle_zero() {
+        // Regardless of when the node starts, bootstrap always produces cycle 0.
+        let (vp, vpub) = make_validator();
+        let val_list = ValidatorList::new();
+        let mut engine = CycleEngine::new(
+            ConsensusConfig::default(),
+            val_list,
+            0,
+            Hash256::ZERO,
+            test_chain_id(),
+            Some((vp, vpub)),
+            None,
+        );
+        engine.set_peer_count(1);
+        // Use a timestamp far in the future — should still get cycle 0
+        let far_future = 2_000_000_000u64; // ~2033
+        let outputs = engine.step(CycleEvent::Tick { now: far_future });
+        assert!(has_set_timer(&outputs));
+        assert_eq!(
+            engine.tracked_cycle, 0,
+            "wall-clock-aligned epoch must produce cycle 0 at the alignment point"
+        );
+        let expected_epoch = (far_future / 1200) * 1200;
+        assert_eq!(engine.cycle_mgr.genesis_ts(), expected_epoch);
+    }
+
+    #[test]
+    fn bootstrap_tolerance_disabled_after_block_1_commit() {
+        // After block 1 commits, bootstrap tolerance should be off.
+        let (vp, vpub) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone(), vpub2.clone()], 2);
+        // Simulate bootstrap: clear genesis so first tick sets wall-clock epoch
+        engine.cycle_mgr.set_genesis_timestamp(u64::MAX);
+        engine.first_tick = true;
+        engine.tip_height = 0;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        engine.step(CycleEvent::Tick { now });
+        assert!(
+            engine.vote_mgr.bootstrap_tolerance,
+            "bootstrap tolerance should be enabled after bootstrap init"
+        );
+
+        // Propose and commit block 1
+        engine.tracked_phase = CyclePhase::Proposal;
+        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
+        engine.tracked_phase = CyclePhase::Voting;
+        let v1 = PorVote::sign(0, hash, &vp, vpub).unwrap();
+        let v2 = PorVote::sign(0, hash, &vp2, vpub2).unwrap();
+        engine.step(CycleEvent::VoteReceived { vote: v1, from_peer: b"p1".to_vec() });
+        engine.step(CycleEvent::VoteReceived { vote: v2, from_peer: b"p2".to_vec() });
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        assert!(has_commit(&outputs), "block 1 should commit");
+        assert!(
+            !engine.vote_mgr.bootstrap_tolerance,
+            "bootstrap tolerance must be disabled after block 1 commit"
+        );
+    }
+
+    #[test]
+    fn block_1_votes_stored_as_cycle_zero() {
+        // StoreBlockVotes for block 1 should use cycle_number=0
+        let (vp, vpub) = make_validator();
+        let (vp2, vpub2) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone(), vpub2.clone()], 2);
+        engine.tracked_phase = CyclePhase::Proposal;
+        let (block, hash) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        engine.step(CycleEvent::BlockProposed { block, from_peer: b"p1".to_vec() });
+        engine.tracked_phase = CyclePhase::Voting;
+        let v1 = PorVote::sign(0, hash, &vp, vpub).unwrap();
+        let v2 = PorVote::sign(0, hash, &vp2, vpub2).unwrap();
+        engine.step(CycleEvent::VoteReceived { vote: v1, from_peer: b"p1".to_vec() });
+        engine.step(CycleEvent::VoteReceived { vote: v2, from_peer: b"p2".to_vec() });
+        let outputs = engine.step(CycleEvent::CycleBoundary { completed_cycle: 0 });
+        let stored = outputs.iter().find_map(|o| {
+            if let CycleIo::StoreBlockVotes { votes, .. } = o {
+                Some(votes)
+            } else {
+                None
+            }
+        });
+        assert!(stored.is_some(), "StoreBlockVotes should be emitted");
+        assert_eq!(
+            stored.unwrap().cycle_number, 0,
+            "block 1 votes must be stored with cycle_number=0"
         );
     }
 

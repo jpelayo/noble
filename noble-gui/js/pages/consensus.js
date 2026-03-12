@@ -1070,7 +1070,7 @@ export function init(root, ctx) {
       // backbone and overlay local cycle history for enrichment (proposals,
       // votes, disambiguation).
       const [blockCount, cycleStatus, tallies, history] = await Promise.all([
-        rpc.call('noble_getBlockCount'),
+        rpc.call('noble_getBlockCount').catch(() => ({ height: 0 })),
         rpc.call('noble_getCycleStatus').catch(() => null),
         rpc.call('noble_getVoteTallies').catch(() => null),
         rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]).catch(() => ({ entries: [] })),
@@ -1151,11 +1151,15 @@ export function init(root, ctx) {
 
       // 2) Past cycles: walk down from highestCycle-1, collect up to TIMELINE_LIMIT
       //    finalized cycles (from blocks) with gap rows in between.
+      //    Cap the scan range to avoid iterating hundreds of empty cycles
+      //    (e.g. when bootstrap cycle inflation produced a high cycle number).
       let collected = 0;
       const lowestBlockCycle = blockCycles.length > 0 ? blockCycles[blockCycles.length - 1] : highestCycle;
       const startCycle = allEntries.length > 0 ? allEntries[0].cycle_number - 1 : highestCycle;
+      const MAX_SCAN_GAP = TIMELINE_LIMIT * 10;
+      const scanFloor = Math.max(lowestBlockCycle, startCycle - MAX_SCAN_GAP);
 
-      for (let c = startCycle; c >= lowestBlockCycle && collected < TIMELINE_LIMIT; c--) {
+      for (let c = startCycle; c >= scanFloor && collected < TIMELINE_LIMIT; c--) {
         const block = cycleBlockMap.get(c);
         if (block) {
           // Committed block exists — this cycle is FINALIZED (chain truth).

@@ -893,7 +893,7 @@ export class MockRpcClient {
           votes.sort((a, b) => b.vote_count - a.vote_count);
           const winner = votes[0];
           // Simulate an indeterminate cycle every 5th historical cycle
-          const isIndeterminate = !isCurrent && (i % 5 === 3);
+          const isIndeterminate = !isCurrent && (offset % 5 === 3);
           const disambiguation = false; // Always false (v0.28.0: no hash tiebreaker)
 
           // Build phase states for the cycle (4 phases)

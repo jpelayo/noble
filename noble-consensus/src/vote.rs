@@ -199,6 +199,9 @@ pub struct VoteManager {
     first_votes: HashMap<(Vec<u8>, u8), PorVote>,
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
+    /// When true, accept votes with cycle ±1 of current_cycle (bootstrap tolerance).
+    /// Enabled during pre-genesis bootstrap, disabled after block 1 commit.
+    pub(crate) bootstrap_tolerance: bool,
 }
 
 impl VoteManager {
@@ -211,12 +214,22 @@ impl VoteManager {
             vote_commitments: HashMap::new(),
             first_votes: HashMap::new(),
             current_cycle: 0,
+            bootstrap_tolerance: false,
         }
     }
 
     /// Set the current cycle number (AUD2-M4).
     pub fn set_current_cycle(&mut self, cycle: u64) {
         self.current_cycle = cycle;
+    }
+
+    /// Enable or disable ±1 cycle tolerance for bootstrap.
+    ///
+    /// During pre-genesis, nodes starting in adjacent 1200s wall-clock windows
+    /// may disagree on cycle number by 1. This tolerance accepts votes from
+    /// those peers. Disabled after block 1 commit.
+    pub fn set_bootstrap_tolerance(&mut self, enabled: bool) {
+        self.bootstrap_tolerance = enabled;
     }
 
     /// Record a vote from a peer.
@@ -229,10 +242,22 @@ impl VoteManager {
     pub fn record_vote(&mut self, _peer_id: &[u8], vote: &PorVote) -> Result<bool, VoteError> {
         // AUD2-M4: Validate vote cycle matches current cycle
         if vote.cycle != self.current_cycle {
-            return Err(VoteError::WrongCycle {
-                expected: self.current_cycle,
-                got: vote.cycle,
-            });
+            // During bootstrap, nodes in adjacent 1200s wall-clock windows may
+            // compute cycle numbers that differ by 1. Accept ±1 tolerance.
+            if self.bootstrap_tolerance
+                && (vote.cycle == self.current_cycle.wrapping_add(1)
+                    || vote.cycle == self.current_cycle.saturating_sub(1))
+            {
+                debug!(
+                    "accepting vote with ±1 cycle tolerance (bootstrap): got {}, expected {}",
+                    vote.cycle, self.current_cycle
+                );
+            } else {
+                return Err(VoteError::WrongCycle {
+                    expected: self.current_cycle,
+                    got: vote.cycle,
+                });
+            }
         }
 
         // Reject invalid round values — only R1 (1) and R2 (2) are valid.
@@ -1029,5 +1054,71 @@ mod tests {
 
         mgr.clear();
         assert!(mgr.first_votes.is_empty());
+    }
+
+    // --- Bootstrap tolerance tests ---
+
+    #[test]
+    fn bootstrap_tolerance_accepts_adjacent_cycle_votes() {
+        // With tolerance enabled, votes with cycle ±1 should be accepted.
+        let mut mgr = VoteManager::new();
+        mgr.set_current_cycle(5);
+        mgr.set_bootstrap_tolerance(true);
+
+        let candidate = hash_n(1);
+        // Vote for cycle 6 (current + 1)
+        let (vote_plus, _) = make_vote(6, candidate);
+        assert!(
+            mgr.record_vote(b"p1", &vote_plus).unwrap(),
+            "cycle+1 vote should be accepted with bootstrap tolerance"
+        );
+
+        // Vote for cycle 4 (current - 1)
+        let (vote_minus, _) = make_vote(4, candidate);
+        assert!(
+            mgr.record_vote(b"p2", &vote_minus).unwrap(),
+            "cycle-1 vote should be accepted with bootstrap tolerance"
+        );
+
+        // Vote for cycle 5 (exact match — always accepted)
+        let (vote_exact, _) = make_vote(5, candidate);
+        assert!(
+            mgr.record_vote(b"p3", &vote_exact).unwrap(),
+            "exact cycle vote should be accepted"
+        );
+
+        assert_eq!(mgr.total_votes(), 3);
+    }
+
+    #[test]
+    fn bootstrap_tolerance_rejects_cycle_off_by_two() {
+        // Tolerance is ±1, not ±2.
+        let mut mgr = VoteManager::new();
+        mgr.set_current_cycle(5);
+        mgr.set_bootstrap_tolerance(true);
+
+        let candidate = hash_n(1);
+        let (vote, _) = make_vote(7, candidate); // cycle 7, expected 5 → off by 2
+        let result = mgr.record_vote(b"p1", &vote);
+        assert!(
+            matches!(result, Err(VoteError::WrongCycle { .. })),
+            "cycle±2 should be rejected even with tolerance"
+        );
+    }
+
+    #[test]
+    fn bootstrap_tolerance_disabled_rejects_adjacent() {
+        // Without tolerance, ±1 should be rejected.
+        let mut mgr = VoteManager::new();
+        mgr.set_current_cycle(5);
+        // bootstrap_tolerance is false by default
+
+        let candidate = hash_n(1);
+        let (vote, _) = make_vote(6, candidate);
+        let result = mgr.record_vote(b"p1", &vote);
+        assert!(
+            matches!(result, Err(VoteError::WrongCycle { .. })),
+            "cycle+1 should be rejected without tolerance"
+        );
     }
 }
