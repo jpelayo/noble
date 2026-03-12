@@ -1242,6 +1242,27 @@ export function init(root, ctx) {
           const match = cycles.find(c => c.cycle_number === bv.cycle_number);
           if (match) match._blockVotes = bv;
         }
+
+        // Enrich empty voting phases from blockVotes witness data.
+        // Synced nodes and genesis blocks may lack local vote tallies,
+        // but noble_getBlockVotes always has the committed witness data.
+        for (const cycle of cycles) {
+          if (!cycle._blockVotes) continue;
+          const votingPhase = cycle.phases[1];
+          if (votingPhase.votes && votingPhase.votes.length > 0) continue;
+
+          const bv = cycle._blockVotes;
+          const winningHash = cycle.winning_hash || (cycle.phases[2] && cycle.phases[2].winning_hash);
+          if (winningHash) {
+            votingPhase.votes = [{
+              block_hash: winningHash,
+              validator: cycle.winner || '',
+              vote_count: bv.r1_voters.length,
+              r2_vote_count: bv.r2_voters.length,
+            }];
+            votingPhase.total_voters = bv.voter_count;
+          }
+        }
       } catch (_) { /* getSyncStatus or getBlockVotes not available */ }
 
       // Fetch finality status for per-block finality badges.
@@ -1363,6 +1384,10 @@ export function init(root, ctx) {
           // Voting (R1)
           if (phase.votes && phase.votes.length > 0) {
             label += `<div style="font-size:0.55rem;opacity:0.85">${phase.total_voters || 0} voter${(phase.total_voters || 0) !== 1 ? 's' : ''}</div>`;
+          } else if (cycle._blockVotes) {
+            // Fallback: use per-block witness data when cycle history lacks tallies
+            const bv = cycle._blockVotes;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${bv.unique_witness_count} witness${bv.unique_witness_count !== 1 ? 'es' : ''}</div>`;
           } else {
             label += `<div style="font-size:0.55rem;opacity:0.5">—</div>`;
           }

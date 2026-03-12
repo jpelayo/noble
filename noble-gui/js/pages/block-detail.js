@@ -18,9 +18,19 @@ export function init(root, ctx) {
 
   async function load() {
     try {
-      const block = await rpc.call('noble_getBlock', [height]);
+      // Fetch block data and votes in parallel
+      const [block, votes] = await Promise.all([
+        rpc.call('noble_getBlock', [height]),
+        rpc.call('noble_getBlockVotes', [height]).catch(() => null),
+      ]);
 
       root.querySelector('#block-loading')?.remove();
+
+      // Resolve validator friendly name from votes data
+      const validatorName = resolveValidatorName(block.validator_id, votes);
+      const validatorDisplay = validatorName
+        ? `<strong>${esc(validatorName)}</strong> <span class="mono" style="opacity:0.5">${truncateHash(block.validator_id, 12)}</span>`
+        : `<span class="mono">${truncateHash(block.validator_id, 16)}</span>`;
 
       // Header detail grid
       const grid = document.createElement('dl');
@@ -32,9 +42,73 @@ export function init(root, ctx) {
         <dt>Prev Block Hash</dt><dd class="mono">${block.prev_hash}</dd>
         <dt>Merkle Root</dt><dd class="mono">${block.merkle_root}</dd>
         <dt>Transaction Count</dt><dd>${block.tx_count}</dd>
-        <dt>Validator ID</dt><dd class="mono">${truncateHash(block.validator_id, 16)}</dd>
+        <dt>Validator</dt><dd>${validatorDisplay}</dd>
       `;
+
+      // Add consensus row if votes are available
+      if (votes) {
+        const strengthBadge = votes.strength === 'Strong'
+          ? '<span class="badge consensus-strong">Strong</span>'
+          : '<span class="badge consensus-plurality">Plurality</span>';
+        const witnessInfo = `${votes.unique_witness_count} witness${votes.unique_witness_count !== 1 ? 'es' : ''}`;
+        const cycleInfo = `Cycle ${formatNumber(votes.cycle_number)}`;
+        grid.innerHTML += `
+          <dt>Consensus</dt>
+          <dd>${strengthBadge} ${witnessInfo} &middot; ${cycleInfo}</dd>
+        `;
+      }
+
       root.appendChild(grid);
+
+      // Voting witnesses panel
+      if (votes && (votes.r1_voters.length > 0 || votes.r2_voters.length > 0)) {
+        const votePanel = document.createElement('div');
+        votePanel.className = 'panel';
+        const totalWitnesses = votes.unique_witness_count;
+        votePanel.innerHTML = `
+          <div class="panel-header">Voting Witnesses (${totalWitnesses})</div>
+          <div class="panel-body" style="padding:0">
+            <table class="data-table">
+              <thead><tr><th>Round</th><th>Validator</th><th>Key</th></tr></thead>
+              <tbody id="block-votes"></tbody>
+            </table>
+          </div>
+        `;
+        root.appendChild(votePanel);
+
+        const voteBody = votePanel.querySelector('#block-votes');
+        // Track which keys we've shown to mark R2-only voters
+        const r1Keys = new Set(votes.r1_voters.map(v => v.validator_key));
+
+        votes.r1_voters.forEach(v => {
+          const inR2 = votes.r2_voters.some(r2 => r2.validator_key === v.validator_key);
+          const roundLabel = inR2
+            ? '<span class="badge consensus-r1">R1</span> <span class="badge consensus-r2">R2</span>'
+            : '<span class="badge consensus-r1">R1</span>';
+          const name = v.name || 'Unknown';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${roundLabel}</td>
+            <td>${esc(name)}</td>
+            <td class="mono">${truncateHash(v.validator_key)}</td>
+          `;
+          voteBody.appendChild(tr);
+        });
+
+        // R2-only voters (voted in R2 but not R1)
+        votes.r2_voters
+          .filter(v => !r1Keys.has(v.validator_key))
+          .forEach(v => {
+            const name = v.name || 'Unknown';
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td><span class="badge consensus-r2">R2</span></td>
+              <td>${esc(name)}</td>
+              <td class="mono">${truncateHash(v.validator_key)}</td>
+            `;
+            voteBody.appendChild(tr);
+          });
+      }
 
       // Transactions table
       if (block.transactions.length > 0) {
@@ -96,5 +170,20 @@ export function init(root, ctx) {
 
   load();
   return { destroy() {} };
+}
+
+/** Match the block's validator_id against vote witnesses to find a friendly name. */
+function resolveValidatorName(validatorId, votes) {
+  if (!votes) return null;
+  const all = [...votes.r1_voters, ...votes.r2_voters];
+  const match = all.find(v => v.validator_key === validatorId);
+  return match?.name || null;
+}
+
+/** Escape HTML special characters to prevent XSS. */
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
 }
 

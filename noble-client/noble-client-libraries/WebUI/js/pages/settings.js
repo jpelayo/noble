@@ -475,6 +475,14 @@ export function init(root, ctx) {
                     <span class="settings-label">Project</span>
                     <span>NOBLE Blockchain</span>
                 </div>
+                <div class="settings-row">
+                    <span class="settings-label">Copyright</span>
+                    <span>&copy; 2026 InfiniteContext.com</span>
+                </div>
+                <div class="settings-row">
+                    <span class="settings-label">License</span>
+                    <span>Apache-2.0</span>
+                </div>
             </div>
         `;
         root.appendChild(card);
