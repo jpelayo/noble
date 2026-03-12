@@ -7,14 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		3E1838CA2F5CD21D0006AD13 /* css in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E1838C72F5CD21C0006AD13 /* css */; };
-		3E1838CB2F5CD21D0006AD13 /* js in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E1838C82F5CD21C0006AD13 /* js */; };
-		3E1838CC2F5CD21D0006AD13 /* index.html in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E1838C92F5CD21C0006AD13 /* index.html */; };
-		3E1C2D372F5BBB0000D8F7D6 /* NobleClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D322F5BBB0000D8F7D6 /* NobleClientCore */; };
-		3E1C2D382F5BBB0000D8F7D6 /* NobleClientAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D332F5BBB0000D8F7D6 /* NobleClientAPI */; };
-		3E1C2D392F5BBB0000D8F7D6 /* NobleClientCrypto in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D342F5BBB0000D8F7D6 /* NobleClientCrypto */; };
-		3E1C2D3A2F5BBB0000D8F7D6 /* NobleClientSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D352F5BBB0000D8F7D6 /* NobleClientSecurity */; };
-		3E1C2D3B2F5BBB0000D8F7D6 /* NobleClientDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D362F5BBB0000D8F7D6 /* NobleClientDesignSystem */; };
+		3E322D342F62AFFF00A1F4FF /* index.html in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D312F62AFFF00A1F4FF /* index.html */; };
+		3E322D352F62AFFF00A1F4FF /* js in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D322F62AFFF00A1F4FF /* js */; };
+		3E322D362F62AFFF00A1F4FF /* css in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D332F62AFFF00A1F4FF /* css */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,9 +36,9 @@
 			dstPath = WebUI;
 			dstSubfolderSpec = 7;
 			files = (
-				3E1838CA2F5CD21D0006AD13 /* css in CopyFiles */,
-				3E1838CB2F5CD21D0006AD13 /* js in CopyFiles */,
-				3E1838CC2F5CD21D0006AD13 /* index.html in CopyFiles */,
+				3E322D342F62AFFF00A1F4FF /* index.html in CopyFiles */,
+				3E322D352F62AFFF00A1F4FF /* js in CopyFiles */,
+				3E322D362F62AFFF00A1F4FF /* css in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,6 +48,14 @@
 		3E1838C72F5CD21C0006AD13 /* css */ = {isa = PBXFileReference; lastKnownFileType = folder; name = css; path = "../../../noble-client-libraries/WebUI/css"; sourceTree = "<group>"; };
 		3E1838C82F5CD21C0006AD13 /* js */ = {isa = PBXFileReference; lastKnownFileType = folder; name = js; path = "../../../noble-client-libraries/WebUI/js"; sourceTree = "<group>"; };
 		3E1838C92F5CD21C0006AD13 /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = index.html; path = "../../../noble-client-libraries/WebUI/index.html"; sourceTree = "<group>"; };
+		3E322D312F62AFFF00A1F4FF /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = index.html; path = "../../noble-client-libraries/WebUI/index.html"; sourceTree = "<group>"; };
+		3E322D322F62AFFF00A1F4FF /* js */ = {isa = PBXFileReference; lastKnownFileType = folder; name = js; path = "../../noble-client-libraries/WebUI/js"; sourceTree = "<group>"; };
+		3E322D332F62AFFF00A1F4FF /* css */ = {isa = PBXFileReference; lastKnownFileType = folder; name = css; path = "../../noble-client-libraries/WebUI/css"; sourceTree = "<group>"; };
+		3E322D382F62B03600A1F4FF /* NobleClientCore */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = NobleClientCore; path = "../../noble-client-libraries/SwiftPackages/NobleClientCore"; sourceTree = "<group>"; };
+		3E322D392F62B03600A1F4FF /* NobleClientAPI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = NobleClientAPI; path = "../../noble-client-libraries/SwiftPackages/NobleClientAPI"; sourceTree = "<group>"; };
+		3E322D3A2F62B03600A1F4FF /* NobleClientSecurity */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = NobleClientSecurity; path = "../../noble-client-libraries/SwiftPackages/NobleClientSecurity"; sourceTree = "<group>"; };
+		3E322D3B2F62B03600A1F4FF /* NobleClientCrypto */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = NobleClientCrypto; path = "../../noble-client-libraries/SwiftPackages/NobleClientCrypto"; sourceTree = "<group>"; };
+		3E322D3C2F62B03600A1F4FF /* NobleClientDesignSystem */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = NobleClientDesignSystem; path = "../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem"; sourceTree = "<group>"; };
 		3EA5F34F2F4F1AA300E6F4A3 /* NobleDoc.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NobleDoc.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3EA5F35E2F4F1AA400E6F4A3 /* NobleDocTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NobleDocTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3EA5F3682F4F1AA400E6F4A3 /* NobleDocUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NobleDocUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -81,11 +84,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				3E1C2D372F5BBB0000D8F7D6 /* NobleClientCore in Frameworks */,
-				3E1C2D382F5BBB0000D8F7D6 /* NobleClientAPI in Frameworks */,
-				3E1C2D392F5BBB0000D8F7D6 /* NobleClientCrypto in Frameworks */,
-				3E1C2D3A2F5BBB0000D8F7D6 /* NobleClientSecurity in Frameworks */,
-				3E1C2D3B2F5BBB0000D8F7D6 /* NobleClientDesignSystem in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -106,15 +104,31 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3E322D372F62B03600A1F4FF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				3E322D392F62B03600A1F4FF /* NobleClientAPI */,
+				3E322D382F62B03600A1F4FF /* NobleClientCore */,
+				3E322D3B2F62B03600A1F4FF /* NobleClientCrypto */,
+				3E322D3C2F62B03600A1F4FF /* NobleClientDesignSystem */,
+				3E322D3A2F62B03600A1F4FF /* NobleClientSecurity */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		3EA5F3462F4F1AA300E6F4A3 = {
 			isa = PBXGroup;
 			children = (
 				3E1838C72F5CD21C0006AD13 /* css */,
+				3E322D332F62AFFF00A1F4FF /* css */,
 				3E1838C92F5CD21C0006AD13 /* index.html */,
 				3E1838C82F5CD21C0006AD13 /* js */,
+				3E322D312F62AFFF00A1F4FF /* index.html */,
+				3E322D322F62AFFF00A1F4FF /* js */,
 				3EA5F3512F4F1AA300E6F4A3 /* NobleDoc */,
 				3EA5F3612F4F1AA400E6F4A3 /* NobleDocTests */,
 				3EA5F36B2F4F1AA400E6F4A3 /* NobleDocUITests */,
+				3E322D372F62B03600A1F4FF /* Frameworks */,
 				3EA5F3502F4F1AA300E6F4A3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -239,11 +253,11 @@
 			mainGroup = 3EA5F3462F4F1AA300E6F4A3;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientAPI" */,
 				3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientCore" */,
 				3E1C2D2F2F5AB3BB00D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem" */,
 				3E1C2D302F5AB3CC00D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientCrypto" */,
 				3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientSecurity" */,
+				3E322D422F62B05800A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientAPI" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3EA5F3502F4F1AA300E6F4A3 /* Products */;
@@ -635,10 +649,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		3E1C2D2D2F5AB3A700D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientAPI" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../noble-client-libraries/SwiftPackages/NobleClientAPI";
-		};
 		3E1C2D2E2F5AB3B200D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientCore" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../noble-client-libraries/SwiftPackages/NobleClientCore";
@@ -654,6 +664,10 @@
 		3E1C2D312F5AB3D800D8F7D6 /* XCLocalSwiftPackageReference "../../../noble-client-libraries/SwiftPackages/NobleClientSecurity" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../noble-client-libraries/SwiftPackages/NobleClientSecurity";
+		};
+		3E322D422F62B05800A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientAPI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientAPI";
 		};
 /* End XCLocalSwiftPackageReference section */
 

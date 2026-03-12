@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3E322D542F62B0AE00A1F4FF /* js in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D512F62B0AE00A1F4FF /* js */; };
+		3E322D552F62B0AE00A1F4FF /* index.html in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D522F62B0AE00A1F4FF /* index.html */; };
+		3E322D562F62B0AE00A1F4FF /* css in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D532F62B0AE00A1F4FF /* css */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3E322CD22F62A77200A1F4FF /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -23,10 +29,28 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		3E322D0A2F62AF0F00A1F4FF /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 7;
+			files = (
+				3E322D542F62B0AE00A1F4FF /* js in CopyFiles */,
+				3E322D552F62B0AE00A1F4FF /* index.html in CopyFiles */,
+				3E322D562F62B0AE00A1F4FF /* css in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		3E322CC22F62A76F00A1F4FF /* NobleApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NobleApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3E322CD12F62A77200A1F4FF /* NobleAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NobleAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3E322CDB2F62A77200A1F4FF /* NobleAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NobleAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3E322D512F62B0AE00A1F4FF /* js */ = {isa = PBXFileReference; lastKnownFileType = folder; name = js; path = "../../noble-client-libraries/WebUI/js"; sourceTree = "<group>"; };
+		3E322D522F62B0AE00A1F4FF /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = index.html; path = "../../noble-client-libraries/WebUI/index.html"; sourceTree = "<group>"; };
+		3E322D532F62B0AE00A1F4FF /* css */ = {isa = PBXFileReference; lastKnownFileType = folder; name = css; path = "../../noble-client-libraries/WebUI/css"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -75,6 +99,9 @@
 		3E322CB92F62A76F00A1F4FF = {
 			isa = PBXGroup;
 			children = (
+				3E322D532F62B0AE00A1F4FF /* css */,
+				3E322D522F62B0AE00A1F4FF /* index.html */,
+				3E322D512F62B0AE00A1F4FF /* js */,
 				3E322CC42F62A76F00A1F4FF /* NobleApp */,
 				3E322CD42F62A77200A1F4FF /* NobleAppTests */,
 				3E322CDE2F62A77200A1F4FF /* NobleAppUITests */,
@@ -102,6 +129,7 @@
 				3E322CBE2F62A76F00A1F4FF /* Sources */,
 				3E322CBF2F62A76F00A1F4FF /* Frameworks */,
 				3E322CC02F62A76F00A1F4FF /* Resources */,
+				3E322D0A2F62AF0F00A1F4FF /* CopyFiles */,
 			);
 			buildRules = (
 			);

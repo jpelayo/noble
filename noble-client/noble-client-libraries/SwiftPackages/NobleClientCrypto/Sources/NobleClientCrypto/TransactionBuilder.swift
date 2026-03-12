@@ -120,7 +120,7 @@ public struct TransactionBuilder: Sendable {
             chainId: chainId
         )
 
-        let payloadBytes = try canonicalCbor(signingPayload)
+        let payloadBytes = canonicalCbor(signingPayload)
         let signingMessage = sha256(payloadBytes)
         let signature = try Secp256k1Helper.sign(data: signingMessage, privateKey: privateKey)
 
@@ -141,7 +141,7 @@ public struct TransactionBuilder: Sendable {
             gatewayAddress: nil
         )
 
-        let txBytes = try canonicalCbor(txCbor)
+        let txBytes = canonicalCbor(txCbor)
         return txBytes.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -197,7 +197,7 @@ public struct TransactionBuilder: Sendable {
             chainId: chainId
         )
 
-        let payloadBytes = try canonicalCbor(signingPayload)
+        let payloadBytes = canonicalCbor(signingPayload)
         let signingMessage = sha256(payloadBytes)
         let signature = try Secp256k1Helper.sign(data: signingMessage, privateKey: privateKey)
 
@@ -218,7 +218,7 @@ public struct TransactionBuilder: Sendable {
             gatewayAddress: nil
         )
 
-        let txBytes = try canonicalCbor(txCbor)
+        let txBytes = canonicalCbor(txCbor)
         return txBytes.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -382,9 +382,9 @@ public struct TransactionBuilder: Sendable {
         return Array(hash)
     }
 
-    func canonicalCbor(_ value: CBOR) throws -> [UInt8] {
+    func canonicalCbor(_ value: CBOR) -> [UInt8] {
         // SwiftCBOR's encode produces canonical deterministic CBOR
-        try CBOR.encodeToBytes(value)
+        value.encode()
     }
 }
 
