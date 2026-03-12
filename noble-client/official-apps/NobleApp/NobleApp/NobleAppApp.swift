@@ -1,32 +1,37 @@
-//
-//  NobleAppApp.swift
-//  NobleApp
-//
-//  Created by pelayo on 12/3/26.
-//
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
 
 import SwiftUI
-import SwiftData
 
 @main
 struct NobleAppApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            Group {
+                if appState.hasCompletedOnboarding {
+                    MainView(appState: appState)
+                } else {
+                    OnboardingView(appState: appState)
+                }
+            }
+            .task {
+                appState.checkExistingWallet()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .active:
+                    if appState.isConnected {
+                        appState.startPolling()
+                    }
+                case .background, .inactive:
+                    appState.stopPolling()
+                @unknown default:
+                    break
+                }
+            }
         }
-        .modelContainer(sharedModelContainer)
     }
 }

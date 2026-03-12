@@ -10,6 +10,11 @@
 		3E322D542F62B0AE00A1F4FF /* js in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D512F62B0AE00A1F4FF /* js */; };
 		3E322D552F62B0AE00A1F4FF /* index.html in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D522F62B0AE00A1F4FF /* index.html */; };
 		3E322D562F62B0AE00A1F4FF /* css in CopyFiles */ = {isa = PBXBuildFile; fileRef = 3E322D532F62B0AE00A1F4FF /* css */; };
+		3E322D972F62B28200A1F4FF /* NobleClientAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 3E322D962F62B28200A1F4FF /* NobleClientAPI */; };
+		3E322D992F62B28200A1F4FF /* NobleClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3E322D982F62B28200A1F4FF /* NobleClientCore */; };
+		3E322D9B2F62B28200A1F4FF /* NobleClientSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = 3E322D9A2F62B28200A1F4FF /* NobleClientSecurity */; };
+		3E322D9D2F62B28200A1F4FF /* NobleClientCrypto in Frameworks */ = {isa = PBXBuildFile; productRef = 3E322D9C2F62B28200A1F4FF /* NobleClientCrypto */; };
+		3E322D9F2F62B28200A1F4FF /* NobleClientDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3E322D9E2F62B28200A1F4FF /* NobleClientDesignSystem */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +81,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3E322D9B2F62B28200A1F4FF /* NobleClientSecurity in Frameworks */,
+				3E322D9D2F62B28200A1F4FF /* NobleClientCrypto in Frameworks */,
+				3E322D972F62B28200A1F4FF /* NobleClientAPI in Frameworks */,
+				3E322D9F2F62B28200A1F4FF /* NobleClientDesignSystem in Frameworks */,
+				3E322D992F62B28200A1F4FF /* NobleClientCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -105,6 +115,7 @@
 				3E322CC42F62A76F00A1F4FF /* NobleApp */,
 				3E322CD42F62A77200A1F4FF /* NobleAppTests */,
 				3E322CDE2F62A77200A1F4FF /* NobleAppUITests */,
+				3E322D952F62B28200A1F4FF /* Frameworks */,
 				3E322CC32F62A76F00A1F4FF /* Products */,
 			);
 			sourceTree = "<group>";
@@ -117,6 +128,13 @@
 				3E322CDB2F62A77200A1F4FF /* NobleAppUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		3E322D952F62B28200A1F4FF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -140,6 +158,11 @@
 			);
 			name = NobleApp;
 			packageProductDependencies = (
+				3E322D962F62B28200A1F4FF /* NobleClientAPI */,
+				3E322D982F62B28200A1F4FF /* NobleClientCore */,
+				3E322D9A2F62B28200A1F4FF /* NobleClientSecurity */,
+				3E322D9C2F62B28200A1F4FF /* NobleClientCrypto */,
+				3E322D9E2F62B28200A1F4FF /* NobleClientDesignSystem */,
 			);
 			productName = NobleApp;
 			productReference = 3E322CC22F62A76F00A1F4FF /* NobleApp.app */;
@@ -223,6 +246,13 @@
 			);
 			mainGroup = 3E322CB92F62A76F00A1F4FF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3E322D902F62B21F00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientAPI" */,
+				3E322D912F62B24700A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCore" */,
+				3E322D922F62B25A00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientSecurity" */,
+				3E322D932F62B26B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCrypto" */,
+				3E322D942F62B27B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 3E322CC32F62A76F00A1F4FF /* Products */;
 			projectDirPath = "";
@@ -610,6 +640,57 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		3E322D902F62B21F00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientAPI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientAPI";
+		};
+		3E322D912F62B24700A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientCore";
+		};
+		3E322D922F62B25A00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientSecurity" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientSecurity";
+		};
+		3E322D932F62B26B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCrypto" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientCrypto";
+		};
+		3E322D942F62B27B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3E322D962F62B28200A1F4FF /* NobleClientAPI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E322D902F62B21F00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientAPI" */;
+			productName = NobleClientAPI;
+		};
+		3E322D982F62B28200A1F4FF /* NobleClientCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E322D912F62B24700A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCore" */;
+			productName = NobleClientCore;
+		};
+		3E322D9A2F62B28200A1F4FF /* NobleClientSecurity */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E322D922F62B25A00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientSecurity" */;
+			productName = NobleClientSecurity;
+		};
+		3E322D9C2F62B28200A1F4FF /* NobleClientCrypto */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E322D932F62B26B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientCrypto" */;
+			productName = NobleClientCrypto;
+		};
+		3E322D9E2F62B28200A1F4FF /* NobleClientDesignSystem */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E322D942F62B27B00A1F4FF /* XCLocalSwiftPackageReference "../../noble-client-libraries/SwiftPackages/NobleClientDesignSystem" */;
+			productName = NobleClientDesignSystem;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 3E322CBA2F62A76F00A1F4FF /* Project object */;
 }
