@@ -1140,13 +1140,14 @@ async fn handle_swarm_event(
                     // guard prevents a malicious peer from claiming chain_id=0 with
                     // height > 0 to bypass the mismatch gate.
                     //
-                    // Exception 2: early-chain nodes (tip_height ≤ 5) may have
-                    // independently bootstrapped a short chain.  They must stay
-                    // connected to peers on other chains so fork resolution can
-                    // trigger a chain adoption (blockchain hop) to the longer chain.
-                    // Without this, two independently-bootstrapped nodes are
-                    // permanently deadlocked.
-                    let early_chain = config.tip_height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
+                    // Exception 2: early-chain — if EITHER side has tip ≤ 5, they
+                    // may have independently bootstrapped a short chain.  Keep the
+                    // connection so the short-chain node can discover and adopt the
+                    // longer chain.  Without this, an established node (h>5) kicks
+                    // every early-chain joiner that has a different genesis.
+                    let local_early = config.tip_height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
+                    let remote_early = height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
+                    let early_chain = local_early || remote_early;
                     let remote_pre_genesis = chain_id == 0 && height == 0;
                     let chain_mismatch = chain_id != config.chain_id
                         && config.chain_id != 0
@@ -1186,7 +1187,9 @@ async fn handle_swarm_event(
                             Instant::now() + Duration::from_secs(MISMATCH_COOLDOWN_SECS),
                         );
                         disconnect_reasons.insert(peer, reason.clone());
-                        let _ = swarm.disconnect_peer_id(peer);
+                        if let Err(e) = swarm.disconnect_peer_id(peer) {
+                            tracing::debug!(task = "sync", %peer, "mismatch disconnect failed: {e:?}");
+                        }
                     } else {
                         peer_manager.update_chain_tip(&peer, height, tip_hash);
                         // S49: Compute clock offset from sender_timestamp.

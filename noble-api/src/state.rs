@@ -94,6 +94,8 @@ pub struct PeerInfoEntry {
     pub latency_ms: Option<u64>,
     /// Last ban reason category + subject (from most recent misbehavior).
     pub last_ban_reason: Option<(String, String)>,
+    /// Peer's chain ID (from NodeAnnounce). `None` if not yet announced.
+    pub chain_id: Option<u32>,
 }
 
 /// Shared state available to all RPC method handlers.

@@ -1893,6 +1893,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             tip_hash,
                             chain_owner_key.as_deref(),
                             our_identity.as_deref(),
+                            self.get_chain_id(),
                         );
                         let total_peers = peers.len();
 
@@ -1979,10 +1980,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let (tip_h, _) = self.consensus.read().chain_tip();
                         let local_vote_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
                         let discovered = self.discovered_blockchains.lock();
-                        // Count same-chain peers (excluding our own chain entry).
+                        // Count same-chain peers: only peers whose announced chain_id
+                        // matches ours.  Cross-chain peers must NOT prevent adoption.
                         let peers = self.peer_info.read();
                         let same_chain_peer_count = peers.values()
-                            .filter(|p| p.chain_tip_height.is_some())
+                            .filter(|p| p.chain_id == Some(local_chain_id) && p.chain_tip_height.is_some())
                             .count();
                         drop(peers);
                         // Build cross-chain fork info from discovered blockchains.
@@ -2269,6 +2271,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             identity_key: None, // set when NodeAnnounce received
                             latency_ms: None,
                             last_ban_reason: None,
+                            chain_id: None, // set when NodeAnnounce received
                         },
                     );
                 }
@@ -2576,18 +2579,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     })).is_err() {
                         tracing::debug!(task = "peer_tracking", "blockchain_discovered broadcast: no subscribers");
                     }
-                    // ── Early-chain fast-path: immediate adoption ──
+                    // ── Early-chain fast-path ──
                     //
-                    // When our chain is very short (≤ EARLY_CHAIN_HEIGHT_LIMIT), it
-                    // was independently bootstrapped and may be inferior to the peer's
-                    // chain.  Instead of disconnecting (which would require a slow
-                    // reconnect cycle), keep the peer connected and trigger immediate
-                    // chain adoption if their chain is better.  This guarantees two
-                    // independently-bootstrapped nodes always reconcile without any
-                    // possibility of permanent deadlock.
+                    // If EITHER side is early-chain (≤ EARLY_CHAIN_HEIGHT_LIMIT),
+                    // keep connected and let the short-chain node adopt the longer one.
+                    //
+                    // Case A: WE are early-chain → evaluate adoption of their chain.
+                    // Case B: THEY are early-chain → keep connected so they can adopt
+                    //         our chain (they'll trigger adoption on their side).
+                    // Case C: Neither is early → graceful disconnect (different network).
                     let our_height = self.consensus.read().chain_tip().0;
-                    if our_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT {
-                        let their_height = announce.chain_tip_height.unwrap_or(0);
+                    let their_height = announce.chain_tip_height.unwrap_or(0);
+                    let we_are_early = our_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT;
+                    let they_are_early = their_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT;
+
+                    if we_are_early {
+                        // Case A: We're short-chain — decide whether to adopt theirs.
                         let their_weight = announce.chain_vote_weight.unwrap_or(0);
                         let our_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
                         let our_chain_id = self.get_chain_id();
@@ -2611,12 +2618,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 our_chain_id, our_height, announce.node_name, announce.chain_id, their_height,
                             );
                         }
-                        // Keep peer connected regardless — they will adopt our chain
-                        // (if we're better) or we just adopted theirs.
-                        return; // Skip normal announce processing (different chain_id).
+                        return; // Keep peer connected regardless.
                     }
 
-                    // ── Past early-chain: graceful disconnect ──
+                    if they_are_early {
+                        // Case B: They're short-chain — keep them connected so they
+                        // can discover our chain (via their own NodeAnnounce handler)
+                        // and adopt it.  No action needed on our side.
+                        tracing::info!(
+                            task = "chain_adoption",
+                            "remote peer {} is early-chain (h={}) on {:#010X} — keeping connected for adoption",
+                            announce.node_name, their_height, announce.chain_id,
+                        );
+                        return; // Keep peer connected.
+                    }
+
+                    // ── Case C: Neither side is early — graceful disconnect ──
                     // Blockchain info + peer IP are persisted above BEFORE disconnect.
                     // No ban: different chain is not misbehavior.
                     if let Err(e) = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone())) {
@@ -2678,6 +2695,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
                         entry.identity_key = Some(identity_wire.clone());
+                        entry.chain_id = Some(announce.chain_id);
                         if announce.proposed_height.is_some() {
                             entry.proposed_height = announce.proposed_height;
                         }
@@ -4020,7 +4038,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tracing::warn!(task = "chain_adoption", "failed to send UpdateChainId(0): {e}");
         }
         if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateTipHeight(0)) {
-            tracing::debug!(task = "chain_adoption", "UpdateTipHeight(0) dropped: {e}");
+            tracing::warn!(task = "chain_adoption", "UpdateTipHeight(0) dropped: {e}");
         }
         // 4. Reset consensus engine to height 0, no chain tip.
         {
@@ -4979,13 +4997,22 @@ fn compute_fork_groups(
     local_hash: noble_crypto::Hash256,
     chain_owner_key: Option<&[u8]>,
     our_identity_key: Option<&[u8]>,
+    local_chain_id: u32,
 ) -> Vec<noble_consensus::ForkInfo> {
     let local_tip_hex = hex::encode(local_hash.as_bytes());
 
-    // Group peers by chain_tip_hash.
+    // Group peers by chain_tip_hash — only same-chain peers.
+    // Cross-chain peers (different chain_id) are handled by the
+    // cross-chain adoption path, not the same-chain fork resolver.
     let mut groups: std::collections::HashMap<String, (u64, usize)> =
         std::collections::HashMap::new();
     for entry in peers.values() {
+        // Skip peers on different chains (or unknown chain — not yet announced).
+        match entry.chain_id {
+            Some(cid) if cid == local_chain_id => {}
+            Some(_) => continue, // different chain
+            None => continue,    // not yet announced
+        }
         let h = match entry.chain_tip_height { Some(h) => h, None => continue };
         let hash = match entry.chain_tip_hash.as_ref() { Some(s) => s.clone(), None => continue };
         let g = groups.entry(hash).or_insert((h, 0usize));
