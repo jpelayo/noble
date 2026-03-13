@@ -813,6 +813,9 @@ pub struct VoteTallyEntry {
     /// Validator name (from validator list), if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator: Option<String>,
+    /// Validator identity key (hex wire bytes), if the block is in the candidate tracker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_key: Option<String>,
 }
 
 /// Response for `noble_getVoteTallies`.

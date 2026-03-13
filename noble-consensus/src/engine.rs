@@ -1475,7 +1475,7 @@ impl CycleEngine {
             Ok(()) => {
                 self.delivered_block_log.insert(*block_hash.as_bytes());
                 outputs.push(CycleIo::Log(format!(
-                    "accepted candidate block {} from validator {}",
+                    "accepted candidate block {{{}}} from validator {}",
                     block_hash,
                     self.candidate_tracker
                         .get(&block_hash)
@@ -1488,7 +1488,7 @@ impl CycleEngine {
                 // RequestBlock racing with BlockAnnounce fetch).  Not a double
                 // proposal — just ignore.
                 outputs.push(CycleIo::Log(format!(
-                    "duplicate block delivery {} (already tracked)",
+                    "duplicate block delivery {{{}}} (already tracked)",
                     block_hash
                 )));
             }

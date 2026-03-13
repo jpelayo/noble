@@ -777,9 +777,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         let mut entries: Vec<VoteTallyEntry> = tallies
             .into_iter()
             .map(|(h, c)| {
-                // Look up proposer: friendly name from validator list,
-                // then peer announce name, then self-node identity, else hex pubkey
-                let validator = candidate_tracker.validator_of(&h).map(|wire| {
+                // Look up proposer wire bytes once (used for both name and key).
+                let proposer_wire = candidate_tracker.validator_of(&h);
+                let validator_key = proposer_wire.as_ref()
+                    .map(|wire| hex::encode(wire));
+                let validator = proposer_wire.map(|wire| {
                     let display_key = noble_crypto::noble_addr::encode_wire_bytes(&wire)
                         .unwrap_or_else(|| hex::encode(&wire));
                     validator_list
@@ -803,6 +805,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     block_hash: hash_to_hex(&h),
                     vote_count: c,
                     validator,
+                    validator_key,
                 }
             })
             .collect();

@@ -778,8 +778,10 @@ export function init(root, ctx) {
       if (data.event === 'block_committed') {
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
-      // Refresh tallies on vote events (live updates)
-      if (data.event === 'vote_received' || data.event === 'vote_broadcast') {
+      // Refresh tallies on vote events and block arrivals (live updates).
+      // block_received triggers re-resolve of validator names that were
+      // unknown when the vote arrived before the block.
+      if (data.event === 'vote_received' || data.event === 'vote_broadcast' || data.event === 'block_received') {
         scheduleReload(loadVoteTallies);
       }
       // Refresh cycle display on phase changes
@@ -967,7 +969,7 @@ export function init(root, ctx) {
       const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';
       talliesBody.innerHTML = result.tallies.map(t => {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
-        const name = t.validator || truncateHash(t.block_hash, 8);
+        const name = t.validator || (t.validator_key && getValidatorDisplayName(t.validator_key, 8)) || truncateHash(t.block_hash, 8);
         const r2 = t.r2_vote_count ? ` <span style="color:var(--text-muted);font-size:10px">R2: ${t.r2_vote_count}</span>` : '';
         const voteBtn = isManual
           ? `<button class="btn btn-sm cs-inline-vote-btn" data-hash="${t.block_hash}" style="flex-shrink:0;padding:2px 8px;font-size:11px">Vote</button>`

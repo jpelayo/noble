@@ -1001,8 +1001,8 @@ export class MockRpcClient {
         const phases = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
         // Always return candidates so manual vote dropdown has options
         const tallies = [
-          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), validator: 'noble-alpha', vote_count: phaseIndex >= 1 ? 3 : 0 },
-          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), validator: 'noble-beta', vote_count: phaseIndex >= 1 ? 1 : 0 },
+          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), validator: 'noble-alpha', validator_key: 'aa'.repeat(33), vote_count: phaseIndex >= 1 ? 3 : 0 },
+          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), validator: 'noble-beta', validator_key: 'bb'.repeat(33), vote_count: phaseIndex >= 1 ? 1 : 0 },
         ];
         return { cycle, phase: phases[phaseIndex], tallies };
       }
