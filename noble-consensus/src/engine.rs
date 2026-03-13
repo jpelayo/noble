@@ -82,8 +82,12 @@ pub struct CycleEngine {
     manual_vote: Option<Hash256>,
     /// Whether an R1 vote has been cast this cycle.
     r1_vote_cast: bool,
+    /// Suppresses repeated "no candidate for R1 vote" log after first emission per cycle.
+    r1_retry_logged: bool,
     /// P1.2: Whether an R2 confirmation vote has been cast this cycle.
     r2_vote_cast: bool,
+    /// Suppresses repeated "no candidate for R2 vote" log after first emission per cycle.
+    r2_retry_logged: bool,
     /// S15-A: Per-validator reputation scoring engine.
     reputation: ReputationEngine,
     /// First tick: triggers proposal request if starting mid-Proposal phase.
@@ -162,7 +166,9 @@ impl CycleEngine {
             last_cycle_history: None,
             manual_vote: None,
             r1_vote_cast: false,
+            r1_retry_logged: false,
             r2_vote_cast: false,
+            r2_retry_logged: false,
             reputation: ReputationEngine::new(),
             first_tick: true,
             proposals_enabled: true, // default; call set_proposals_enabled(false) for vote-only
@@ -374,7 +380,9 @@ impl CycleEngine {
         self.last_cycle_history = None;
         self.manual_vote = None;
         self.r1_vote_cast = false;
+        self.r1_retry_logged = false;
         self.r2_vote_cast = false;
+        self.r2_retry_logged = false;
         // When hopping to a new chain (height 0), clear the cycle epoch.
         // Next tick sets a wall-clock-aligned epoch; the new chain's block 1
         // resets it to the real timestamp when committed.
@@ -637,7 +645,9 @@ impl CycleEngine {
                 self.vote_mgr.set_current_cycle(cycle);
                 self.candidate_tracker.clear();
                 self.r1_vote_cast = false;
+                self.r1_retry_logged = false;
                 self.r2_vote_cast = false;
+                self.r2_retry_logged = false;
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cl}: entering Proposal phase"
                 )));
@@ -744,7 +754,9 @@ impl CycleEngine {
             self.vote_mgr.clear();
             self.candidate_tracker.clear();
             self.r1_vote_cast = false;
+            self.r1_retry_logged = false;
             self.r2_vote_cast = false;
+            self.r2_retry_logged = false;
             outputs.push(CycleIo::Log(format!(
                 "cycle {cl}: no connected peers — genesis requires live witnesses"
             )));
@@ -1119,7 +1131,9 @@ impl CycleEngine {
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
         self.r1_vote_cast = false;
+        self.r1_retry_logged = false;
         self.r2_vote_cast = false;
+        self.r2_retry_logged = false;
 
         outputs
     }
@@ -1858,10 +1872,11 @@ impl CycleEngine {
                     )));
                 }
             }
-        } else {
+        } else if !self.r1_retry_logged {
             // No candidate available yet — DON'T set r1_vote_cast so
             // handle_tick will retry on the next tick when a candidate
-            // may have arrived via gossip.
+            // may have arrived via gossip.  Log only once per cycle.
+            self.r1_retry_logged = true;
             let n = self.candidate_tracker.all_candidates().len();
             outputs.push(CycleIo::Log(format!(
                 "cycle {cl}: no candidate selected for R1 vote ({n} proposal(s) available), will retry"
@@ -1922,8 +1937,9 @@ impl CycleEngine {
                     )));
                 }
             }
-        } else {
-            // No candidate available — allow retry on subsequent ticks.
+        } else if !self.r2_retry_logged {
+            // No candidate available — log once, then retry silently on subsequent ticks.
+            self.r2_retry_logged = true;
             let r1_count = self.vote_mgr.current_tallies().len();
             outputs.push(CycleIo::Log(format!(
                 "cycle {cl}: no candidate selected for R2 vote ({r1_count} R1 candidate(s)), will retry"

@@ -169,9 +169,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             let s = storage.read();
             match s.get_block_hash_by_height(0) {
                 Ok(hash) => noble_core::derive_chain_id(&hash),
-                Err(_) => match s.get_block_hash_by_height(1) {
+                Err(e0) => match s.get_block_hash_by_height(1) {
                     Ok(hash) => noble_core::derive_chain_id(&hash),
-                    Err(_) => 0,
+                    Err(e1) => {
+                        tracing::debug!(
+                            task = "startup",
+                            "no blocks in storage (height 0: {e0}, height 1: {e1}) — chain_id=0 (pre-genesis)",
+                        );
+                        0
+                    }
                 },
             }
         };
@@ -185,13 +191,32 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
 
         // Determine chain tip for the consensus engine.
-        let tip = storage
+        let mut tip = storage
             .read()
             .get_chain_tip()?
             .unwrap_or(noble_storage::ChainTip {
                 block_hash: Hash256::ZERO,
                 height: 0,
             });
+
+        // Startup integrity check: chain_tip says height > 0 but we failed to
+        // derive chain_id (blocks missing from storage).  This is an inconsistent
+        // state — typically caused by incomplete adoption or interrupted sync.
+        // Wipe everything so the node starts fresh and can sync properly.
+        if chain_id == 0 && tip.height > 0 {
+            tracing::warn!(
+                task = "startup",
+                "chain_tip at height {} but chain_id=0 (blocks missing from storage) — wiping inconsistent state",
+                tip.height,
+            );
+            if let Err(e) = storage.read().wipe_all_chain_data() {
+                tracing::error!(task = "startup", "failed to wipe inconsistent chain data: {e}");
+            }
+            tip = noble_storage::ChainTip {
+                block_hash: Hash256::ZERO,
+                height: 0,
+            };
+        }
 
         // AUD3-D5/D6: Load tip block header for proper B2/B3/B5/B6 validation on startup.
         let tip_header = if tip.height > 0 || tip.block_hash != Hash256::ZERO {
@@ -3008,7 +3033,39 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // directly from them.  The sync import path (try_sync_import)
                 // handles validation and commitment, then fetches the next block
                 // from the same peer to continue the chain until caught up.
-                let our_height = self.consensus.read().chain_tip().0;
+                let (our_height, our_tip_hash) = self.consensus.read().chain_tip();
+
+                // ── Chain integrity probe ──
+                // Every time a peer reports its chain state, verify our own
+                // tip block actually exists in storage.  If the tip is stale
+                // or corrupt (chain_tip says height N but the block is gone),
+                // wipe and re-sync immediately.  This catches inconsistencies
+                // from interrupted adoptions, storage corruption, or any
+                // scenario where the in-memory chain_tip diverges from the
+                // actual block data on disk.
+                if our_height > 0 {
+                    let probe_ok = self.storage.read()
+                        .get_block_header(&our_tip_hash)
+                        .is_ok();
+                    if !probe_ok {
+                        tracing::error!(
+                            task = "integrity",
+                            "CHAIN INTEGRITY FAILURE: tip at height {} claims hash {} but block missing from storage — wiping and re-syncing",
+                            our_height,
+                            hex::encode(our_tip_hash.as_bytes()),
+                        );
+                        self.perform_chain_adoption(
+                            0,
+                            "integrity probe: tip block missing from storage",
+                            network_cmd,
+                            cycle_phase_tx,
+                        );
+                        // After adoption, our_height is 0 and we fall through to
+                        // the sync path below on the next PeerChainTipUpdated.
+                        return;
+                    }
+                }
+
                 if *height > our_height {
                     let behind = *height - our_height;
                     let next_height = our_height + 1;

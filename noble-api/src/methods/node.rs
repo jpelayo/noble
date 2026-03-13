@@ -1211,10 +1211,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                         Ok(peer_hash) => {
                             match storage.get_block_hash_by_height(height) {
                                 Ok(our_hash) => Some(our_hash == peer_hash),
-                                Err(_) => None,
+                                // Storage error at or below our height: can't
+                                // confirm agreement → treat as diverged.
+                                Err(_) => Some(false),
                             }
                         }
-                        Err(_) => None,
+                        Err(_) => Some(false),
                     }
                 };
                 ForkEntry {
