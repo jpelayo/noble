@@ -446,7 +446,7 @@ async fn run_event_loop(
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &event_tx, &mut ancestor_finder).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -662,6 +662,7 @@ async fn handle_swarm_event(
                     }) {
                         tracing::debug!(task = "peer_management", "event channel full: {e}");
                     }
+                    disconnect_reasons.insert(peer_id, "inbound subnet diversity limit".to_string());
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return;
                 }
@@ -738,6 +739,7 @@ async fn handle_swarm_event(
                 }
                 Err(reason) => {
                     tracing::debug!(task = "peer_management", %peer_id, %reason, "peer rejected");
+                    disconnect_reasons.insert(peer_id, format!("peer rejected: {reason}"));
                     if let Err(e) = event_tx.try_send(NetworkEvent::PeerRejected {
                         peer_id: peer_id.to_bytes().to_vec(),
                         addr: remote_addr,
@@ -1004,6 +1006,7 @@ async fn handle_swarm_event(
                     );
                     emit_misbehavior_event(&outcome, &propagation_source, &reason_text, &event_tx);
                     if outcome.is_banned() {
+                        disconnect_reasons.insert(propagation_source, format!("banned: {reason_text}"));
                         if swarm.disconnect_peer_id(propagation_source).is_err() {
                             tracing::debug!(task = "gossip_receive", %propagation_source, "disconnect failed (already disconnected)");
                         }
@@ -1854,6 +1857,7 @@ async fn handle_command(
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
+    disconnect_reasons: &mut HashMap<PeerId, String>,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
     ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
 ) -> bool {
@@ -2168,6 +2172,7 @@ async fn handle_command(
                     ban_reason,
                 );
                 emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
+                disconnect_reasons.insert(pid, format!("banned: {reason_clone}"));
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
@@ -2175,6 +2180,7 @@ async fn handle_command(
         NetworkCommand::DisconnectPeer(peer_bytes) => {
             if let Ok(pid) = PeerId::from_bytes(&peer_bytes) {
                 tracing::info!(task = "network", %pid, "Graceful disconnect (no ban)");
+                disconnect_reasons.insert(pid, "graceful disconnect (no ban)".to_string());
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }
@@ -2187,6 +2193,7 @@ async fn handle_command(
                     BanReason::new(BanCategory::ManualBan, reason),
                 );
                 emit_misbehavior_event(&outcome, &pid, &reason_clone, &event_tx);
+                disconnect_reasons.insert(pid, format!("manual ban: {reason_clone}"));
                 let _ = swarm.disconnect_peer_id(pid);
             }
         }

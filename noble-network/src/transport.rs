@@ -32,7 +32,7 @@ pub fn build_swarm(
         .map_err(|e| NetworkError::Transport(e.to_string()))?
         .with_behaviour(|_| behaviour)
         .map_err(|e| NetworkError::Transport(e.to_string()))?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(7200)))
         .build()
         .pipe_ok()
 }

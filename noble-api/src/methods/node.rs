@@ -1149,10 +1149,19 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let local_tip = hex::encode(local_tip_bytes);
 
         // Aggregate peer chain tips by tip_hash.
+        // Only include same-chain peers (chain_id match or unknown) to avoid
+        // cross-chain peers appearing as "diverged" forks.
+        let local_chain_id = self.chain_id.load(std::sync::atomic::Ordering::Relaxed);
         let peer_tips: Vec<(String, u64, String)> = {
             let info = self.peer_info.read();
             info.values()
                 .filter_map(|entry| {
+                    // Skip peers on a different chain.
+                    if let Some(cid) = entry.chain_id {
+                        if local_chain_id != 0 && cid != local_chain_id {
+                            return None;
+                        }
+                    }
                     let h = entry.chain_tip_height?;
                     let hash = entry.chain_tip_hash.clone()?;
                     Some((entry.peer_id.clone(), h, hash))

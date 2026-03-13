@@ -981,6 +981,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             (config.network.max_peers as usize).saturating_sub(net_config.max_outbound);
         net_config.ban_threshold = config.network.ban_threshold;
         net_config.chain_id = self.get_chain_id();
+        // Initialize tip_height from consensus so the early-chain exemption
+        // in service.rs reflects committed blocks from previous runs, not 0.
+        net_config.tip_height = self.consensus.read().chain_tip().0;
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
         net_config.chain_meta = Some(self.chain_meta);
@@ -2503,6 +2506,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }));
             }
             NetworkEvent::NodeAnnounceReceived { peer_id, announce } => {
+                // Always set chain_id on PeerInfoEntry, even for cross-chain peers.
+                // Must happen BEFORE Cases A/B/C which return early.
+                if announce.chain_id != 0 {
+                    let hex_pid = hex::encode(&peer_id);
+                    let mut info = self.peer_info.write();
+                    if let Some(entry) = info.get_mut(&hex_pid) {
+                        entry.chain_id = Some(announce.chain_id);
+                    }
+                }
                 // --- Chain ID mismatch: blockchain discovery ---
                 // If the peer announces a different chain_id (and it's not 0 = unknown),
                 // record the discovered blockchain and kick the peer if we already have a chain.
@@ -2695,7 +2707,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
                         entry.identity_key = Some(identity_wire.clone());
-                        entry.chain_id = Some(announce.chain_id);
+                        // chain_id already set at the top of NodeAnnounceReceived handler.
                         if announce.proposed_height.is_some() {
                             entry.proposed_height = announce.proposed_height;
                         }
@@ -2759,12 +2771,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 {
                     let mut cache = self.announce_cache.lock();
                     if let Some(prev) = cache.get(&identity_wire) {
-                        // Check for impossible contradictions.
-                        let contradiction = if prev.chain_id != 0 && announce.chain_id != 0
-                            && prev.chain_id != announce.chain_id
+                        // If the peer changed chain_id, their old cached announce is
+                        // stale (they adopted a new chain).  Evict the stale entry and
+                        // skip ALL equivocation checks — chain adoption legitimately
+                        // changes chain_id AND can regress chain_tip to 0.
+                        let chain_changed = prev.chain_id != 0 && announce.chain_id != 0
+                            && prev.chain_id != announce.chain_id;
+                        let contradiction = if chain_changed {
+                            // Not equivocation — legitimate chain adoption.  Update cache.
+                            tracing::debug!(
+                                task = "evidence",
+                                "peer {} changed chain_id ({:#010X} → {:#010X}) — likely adoption, skipping equivocation check",
+                                hex::encode(&identity_wire), prev.chain_id, announce.chain_id,
+                            );
+                            None
+                        } else if prev.chain_id == announce.chain_id
+                            && prev.chain_tip_height.is_some() && announce.chain_tip_height.is_some()
                         {
-                            Some(noble_core::AnnounceContradiction::ChainId)
-                        } else if prev.chain_tip_height.is_some() && announce.chain_tip_height.is_some() {
+                            // Same chain — check for tip regression.
                             let prev_h = prev.chain_tip_height.unwrap_or(0);
                             let ann_h = announce.chain_tip_height.unwrap_or(0);
                             let prev_t = prev.timestamp;
@@ -2777,17 +2801,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         } else {
                             None
                         };
-                        // Also check competing proposals.
-                        let contradiction = contradiction.or_else(|| {
-                            if prev.proposed_height.is_some()
-                                && prev.proposed_height == announce.proposed_height
-                                && prev.proposed_hash != announce.proposed_hash
-                            {
-                                Some(noble_core::AnnounceContradiction::CompetingProposals)
-                            } else {
-                                None
-                            }
-                        });
+                        // Also check competing proposals (only within the same chain).
+                        let contradiction = if !chain_changed {
+                            contradiction.or_else(|| {
+                                if prev.proposed_height.is_some()
+                                    && prev.proposed_height == announce.proposed_height
+                                    && prev.proposed_hash != announce.proposed_hash
+                                {
+                                    Some(noble_core::AnnounceContradiction::CompetingProposals)
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
 
                         if let Some(c) = contradiction {
                             let evidence = noble_core::AnnounceEquivocationEvidence {
@@ -2869,6 +2897,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             task = "evidence",
                             "InvalidBlockEvidence from {} failed verification — discarding",
                             hex::encode(&peer_id),
+                        );
+                        return;
+                    }
+                }
+                // Discard ChainId contradiction evidence — chain adoption legitimately
+                // changes a node's chain_id, so this type of evidence is always a false positive.
+                if let noble_core::MisbehaviorEvidence::AnnounceEquivocation(ref ae) = &**evidence {
+                    if ae.contradiction == noble_core::AnnounceContradiction::ChainId {
+                        tracing::debug!(
+                            task = "evidence",
+                            "discarding ChainId contradiction evidence — chain adoption is legitimate",
                         );
                         return;
                     }
@@ -4027,6 +4066,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
         self.fork_visible = false;
         self.fork_common_ancestor = None;
+        // 2c. Clear announce cache — old entries reflect the pre-adoption chain
+        // and would cause false equivocation positives when peers re-announce.
+        self.announce_cache.lock().clear();
         // 2b. Clear discovered blockchains to prevent ping-pong adoption.
         {
             let mut discovered = self.discovered_blockchains.lock();
