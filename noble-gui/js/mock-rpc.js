@@ -1035,6 +1035,8 @@ export class MockRpcClient {
           latest_network_version: null,
           sync_behind: false,
           sync_target_height: 0,
+          sync_current_height: 0,
+          sync_progress_pct: 0,
         };
       }
 

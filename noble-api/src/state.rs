@@ -310,4 +310,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Target height the node is syncing towards (0 = not syncing, shared with Node event loop).
     pub sync_target_height: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Current sync progress height (shared with HealingManager for real-time reads).
+    pub sync_progress_current: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Overall sync target height (shared with HealingManager for real-time reads).
+    pub sync_progress_total: Arc<std::sync::atomic::AtomicU64>,
 }

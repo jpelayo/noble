@@ -550,6 +550,10 @@ pub struct NodeInfoResponse {
     pub sync_behind: bool,
     /// Target height the node is syncing towards (0 when not syncing).
     pub sync_target_height: u64,
+    /// Current height during sync (0 when not syncing).
+    pub sync_current_height: u64,
+    /// Sync progress percentage (0-100, 0 when not syncing).
+    pub sync_progress_pct: u64,
 }
 
 /// Response for `noble_getApiVersion`.

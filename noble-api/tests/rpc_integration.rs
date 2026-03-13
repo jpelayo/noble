@@ -163,6 +163,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         max_peers: std::sync::atomic::AtomicU32::new(50),
         sync_behind: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sync_target_height: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        sync_progress_current: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        sync_progress_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     (state, dir)

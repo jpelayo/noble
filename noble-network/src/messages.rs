@@ -261,6 +261,14 @@ pub enum NetworkCommand {
         local_height: u64,
         peer_height: u64,
     },
+    /// Request a sync manifest (block hash batch) from a specific peer.
+    /// The manifest lists block hashes for a height range so we can fetch
+    /// blocks sequentially and verify each one against the expected hash.
+    RequestSyncManifest {
+        peer_id: Vec<u8>,
+        start_height: u64,
+        count: u16,
+    },
     /// Clear the pending_proposals cache (used during fork resolution/chain adoption).
     ClearPendingProposals,
     /// Shut down the network service.
@@ -364,6 +372,11 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         ancestor_height: u64,
         ancestor_hash: [u8; 32],
+    },
+    /// A sync manifest was received from a peer (block hashes for a height range).
+    SyncManifestReceived {
+        peer_id: Vec<u8>,
+        entries: Vec<(u64, Option<[u8; 32]>)>,
     },
 }
 

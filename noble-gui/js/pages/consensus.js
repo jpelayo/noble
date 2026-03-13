@@ -571,7 +571,9 @@ export function init(root, ctx) {
       case 'sync_started':
         return `Behind by ${data.blocks_behind} block${data.blocks_behind > 1 ? 's' : ''} (height ${data.our_height} \u2192 ${data.peer_height}) \u2014 syncing`;
       case 'sync_progress':
-        return `Sync-imported block #${data.height} {${truncateHash(data.hash || '')}} (${data.tx_count} tx)`;
+        return data.target
+          ? `Syncing \u2014 block ${data.height} of ${data.target} (${data.progress}%)`
+          : `Sync-imported block #${data.height}`;
       case 'sync_complete':
         return `Sync complete \u2192 height ${data.height}`;
       case 'evidence_received': {
@@ -784,9 +786,11 @@ export function init(root, ctx) {
       if (data.event === 'phase_change') {
         scheduleReload(loadCycle, loadVoteTallies);
       }
-      // Sync banner: show on sync_started, hide on sync_complete
+      // Sync banner: show on sync_started, update on sync_progress, hide on sync_complete
       if (data.event === 'sync_started') {
         updateSyncBanner(true, data.peer_height);
+      } else if (data.event === 'sync_progress' && data.target) {
+        updateSyncBanner(true, data.target, data.height, data.progress);
       } else if (data.event === 'sync_complete') {
         updateSyncBanner(false);
       }
@@ -845,13 +849,17 @@ export function init(root, ctx) {
   // ── Sync banner management ──
   const syncBanner = root.querySelector('#cs-sync-banner');
 
-  function updateSyncBanner(syncing, targetHeight) {
+  function updateSyncBanner(syncing, targetHeight, currentHeight, progressPct) {
     if (!syncBanner) return;
     if (syncing) {
       syncBanner.style.display = 'block';
-      syncBanner.textContent = targetHeight
-        ? `Syncing \u2014 catching up to height ${formatNumber(targetHeight)}\u2026`
-        : 'Syncing \u2014 catching up to peer chain\u2026';
+      if (currentHeight && targetHeight) {
+        syncBanner.textContent = `Syncing \u2014 block ${formatNumber(currentHeight)} of ${formatNumber(targetHeight)} (${progressPct || 0}%)`;
+      } else if (targetHeight) {
+        syncBanner.textContent = `Syncing \u2014 catching up to height ${formatNumber(targetHeight)}\u2026`;
+      } else {
+        syncBanner.textContent = 'Syncing \u2014 catching up to peer chain\u2026';
+      }
     } else {
       syncBanner.style.display = 'none';
     }
@@ -863,7 +871,7 @@ export function init(root, ctx) {
       if (info) {
         pushActivity({ event: 'heartbeat', message: `Node v${info.version}` });
         // Show sync banner immediately from RPC state (no WS event needed).
-        updateSyncBanner(info.sync_behind, info.sync_target_height);
+        updateSyncBanner(info.sync_behind, info.sync_target_height, info.sync_current_height, info.sync_progress_pct);
       }
     }).catch(() => {});
   }

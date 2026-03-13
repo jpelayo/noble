@@ -297,6 +297,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         let sync_behind = self.sync_behind.load(std::sync::atomic::Ordering::Relaxed);
         let sync_target_height = self.sync_target_height.load(std::sync::atomic::Ordering::Relaxed);
+        let sync_current_height = self.sync_progress_current.load(std::sync::atomic::Ordering::Relaxed);
+        let sync_progress_pct = if sync_behind && sync_target_height > 0 {
+            (sync_current_height as f64 / sync_target_height as f64 * 100.0).min(100.0) as u64
+        } else {
+            0
+        };
 
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
@@ -321,6 +327,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             }),
             sync_behind,
             sync_target_height,
+            sync_current_height,
+            sync_progress_pct,
         })
     }
 

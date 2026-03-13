@@ -420,6 +420,11 @@ async fn run_event_loop(
     // Common ancestor discovery state machine (one search at a time).
     let mut ancestor_finder: Option<crate::ancestor::AncestorFinder> = None;
 
+    // Manifest-based sync: tracks the peer we requested a sync manifest from.
+    // When a BlockHashBatch response arrives from this peer, it's routed as a
+    // SyncManifestReceived event instead of to the ancestor finder.
+    let mut manifest_peer: Option<PeerId> = None;
+
     loop {
         tokio::select! {
             // --- Swarm events ---
@@ -441,12 +446,13 @@ async fn run_event_loop(
                     &mut mismatch_cooldown,
                     &mut disconnect_reasons,
                     &mut ancestor_finder,
+                    &mut manifest_peer,
                 ).await;
             }
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder).await {
+                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -578,6 +584,7 @@ async fn handle_swarm_event(
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
     disconnect_reasons: &mut HashMap<PeerId, String>,
     ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
+    manifest_peer: &mut Option<PeerId>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -1215,7 +1222,17 @@ async fn handle_swarm_event(
                     }
                 }
                 SyncResponse::BlockHashBatch(ref remote_hashes) => {
-                    if let Some(ref mut finder) = ancestor_finder {
+                    // Manifest-based sync: if this peer matches manifest_peer,
+                    // route as SyncManifestReceived instead of ancestor finder.
+                    if manifest_peer.as_ref() == Some(&peer) {
+                        if let Err(e) = event_tx.try_send(NetworkEvent::SyncManifestReceived {
+                            peer_id: peer.to_bytes().to_vec(),
+                            entries: remote_hashes.clone(),
+                        }) {
+                            tracing::debug!(task = "sync_manifest", "event channel full: {e}");
+                        }
+                        *manifest_peer = None;
+                    } else if let Some(ref mut finder) = ancestor_finder {
                         if finder.peer_id == peer {
                             // Get local hashes for the same heights.
                             let local_hashes: Vec<(u64, Option<[u8; 32]>)> = remote_hashes
@@ -1860,6 +1877,7 @@ async fn handle_command(
     disconnect_reasons: &mut HashMap<PeerId, String>,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
     ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
+    manifest_peer: &mut Option<PeerId>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -2237,6 +2255,26 @@ async fn handle_command(
                     SyncRequest::GetBlockHashBatch { heights: probes },
                 );
                 *ancestor_finder = Some(finder);
+            }
+        }
+
+        NetworkCommand::RequestSyncManifest { peer_id, start_height, count } => {
+            match PeerId::from_bytes(&peer_id) {
+                Ok(pid) => {
+                    let heights: Vec<u64> = (start_height..start_height + count as u64).collect();
+                    swarm.behaviour_mut().sync_rpc.send_request(
+                        &pid,
+                        SyncRequest::GetBlockHashBatch { heights },
+                    );
+                    *manifest_peer = Some(pid);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "sync_manifest",
+                        "RequestSyncManifest: invalid peer_id ({} bytes): {e}",
+                        peer_id.len(),
+                    );
+                }
             }
         }
 

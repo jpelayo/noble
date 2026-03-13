@@ -495,6 +495,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let last_proposed = Arc::new(parking_lot::Mutex::new(None));
         let sync_behind_shared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sync_target_height_shared = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let sync_progress_current = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let sync_progress_total = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let discovered_arc = Arc::new(Mutex::new(discovered_blockchains));
 
         let healing = crate::healing::HealingManager::new(
@@ -508,6 +510,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             Some(discovered_path),
             sync_behind_shared,
             sync_target_height_shared,
+            sync_progress_current,
+            sync_progress_total,
         );
 
         Ok(Self {
@@ -1624,6 +1628,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             discovered_blockchains: self.healing.discovered_blockchains().clone(),
             sync_behind: self.healing.sync_behind_shared().clone(),
             sync_target_height: self.healing.sync_target_height_shared().clone(),
+            sync_progress_current: self.healing.sync_progress_current().clone(),
+            sync_progress_total: self.healing.sync_progress_total().clone(),
         });
 
         // --- Determine bind addresses ---
@@ -1882,8 +1888,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
-                    // ── Sync retry (delegated to healing manager) ──
-                    self.healing.on_tick_sync_retry(now);
+                    // ── Sync advancement (manifest-based) ──
+                    self.healing.advance_sync(now);
 
                     // ── Fork evaluation (delegated to healing manager) ──
                     // The sync_behind guard is enforced inside on_tick_fork_eval().
@@ -2290,6 +2296,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         self.redial_known_peers(network_cmd, cycle_phase_tx);
                     }
                 }
+                // If the disconnected peer was our sync peer, reset sync state
+                // so advance_sync picks a new peer on the next tick.
+                self.healing.on_sync_peer_disconnected(peer_id);
             }
             NetworkEvent::PeerRejected { peer_id, addr, reason } => {
                 let hex_pid = hex::encode(peer_id);
@@ -2587,38 +2596,46 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 };
                 self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
                 // GUI event.
-                let _ = cycle_phase_tx.send(serde_json::json!({
+                if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "evidence_received",
                     "type": evidence_type,
                     "peer_id": hex::encode(&peer_id),
                     "evidence_hash": hex::encode(evidence_hash.as_bytes()),
-                }));
+                })) {
+                    tracing::debug!(task = "broadcast", "evidence_received event dropped (no subscribers): {e}");
+                }
             }
             NetworkEvent::BlockAnnounced {
                 peer_id,
                 height,
                 hash,
             } => {
-                let _ = cycle_phase_tx.send(serde_json::json!({
+                if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "block_announced",
                     "peer_id": hex::encode(peer_id),
                     "height": height,
                     "hash": hex::encode(hash),
-                }));
+                })) {
+                    tracing::debug!(task = "broadcast", "block_announced event dropped (no subscribers): {e}");
+                }
                 tracing::debug!(
                     task = "sync",
                     "Block announced by {}: height={height}, hash={}",
                     hex::encode(peer_id),
                     hex::encode(hash),
                 );
-                let our_height = self.consensus.read().chain_tip().0;
-                if *height > our_height {
-                    // Fetch directly from the announcing peer instead of polling all peers.
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
-                        peer_id: peer_id.clone(),
-                        height: our_height + 1,
-                    }) {
-                        tracing::warn!(task = "sync", "RequestBlockByHeight on BlockAnnounced dropped: {e}");
+                // When actively syncing, do NOT request blocks from announced peers —
+                // the manifest-based sync handles all block fetching.
+                if !self.healing.is_syncing() {
+                    let our_height = self.consensus.read().chain_tip().0;
+                    if *height > our_height {
+                        // Fetch directly from the announcing peer instead of polling all peers.
+                        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
+                            peer_id: peer_id.clone(),
+                            height: our_height + 1,
+                        }) {
+                            tracing::warn!(task = "sync", "RequestBlockByHeight on BlockAnnounced dropped: {e}");
+                        }
                     }
                 }
             }
@@ -2698,19 +2715,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
             NetworkEvent::BlockReceived { peer_id, block } => {
-                // Determine whether this block is a sync catch-up (committed
-                // block from a peer ahead of us) or a live consensus proposal.
+                // Determine whether this block is a manifest sync block or a
+                // live consensus proposal.
                 //
-                // Sync import:  block.height == our_tip + 1 AND any peer is
-                //   ahead of us AND tip_height > 0.
-                //   Validate against the parent in storage, commit directly.
+                // Manifest sync: block.height is in the current manifest →
+                //   validate + commit via try_sync_import, then advance manifest.
                 //
-                // Block 1 exception:  when tip_height == 0, block 1 is ALWAYS
-                //   routed to consensus for Dual-Witness validation.  This
-                //   prevents phantom chain resurrection after noble-tool reset.
+                // Fallback sync: block.height == our_tip + 1 AND any peer ahead
+                //   AND we're actively syncing → sync import (handles blocks
+                //   arriving before the manifest cursor catches up, e.g. block 1).
                 //
-                // Consensus proposal:  everything else → route to the consensus
-                //   engine for candidate tracking + voting.
+                // Live consensus: everything else → route to consensus engine
+                //   for candidate tracking + voting.
 
                 // Enrich block_received with proposer identity for GUI display.
                 let proposer_wire = block.header.validator_id.to_wire_bytes();
@@ -2720,41 +2736,33 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .map(|ve| ve.name())
                         .filter(|n| !n.is_empty())
                 };
-                let _ = cycle_phase_tx.send(serde_json::json!({
-                    "event": "block_received",
-                    "peer_id": hex::encode(peer_id),
-                    "height": block.header.height,
-                    "proposer": hex::encode(&proposer_wire),
-                    "proposer_name": proposer_name.as_deref().unwrap_or(""),
-                }));
+                // Only emit individual block_received events when not syncing
+                // (during sync, sync_progress events replace per-block noise).
+                if !self.healing.is_syncing() {
+                    if let Err(e) = cycle_phase_tx.send(serde_json::json!({
+                        "event": "block_received",
+                        "peer_id": hex::encode(peer_id),
+                        "height": block.header.height,
+                        "proposer": hex::encode(&proposer_wire),
+                        "proposer_name": proposer_name.as_deref().unwrap_or(""),
+                    })) {
+                        tracing::debug!(task = "broadcast", "block_received event dropped (no subscribers): {e}");
+                    }
+                }
                 let tip_height = self.consensus.read().chain_tip().0;
-                // Check if any peer is ahead of us (indicating we need to sync).
-                let max_peer_height = {
-                    let info = self.peer_info.read();
-                    info.values()
-                        .filter_map(|e| e.chain_tip_height)
-                        .max()
-                        .unwrap_or(0)
-                };
-                let we_are_behind = max_peer_height > tip_height;
 
                 if block.header.height <= tip_height {
                     // Already have this block — ignore.
-                } else if block.header.height == tip_height + 1 && we_are_behind {
-                    // Sync import: committed block from peer ahead of us.
-                    // Takes priority over live proposals — the network already has
-                    // this block, we should import it rather than propose our own.
-                    //
-                    // Block 1 (tip_height == 0) is also sync-imported.  Without this,
-                    // a fresh node joining an existing chain can never acquire block 1:
-                    // B6 past-skew (MAX_BLOCK_PAST_SKEW=3600s) rejects it through the
-                    // live consensus path once the block is >1 hour old, and the two
-                    // nodes end up on divergent cycle timelines (different genesis
-                    // timestamps).  The block is fully validated (B4/B8/B9/B11) and
-                    // came from a peer that already committed it via consensus.
-                    let _ = self.healing.try_sync_import(&block);
-                    // Sync local fields from shared atomics.
-                    self.healing.sync_locals_from_atomics();
+                } else if self.healing.is_sync_block(block.header.height)
+                    || (self.healing.is_syncing() && block.header.height == tip_height + 1)
+                {
+                    // Sync import: block is in the manifest or is the next expected block.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let result = self.healing.try_sync_import(&block);
+                    self.healing.advance_after_import(block.header.height, &result, now);
                 } else {
                     // Live proposal — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
@@ -2780,6 +2788,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     hex_pid, ancestor_height, hex::encode(ancestor_hash)
                 );
                 self.healing.on_common_ancestor_found(*ancestor_height, *ancestor_hash);
+            }
+            NetworkEvent::SyncManifestReceived { peer_id, entries } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.healing.on_manifest_received(peer_id, entries, now);
             }
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
