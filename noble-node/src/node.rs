@@ -2271,18 +2271,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             .filter(|n| !n.is_empty())
                     }).unwrap_or_default()
                 };
-                let _ = peer_update_tx.send(serde_json::json!({
+                if let Err(e) = peer_update_tx.send(serde_json::json!({
                     "event": "disconnected",
                     "peer_id": hex_pid,
                     "node_name": disc_name,
                     "reason": reason,
-                }));
-                let _ = cycle_phase_tx.send(serde_json::json!({
+                })) {
+                    tracing::debug!(task = "broadcast", "peer disconnected event dropped (no subscribers): {e}");
+                }
+                if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_disconnected",
                     "peer_id": hex_pid,
                     "node_name": disc_name,
                     "reason": reason,
-                }));
+                })) {
+                    tracing::debug!(task = "broadcast", "peer_disconnected event dropped (no subscribers): {e}");
+                }
                 // Auto-reconnect: immediately try to redial when last peer disconnects.
                 // Cooldown: skip if we redialed within the last 60s to prevent tight
                 // connect/disconnect loops (e.g. chain_id mismatch).
@@ -2671,12 +2675,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
                 // Notify GUI — chain tip changed for a peer (alignment may differ).
-                let _ = peer_update_tx.send(serde_json::json!({
+                if let Err(e) = peer_update_tx.send(serde_json::json!({
                     "event": "chain_tip_updated",
                     "peer_id": hex_pid,
                     "height": height,
                     "tip_hash": hex::encode(tip_hash),
-                }));
+                })) {
+                    tracing::debug!(task = "broadcast", "chain_tip_updated event dropped (no subscribers): {e}");
+                }
                 // S49: Update network-level clock offset.
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;

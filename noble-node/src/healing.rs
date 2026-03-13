@@ -435,6 +435,21 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 }
             }
             SyncState::AwaitingManifest { peer, target, requested_at } => {
+                // If we already caught up (e.g., blocks arrived via fallback
+                // while waiting for the manifest), stop syncing.
+                if our_height >= *target {
+                    self.reset_sync_idle();
+                    self.broadcast_event(serde_json::json!({
+                        "event": "sync_complete",
+                        "height": our_height,
+                    }));
+                    tracing::info!(
+                        task = "sync",
+                        "Sync complete (caught up during AwaitingManifest) — height {}",
+                        our_height,
+                    );
+                    return;
+                }
                 // Timeout check.
                 if now.saturating_sub(*requested_at) >= MANIFEST_TIMEOUT_SECS {
                     tracing::warn!(
@@ -704,15 +719,25 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     }
 
     /// Find the best (highest) sync peer that's ahead of us on the same chain.
+    ///
+    /// Chain filter: when our chain_id is non-zero, reject peers that have
+    /// announced a *different* chain_id.  Peers with `chain_id = None` (no
+    /// NodeAnnounce received yet) are allowed — the service-level GetStatus
+    /// mismatch gate is the authoritative chain check.  Filtering them out
+    /// here would stall sync after block 1 commit (chain_id changes from 0
+    /// to derived before the peer's gossipsub announce arrives).
     fn find_best_sync_peer(&self, our_height: u64) -> (Option<Vec<u8>>, u64) {
         let local_chain_id = self.get_chain_id();
         let peers = self.peer_info.read();
         let mut best_peer = None;
         let mut best_height = our_height;
         for entry in peers.values() {
-            // Only consider peers on the same chain (or pre-genesis peers when we're pre-genesis).
+            // Skip peers on a known-different chain.  chain_id=None means
+            // "not yet announced" — allow (service.rs mismatch check is authoritative).
             if local_chain_id != 0 {
-                if entry.chain_id != Some(local_chain_id) { continue; }
+                if let Some(peer_cid) = entry.chain_id {
+                    if peer_cid != local_chain_id { continue; }
+                }
             }
             if let Some(h) = entry.chain_tip_height {
                 if h > best_height {
@@ -735,9 +760,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         let mut best_height = our_height;
         for entry in peers.values() {
             if entry.peer_id == exclude_hex { continue; }
-            // Only consider peers on the same chain.
+            // Skip peers on a known-different chain (see find_best_sync_peer doc).
             if local_chain_id != 0 {
-                if entry.chain_id != Some(local_chain_id) { continue; }
+                if let Some(peer_cid) = entry.chain_id {
+                    if peer_cid != local_chain_id { continue; }
+                }
             }
             if let Some(h) = entry.chain_tip_height {
                 if h > best_height {
