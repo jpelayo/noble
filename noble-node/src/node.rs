@@ -140,6 +140,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub sync_behind_shared: Arc<std::sync::atomic::AtomicBool>,
     /// Shared sync target height for RPC visibility (0 = not syncing).
     pub sync_target_height_shared: Arc<std::sync::atomic::AtomicU64>,
+    /// Last time a sync block was requested (epoch secs). Used for retry on stall.
+    pub last_sync_request_at: u64,
 }
 
 impl Node<MemoryStorage> {
@@ -553,6 +555,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height: None,
             sync_behind_shared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_target_height_shared: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_sync_request_at: 0,
         })
     }
 
@@ -1907,6 +1910,34 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
+                    // ── Sync retry: re-request blocks if sync is stalled ──
+                    // If sync_behind is true but no block arrived in 10 seconds,
+                    // the original RequestBlockByHeight may have been lost or
+                    // responded with Block(None).  Re-request to unstick.
+                    if self.sync_behind {
+                        const SYNC_RETRY_SECS: u64 = 10;
+                        if now.saturating_sub(self.last_sync_request_at) >= SYNC_RETRY_SECS {
+                            let our_height = self.consensus.read().chain_tip().0;
+                            let next = our_height + 1;
+                            if let Some(ref speer) = self.sync_from_peer {
+                                tracing::debug!(
+                                    task = "sync",
+                                    "sync stalled — retrying RequestBlockByHeight for height {}",
+                                    next,
+                                );
+                                if let Err(e) = network_cmd.try_send(
+                                    noble_network::NetworkCommand::RequestBlockByHeight {
+                                        peer_id: speer.clone(),
+                                        height: next,
+                                    },
+                                ) {
+                                    tracing::warn!(task = "sync", "sync retry RequestBlockByHeight dropped: {e}");
+                                }
+                                self.last_sync_request_at = now;
+                            }
+                        }
+                    }
+
                     // Inject fork status for fork resolver evaluation.
                     // CRITICAL: Skip fork resolution while actively syncing.
                     // During sync, the node's tip is behind the peer's tip by
@@ -3110,11 +3141,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     ) {
                         tracing::warn!(task = "sync", "RequestBlockByHeight dropped: {e}");
                     }
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    self.last_sync_request_at = now_ts;
                 } else if self.sync_behind && *height <= our_height && our_height > 0 {
                     // We were behind and caught up — emit sync_complete.
                     self.sync_behind = false;
                     self.sync_from_peer = None;
                     self.sync_target_height = None;
+                    self.last_sync_request_at = 0;
                     self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
                     self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
                     let _ = cycle_phase_tx.send(serde_json::json!({
@@ -4161,6 +4198,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         self.sync_from_peer = None;
         self.sync_target_height = None;
         self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_sync_request_at = 0;
         // 6. Clear stale proposals and request sync from new chain peers.
         if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
             tracing::warn!(task = "chain_adoption", "ClearPendingProposals dropped: {e}");
