@@ -1796,8 +1796,10 @@ export class MockRpcClient {
 
       case 'noble_dialPeer': {
         let addr = params.multiaddr || '';
-        if (!addr.startsWith('/')) addr = `/ip4/${addr}/tcp/8780`;
-        if (!/^\/ip[46]\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
+        if (!addr.startsWith('/')) {
+          addr = /[a-zA-Z]/.test(addr) ? `/dns4/${addr}/tcp/8780` : `/ip4/${addr}/tcp/8780`;
+        }
+        if (!/^\/(ip[46]|dns[46])\//.test(addr)) throw { code: -32602, message: 'Invalid multiaddr' };
         // Simulate adding a synthetic peer entry
         const dialPeerId = '12D3KooW' + randomHex(16).slice(0, 20) + 'XX';
         const dialNow = Math.floor(Date.now() / 1000);
@@ -1835,8 +1837,10 @@ export class MockRpcClient {
 
       case 'noble_addSeed': {
         let seedAddr = params.multiaddr || '';
-        if (!seedAddr.startsWith('/')) seedAddr = `/ip4/${seedAddr}/tcp/8780`;
-        if (!/^\/ip[46]\//.test(seedAddr)) throw { code: -32602, message: 'Invalid multiaddr' };
+        if (!seedAddr.startsWith('/')) {
+          seedAddr = /[a-zA-Z]/.test(seedAddr) ? `/dns4/${seedAddr}/tcp/8780` : `/ip4/${seedAddr}/tcp/8780`;
+        }
+        if (!/^\/(ip[46]|dns[46])\//.test(seedAddr)) throw { code: -32602, message: 'Invalid multiaddr' };
         if (!this._mockSeeds) this._mockSeeds = [];
         if (!this._mockSeeds.includes(seedAddr)) this._mockSeeds.push(seedAddr);
         return { seeds: [...this._mockSeeds] };

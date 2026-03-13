@@ -22,6 +22,8 @@ use crate::types::*;
 fn normalize_multiaddr(input: &str) -> String {
     if input.starts_with('/') {
         input.to_string()
+    } else if input.chars().any(|c| c.is_ascii_alphabetic()) {
+        format!("/dns4/{}/tcp/8780", input)
     } else {
         format!("/ip4/{}/tcp/8780", input)
     }

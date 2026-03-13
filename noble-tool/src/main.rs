@@ -252,9 +252,9 @@ enum AllowIpsCommand {
 
 #[derive(Subcommand)]
 enum PeerCommand {
-    /// Dial a peer by multiaddr on a running node.
+    /// Dial a peer by multiaddr or hostname on a running node.
     Dial {
-        /// Multiaddr to dial (e.g. /ip4/192.168.5.20/tcp/8780).
+        /// Address to dial (e.g. node.infinitecontext.com, 192.168.5.20, /ip4/1.2.3.4/tcp/8780).
         multiaddr: String,
         /// JSON-RPC URL of the running node.
         #[arg(long, default_value = "https://127.0.0.1:8783")]
@@ -270,7 +270,7 @@ enum PeerCommand {
 
     /// Add a seed node (dials immediately and persists to noble.toml).
     AddSeed {
-        /// Multiaddr of the seed (e.g. /ip4/192.168.5.20/tcp/8780).
+        /// Address of the seed (e.g. node.infinitecontext.com, 192.168.5.20, /dns4/host/tcp/8780).
         multiaddr: String,
         /// JSON-RPC URL of the running node.
         #[arg(long, default_value = "https://127.0.0.1:8783")]
@@ -1155,6 +1155,8 @@ fn cmd_peer(action: PeerCommand) {
         PeerCommand::Dial { multiaddr, rpc_url } => {
             let multiaddr = if multiaddr.starts_with('/') {
                 multiaddr.clone()
+            } else if multiaddr.chars().any(|c| c.is_ascii_alphabetic()) {
+                format!("/dns4/{}/tcp/8780", multiaddr)
             } else {
                 format!("/ip4/{}/tcp/8780", multiaddr)
             };
@@ -1193,6 +1195,8 @@ fn cmd_peer(action: PeerCommand) {
         PeerCommand::AddSeed { multiaddr, rpc_url } => {
             let multiaddr = if multiaddr.starts_with('/') {
                 multiaddr.clone()
+            } else if multiaddr.chars().any(|c| c.is_ascii_alphabetic()) {
+                format!("/dns4/{}/tcp/8780", multiaddr)
             } else {
                 format!("/ip4/{}/tcp/8780", multiaddr)
             };

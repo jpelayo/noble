@@ -767,16 +767,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 return;
             }
             if let Ok(maddr) = maddr_str.parse::<noble_network::Multiaddr>() {
-                let _ = cmd.try_send(NetworkCommand::DialPeer(maddr, None));
-                dialed += 1;
+                if let Err(e) = cmd.try_send(NetworkCommand::DialPeer(maddr, None)) {
+                    tracing::debug!(task = "redial", addr = %maddr_str, "dial command send failed: {e}");
+                } else {
+                    dialed += 1;
+                }
             }
         };
 
         // For bare IPs, try all 3 P2P ports (8780, 8781, 8782) so we reach
         // peers that fell back to alternate ports on restart.
+        // Bare hostnames use /dns4/ (single port — DNS implies managed infra).
         let expand_addr = |addr: &str| -> Vec<String> {
             if addr.starts_with('/') {
                 vec![addr.to_string()]
+            } else if addr.chars().any(|c| c.is_ascii_alphabetic()) {
+                vec![format!("/dns4/{addr}/tcp/8780")]
             } else {
                 vec![
                     format!("/ip4/{addr}/tcp/8780"),
@@ -1067,6 +1073,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if let Some(addr) = addr_str {
                         let normalized = if addr.starts_with('/') {
                             addr.to_string()
+                        } else if addr.chars().any(|c| c.is_ascii_alphabetic()) {
+                            format!("/dns4/{}/tcp/8780", addr)
                         } else {
                             format!("/ip4/{}/tcp/8780", addr)
                         };
@@ -1099,6 +1107,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 for addr in addrs {
                     let normalized = if addr.starts_with('/') {
                         addr.clone()
+                    } else if addr.chars().any(|c| c.is_ascii_alphabetic()) {
+                        format!("/dns4/{}/tcp/8780", addr)
                     } else {
                         format!("/ip4/{}/tcp/8780", addr)
                     };

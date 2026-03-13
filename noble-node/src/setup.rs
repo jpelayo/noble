@@ -563,9 +563,14 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         };
         let addr = format!("/ip4/0.0.0.0/tcp/{port}");
 
+        let seed_default = if defaults.network.seeds.is_empty() {
+            noble_network::config::DEFAULT_GENESIS_NODE.to_string()
+        } else {
+            defaults.network.seeds.join(", ")
+        };
         let seeds_str: String = Input::new()
-            .with_prompt("Seed nodes (comma-separated multiaddrs, or empty)")
-            .default(defaults.network.seeds.join(", "))
+            .with_prompt("Seed nodes (comma-separated, Enter to accept default)")
+            .default(seed_default)
             .allow_empty(true)
             .interact_text()?;
         let seed_vec: Vec<String> = seeds_str
@@ -575,6 +580,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .map(|s| {
                 if s.starts_with('/') {
                     s
+                } else if s.chars().any(|c| c.is_ascii_alphabetic()) {
+                    format!("/dns4/{}/tcp/8780", s)
                 } else {
                     format!("/ip4/{}/tcp/8780", s)
                 }

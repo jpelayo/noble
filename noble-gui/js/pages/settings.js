@@ -165,7 +165,7 @@ export function init(root, ctx) {
         <div id="s-seed-list" style="margin-bottom:var(--gap)"></div>
 
         <div style="display:flex;gap:var(--gap-sm);align-items:center;margin-bottom:var(--gap)">
-          <input id="s-new-seed" type="text" placeholder="e.g. 192.168.5.20 or /ip4/1.2.3.4/tcp/8780"
+          <input id="s-new-seed" type="text" placeholder="e.g. node.infinitecontext.com or 192.168.5.20"
             style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
           <button id="s-add-seed" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm);white-space:nowrap">Add Seed</button>
         </div>

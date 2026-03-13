@@ -32,6 +32,12 @@ pub const GUI_PORT: u16 = 8785;
 /// Faucet HTTP server port (token onboarding).
 pub const FAUCET_PORT: u16 = 8786;
 
+/// Default genesis seed node hostname.
+pub const DEFAULT_GENESIS_NODE: &str = "node.infinitecontext.com";
+
+/// Default genesis seed node as a multiaddr string.
+pub const DEFAULT_GENESIS_SEED: &str = "/dns4/node.infinitecontext.com/tcp/8780";
+
 /// Legacy alias kept for backward compatibility within the crate.
 pub const DEFAULT_LISTEN_PORT: u16 = P2P_PORT_PRIMARY;
 

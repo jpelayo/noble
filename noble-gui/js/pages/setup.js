@@ -88,7 +88,7 @@ export function init(root, ctx) {
     rewardSkipped: false,  // true when user chose to skip
     walletSkipped: false,  // true when user chose to skip wallet step
     p2pPort: 8780,
-    seeds: '',
+    seeds: 'node.infinitecontext.com',
     maxPeers: 50,
     // Storage
     dataDir: '',
@@ -1041,11 +1041,11 @@ export function init(root, ctx) {
       <div class="form-group">
         <label for="setup-seeds" style="font-weight:600">Seed Nodes</label>
         <input type="text" id="setup-seeds" autocomplete="off" spellcheck="false"
-          placeholder="203.0.113.1, 198.51.100.2"
+          placeholder="node.infinitecontext.com"
           value="${esc(state.seeds)}"
           style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
         <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-          Comma-separated IPs of seed peers. Leave empty for default bootstrap.
+          Comma-separated hostnames or IPs of seed peers. Clear to run standalone.
         </div>
       </div>
 
@@ -1139,8 +1139,10 @@ export function init(root, ctx) {
       if (state.seeds) {
         const seedAddrs = state.seeds.split(',').map(s => s.trim()).filter(Boolean);
         for (const addr of seedAddrs) {
-          // Convert bare IP to multiaddr if needed.
-          const multiaddr = addr.startsWith('/') ? addr : `/ip4/${addr}/tcp/8780`;
+          // Convert bare IP/hostname to multiaddr if needed.
+          const multiaddr = addr.startsWith('/') ? addr
+            : /[a-zA-Z]/.test(addr) ? `/dns4/${addr}/tcp/8780`
+            : `/ip4/${addr}/tcp/8780`;
           try { await rpc.call('noble_addSeed', { multiaddr }); } catch { /* best effort */ }
         }
       }

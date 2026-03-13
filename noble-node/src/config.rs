@@ -477,7 +477,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             listen_addr: "/ip4/0.0.0.0/tcp/8780".to_string(),
-            seeds: Vec::new(),
+            seeds: vec![noble_network::config::DEFAULT_GENESIS_SEED.to_string()],
             max_peers: 50,
             ban_threshold: 100,
         }

@@ -59,7 +59,7 @@ export function init(root, ctx) {
           Manually connect to a peer by entering their multiaddr.
         </p>
         <div style="display:flex;gap:var(--gap-sm);align-items:center">
-          <input id="net-dial-addr" type="text" placeholder="e.g. 192.168.5.20 or /ip4/1.2.3.4/tcp/8780"
+          <input id="net-dial-addr" type="text" placeholder="e.g. node.infinitecontext.com or 192.168.5.20"
             style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
           <button id="net-dial-btn" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm);white-space:nowrap">Dial Peer</button>
         </div>

@@ -262,27 +262,32 @@ pub async fn start_network(
 
     // Dial bootstrap peers and add them to Kademlia routing table.
     for addr_str in &config.bootstrap_peers {
-        if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-            // Extract peer ID from multiaddr if present (e.g. /p2p/<peer_id>).
-            let peer_id_from_addr = addr.iter().find_map(|p| {
-                if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
-                    Some(peer_id)
-                } else {
-                    None
+        match addr_str.parse::<Multiaddr>() {
+            Ok(addr) => {
+                // Extract peer ID from multiaddr if present (e.g. /p2p/<peer_id>).
+                let peer_id_from_addr = addr.iter().find_map(|p| {
+                    if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
+                        Some(peer_id)
+                    } else {
+                        None
+                    }
+                });
+                if let Err(e) = swarm.dial(addr.clone()) {
+                    tracing::warn!(task = "network_startup", %addr, err = %e, "failed to dial bootstrap peer");
                 }
-            });
-            if let Err(e) = swarm.dial(addr.clone()) {
-                tracing::warn!(task = "network_startup", %addr, err = %e, "failed to dial bootstrap peer");
-            }
-            // Add to Kademlia routing table for discovery.
-            if config.enable_kademlia {
-                if let Some(pid) = peer_id_from_addr {
-                    swarm.behaviour_mut().kad.add_address(&pid, addr.clone());
-                    // Also add port variants for multi-port discovery.
-                    for variant in generate_port_variants(&addr) {
-                        swarm.behaviour_mut().kad.add_address(&pid, variant);
+                // Add to Kademlia routing table for discovery.
+                if config.enable_kademlia {
+                    if let Some(pid) = peer_id_from_addr {
+                        swarm.behaviour_mut().kad.add_address(&pid, addr.clone());
+                        // Also add port variants for multi-port discovery.
+                        for variant in generate_port_variants(&addr) {
+                            swarm.behaviour_mut().kad.add_address(&pid, variant);
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(task = "network_startup", addr = %addr_str, err = %e, "invalid bootstrap peer multiaddr — skipped");
             }
         }
     }

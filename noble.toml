@@ -14,8 +14,8 @@ role = "observer"
 # Address to listen for incoming P2P connections.
 listen_addr = "/ip4/0.0.0.0/tcp/8780"
 
-# Seed nodes to connect to on startup (multiaddr format).
-seeds = []
+# Seed nodes to connect to on startup (multiaddr or hostname).
+seeds = ["/dns4/node.infinitecontext.com/tcp/8780"]
 
 # Maximum number of connected peers.
 max_peers = 50
