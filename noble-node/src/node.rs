@@ -1908,6 +1908,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
                     // Inject fork status for fork resolver evaluation.
+                    // CRITICAL: Skip fork resolution while actively syncing.
+                    // During sync, the node's tip is behind the peer's tip by
+                    // definition.  The fork resolver sees this as a "fork" and
+                    // rolls back to the common ancestor — which undoes the
+                    // blocks the sync just imported, creating an infinite loop.
+                    // The sync mechanism already handles catching up; the fork
+                    // resolver should only evaluate AFTER sync completes.
+                    if !self.sync_behind {
                     {
                         let engine_read = self.consensus.read();
                         let (tip_h, tip_hash) = engine_read.chain_tip();
@@ -2001,6 +2009,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             }
                         }
                     }
+                    } // end if !self.sync_behind (skip fork resolver during sync)
 
                     // Inject cross-chain fork status for cross-chain adoption evaluation.
                     {
