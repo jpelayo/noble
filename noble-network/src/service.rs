@@ -1132,12 +1132,26 @@ async fn handle_swarm_event(
                     // blockchain or running an incompatible protocol. No tolerance
                     // needed — legitimate peers ALWAYS match on both values.
                     //
-                    // Exception: pre-genesis nodes (chain_id == 0) have not committed
-                    // genesis yet — they NEED peers to sync from, so chain_id
-                    // mismatches are expected and must be tolerated.  Without this
-                    // exception the node enters a rapid connect→mismatch→disconnect
-                    // loop with thousands of reconnection attempts per minute.
-                    let chain_mismatch = chain_id != config.chain_id && config.chain_id != 0;
+                    // Exception 1: local pre-genesis (config.chain_id == 0) — we haven't
+                    // committed genesis yet and need any peer to sync from.
+                    //
+                    // Exception 1b: remote pre-genesis (chain_id == 0 AND height == 0) —
+                    // a fresh node joining an established network.  The height == 0
+                    // guard prevents a malicious peer from claiming chain_id=0 with
+                    // height > 0 to bypass the mismatch gate.
+                    //
+                    // Exception 2: early-chain nodes (tip_height ≤ 5) may have
+                    // independently bootstrapped a short chain.  They must stay
+                    // connected to peers on other chains so fork resolution can
+                    // trigger a chain adoption (blockchain hop) to the longer chain.
+                    // Without this, two independently-bootstrapped nodes are
+                    // permanently deadlocked.
+                    let early_chain = config.tip_height <= crate::config::EARLY_CHAIN_HEIGHT_LIMIT;
+                    let remote_pre_genesis = chain_id == 0 && height == 0;
+                    let chain_mismatch = chain_id != config.chain_id
+                        && config.chain_id != 0
+                        && !remote_pre_genesis
+                        && !early_chain;
                     let proto_mismatch = protocol_version != config.protocol_version;
                     if chain_mismatch || proto_mismatch {
                         let reason = if chain_mismatch && proto_mismatch {
@@ -2195,6 +2209,9 @@ async fn handle_command(
             config.chain_id = new_chain_id;
             // Clear mismatch cooldown so peers on the target chain can reconnect immediately.
             mismatch_cooldown.clear();
+        }
+        NetworkCommand::UpdateTipHeight(h) => {
+            config.tip_height = h;
         }
 
         NetworkCommand::FindCommonAncestor {

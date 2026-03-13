@@ -475,12 +475,17 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // No genesis block yet — use a wall-clock-aligned epoch so bootstrap
-        // always starts at cycle 0.  `aligned = floor(now / cycle_duration) * cycle_duration`.
-        // All nodes starting within the same 1200s window compute the same epoch.
+        // No block committed yet — continuously re-align the epoch to the
+        // current wall-clock window so bootstrap ALWAYS sees cycle 0.
+        // `aligned = floor(now / cycle_duration) * cycle_duration`.
+        // All nodes in the same 1200s window compute the same epoch.
         // Nodes in adjacent windows differ by ±1 cycle, handled by
         // bootstrap_tolerance on VoteManager.
-        if !self.cycle_mgr.has_genesis() {
+        //
+        // IMPORTANT: Use tip_height (not has_genesis) because set_genesis_timestamp
+        // is called on the first tick, making has_genesis() true forever — but the
+        // epoch must keep re-aligning until block 1 actually commits.
+        if self.tip_height == 0 {
             let cd = self.cycle_mgr.cycle_duration();
             let aligned = (now / cd) * cd;
             self.cycle_mgr.set_genesis_timestamp(aligned);

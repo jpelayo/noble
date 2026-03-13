@@ -2567,26 +2567,70 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         announce.chain_id,
                         announce.node_name,
                     );
-                    let _ = cycle_phase_tx.send(serde_json::json!({
+                    if cycle_phase_tx.send(serde_json::json!({
                         "event": "blockchain_discovered",
                         "chain_id": format!("{:#010X}", announce.chain_id),
                         "network_name": chain_name,
                         "peer_name": announce.node_name,
                         "peer_addr": peer_addr,
-                    }));
-                    // Graceful disconnect — they're on a different chain.
+                    })).is_err() {
+                        tracing::debug!(task = "peer_tracking", "blockchain_discovered broadcast: no subscribers");
+                    }
+                    // ── Early-chain fast-path: immediate adoption ──
+                    //
+                    // When our chain is very short (≤ EARLY_CHAIN_HEIGHT_LIMIT), it
+                    // was independently bootstrapped and may be inferior to the peer's
+                    // chain.  Instead of disconnecting (which would require a slow
+                    // reconnect cycle), keep the peer connected and trigger immediate
+                    // chain adoption if their chain is better.  This guarantees two
+                    // independently-bootstrapped nodes always reconcile without any
+                    // possibility of permanent deadlock.
+                    let our_height = self.consensus.read().chain_tip().0;
+                    if our_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT {
+                        let their_height = announce.chain_tip_height.unwrap_or(0);
+                        let their_weight = announce.chain_vote_weight.unwrap_or(0);
+                        let our_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                        let our_chain_id = self.get_chain_id();
+                        // Composite score: height × 10k + vote_weight (same as fork_resolver)
+                        let their_score = their_height.saturating_mul(10_000).saturating_add(their_weight.min(9_999));
+                        let our_score = our_height.saturating_mul(10_000).saturating_add(our_weight.min(9_999));
+                        let should_adopt = their_score > our_score
+                            || (their_score == our_score && announce.chain_id < our_chain_id);
+
+                        if should_adopt {
+                            let reason = format!(
+                                "early-chain adoption: peer {} on chain {:#010X} (h={}, w={}) vs local {:#010X} (h={}, w={})",
+                                announce.node_name, announce.chain_id, their_height, their_weight,
+                                our_chain_id, our_height, our_weight,
+                            );
+                            self.perform_chain_adoption(announce.chain_id, &reason, &network_cmd, &cycle_phase_tx);
+                        } else {
+                            tracing::info!(
+                                task = "chain_adoption",
+                                "early-chain: our chain {:#010X} (h={}) is better than peer {} chain {:#010X} (h={}) — keeping connected",
+                                our_chain_id, our_height, announce.node_name, announce.chain_id, their_height,
+                            );
+                        }
+                        // Keep peer connected regardless — they will adopt our chain
+                        // (if we're better) or we just adopted theirs.
+                        return; // Skip normal announce processing (different chain_id).
+                    }
+
+                    // ── Past early-chain: graceful disconnect ──
                     // Blockchain info + peer IP are persisted above BEFORE disconnect.
                     // No ban: different chain is not misbehavior.
                     if let Err(e) = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone())) {
                         tracing::debug!(task = "peer_management", "disconnect command backpressure: {e}");
                     }
-                    let _ = cycle_phase_tx.send(serde_json::json!({
+                    if cycle_phase_tx.send(serde_json::json!({
                         "event": "peer_wrong_chain",
                         "peer_name": announce.node_name,
                         "peer_id": hex::encode(&peer_id),
                         "their_chain_id": format!("{:#010X}", announce.chain_id),
                         "their_network": chain_name,
-                    }));
+                    })).is_err() {
+                        tracing::debug!(task = "peer_tracking", "peer_wrong_chain broadcast: no subscribers");
+                    }
                     tracing::info!(
                         task = "peer_tracking",
                         "Disconnected peer {} — different chain ({})",
@@ -3258,6 +3302,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         );
                     }
 
+                    // Update network service tip height (used by chain_id mismatch check
+                    // to exempt early chains from permanent disconnection).
+                    if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateTipHeight(block.header.height)) {
+                        tracing::debug!(task = "block_commit", "UpdateTipHeight dropped: {e}");
+                    }
+
                     // Remove committed txs from mempool
                     {
                         let mut mempool = self.mempool.lock();
@@ -3837,55 +3887,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
                 }
                 CycleIo::RequestChainAdoption { target_chain_id, reason } => {
-                    tracing::warn!(
-                        task = "chain_adoption",
-                        "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
-                        target_chain_id
-                    );
-                    // 1. Wipe ALL chain data (including genesis) — true clean slate.
-                    {
-                        let storage = self.storage.read();
-                        if let Err(e) = storage.wipe_all_chain_data() {
-                            tracing::error!(task = "chain_adoption", "wipe_all_chain_data failed: {e}");
-                        }
-                        if let Err(e) = storage.clear_cycle_history() {
-                            tracing::warn!(task = "chain_adoption", "clear_cycle_history: {e}");
-                        }
-                    }
-                    // 2. Reset chain_id to 0 (pre-genesis state) so we accept any chain.
-                    self.chain_id.store(0, std::sync::atomic::Ordering::Relaxed);
-                    self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
-                    self.fork_visible = false;
-                    self.fork_common_ancestor = None;
-                    // 2b. Clear discovered blockchains to prevent ping-pong adoption
-                    // between the old chain and the new one from stale entries.
-                    {
-                        let mut discovered = self.discovered_blockchains.lock();
-                        discovered.clear();
-                    }
-                    self.persist_discovered_blockchains();
-                    // 3. Tell network service to update its config chain_id + clear cooldowns.
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0)) {
-                        tracing::warn!(task = "chain_hop", "failed to send UpdateChainId(0): {e}");
-                    }
-                    // 4. Reset consensus engine to height 0, no chain tip.
-                    {
-                        if let Err(e) = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true) {
-                            tracing::error!(task = "chain_hop", "failed to reset consensus tip: {e}");
-                        }
-                    }
-                    // 5. Clear stale proposals and request sync.
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
-                        tracing::warn!(task = "chain_adoption", "ClearPendingProposals dropped: {e}");
-                    }
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-                        tracing::warn!(task = "chain_adoption", "RequestSync dropped: {e}");
-                    }
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "chain_adoption_started",
-                        "target_chain_id": format!("{:#010X}", target_chain_id),
-                        "reason": reason,
-                    }));
+                    self.perform_chain_adoption(target_chain_id, &reason, network_cmd, cycle_phase_tx);
                 }
                 other => {
                     // Emit protocol activity events for votes and bans
@@ -3966,6 +3968,86 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
             }
+        }
+    }
+
+    /// Wipe local chain and reset to pre-genesis state for cross-chain adoption.
+    ///
+    /// Called both from the `CycleIo::RequestChainAdoption` handler (normal
+    /// cross-chain evaluation path) and from the `NodeAnnounceReceived` handler
+    /// (fast-path for early-chain nodes ≤ `EARLY_CHAIN_HEIGHT_LIMIT`).
+    fn perform_chain_adoption(
+        &mut self,
+        target_chain_id: u32,
+        reason: &str,
+        network_cmd: &tokio::sync::mpsc::Sender<noble_network::NetworkCommand>,
+        cycle_phase_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
+    ) {
+        tracing::warn!(
+            task = "chain_adoption",
+            "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
+            target_chain_id
+        );
+        // 1. Wipe ALL chain data (including genesis) — true clean slate.
+        //    If the wipe fails, abort adoption to avoid inconsistent state
+        //    (chain_id=0 but storage still has old blocks → sync import PrevHashMismatch).
+        {
+            let storage = self.storage.read();
+            if let Err(e) = storage.wipe_all_chain_data() {
+                tracing::error!(
+                    task = "chain_adoption",
+                    "wipe_all_chain_data failed: {e} — ABORTING adoption to avoid inconsistent state"
+                );
+                return;
+            }
+            if let Err(e) = storage.clear_cycle_history() {
+                tracing::warn!(task = "chain_adoption", "clear_cycle_history: {e}");
+            }
+        }
+        // 2. Reset chain_id to 0 (pre-genesis state) so we accept any chain.
+        self.chain_id.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.fork_visible = false;
+        self.fork_common_ancestor = None;
+        // 2b. Clear discovered blockchains to prevent ping-pong adoption.
+        {
+            let mut discovered = self.discovered_blockchains.lock();
+            discovered.clear();
+        }
+        self.persist_discovered_blockchains();
+        // 3. Tell network service to update chain_id + tip_height + clear cooldowns.
+        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0)) {
+            tracing::warn!(task = "chain_adoption", "failed to send UpdateChainId(0): {e}");
+        }
+        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateTipHeight(0)) {
+            tracing::debug!(task = "chain_adoption", "UpdateTipHeight(0) dropped: {e}");
+        }
+        // 4. Reset consensus engine to height 0, no chain tip.
+        {
+            if let Err(e) = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true) {
+                tracing::error!(task = "chain_adoption", "failed to reset consensus tip: {e}");
+            }
+        }
+        // 5. Reset sync state — stale sync targets from the old chain must not
+        //    block fresh sync from the adopted chain's peers.
+        self.sync_behind = false;
+        self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.sync_from_peer = None;
+        self.sync_target_height = None;
+        self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
+        // 6. Clear stale proposals and request sync from new chain peers.
+        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
+            tracing::warn!(task = "chain_adoption", "ClearPendingProposals dropped: {e}");
+        }
+        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
+            tracing::warn!(task = "chain_adoption", "RequestSync dropped: {e}");
+        }
+        if cycle_phase_tx.send(serde_json::json!({
+            "event": "chain_adoption_started",
+            "target_chain_id": format!("{:#010X}", target_chain_id),
+            "reason": reason,
+        })).is_err() {
+            tracing::debug!(task = "chain_adoption", "chain_adoption_started broadcast: no subscribers");
         }
     }
 
@@ -4139,6 +4221,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 new_chain_id,
                 block.header.height,
             );
+        }
+
+        // Update network service tip height (used by early-chain exemption).
+        if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateTipHeight(block.header.height)) {
+            tracing::debug!(task = "sync_import", "UpdateTipHeight dropped: {e}");
         }
 
         // Remove committed txs from mempool.

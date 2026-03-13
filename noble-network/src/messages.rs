@@ -253,6 +253,8 @@ pub enum NetworkCommand {
     /// Update the local chain_id in network config (cross-chain adoption).
     /// Also clears the mismatch cooldown map so peers can reconnect immediately.
     UpdateChainId(u32),
+    /// Update the local tip height in network config (called on each committed block).
+    UpdateTipHeight(u64),
     /// Initiate common ancestor search with a peer on a different fork.
     FindCommonAncestor {
         peer_id: Vec<u8>,

@@ -47,6 +47,11 @@ pub const DEFAULT_BAN_THRESHOLD: u32 = 100;
 /// Default ban duration in seconds (24 hours).
 pub const DEFAULT_BAN_DURATION_SECS: u64 = 86_400;
 
+/// Chain height below which a node is considered "early-chain" and tolerates
+/// chain_id mismatches from peers.  Independently-bootstrapped nodes with
+/// short chains must stay connected so fork resolution can trigger adoption.
+pub const EARLY_CHAIN_HEIGHT_LIMIT: u64 = 5;
+
 /// Configuration for the NOBLE P2P network layer.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -116,6 +121,12 @@ pub struct NetworkConfig {
     /// Gossipsub heartbeat interval in seconds (default: 10).
     /// Lower values speed up mesh formation in tests.
     pub gossipsub_heartbeat_interval_secs: u64,
+
+    /// Local chain tip height.  Updated by the node on each committed block.
+    /// Used by the chain_id mismatch check: nodes with very short chains
+    /// (≤ `EARLY_CHAIN_HEIGHT_LIMIT`) tolerate chain_id mismatches so that
+    /// independently bootstrapped nodes can reconnect and adopt the longer chain.
+    pub tip_height: u64,
 }
 
 impl Default for NetworkConfig {
@@ -142,6 +153,7 @@ impl Default for NetworkConfig {
             chain_meta: None,
             pre_loaded_p2p_key: None,
             gossipsub_heartbeat_interval_secs: 1,
+            tip_height: 0,
         }
     }
 }
