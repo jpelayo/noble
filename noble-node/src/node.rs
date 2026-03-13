@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
 use noble_api::auth::TotpValidator;
-use noble_api::state::{ApiState, NodeIdentityData, PeerInfoEntry};
+use noble_api::state::{ApiState, NodeIdentityData};
 use noble_api::NetworkStats;
 use noble_consensus::{
     ConsensusConfig as CConsensusConfig, ConsensusStateMachine, CycleEngine, CycleEvent, CycleIo,
@@ -105,43 +105,17 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// While true, block proposals are suppressed.
     pub clock_drift_paused: std::sync::atomic::AtomicBool,
     /// S53: Last proposed block (height, hash) — set when BroadcastBlock passes the gate.
-    /// Cleared on chain tip advancement (new cycle).
-    pub last_proposed: parking_lot::Mutex<Option<(u64, [u8; 32])>>,
+    /// Cleared on chain tip advancement (new cycle). Shared with HealingManager.
+    pub last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
     /// Path to the CBOR validator list file (for persisting network metadata).
     pub validator_list_path: Option<std::path::PathBuf>,
     /// Seed/bootstrap peer addresses from config (for auto-reconnection).
     pub seed_addrs: Vec<String>,
-    /// Blockchains discovered via NodeAnnounce from peers on different chains.
-    /// Key: chain_id. Shared with ApiState for RPC access. Persisted to `discovered_blockchains.cbor`.
-    pub discovered_blockchains: Arc<Mutex<std::collections::HashMap<u32, noble_api::types::DiscoveredBlockchainInfo>>>,
-    /// Path for persisting discovered blockchains CBOR.
-    pub discovered_blockchains_path: Option<std::path::PathBuf>,
     /// Cooldown: last time redial_known_peers was called (epoch secs). Prevents tight
     /// reconnect loops when the only known peer has a chain_id mismatch.
     pub last_redial_at: std::sync::atomic::AtomicU64,
-    /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
-    /// Incremented each time a block is committed with its voter count.
-    pub chain_vote_weight: std::sync::atomic::AtomicU64,
-    /// Cache of last NodeAnnounce per identity_key (wire bytes) for equivocation detection.
-    /// Stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS) are evicted on each insert.
-    /// Capped at 1024 entries to bound memory usage.
-    pub announce_cache: parking_lot::Mutex<std::collections::HashMap<Vec<u8>, noble_core::NodeAnnounce>>,
-    /// True when compute_fork_groups() detected >1 distinct chain tip among connected peers.
-    pub fork_visible: bool,
-    /// Common ancestor discovered via AncestorFinder (height, hash).
-    pub fork_common_ancestor: Option<(u64, [u8; 32])>,
-    /// True while this node is catching up blocks from a peer that is ahead.
-    pub sync_behind: bool,
-    /// The peer we're currently syncing from (their PeerId bytes). Set on sync_started, cleared on sync_complete.
-    pub sync_from_peer: Option<Vec<u8>>,
-    /// Target height we're syncing towards. Set on sync_started, cleared on sync_complete.
-    pub sync_target_height: Option<u64>,
-    /// Shared AtomicBool for RPC visibility of sync_behind state.
-    pub sync_behind_shared: Arc<std::sync::atomic::AtomicBool>,
-    /// Shared sync target height for RPC visibility (0 = not syncing).
-    pub sync_target_height_shared: Arc<std::sync::atomic::AtomicU64>,
-    /// Last time a sync block was requested (epoch secs). Used for retry on stall.
-    pub last_sync_request_at: u64,
+    /// Chain healing, sync, fork resolution, and cross-chain adoption manager.
+    pub healing: crate::healing::HealingManager<S>,
 }
 
 impl Node<MemoryStorage> {
@@ -201,16 +175,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 height: 0,
             });
 
-        // Startup integrity check: chain_tip says height > 0 but we failed to
-        // derive chain_id (blocks missing from storage).  This is an inconsistent
-        // state — typically caused by incomplete adoption or interrupted sync.
-        // Wipe everything so the node starts fresh and can sync properly.
-        if chain_id == 0 && tip.height > 0 {
-            tracing::warn!(
-                task = "startup",
-                "chain_tip at height {} but chain_id=0 (blocks missing from storage) — wiping inconsistent state",
-                tip.height,
-            );
+        // Startup integrity check — detect inconsistent state (chain_tip > 0
+        // but chain_id = 0, meaning blocks are missing from storage).
+        if crate::healing::startup_integrity_check(chain_id, tip.height) {
             if let Err(e) = storage.read().wipe_all_chain_data() {
                 tracing::error!(task = "startup", "failed to wipe inconsistent chain data: {e}");
             }
@@ -524,6 +491,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             std::collections::HashMap::new()
         };
 
+        // Build shared state for HealingManager before constructing Self.
+        let last_proposed = Arc::new(parking_lot::Mutex::new(None));
+        let sync_behind_shared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sync_target_height_shared = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let discovered_arc = Arc::new(Mutex::new(discovered_blockchains));
+
+        let healing = crate::healing::HealingManager::new(
+            storage.clone(),
+            consensus.clone(),
+            mempool.clone(),
+            chain_id_arc.clone(),
+            peer_info.clone(),
+            last_proposed.clone(),
+            discovered_arc,
+            Some(discovered_path),
+            sync_behind_shared,
+            sync_target_height_shared,
+        );
+
         Ok(Self {
             storage,
             mempool,
@@ -540,22 +526,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             chain_meta,
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
-            last_proposed: parking_lot::Mutex::new(None),
             validator_list_path: Some(validator_list_path),
             seed_addrs: config.network.seeds.clone(),
-            discovered_blockchains: Arc::new(Mutex::new(discovered_blockchains)),
-            discovered_blockchains_path: Some(discovered_path),
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
-            chain_vote_weight: std::sync::atomic::AtomicU64::new(0),
-            announce_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            fork_visible: false,
-            fork_common_ancestor: None,
-            sync_behind: false,
-            sync_from_peer: None,
-            sync_target_height: None,
-            sync_behind_shared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            sync_target_height_shared: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            last_sync_request_at: 0,
+            last_proposed,
+            healing,
         })
     }
 
@@ -743,7 +718,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             self.get_chain_id(),
             self.network_name.clone(),
             {
-                let w = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                let w = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
                 if w > 0 { Some(w) } else { None }
             },
             now,
@@ -886,17 +861,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
     }
 
-    /// Persist discovered blockchains map to CBOR file.
-    fn persist_discovered_blockchains(&self) {
-        if let Some(ref path) = self.discovered_blockchains_path {
-            let discovered = self.discovered_blockchains.lock();
-            if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*discovered) {
-                if let Err(e) = std::fs::write(path, &bytes) {
-                    tracing::warn!(task = "peer_tracking", "Failed to persist discovered blockchains: {e}");
-                }
-            }
-        }
-    }
 
     fn publish_node_announce(
         &self,
@@ -1657,9 +1621,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .map(|h| hex::encode(h.as_bytes()))
                     .unwrap_or_default()
             },
-            discovered_blockchains: self.discovered_blockchains.clone(),
-            sync_behind: self.sync_behind_shared.clone(),
-            sync_target_height: self.sync_target_height_shared.clone(),
+            discovered_blockchains: self.healing.discovered_blockchains().clone(),
+            sync_behind: self.healing.sync_behind_shared().clone(),
+            sync_target_height: self.healing.sync_target_height_shared().clone(),
         });
 
         // --- Determine bind addresses ---
@@ -1855,6 +1819,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         );
         reconnect_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Inject IO channels into HealingManager now that network + broadcast are ready.
+        self.healing.set_io_channels(
+            network_cmd.clone(),
+            new_block_tx.clone(),
+            cycle_phase_tx.clone(),
+            metrics.clone(),
+        );
+
         tracing::info!(
             task = "node_startup",
             "Node event loop started — chain height: {}",
@@ -1910,113 +1882,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
 
-                    // ── Sync retry: re-request blocks if sync is stalled ──
-                    // If sync_behind is true but no block arrived in 10 seconds,
-                    // the original RequestBlockByHeight may have been lost or
-                    // responded with Block(None).  Re-request to unstick.
-                    if self.sync_behind {
-                        const SYNC_RETRY_SECS: u64 = 10;
-                        if now.saturating_sub(self.last_sync_request_at) >= SYNC_RETRY_SECS {
-                            let our_height = self.consensus.read().chain_tip().0;
-                            let next = our_height + 1;
-                            if let Some(ref speer) = self.sync_from_peer {
-                                tracing::debug!(
-                                    task = "sync",
-                                    "sync stalled — retrying RequestBlockByHeight for height {}",
-                                    next,
-                                );
-                                if let Err(e) = network_cmd.try_send(
-                                    noble_network::NetworkCommand::RequestBlockByHeight {
-                                        peer_id: speer.clone(),
-                                        height: next,
-                                    },
-                                ) {
-                                    tracing::warn!(task = "sync", "sync retry RequestBlockByHeight dropped: {e}");
-                                }
-                                self.last_sync_request_at = now;
-                            }
-                        }
-                    }
+                    // ── Sync retry (delegated to healing manager) ──
+                    self.healing.on_tick_sync_retry(now);
 
-                    // Inject fork status for fork resolver evaluation.
-                    // CRITICAL: Skip fork resolution while actively syncing.
-                    // During sync, the node's tip is behind the peer's tip by
-                    // definition.  The fork resolver sees this as a "fork" and
-                    // rolls back to the common ancestor — which undoes the
-                    // blocks the sync just imported, creating an infinite loop.
-                    // The sync mechanism already handles catching up; the fork
-                    // resolver should only evaluate AFTER sync completes.
-                    if !self.sync_behind {
+                    // ── Fork evaluation (delegated to healing manager) ──
+                    // The sync_behind guard is enforced inside on_tick_fork_eval().
                     {
-                        let engine_read = self.consensus.read();
-                        let (tip_h, tip_hash) = engine_read.chain_tip();
-                        let chain_owner_key = engine_read.chain_owner_key().map(|k| k.to_vec());
-                        let our_identity = engine_read.our_validator_wire_bytes();
-                        drop(engine_read);
-                        let peers = self.peer_info.read();
-                        let fork_groups = compute_fork_groups(
-                            &peers,
-                            tip_h,
-                            tip_hash,
-                            chain_owner_key.as_deref(),
-                            our_identity.as_deref(),
-                            self.get_chain_id(),
-                        );
-                        let total_peers = peers.len();
-
-                        // Emit fork_detected / fork_aligned events for GUI visibility.
-                        let is_forked = fork_groups.len() > 1;
-                        if is_forked && !self.fork_visible {
-                            self.fork_visible = true;
-                            // Clear stale ancestor from any previous fork.
-                            self.fork_common_ancestor = None;
-                            let remote: Vec<_> = fork_groups.iter().filter(|g| !g.is_local).collect();
-                            let _ = cycle_phase_tx.send(serde_json::json!({
-                                "event": "fork_detected",
-                                "fork_count": fork_groups.len(),
-                                "local_height": tip_h,
-                                "remote_heights": remote.iter().map(|g| g.height).collect::<Vec<_>>(),
-                                "remote_peer_counts": remote.iter().map(|g| g.peer_count).collect::<Vec<_>>(),
-                            }));
-                            // Start common ancestor discovery with the first remote peer group.
-                            if let Some(remote_group) = fork_groups.iter().find(|g| !g.is_local) {
-                                let peers_on_fork: Vec<_> = peers.values()
-                                    .filter(|e| e.chain_tip_hash.as_deref() == Some(&hex::encode(remote_group.tip_hash.as_bytes())))
-                                    .collect();
-                                if let Some(peer_entry) = peers_on_fork.first() {
-                                    if let Ok(pid_bytes) = hex::decode(&peer_entry.peer_id) {
-                                        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::FindCommonAncestor {
-                                            peer_id: pid_bytes,
-                                            local_height: tip_h,
-                                            peer_height: remote_group.height,
-                                        }) {
-                                            tracing::warn!(task = "fork", "FindCommonAncestor dropped: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                        } else if !is_forked && self.fork_visible {
-                            self.fork_visible = false;
-                            let _ = cycle_phase_tx.send(serde_json::json!({
-                                "event": "fork_aligned",
-                                "height": tip_h,
-                            }));
+                        let dwell_before = self.consensus.read().fork_resolver().dwell_counter();
+                        let cycle_events = self.healing.on_tick_fork_eval();
+                        for ce in cycle_events {
+                            let io = {
+                                let mut engine = self.consensus.write();
+                                engine.step(ce)
+                            };
+                            self.process_cycle_actions(io, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
                         }
 
-                        drop(peers);
-                        if !fork_groups.is_empty() {
-                            let dwell_before = self.consensus.read().fork_resolver().dwell_counter();
-                            let fork_actions = {
-                                let mut engine = self.consensus.write();
-                                engine.step(noble_consensus::CycleEvent::ForkStatus {
-                                    local_height: tip_h,
-                                    forks: fork_groups,
-                                    total_peers,
-                                })
-                            };
-                            self.process_cycle_actions(fork_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
-
-                            // Emit fork alignment status to GUI.
+                        // Emit fork alignment status to GUI (requires post-injection dwell check).
+                        if !self.healing.sync_behind() {
                             let dwell_after = self.consensus.read().fork_resolver().dwell_counter();
                             if dwell_after > 0 {
                                 let engine = self.consensus.read();
@@ -2031,66 +1914,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                     "tracked_height": tracked,
                                 }));
                             } else if dwell_before > 0 {
-                                // Dwell went from >0 to 0 — fork disappeared or was resolved.
-                                // (fork_auto_resolved is emitted separately by process_cycle_actions
-                                // when RequestForkResolution fires.)
                                 let _ = cycle_phase_tx.send(serde_json::json!({
                                     "event": "fork_alignment_clear",
                                 }));
                             }
                         }
                     }
-                    } // end if !self.sync_behind (skip fork resolver during sync)
 
-                    // Inject cross-chain fork status for cross-chain adoption evaluation.
+                    // ── Cross-chain evaluation (delegated to healing manager) ──
                     {
-                        let local_chain_id = self.get_chain_id();
-                        let (tip_h, _) = self.consensus.read().chain_tip();
-                        let local_vote_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
-                        let discovered = self.discovered_blockchains.lock();
-                        // Count same-chain peers: only peers whose announced chain_id
-                        // matches ours.  Cross-chain peers must NOT prevent adoption.
-                        let peers = self.peer_info.read();
-                        let same_chain_peer_count = peers.values()
-                            .filter(|p| p.chain_id == Some(local_chain_id) && p.chain_tip_height.is_some())
-                            .count();
-                        drop(peers);
-                        // Build cross-chain fork info from discovered blockchains.
-                        // Use a staleness threshold: entries not seen for 2 cycles
-                        // (2400s) are treated as having 0 live peers, preventing
-                        // phantom adoption targets from stale peer_addresses.
-                        let now_ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        const STALE_THRESHOLD_SECS: u64 = 2400; // 2 cycles
-                        let cross_chain_forks: Vec<noble_consensus::CrossChainForkInfo> = discovered
-                            .iter()
-                            .filter(|(&cid, _)| cid != local_chain_id && cid != 0)
-                            .map(|(&cid, info)| {
-                                let is_stale = now_ts.saturating_sub(info.last_seen) > STALE_THRESHOLD_SECS;
-                                noble_consensus::CrossChainForkInfo {
-                                    chain_id: cid,
-                                    peer_count: if is_stale { 0 } else { info.peer_addresses.len() },
-                                    chain_tip_height: info.chain_tip_height,
-                                    chain_vote_weight: info.chain_vote_weight,
-                                    last_seen: info.last_seen,
-                                }
-                            })
-                            .collect();
-                        drop(discovered);
-                        if !cross_chain_forks.is_empty() {
-                            let cc_actions = {
+                        let cycle_events = self.healing.on_tick_cross_chain_eval();
+                        for ce in cycle_events {
+                            let io = {
                                 let mut engine = self.consensus.write();
-                                engine.step(noble_consensus::CycleEvent::CrossChainStatus {
-                                    local_chain_id,
-                                    local_height: tip_h,
-                                    local_vote_weight,
-                                    same_chain_peer_count,
-                                    cross_chain_forks,
-                                })
+                                engine.step(ce)
                             };
-                            self.process_cycle_actions(cc_actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
+                            self.process_cycle_actions(io, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
                         }
                     }
 
@@ -2580,158 +2419,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         entry.chain_id = Some(announce.chain_id);
                     }
                 }
-                // --- Chain ID mismatch: blockchain discovery ---
-                // If the peer announces a different chain_id (and it's not 0 = unknown),
-                // record the discovered blockchain and kick the peer if we already have a chain.
+                // --- Chain ID mismatch: blockchain discovery (delegated to healing) ---
                 if announce.chain_id != 0 && self.get_chain_id() != 0 && announce.chain_id != self.get_chain_id() {
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    // Use the announced host_address, falling back to the actual
-                    // connection address from peer_info so we always record an IP.
-                    let peer_addr = announce.host_address.clone()
-                        .filter(|a| !a.is_empty())
-                        .or_else(|| {
-                            let info = self.peer_info.read();
-                            let hex_pid = hex::encode(&peer_id);
-                            info.get(&hex_pid).map(|e| e.addr.clone())
-                        })
-                        .unwrap_or_default();
-                    let chain_name = if announce.network_name.is_empty() {
-                        format!("chain-{:08X}", announce.chain_id)
-                    } else {
-                        announce.network_name.clone()
-                    };
-                    // Store/update discovered blockchain.
-                    {
-                        let mut discovered = self.discovered_blockchains.lock();
-                        let entry = discovered.entry(announce.chain_id).or_insert_with(|| {
-                            noble_api::types::DiscoveredBlockchainInfo {
-                                chain_id: announce.chain_id,
-                                network_name: chain_name.clone(),
-                                peer_addresses: Vec::new(),
-                                first_seen: now_ts,
-                                last_seen: now_ts,
-                                chain_tip_height: None,
-                                chain_vote_weight: None,
-                            }
-                        });
-                        entry.last_seen = now_ts;
-                        // Update chain tip height from announce (take the max seen).
-                        if let Some(h) = announce.chain_tip_height {
-                            entry.chain_tip_height = Some(
-                                entry.chain_tip_height.map_or(h, |prev| prev.max(h))
-                            );
-                        }
-                        // Update vote weight if announced.
-                        if let Some(w) = announce.chain_vote_weight {
-                            entry.chain_vote_weight = Some(
-                                entry.chain_vote_weight.map_or(w, |prev| prev.max(w))
-                            );
-                        }
-                        if !chain_name.is_empty() {
-                            entry.network_name = chain_name.clone();
-                        }
-                        if !peer_addr.is_empty() && !entry.peer_addresses.contains(&peer_addr) {
-                            entry.peer_addresses.push(peer_addr.clone());
-                        }
-                    }
-                    // Persist to disk.
-                    self.persist_discovered_blockchains();
-
-                    tracing::info!(
-                        task = "peer_tracking",
-                        "Blockchain discovered: {} (chain_id={:#010X}) from peer {}",
-                        chain_name,
-                        announce.chain_id,
-                        announce.node_name,
-                    );
-                    if cycle_phase_tx.send(serde_json::json!({
-                        "event": "blockchain_discovered",
-                        "chain_id": format!("{:#010X}", announce.chain_id),
-                        "network_name": chain_name,
-                        "peer_name": announce.node_name,
-                        "peer_addr": peer_addr,
-                    })).is_err() {
-                        tracing::debug!(task = "peer_tracking", "blockchain_discovered broadcast: no subscribers");
-                    }
-                    // ── Early-chain fast-path ──
-                    //
-                    // If EITHER side is early-chain (≤ EARLY_CHAIN_HEIGHT_LIMIT),
-                    // keep connected and let the short-chain node adopt the longer one.
-                    //
-                    // Case A: WE are early-chain → evaluate adoption of their chain.
-                    // Case B: THEY are early-chain → keep connected so they can adopt
-                    //         our chain (they'll trigger adoption on their side).
-                    // Case C: Neither is early → graceful disconnect (different network).
-                    let our_height = self.consensus.read().chain_tip().0;
-                    let their_height = announce.chain_tip_height.unwrap_or(0);
-                    let we_are_early = our_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT;
-                    let they_are_early = their_height <= noble_network::config::EARLY_CHAIN_HEIGHT_LIMIT;
-
-                    if we_are_early {
-                        // Case A: We're short-chain — decide whether to adopt theirs.
-                        let their_weight = announce.chain_vote_weight.unwrap_or(0);
-                        let our_weight = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
-                        let our_chain_id = self.get_chain_id();
-                        // Composite score: height × 10k + vote_weight (same as fork_resolver)
-                        let their_score = their_height.saturating_mul(10_000).saturating_add(their_weight.min(9_999));
-                        let our_score = our_height.saturating_mul(10_000).saturating_add(our_weight.min(9_999));
-                        let should_adopt = their_score > our_score
-                            || (their_score == our_score && announce.chain_id < our_chain_id);
-
-                        if should_adopt {
-                            let reason = format!(
-                                "early-chain adoption: peer {} on chain {:#010X} (h={}, w={}) vs local {:#010X} (h={}, w={})",
-                                announce.node_name, announce.chain_id, their_height, their_weight,
-                                our_chain_id, our_height, our_weight,
-                            );
-                            self.perform_chain_adoption(announce.chain_id, &reason, &network_cmd, &cycle_phase_tx);
-                        } else {
-                            tracing::info!(
-                                task = "chain_adoption",
-                                "early-chain: our chain {:#010X} (h={}) is better than peer {} chain {:#010X} (h={}) — keeping connected",
-                                our_chain_id, our_height, announce.node_name, announce.chain_id, their_height,
-                            );
-                        }
-                        return; // Keep peer connected regardless.
-                    }
-
-                    if they_are_early {
-                        // Case B: They're short-chain — keep them connected so they
-                        // can discover our chain (via their own NodeAnnounce handler)
-                        // and adopt it.  No action needed on our side.
-                        tracing::info!(
-                            task = "chain_adoption",
-                            "remote peer {} is early-chain (h={}) on {:#010X} — keeping connected for adoption",
-                            announce.node_name, their_height, announce.chain_id,
-                        );
-                        return; // Keep peer connected.
-                    }
-
-                    // ── Case C: Neither side is early — graceful disconnect ──
-                    // Blockchain info + peer IP are persisted above BEFORE disconnect.
-                    // No ban: different chain is not misbehavior.
-                    if let Err(e) = network_cmd.try_send(NetworkCommand::DisconnectPeer(peer_id.clone())) {
-                        tracing::debug!(task = "peer_management", "disconnect command backpressure: {e}");
-                    }
-                    if cycle_phase_tx.send(serde_json::json!({
-                        "event": "peer_wrong_chain",
-                        "peer_name": announce.node_name,
-                        "peer_id": hex::encode(&peer_id),
-                        "their_chain_id": format!("{:#010X}", announce.chain_id),
-                        "their_network": chain_name,
-                    })).is_err() {
-                        tracing::debug!(task = "peer_tracking", "peer_wrong_chain broadcast: no subscribers");
-                    }
-                    tracing::info!(
-                        task = "peer_tracking",
-                        "Disconnected peer {} — different chain ({})",
-                        announce.node_name,
-                        chain_name,
-                    );
-                    return; // Skip normal announce processing.
+                    self.healing.on_cross_chain_announce(&announce, &peer_id);
+                    return; // Skip normal announce processing (Cases A/B keep peer connected).
                 }
 
                 // Persist the announce to storage so getPeerMemory (and thus
@@ -2832,104 +2523,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "software_version": announce.software_version,
                     "connected": is_connected,
                 }));
-                // Announce equivocation detection: compare with cached previous announce.
-                {
-                    let mut cache = self.announce_cache.lock();
-                    if let Some(prev) = cache.get(&identity_wire) {
-                        // If the peer changed chain_id, their old cached announce is
-                        // stale (they adopted a new chain).  Evict the stale entry and
-                        // skip ALL equivocation checks — chain adoption legitimately
-                        // changes chain_id AND can regress chain_tip to 0.
-                        let chain_changed = prev.chain_id != 0 && announce.chain_id != 0
-                            && prev.chain_id != announce.chain_id;
-                        let contradiction = if chain_changed {
-                            // Not equivocation — legitimate chain adoption.  Update cache.
-                            tracing::debug!(
-                                task = "evidence",
-                                "peer {} changed chain_id ({:#010X} → {:#010X}) — likely adoption, skipping equivocation check",
-                                hex::encode(&identity_wire), prev.chain_id, announce.chain_id,
-                            );
-                            None
-                        } else if prev.chain_id == announce.chain_id
-                            && prev.chain_tip_height.is_some() && announce.chain_tip_height.is_some()
-                        {
-                            // Same chain — check for tip regression.
-                            let prev_h = prev.chain_tip_height.unwrap_or(0);
-                            let ann_h = announce.chain_tip_height.unwrap_or(0);
-                            let prev_t = prev.timestamp;
-                            let ann_t = announce.timestamp;
-                            if (ann_t > prev_t && ann_h < prev_h) || (prev_t > ann_t && prev_h < ann_h) {
-                                Some(noble_core::AnnounceContradiction::ChainTipRegression)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        // Also check competing proposals (only within the same chain).
-                        let contradiction = if !chain_changed {
-                            contradiction.or_else(|| {
-                                if prev.proposed_height.is_some()
-                                    && prev.proposed_height == announce.proposed_height
-                                    && prev.proposed_hash != announce.proposed_hash
-                                {
-                                    Some(noble_core::AnnounceContradiction::CompetingProposals)
-                                } else {
-                                    None
-                                }
-                            })
-                        } else {
-                            None
-                        };
-
-                        if let Some(c) = contradiction {
-                            let evidence = noble_core::AnnounceEquivocationEvidence {
-                                identity_key: announce.identity_key.clone(),
-                                announce_a: prev.clone(),
-                                announce_b: (*announce).as_ref().clone(),
-                                contradiction: c,
-                            };
-                            if evidence.verify().is_ok() {
-                                tracing::warn!(
-                                    task = "evidence",
-                                    "announce equivocation detected for {}",
-                                    hex::encode(&identity_wire),
-                                );
-                                let cbor = noble_codec::NobleCbor::to_cbor(&noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence.clone())).unwrap_or_default();
-                                let ev_hash = noble_crypto::sha256(&cbor);
-                                if let Err(e) = self.storage.read().store_evidence(ev_hash.as_bytes(), &cbor) {
-                                    tracing::warn!(task = "evidence", "failed to store evidence: {e}");
-                                }
-                                self.consensus.write().reputation_mut().record_misbehavior(&identity_wire);
-                                if let Err(e) = network_cmd.try_send(NetworkCommand::PublishEvidence(
-                                    Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
-                                )) {
-                                    tracing::warn!(task = "evidence", "failed to publish evidence: {e}");
-                                }
-                            }
-                        }
-                    }
-                    // Evict stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS).
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    if cache.len() > 512 {
-                        cache.retain(|_, a| now_ts.saturating_sub(a.timestamp) < noble_core::NODE_ANNOUNCE_MAX_AGE_SECS);
-                    }
-                    // Cap at 1024 entries to bound memory.
-                    if cache.len() >= 1024 {
-                        // Remove the oldest entry.
-                        if let Some(oldest_key) = cache.iter()
-                            .min_by_key(|(_, a)| a.timestamp)
-                            .map(|(k, _)| k.clone())
-                        {
-                            cache.remove(&oldest_key);
-                        }
-                    }
-                    // Update cache with latest announce.
-                    cache.insert(identity_wire.clone(), (*announce).as_ref().clone());
-                }
+                // Announce equivocation detection — fully delegated to healing.
+                self.healing.handle_announce_equivocation(&announce, &identity_wire);
 
                 tracing::debug!(
                     task = "peer_tracking",
@@ -3069,101 +2664,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if median_clock_offset_ms.is_some() {
                     self.network_stats.write().median_clock_offset_ms = *median_clock_offset_ms;
                 }
-                // Gossip-driven sync: if the peer is ahead, request the next block
-                // directly from them.  The sync import path (try_sync_import)
-                // handles validation and commitment, then fetches the next block
-                // from the same peer to continue the chain until caught up.
-                let (our_height, our_tip_hash) = self.consensus.read().chain_tip();
-
-                // ── Chain integrity probe ──
-                // Every time a peer reports its chain state, verify our own
-                // tip block actually exists in storage.  If the tip is stale
-                // or corrupt (chain_tip says height N but the block is gone),
-                // wipe and re-sync immediately.  This catches inconsistencies
-                // from interrupted adoptions, storage corruption, or any
-                // scenario where the in-memory chain_tip diverges from the
-                // actual block data on disk.
-                if our_height > 0 {
-                    let probe_ok = self.storage.read()
-                        .get_block_header(&our_tip_hash)
-                        .is_ok();
-                    if !probe_ok {
-                        tracing::error!(
-                            task = "integrity",
-                            "CHAIN INTEGRITY FAILURE: tip at height {} claims hash {} but block missing from storage — wiping and re-syncing",
-                            our_height,
-                            hex::encode(our_tip_hash.as_bytes()),
-                        );
-                        self.perform_chain_adoption(
-                            0,
-                            "integrity probe: tip block missing from storage",
-                            network_cmd,
-                            cycle_phase_tx,
-                        );
-                        // After adoption, our_height is 0 and we fall through to
-                        // the sync path below on the next PeerChainTipUpdated.
-                        return;
-                    }
-                }
-
-                if *height > our_height {
-                    let behind = *height - our_height;
-                    let next_height = our_height + 1;
-                    if !self.sync_behind {
-                        // First time we see a peer ahead — emit sync_started.
-                        self.sync_behind = true;
-                        self.sync_from_peer = Some(peer_id.clone());
-                        self.sync_target_height = Some(*height);
-                        self.sync_behind_shared.store(true, std::sync::atomic::Ordering::Relaxed);
-                        self.sync_target_height_shared.store(*height, std::sync::atomic::Ordering::Relaxed);
-                        let _ = cycle_phase_tx.send(serde_json::json!({
-                            "event": "sync_started",
-                            "peer_height": height,
-                            "our_height": our_height,
-                            "blocks_behind": behind,
-                        }));
-                    } else if *height > self.sync_target_height.unwrap_or(0) {
-                        // Update target if this peer is further ahead.
-                        self.sync_from_peer = Some(peer_id.clone());
-                        self.sync_target_height = Some(*height);
-                        self.sync_target_height_shared.store(*height, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    tracing::info!(
-                        task = "sync",
-                        "peer {} at height {}, we're at {} ({} behind) — requesting block {}",
-                        hex_pid, height, our_height, behind, next_height
-                    );
-                    if let Err(e) = network_cmd.try_send(
-                        noble_network::NetworkCommand::RequestBlockByHeight {
-                            peer_id: peer_id.clone(),
-                            height: next_height,
-                        },
-                    ) {
-                        tracing::warn!(task = "sync", "RequestBlockByHeight dropped: {e}");
-                    }
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    self.last_sync_request_at = now_ts;
-                } else if self.sync_behind && *height <= our_height && our_height > 0 {
-                    // We were behind and caught up — emit sync_complete.
-                    self.sync_behind = false;
-                    self.sync_from_peer = None;
-                    self.sync_target_height = None;
-                    self.last_sync_request_at = 0;
-                    self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "sync_complete",
-                        "height": our_height,
-                    }));
-                    tracing::info!(
-                        task = "sync",
-                        "Sync complete — caught up at height {}",
-                        our_height
-                    );
-                }
+                // ── Healing: sync initiation, integrity probe, sync completion ──
+                self.healing.on_peer_chain_tip_updated(peer_id, *height);
+                let our_height = self.consensus.read().chain_tip().0;
                 // S60: Bootstrap proposal retry — when the first peer status
                 // arrives during Proposal phase at tip=0, re-trigger the
                 // proposal that was suppressed by the "waiting for peer status"
@@ -3249,22 +2752,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // nodes end up on divergent cycle timelines (different genesis
                     // timestamps).  The block is fully validated (B4/B8/B9/B11) and
                     // came from a peer that already committed it via consensus.
-                    self.try_sync_import(
-                        block.clone(),
-                        peer_id,
-                        tip_height,
-                        network_cmd,
-                        new_block_tx,
-                        cycle_phase_tx,
-                        metrics,
-                    );
-                    // Sync local fields from shared atomics (try_sync_import takes &self,
-                    // so it can only update atomics — we sync locals here with &mut self).
-                    if self.sync_behind && !self.sync_behind_shared.load(std::sync::atomic::Ordering::Relaxed) {
-                        self.sync_behind = false;
-                        self.sync_from_peer = None;
-                        self.sync_target_height = None;
-                    }
+                    let _ = self.healing.try_sync_import(&block);
+                    // Sync local fields from shared atomics.
+                    self.healing.sync_locals_from_atomics();
                 } else {
                     // Live proposal — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
@@ -3289,15 +2779,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "common ancestor with {}: height {} ({})",
                     hex_pid, ancestor_height, hex::encode(ancestor_hash)
                 );
-                self.fork_common_ancestor = Some((*ancestor_height, *ancestor_hash));
-                let our_height = self.consensus.read().chain_tip().0;
-                let _ = cycle_phase_tx.send(serde_json::json!({
-                    "event": "fork_divergence",
-                    "ancestor_height": ancestor_height,
-                    "ancestor_hash": hex::encode(ancestor_hash),
-                    "local_height": our_height,
-                    "divergence_depth": our_height.saturating_sub(*ancestor_height),
-                }));
+                self.healing.on_common_ancestor_found(*ancestor_height, *ancestor_hash);
             }
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
@@ -3588,9 +3070,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Decay-weighted vote accumulation for chain legitimacy tracking.
                     // Recent blocks' votes count more than older ones (exponential decay).
                     {
-                        let old = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
+                        let old = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
                         let new = noble_consensus::decay_vote_weight(old, votes.voter_count as u64);
-                        self.chain_vote_weight.store(new, std::sync::atomic::Ordering::Relaxed);
+                        self.healing.chain_vote_weight().store(new, std::sync::atomic::Ordering::Relaxed);
                     }
                     if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*votes) {
                         let storage = self.storage.read();
@@ -3936,96 +3418,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
                 CycleIo::RequestForkResolution { target_hash, target_height, reason } => {
-                    tracing::warn!(
-                        task = "fork_resolution",
-                        "AUTO-RESOLVING: {reason} (target height {target_height})"
-                    );
-                    let rollback_height = self.fork_common_ancestor
-                        .map(|(h, _)| h)
-                        .unwrap_or(0); // Fallback to genesis if ancestor unknown
-
-                    {
-                        let storage = self.storage.read();
-                        let result = if rollback_height > 0 {
-                            storage.rollback_to_height(rollback_height, self.get_chain_id())
-                        } else {
-                            storage.force_reset_to_genesis(self.get_chain_id())
-                        };
-                        if let Err(e) = result {
-                            // If rollback_to_height fails (MAX_REORG_DEPTH exceeded), fall back to genesis.
-                            tracing::warn!(
-                                task = "fork_resolution",
-                                "rollback to {rollback_height} failed ({e}), resetting to genesis"
-                            );
-                            if let Err(e2) = storage.force_reset_to_genesis(self.get_chain_id()) {
-                                tracing::error!(task = "fork_resolution", "genesis reset also failed: {e2}");
-                            }
-                        }
-                        if let Err(e) = storage.clear_cycle_history() {
-                            tracing::warn!(task = "fork_resolution", "clear cycle history: {e}");
-                        }
-                    }
-                    {
-                        let storage = self.storage.read();
-                        let tip = match storage.get_chain_tip() {
-                            Ok(Some(t)) => t,
-                            Ok(None) => noble_storage::ChainTip {
-                                block_hash: noble_crypto::Hash256::ZERO,
-                                height: 0,
-                            },
-                            Err(e) => {
-                                tracing::error!(task = "fork_resolution", "get_chain_tip failed after rollback: {e} — falling back to genesis");
-                                noble_storage::ChainTip {
-                                    block_hash: noble_crypto::Hash256::ZERO,
-                                    height: 0,
-                                }
-                            }
-                        };
-                        if let Err(e) = self.consensus.write().reset_tip(tip.height, tip.block_hash, true) {
-                            tracing::error!(task = "fork_resolution", "reset_tip failed: {e}");
-                        }
-                        // Restore tip_header from storage so B2/B3/B5 validation works
-                        // for incoming blocks (prevents false DuplicateProposal bans).
-                        if tip.height > 0 {
-                            match storage.get_block_header(&tip.block_hash) {
-                                Ok(header) => {
-                                    self.consensus.write().update_tip_with_header(header);
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        task = "fork_resolution",
-                                        height = tip.height,
-                                        "failed to restore tip_header — B2/B3/B5 validation degraded until next commit: {e}"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    self.fork_visible = false;
-                    self.fork_common_ancestor = None;
-                    if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
-                        tracing::warn!(task = "commit", "ClearPendingProposals dropped: {e}");
-                    }
-                    // After fork resolution, fetch next block from sync peer if syncing,
-                    // otherwise let gossip-driven sync pick it up.
-                    if self.sync_behind {
-                        if let Some(ref speer) = self.sync_from_peer {
-                            let next = self.consensus.read().chain_tip().0 + 1;
-                            if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
-                                peer_id: speer.clone(),
-                                height: next,
-                            }) {
-                                tracing::warn!(task = "commit", "RequestBlockByHeight after fork resolution dropped: {e}");
-                            }
-                        }
-                    }
-                    let _ = cycle_phase_tx.send(serde_json::json!({
-                        "event": "fork_auto_resolved",
-                        "target_height": target_height,
-                        "target_hash": hex::encode(target_hash.as_bytes()),
-                        "rollback_height": rollback_height,
-                        "reason": reason,
-                    }));
+                    self.healing.on_fork_resolution_requested(target_hash, target_height, &reason);
                 }
                 CycleIo::PersistCheckpoint(cp) => {
                     let cbor = noble_codec::NobleCbor::to_cbor(&*cp).unwrap_or_default();
@@ -4047,7 +3440,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
                 }
                 CycleIo::RequestChainAdoption { target_chain_id, reason } => {
-                    self.perform_chain_adoption(target_chain_id, &reason, network_cmd, cycle_phase_tx);
+                    self.healing.on_chain_adoption_requested(target_chain_id, &reason);
                 }
                 other => {
                     // Emit protocol activity events for votes and bans
@@ -4131,344 +3524,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         }
     }
 
-    /// Wipe local chain and reset to pre-genesis state for cross-chain adoption.
-    ///
-    /// Called both from the `CycleIo::RequestChainAdoption` handler (normal
-    /// cross-chain evaluation path) and from the `NodeAnnounceReceived` handler
-    /// (fast-path for early-chain nodes ≤ `EARLY_CHAIN_HEIGHT_LIMIT`).
-    fn perform_chain_adoption(
-        &mut self,
-        target_chain_id: u32,
-        reason: &str,
-        network_cmd: &tokio::sync::mpsc::Sender<noble_network::NetworkCommand>,
-        cycle_phase_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
-    ) {
-        tracing::warn!(
-            task = "chain_adoption",
-            "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
-            target_chain_id
-        );
-        // 1. Wipe ALL chain data (including genesis) — true clean slate.
-        //    If the wipe fails, abort adoption to avoid inconsistent state
-        //    (chain_id=0 but storage still has old blocks → sync import PrevHashMismatch).
-        {
-            let storage = self.storage.read();
-            if let Err(e) = storage.wipe_all_chain_data() {
-                tracing::error!(
-                    task = "chain_adoption",
-                    "wipe_all_chain_data failed: {e} — ABORTING adoption to avoid inconsistent state"
-                );
-                return;
-            }
-            if let Err(e) = storage.clear_cycle_history() {
-                tracing::warn!(task = "chain_adoption", "clear_cycle_history: {e}");
-            }
-        }
-        // 2. Reset chain_id to 0 (pre-genesis state) so we accept any chain.
-        self.chain_id.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.chain_vote_weight.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.fork_visible = false;
-        self.fork_common_ancestor = None;
-        // 2c. Clear announce cache — old entries reflect the pre-adoption chain
-        // and would cause false equivocation positives when peers re-announce.
-        self.announce_cache.lock().clear();
-        // 2b. Clear discovered blockchains to prevent ping-pong adoption.
-        {
-            let mut discovered = self.discovered_blockchains.lock();
-            discovered.clear();
-        }
-        self.persist_discovered_blockchains();
-        // 3. Tell network service to update chain_id + tip_height + clear cooldowns.
-        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateChainId(0)) {
-            tracing::warn!(task = "chain_adoption", "failed to send UpdateChainId(0): {e}");
-        }
-        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::UpdateTipHeight(0)) {
-            tracing::warn!(task = "chain_adoption", "UpdateTipHeight(0) dropped: {e}");
-        }
-        // 4. Reset consensus engine to height 0, no chain tip.
-        {
-            if let Err(e) = self.consensus.write().reset_tip(0, noble_crypto::Hash256::ZERO, true) {
-                tracing::error!(task = "chain_adoption", "failed to reset consensus tip: {e}");
-            }
-        }
-        // 5. Reset sync state — stale sync targets from the old chain must not
-        //    block fresh sync from the adopted chain's peers.
-        self.sync_behind = false;
-        self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
-        self.sync_from_peer = None;
-        self.sync_target_height = None;
-        self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.last_sync_request_at = 0;
-        // 6. Clear stale proposals and request sync from new chain peers.
-        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::ClearPendingProposals) {
-            tracing::warn!(task = "chain_adoption", "ClearPendingProposals dropped: {e}");
-        }
-        if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestSync) {
-            tracing::warn!(task = "chain_adoption", "RequestSync dropped: {e}");
-        }
-        if cycle_phase_tx.send(serde_json::json!({
-            "event": "chain_adoption_started",
-            "target_chain_id": format!("{:#010X}", target_chain_id),
-            "reason": reason,
-        })).is_err() {
-            tracing::debug!(task = "chain_adoption", "chain_adoption_started broadcast: no subscribers");
-        }
-    }
-
-    /// Import a committed block from a sync peer directly to storage,
-    /// bypassing the consensus voting pipeline.
-    ///
-    /// Used when the node is behind and receives blocks outside the Validation
-    /// phase window.  Validates B1-B11 against the parent in storage, commits
-    /// if valid, and updates the consensus engine tip.
-    #[allow(clippy::too_many_arguments)]
-    fn try_sync_import(
-        &self,
-        block: noble_core::Block,
-        _peer_id: &[u8],
-        tip_height: u64,
-        network_cmd: &tokio::sync::mpsc::Sender<noble_network::NetworkCommand>,
-        new_block_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
-        cycle_phase_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
-        metrics: &Option<crate::metrics::NobleMetrics>,
-    ) {
-        let storage = self.storage.read();
-
-        // Load parent header from storage for B2/B3/B5 validation.
-        // Abort sync import if storage fails — proceeding without parent_header
-        // would skip prev_hash, height sequence, and timestamp ordering checks.
-        let parent_header = if tip_height > 0 {
-            let chain_tip = match storage.get_chain_tip() {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    tracing::error!(task = "sync_import", "chain tip missing at height {tip_height} — aborting sync import");
-                    return;
-                }
-                Err(e) => {
-                    tracing::error!(task = "sync_import", "failed to load chain tip: {e} — aborting sync import");
-                    return;
-                }
-            };
-            match storage.get_block_header(&chain_tip.block_hash) {
-                Ok(header) => Some(header),
-                Err(e) => {
-                    tracing::error!(task = "sync_import", "failed to load parent header: {e} — aborting sync import");
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
-        // For sync imports, use the block's own timestamp as "current_time" so the
-        // B6 skew check passes.  Historical blocks are expected to have old timestamps.
-        // All other validation (B2 prev_hash, B3 height, B5 ordering, B8 sig) still
-        // provides full security against invalid blocks.
-        let current_time = block.header.timestamp;
-
-        // Any validator can propose — include block's own validator_id.
-        let engine = self.consensus.read();
-        let mut val_list = engine.validator_list().as_pubkey_vec();
-        if !val_list.contains(&block.header.validator_id) {
-            val_list.push(block.header.validator_id.clone());
-        }
-        drop(engine);
-
-        let ctx = noble_core::BlockValidationContext {
-            chain_id: self.get_chain_id(),
-            current_time,
-            parent: parent_header.as_ref(),
-            validator_list: &val_list,
-        };
-
-        if let Err(e) = noble_core::validate_block(&block, &ctx) {
-            // Fork disagreement (B2/B3 mismatch) → not a ban, just skip.
-            let is_fork = matches!(
-                e,
-                noble_core::ValidationError::PrevHashMismatch
-                    | noble_core::ValidationError::HeightMismatch { .. }
-                    | noble_core::ValidationError::TimestampNotAfterParent { .. }
-            );
-            if is_fork {
-                tracing::info!(
-                    task = "sync_import",
-                    "sync block at height {} rejected (fork disagreement): {e}",
-                    block.header.height
-                );
-            } else {
-                tracing::warn!(
-                    task = "sync_import",
-                    "sync block at height {} rejected: {e}",
-                    block.header.height
-                );
-            }
-            return;
-        }
-
-        let block_hash = match block.header.compute_block_hash() {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(task = "sync_import", "block hash computation failed: {e}");
-                return;
-            }
-        };
-
-        let tx_ids: Vec<noble_crypto::Hash256> = block
-            .transactions
-            .iter()
-            .filter_map(|tx| {
-                tx.compute_tx_id(self.get_chain_id()).map_err(|e| {
-                    tracing::warn!(task = "sync_import", "tx_id computation failed: {e}");
-                }).ok()
-            })
-            .collect();
-
-        if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
-            tracing::error!(
-                task = "sync_import",
-                "failed to commit sync block {}: {e}",
-                block.header.height
-            );
-            return;
-        }
-        drop(storage);
-
-        // Update consensus engine tip.
-        {
-            let mut engine = self.consensus.write();
-            engine.update_tip_with_header(block.header.clone());
-        }
-
-        // Block 1 sync-import: clear stale cycle history from the bootstrap epoch.
-        // Parity with the consensus CommitBlock path (CycleIo::ClearCycleHistory).
-        // The cycle numbers from the wall-clock-aligned epoch are meaningless after
-        // the epoch shifts to block 1's real timestamp.
-        if block.header.height == 1 {
-            let storage = self.storage.read();
-            if let Err(e) = storage.clear_cycle_history() {
-                tracing::warn!(
-                    task = "sync_import",
-                    "failed to clear stale cycle history after block 1 epoch change: {e}"
-                );
-            } else {
-                tracing::info!(
-                    task = "sync_import",
-                    "cleared stale cycle history (block 1 epoch change via sync-import)"
-                );
-            }
-            drop(storage);
-        }
-
-        // Decay-weighted vote accumulation during sync import.
-        // We don't have the full vote tally for historical blocks, but each
-        // committed block had at least 1 voter (the proposer).  Applying decay
-        // with 1 vote keeps the accumulator from stagnating at 0 for synced nodes.
-        {
-            let old = self.chain_vote_weight.load(std::sync::atomic::Ordering::Relaxed);
-            let new = noble_consensus::decay_vote_weight(old, 1);
-            self.chain_vote_weight.store(new, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        // Auto-update chain_id after first sync-import (same as CommitBlock handler).
-        // Consensus-bootstrapped chains start at height 1 (no block 0), so we
-        // derive chain_id from the first block we successfully import, any height.
-        // CRITICAL: Must update BOTH the Node atomic AND the network service config.
-        if self.get_chain_id() == 0 {
-            let new_chain_id = noble_core::derive_chain_id(&block_hash);
-            self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
-            if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateChainId(new_chain_id)) {
-                tracing::warn!(task = "sync_import", "failed to update network chain_id: {e}");
-            }
-            tracing::info!(
-                task = "sync_import",
-                "chain_id updated to {:#010X} after block {} sync-import",
-                new_chain_id,
-                block.header.height,
-            );
-        }
-
-        // Update network service tip height (used by early-chain exemption).
-        if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateTipHeight(block.header.height)) {
-            tracing::debug!(task = "sync_import", "UpdateTipHeight dropped: {e}");
-        }
-
-        // Remove committed txs from mempool.
-        {
-            let mut mempool = self.mempool.lock();
-            for tx_id in &tx_ids {
-                mempool.remove(tx_id);
-            }
-        }
-
-        if let Some(ref m) = metrics {
-            m.block_validation_duration.observe(0.0);
-        }
-
-        tracing::info!(
-            task = "sync_import",
-            "Sync-imported block {} (hash: {}, txs: {})",
-            block.header.height,
-            hex::encode(block_hash.as_bytes()),
-            tx_ids.len()
-        );
-
-        // Emit sync_progress to event viewer so the GUI shows each imported block.
-        if cycle_phase_tx.send(serde_json::json!({
-            "event": "sync_progress",
-            "height": block.header.height,
-            "hash": hex::encode(block_hash.as_bytes()),
-            "tx_count": tx_ids.len(),
-        })).is_err() {
-            tracing::debug!(task = "sync_import", "sync_progress broadcast: no subscribers");
-        }
-
-        // S53: Clear active proposal on tip advancement.
-        *self.last_proposed.lock() = None;
-
-        if new_block_tx.send(serde_json::json!({
-            "height": block.header.height,
-            "hash": hex::encode(block_hash.as_bytes()),
-            "tx_count": tx_ids.len(),
-            "source": "sync",
-        })).is_err() {
-            tracing::debug!(task = "sync_import", "new_block broadcast: no subscribers");
-        }
-
-        // Check if we've reached the sync target — complete immediately
-        // instead of waiting for the next PeerChainTipUpdated event.
-        // NOTE: We use shared atomics here because try_sync_import takes &self.
-        // The caller (run loop with &mut self) will sync local fields from the atomics.
-        let committed_height = block.header.height;
-        let target = self.sync_target_height_shared.load(std::sync::atomic::Ordering::Relaxed);
-        if self.sync_behind_shared.load(std::sync::atomic::Ordering::Relaxed) && target > 0 {
-            if committed_height >= target {
-                self.sync_behind_shared.store(false, std::sync::atomic::Ordering::Relaxed);
-                self.sync_target_height_shared.store(0, std::sync::atomic::Ordering::Relaxed);
-                if cycle_phase_tx.send(serde_json::json!({
-                    "event": "sync_complete",
-                    "height": committed_height,
-                })).is_err() {
-                    tracing::debug!(task = "sync_import", "sync_complete broadcast: no subscribers");
-                }
-                tracing::info!(
-                    task = "sync_import",
-                    "Sync complete — caught up at height {}",
-                    committed_height
-                );
-                return;
-            }
-            // Still behind — request next block from the same peer.
-            if let Some(ref speer) = self.sync_from_peer {
-                let next = committed_height + 1;
-                if let Err(e) = network_cmd.try_send(noble_network::NetworkCommand::RequestBlockByHeight {
-                    peer_id: speer.clone(),
-                    height: next,
-                }) {
-                    tracing::warn!(task = "sync_import", "RequestBlockByHeight continuation dropped: {e}");
-                }
-            }
-        }
-    }
 }
 
 // Adapter structs for mempool admit within the event loop
@@ -5059,7 +4114,7 @@ fn build_consensus_config(config: &NodeConfig) -> CConsensusConfig {
         &config.consensus.voting_subset,
     );
 
-    let fork_resolution_strategy = parse_fork_resolution_strategy(
+    let fork_resolution_strategy = crate::healing::parse_fork_resolution_strategy(
         &config.consensus.fork_resolution_strategy,
     );
 
@@ -5103,119 +4158,6 @@ fn parse_voting_strategy(
             VotingStrategy::FirstValid
         }
     }
-}
-
-/// Parse a fork resolution strategy name into a `ForkResolutionStrategy`.
-fn parse_fork_resolution_strategy(name: &str) -> noble_consensus::ForkResolutionStrategy {
-    use noble_consensus::ForkResolutionStrategy;
-    match name {
-        "manual" => ForkResolutionStrategy::Manual,
-        "peer_supermajority" => ForkResolutionStrategy::PeerSupermajority,
-        "longest_most_legitimate" => ForkResolutionStrategy::LongestMostLegitimate,
-        "longest_chain" => {
-            tracing::warn!(
-                task = "config_load",
-                "fork_resolution_strategy 'longest_chain' is deprecated — using 'longest_most_legitimate'"
-            );
-            ForkResolutionStrategy::LongestMostLegitimate
-        }
-        other => {
-            tracing::warn!(
-                task = "config_load",
-                "Unknown fork resolution strategy '{other}', falling back to manual"
-            );
-            ForkResolutionStrategy::Manual
-        }
-    }
-}
-
-/// Compute fork groups from connected peer chain tips for the ForkResolver.
-///
-/// Groups peers by `chain_tip_hash` (same logic as `getDetectedForks` RPC).
-/// Always includes the local chain as `is_local = true`.
-///
-/// `chain_owner_key` is block 1's validator wire bytes. When a peer's
-/// `identity_key` matches, or the local node's `our_identity_key` matches,
-/// the corresponding fork group gets `has_chain_owner = true`.
-fn compute_fork_groups(
-    peers: &std::collections::HashMap<String, PeerInfoEntry>,
-    local_height: u64,
-    local_hash: noble_crypto::Hash256,
-    chain_owner_key: Option<&[u8]>,
-    our_identity_key: Option<&[u8]>,
-    local_chain_id: u32,
-) -> Vec<noble_consensus::ForkInfo> {
-    let local_tip_hex = hex::encode(local_hash.as_bytes());
-
-    // Group peers by chain_tip_hash — only same-chain peers.
-    // Cross-chain peers (different chain_id) are handled by the
-    // cross-chain adoption path, not the same-chain fork resolver.
-    let mut groups: std::collections::HashMap<String, (u64, usize)> =
-        std::collections::HashMap::new();
-    for entry in peers.values() {
-        // Skip peers on different chains (or unknown chain — not yet announced).
-        match entry.chain_id {
-            Some(cid) if cid == local_chain_id => {}
-            Some(_) => continue, // different chain
-            None => continue,    // not yet announced
-        }
-        let h = match entry.chain_tip_height { Some(h) => h, None => continue };
-        let hash = match entry.chain_tip_hash.as_ref() { Some(s) => s.clone(), None => continue };
-        let g = groups.entry(hash).or_insert((h, 0usize));
-        g.1 += 1;
-        if h > g.0 {
-            g.0 = h;
-        }
-    }
-
-    // Include local chain.
-    let local_entry = groups.entry(local_tip_hex.clone()).or_insert((local_height, 0));
-    if local_height > local_entry.0 {
-        local_entry.0 = local_height;
-    }
-
-    // Determine which fork group has the chain owner.
-    let mut owner_group: Option<String> = None;
-    if let Some(owner_key) = chain_owner_key {
-        // Check peers for the chain owner.
-        for entry in peers.values() {
-            if let Some(ref ident) = entry.identity_key {
-                if ident.as_slice() == owner_key {
-                    if let Some(ref hash) = entry.chain_tip_hash {
-                        owner_group = Some(hash.clone());
-                    }
-                    break;
-                }
-            }
-        }
-        // Check if WE are the chain owner (local group).
-        if owner_group.is_none() {
-            if let Some(our_key) = our_identity_key {
-                if our_key == owner_key {
-                    owner_group = Some(local_tip_hex.clone());
-                }
-            }
-        }
-    }
-
-    groups
-        .into_iter()
-        .map(|(tip_hash, (height, peer_count))| noble_consensus::ForkInfo {
-            tip_hash: {
-                let mut bytes = [0u8; 32];
-                if let Ok(decoded) = hex::decode(&tip_hash) {
-                    if decoded.len() == 32 {
-                        bytes.copy_from_slice(&decoded);
-                    }
-                }
-                noble_crypto::Hash256::from_bytes(bytes)
-            },
-            height,
-            peer_count,
-            is_local: tip_hash == local_tip_hex,
-            has_chain_owner: owner_group.as_ref() == Some(&tip_hash),
-        })
-        .collect()
 }
 
 /// Resolve the gateway key from config or wallet auto-derivation.

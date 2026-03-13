@@ -403,37 +403,37 @@ async function updateForkStatus() {
       statusText = 'Bootstrap';
       detailText = `forming chain \u00b7 ${peerCount} peer${peerCount !== 1 ? 's' : ''}`;
     } else if (behind === 0) {
-      // "Aligned" means FULL agreement with the majority: same chain_id,
-      // same tip hash, same height, same stored blocks.
-      // All peers with the same tip hash as us are grouped in the local
-      // fork group.  Non-local forks = peers with a different tip hash.
-      // ANY non-local fork means we're NOT fully aligned.
-      if (nonLocalForks.length === 0) {
-        // All peers share our exact chain tip — truly aligned.
-        severity = 'zero';
-        statusText = 'Aligned';
-        detailText = `height ${myHeight}`;
-      } else {
-        // Some peers have a different tip hash.
-        const peersBehind = nonLocalForks.filter(f => f.height < myHeight);
-        const peersAhead = nonLocalForks.filter(f => f.height > myHeight);
-        const peersSameHeight = nonLocalForks.filter(f => f.height === myHeight);
-        if (peersBehind.length > 0) {
-          const lowestPeer = Math.min(...peersBehind.map(f => f.height));
-          const peerGap = myHeight - lowestPeer;
-          severity = 'low';
-          statusText = 'Peer syncing';
-          detailText = `height ${myHeight} \u00b7 peer ${peerGap} block${peerGap !== 1 ? 's' : ''} behind`;
-        } else if (peersSameHeight.length > 0) {
-          // Same height but different tip hash — potential fork
+      // We are at the highest known height.
+      //
+      // "Aligned" = majority of peers share the same chain, same height,
+      // same chain tip.  Peers behind us are simply catching up — that is
+      // their normal operation, not a problem for THIS node.
+      //
+      // Only show divergence when peer(s) at OUR SAME height have a
+      // different tip hash — a genuine fork that may need resolution.
+      const sameHeightForks = nonLocalForks.filter(f => f.height === myHeight);
+      if (sameHeightForks.length > 0) {
+        // Same height, different tip hash — genuine fork.
+        // Check majority: if more peers agree with us, we are aligned.
+        const localFork = forkData.forks.find(f => f.is_local);
+        const localPeers = localFork ? localFork.peer_count : 0;
+        const divergentPeers = sameHeightForks.reduce((s, f) => s + f.peer_count, 0);
+        if (localPeers >= divergentPeers) {
+          // Majority agrees with us — aligned despite minor fork.
+          severity = 'zero';
+          statusText = 'Aligned';
+          detailText = `height ${myHeight}`;
+        } else {
+          // We are in the minority position.
           severity = 'medium';
           statusText = 'Diverged';
           detailText = `height ${myHeight} \u00b7 different tip hash`;
-        } else {
-          severity = 'low';
-          statusText = 'Catching up';
-          detailText = `height ${myHeight}`;
         }
+      } else {
+        // All peers either share our tip or are behind us — aligned.
+        severity = 'zero';
+        statusText = 'Aligned';
+        detailText = `height ${myHeight}`;
       }
     } else if (behind <= 3) {
       severity = 'low';

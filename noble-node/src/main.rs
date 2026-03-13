@@ -7,6 +7,7 @@ mod bridge;
 pub mod ca_store;
 mod config;
 mod gui_server;
+pub mod healing;
 mod tls_cert;
 #[allow(unused)]
 mod lock_order;
