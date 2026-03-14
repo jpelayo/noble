@@ -2,7 +2,7 @@
 
 [package]
 name = "noble-win"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Noble Document Client for Windows (WRY + WebView2)"
 authors = ["InfiniteContext <blockchain@infinitecontext.com>"]

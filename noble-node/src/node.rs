@@ -67,21 +67,23 @@ pub enum NodeError {
 /// All shared locks follow the hierarchy in [`crate::lock_order::LockOrder`].
 /// When acquiring multiple locks, always acquire lower-ordered locks first:
 ///
-/// `WalletKeystore < WalletState < Storage < Consensus < Mempool < NetworkStats < PeerInfo`
+/// `WalletKeystore < WalletState < Storage < ValidatorRegistry < Consensus < Mempool < NetworkStats < PeerInfo`
 pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Shared block/transaction storage. **Lock order: 2 (Storage).**
     pub storage: Arc<RwLock<S>>,
-    /// Transaction mempool. **Lock order: 4 (Mempool).**
+    /// Transaction mempool. **Lock order: 5 (Mempool).**
     pub mempool: Arc<Mutex<Mempool>>,
-    /// PoR consensus engine. **Lock order: 3 (Consensus).**
+    /// Validator/participant registry. **Lock order: 3 (ValidatorRegistry).**
+    pub validator_registry: Arc<RwLock<noble_consensus::ValidatorRegistry>>,
+    /// PoR consensus engine. **Lock order: 4 (Consensus).**
     pub consensus: Arc<RwLock<CycleEngine>>,
     /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
     pub wallet_keystore: Arc<Mutex<KeyStore>>,
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
     pub wallet_state: Arc<Mutex<WalletState>>,
-    /// Network statistics (peer counts). **Lock order: 5 (NetworkStats).**
+    /// Network statistics (peer counts). **Lock order: 6 (NetworkStats).**
     pub network_stats: Arc<RwLock<NetworkStats>>,
-    /// Live connected peer info (H-004). **Lock order: 6 (PeerInfo).**
+    /// Live connected peer info (H-004). **Lock order: 7 (PeerInfo).**
     pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID (mutable via AtomicU32 for cross-chain adoption). Shared with ApiState.
     pub chain_id: Arc<std::sync::atomic::AtomicU32>,
@@ -357,6 +359,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
+        // Wrap the validator list in a ValidatorRegistry for centralized persistence.
+        let validator_registry = noble_consensus::ValidatorRegistry::new(
+            validator_list,
+            Some(validator_list_path.clone()),
+        );
+        let validator_registry = Arc::new(RwLock::new(validator_registry));
+
         // Copy the validator keypair before CycleEngine takes ownership —
         // we need it for signing NodeAnnounce broadcasts.
         // NoblePrivateKey intentionally doesn't implement Clone (zeroize safety),
@@ -372,7 +381,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         let mut engine = CycleEngine::new(
             consensus_config,
-            validator_list,
             tip.height,
             tip.block_hash,
             chain_id,
@@ -517,6 +525,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         Ok(Self {
             storage,
             mempool,
+            validator_registry,
             consensus,
             wallet_keystore,
             wallet_state,
@@ -842,10 +851,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // 3. Validator registry IPs (CBOR-persistent)
         {
-            let engine = self.consensus.read();
-            let mut addrs = engine.validator_list().validator_addresses();
-            addrs.extend(engine.validator_list().known_peer_addresses());
-            drop(engine);
+            let registry = self.validator_registry.read();
+            let mut addrs = registry.validator_addresses();
+            addrs.extend(registry.known_peer_addresses());
+            drop(registry);
             for addr in addrs {
                 for maddr_str in expand_addr(&addr) {
                     try_dial(&maddr_str, cmd);
@@ -933,6 +942,28 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // RPC) is the authoritative source. The TOML file sync above writes to disk
         // but does NOT update the in-memory config struct, so the engine may still
         // have stale defaults (e.g. voting_enabled=false when identity says true).
+        // Re-check validator self-registration: init_with_storage() used TOML
+        // config which may have had stale wants_to_validate=false, causing the
+        // node to remove itself from the validator list. Re-add if identity
+        // says we should be validating.
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        if node_identity.wants_to_validate {
+            if let Some((_, ref pk)) = self.announce_keypair {
+                let mut registry = self.validator_registry.write();
+                if !registry.is_validator(pk) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    registry.add_validator(pk.clone(), 1, now);
+                    tracing::info!(
+                        task = "config_load",
+                        "Re-registered as validator from identity.json: {}",
+                        pk.to_address(),
+                    );
+                }
+            }
+        }
         {
             let mut engine = self.consensus.write();
             engine.set_proposals_enabled(node_identity.wants_to_validate);
@@ -943,27 +974,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 node_identity.wants_to_validate,
                 node_identity.wants_to_vote,
             );
-
-            // Re-check validator self-registration: init_with_storage() used TOML
-            // config which may have had stale wants_to_validate=false, causing the
-            // node to remove itself from the validator list. Re-add if identity
-            // says we should be validating.
-            if node_identity.wants_to_validate {
-                if let Some((_, ref pk)) = self.announce_keypair {
-                    if !engine.validator_list().is_validator(pk) {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        engine.validator_list_mut().add_validator(pk.clone(), 1, now);
-                        tracing::info!(
-                            task = "config_load",
-                            "Re-registered as validator from identity.json: {}",
-                            pk.to_address(),
-                        );
-                    }
-                }
-            }
         }
 
         // --- Start network service ---
@@ -1097,10 +1107,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             // Tertiary fallback: CBOR-persistent IPs (survives chain resets).
             // Includes both validator registry IPs and known peer (candidate) IPs.
             {
-                let engine = self.consensus.read();
-                let mut addrs = engine.validator_list().validator_addresses();
-                addrs.extend(engine.validator_list().known_peer_addresses());
-                drop(engine);
+                let registry = self.validator_registry.read();
+                let mut addrs = registry.validator_addresses();
+                addrs.extend(registry.known_peer_addresses());
+                drop(registry);
                 // Dedup addresses (validators and known_peers may overlap).
                 let addrs: std::collections::HashSet<String> = addrs.into_iter().collect();
                 let mut cbor_dialed = 0u32;
@@ -1544,6 +1554,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let api_state = Arc::new(ApiState {
             storage: self.storage.clone(),
             mempool: self.mempool.clone(),
+            validator_registry: self.validator_registry.clone(),
             consensus: self.consensus.clone(),
             network_cmd: network_cmd.clone(),
             wallet_keystore: self.wallet_keystore.clone(),
@@ -1893,7 +1904,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
 
                     let actions = {
+                        // Inject fresh validator snapshot before tick processing.
+                        let snap = self.validator_registry.read().create_snapshot();
                         let mut engine = self.consensus.write();
+                        engine.set_validator_snapshot(snap);
                         engine.step(CycleEvent::Tick { now })
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
@@ -2202,8 +2216,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Fallback: check persistent peer records in storage for inbound
                 // connections where peer_id_hex may not yet be in known_peers.
                 let peer_name = {
-                    let engine = self.consensus.read();
-                    engine.validator_list().known_peers().values()
+                    let registry = self.validator_registry.read();
+                    registry.known_peers().values()
                         .find(|kp| kp.peer_id_hex.as_deref() == Some(&hex_pid))
                         .and_then(|kp| kp.node_name.clone())
                 }.or_else(|| {
@@ -2496,21 +2510,55 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Update validator registry metadata (host_address, country_code).
                 // Persisted in CBOR so it survives chain resets and enables auto-dial.
                 // Also update known_peers for candidate discovery persistence.
+                // Lock order: ValidatorRegistry(3) before Consensus(4).
                 {
-                    let mut engine = self.consensus.write();
-                    engine.validator_list_mut().update_network_info(
+                    let mut registry = self.validator_registry.write();
+
+                    // Auto-register remote validators into entries so that:
+                    //   - WeightedProbability sees all validators (not just self)
+                    //   - set_friendly_name() / update_network_info() land (not silent NO-OPs)
+                    //   - find_by_wire() resolves names in vote tallies
+                    // Peers that stop validating are removed when they re-announce
+                    // with wants_to_validate=false.
+                    if announce.wants_to_validate {
+                        if !registry.is_validator(&announce.identity_key) {
+                            registry.add_validator(
+                                announce.identity_key.clone(),
+                                1,
+                                now_ts,
+                            );
+                            tracing::info!(
+                                task = "peer_tracking",
+                                "Auto-registered remote validator from NodeAnnounce: {}",
+                                hex::encode(&identity_wire),
+                            );
+                        }
+                    } else {
+                        // Peer no longer validates — remove from entries so
+                        // ordered_validator_keys() stays accurate.
+                        if registry.is_validator(&announce.identity_key) {
+                            registry.remove_validator(&announce.identity_key);
+                            tracing::info!(
+                                task = "peer_tracking",
+                                "Removed remote validator (wants_to_validate=false): {}",
+                                hex::encode(&identity_wire),
+                            );
+                        }
+                    }
+
+                    registry.update_network_info(
                         &announce.identity_key,
                         announce.host_address.clone(),
                         announce.country_code.clone(),
                     );
                     // Set friendly name from NodeAnnounce so vote tallies show names.
                     if !announce.node_name.is_empty() {
-                        engine.validator_list_mut().set_friendly_name(
+                        registry.set_friendly_name(
                             &announce.identity_key,
                             announce.node_name.clone(),
                         );
                     }
-                    engine.validator_list_mut().update_known_peer(
+                    registry.update_known_peer(
                         &hex::encode(&identity_wire),
                         Some(announce.node_name.clone()),
                         announce.host_address.clone(),
@@ -2522,15 +2570,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         Some(hex::encode(&peer_id)),
                         now_ts,
                     );
-                    // Persist CBOR so metadata survives restarts and chain resets.
-                    if let Some(ref path) = self.validator_list_path {
-                        if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(engine.validator_list()) {
-                            if let Err(e) = std::fs::write(path, &bytes) {
-                                tracing::warn!(task = "peer_tracking", "Failed to persist validator list CBOR: {e}");
-                            }
-                        }
+                    // Persist CBOR via registry dirty-flag mechanism.
+                    if let Err(e) = registry.persist_if_dirty() {
+                        tracing::warn!(task = "peer_tracking", "Failed to persist validator registry CBOR: {e}");
                     }
                 }
+
 
                 let is_connected = {
                     let info = self.peer_info.read();
@@ -2748,8 +2793,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let proposer_wire = block.header.validator_id.to_wire_bytes();
                 let proposer_name = {
                     let engine = self.consensus.read();
-                    engine.validator_list().find_by_wire(&proposer_wire)
-                        .map(|ve| ve.name())
+                    engine.validator_snapshot()
+                        .and_then(|snap| snap.find_by_wire(&proposer_wire))
+                        .map(|e| e.name.clone())
                         .filter(|n| !n.is_empty())
                 };
                 // Only emit individual block_received events when not syncing
@@ -2822,8 +2868,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let our_wire = engine.our_validator_wire_bytes();
 
                         // Resolve voter name: validator_list → peer records → self identity
-                        let vn = engine.validator_list().find_by_wire(voter_id)
-                            .map(|ve| ve.name())
+                        let vn = engine.validator_snapshot()
+                            .and_then(|snap| snap.find_by_wire(voter_id))
+                            .map(|e| e.name.clone())
                             .filter(|n| !n.is_empty())
                             .or_else(|| {
                                 self.storage.read()
@@ -2849,8 +2896,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let cn = engine.candidate_tracker().get(&noble_crypto::Hash256(*candidate_hash))
                             .and_then(|entry| {
                                 let wire = entry.block.header.validator_id.to_wire_bytes();
-                                engine.validator_list().find_by_wire(&wire)
-                                    .map(|ve| ve.name())
+                                engine.validator_snapshot()
+                                    .and_then(|snap| snap.find_by_wire(&wire))
+                                    .map(|e| e.name.clone())
                                     .filter(|n| !n.is_empty())
                                     .or_else(|| {
                                         self.storage.read()
@@ -3010,8 +3058,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let proposer_name = {
                         let engine = self.consensus.read();
                         let wire = block.header.validator_id.to_wire_bytes();
-                        engine.validator_list().find_by_wire(&wire)
-                            .map(|ve| ve.name())
+                        engine.validator_snapshot()
+                            .and_then(|snap| snap.find_by_wire(&wire))
+                            .map(|e| e.name.clone())
                             .filter(|n| !n.is_empty())
                     };
                     let _ = cycle_phase_tx.send(serde_json::json!({
@@ -3174,7 +3223,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                     })
                                 });
                                 let name_from_list = wire.as_ref().and_then(|w| {
-                                    let n = engine.validator_list().find_by_wire(w).map(|v| v.name()).unwrap_or_default();
+                                    let n = engine.validator_snapshot().and_then(|s| s.find_by_wire(w)).map(|e| e.name.clone()).unwrap_or_default();
                                     if n.is_empty() { None } else { Some(n) }
                                 });
                                 ((total_votes, best, name_from_list), wire)
@@ -3234,7 +3283,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                     })
                                 });
                                 let name_from_list = wire.as_ref().and_then(|w| {
-                                    let n = engine.validator_list().find_by_wire(w).map(|v| v.name()).unwrap_or_default();
+                                    let n = engine.validator_snapshot().and_then(|s| s.find_by_wire(w)).map(|e| e.name.clone()).unwrap_or_default();
                                     if n.is_empty() { None } else { Some(n) }
                                 });
                                 ((best, name_from_list, label), wire)
@@ -3485,9 +3534,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 engine.candidate_tracker().get(&vote.candidate_hash)
                                     .and_then(|entry| {
                                         let wire = entry.block.header.validator_id.to_wire_bytes();
-                                        // 1. Validator list lookup
-                                        engine.validator_list().find_by_wire(&wire)
-                                            .map(|ve| ve.name())
+                                        // 1. Validator snapshot lookup
+                                        engine.validator_snapshot()
+                                            .and_then(|snap| snap.find_by_wire(&wire))
+                                            .map(|e| e.name.clone())
                                             .filter(|n| !n.is_empty())
                                             .or_else(|| {
                                                 // 2. Peer records lookup

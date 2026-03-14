@@ -5,9 +5,8 @@
 
 use noble_consensus::config::ConsensusConfig;
 use noble_consensus::cycle::CyclePhase;
-use noble_consensus::validator::ValidatorList;
 use noble_consensus::vote::{PorVote, VoteManager};
-use noble_consensus::{ConsensusStateMachine, CycleEngine, CycleEvent};
+use noble_consensus::{ConsensusStateMachine, CycleEngine, CycleEvent, ValidatorRegistry};
 use noble_crypto::{ed25519, Hash256, NoblePrivateKey};
 use proptest::prelude::*;
 
@@ -31,17 +30,18 @@ proptest! {
         timestamps in proptest::collection::vec(0u64..100_000, 1..20),
     ) {
         let (_vp, vpub) = arb_validator();
-        let mut val_list = ValidatorList::new();
-        val_list.add_validator(vpub, 100, 0);
+        let mut reg = ValidatorRegistry::empty();
+        reg.add_validator(vpub, 100, 0);
+        let snap = reg.create_snapshot();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             noble_test_utils::fixtures::test_chain_id(),
             None,
             Some(0),
         );
+        engine.set_validator_snapshot(snap);
 
         for ts in timestamps {
             engine.step(CycleEvent::Tick { now: ts });
@@ -134,17 +134,18 @@ proptest! {
         tick_time in 0u64..50_000,
     ) {
         let (_vp, vpub) = arb_validator();
-        let mut val_list = ValidatorList::new();
-        val_list.add_validator(vpub, 100, 0);
+        let mut reg = ValidatorRegistry::empty();
+        reg.add_validator(vpub, 100, 0);
+        let snap = reg.create_snapshot();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             noble_test_utils::fixtures::test_chain_id(),
             None,
             Some(0),
         );
+        engine.set_validator_snapshot(snap);
 
         engine.step(CycleEvent::Tick { now: tick_time });
         let (phase_idx, phase_remaining, cycle_remaining) = engine.phase_timing();
@@ -180,17 +181,18 @@ proptest! {
         let (_known_priv, known_pub) = arb_validator();
         let (unknown_priv, unknown_pub) = arb_validator();
 
-        let mut val_list = ValidatorList::new();
-        val_list.add_validator(known_pub, 100, 0);
+        let mut reg = ValidatorRegistry::empty();
+        reg.add_validator(known_pub, 100, 0);
+        let snap = reg.create_snapshot();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             noble_test_utils::fixtures::test_chain_id(),
             None,
             Some(0),
         );
+        engine.set_validator_snapshot(snap);
         engine.step(CycleEvent::Tick { now: cycle * 1200 });
 
         // Force Voting phase for vote acceptance

@@ -105,15 +105,19 @@ impl TestNode {
             .await
             .expect("network should start");
 
-        let engine = CycleEngine::new(
+        let snap = {
+            let mut reg = noble_consensus::ValidatorRegistry::new(validator_list, None);
+            reg.create_snapshot()
+        };
+        let mut engine = CycleEngine::new(
             consensus_config,
-            validator_list,
             0,
             Hash256::ZERO,
             test_chain_id(),
             Some((private_key.clone_for_test(), public_key.clone())),
             Some(0), // tests: genesis at epoch 0
         );
+        engine.set_validator_snapshot(snap);
 
         let mempool = Mempool::new(MempoolConfig::default());
 
@@ -168,7 +172,7 @@ impl TestNode {
         // Update peer count on connect/disconnect.
         match &event {
             NetworkEvent::PeerConnected { .. } => {
-                let current = self.engine.validator_list().len();
+                let current = self.engine.validator_snapshot().map(|s| s.len()).unwrap_or(0);
                 self.engine.set_peer_count(current);
             }
             NetworkEvent::PeerDisconnected { .. } => {}

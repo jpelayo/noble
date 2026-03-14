@@ -109,15 +109,17 @@ pub struct PeerInfoEntry {
 ///
 /// All locks follow the hierarchy defined in `noble-node::lock_order::LockOrder`:
 ///
-/// `WalletKeystore(0) < WalletState(1) < Storage(2) < Consensus(3) < Mempool(4) < NetworkStats(5) < PeerInfo(6) < TotpValidator(7) < MaxNetworkVersion(8) < TlsCertInfo(9)`
+/// `WalletKeystore(0) < WalletState(1) < Storage(2) < ValidatorRegistry(3) < Consensus(4) < Mempool(5) < NetworkStats(6) < PeerInfo(7) < TotpValidator(8) < MaxNetworkVersion(9) < TlsCertInfo(10)`
 ///
 /// When acquiring multiple locks, always acquire lower-ordered locks first.
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Block/transaction persistence. **Lock order: 2 (Storage).**
     pub storage: Arc<RwLock<S>>,
-    /// Transaction mempool. **Lock order: 4 (Mempool).**
+    /// Transaction mempool. **Lock order: 5 (Mempool).**
     pub mempool: Arc<Mutex<Mempool>>,
-    /// Consensus engine (cycle management, validator list). **Lock order: 3 (Consensus).**
+    /// Validator/participant registry. **Lock order: 3 (ValidatorRegistry).**
+    pub validator_registry: Arc<RwLock<noble_consensus::ValidatorRegistry>>,
+    /// Consensus engine (cycle management, validator list). **Lock order: 4 (Consensus).**
     pub consensus: Arc<RwLock<CycleEngine>>,
     /// Channel to send commands to the network service.
     pub network_cmd: mpsc::Sender<NetworkCommand>,
@@ -125,17 +127,17 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub wallet_keystore: Arc<Mutex<KeyStore>>,
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
     pub wallet_state: Arc<Mutex<WalletState>>,
-    /// Network statistics (updated by the node event loop). **Lock order: 5 (NetworkStats).**
+    /// Network statistics (updated by the node event loop). **Lock order: 6 (NetworkStats).**
     pub network_stats: Arc<RwLock<NetworkStats>>,
     /// Chain ID for tx_id computation and validation. Shared with Node so updates propagate.
     pub chain_id: Arc<AtomicU32>,
     /// Server start time (for uptime reporting).
     pub start_time: Instant,
-    /// Highest software version observed across all peer NodeAnnounce messages. **Lock order: 8 (MaxNetworkVersion).**
+    /// Highest software version observed across all peer NodeAnnounce messages. **Lock order: 9 (MaxNetworkVersion).**
     pub max_network_version: Arc<RwLock<String>>,
     /// RPC rate limiter (per-IP token bucket). None = disabled.
     pub rate_limiter: Option<Arc<crate::rate_limit::RpcRateLimiter>>,
-    /// TOTP validator for API authentication. None = auth disabled. **Lock order: 7 (TotpValidator).**
+    /// TOTP validator for API authentication. None = auth disabled. **Lock order: 8 (TotpValidator).**
     pub totp_validator: Option<Arc<RwLock<crate::auth::TotpValidator>>>,
     /// TOTP enforcement scope (All, WriteOnly, None).
     pub totp_scope: crate::middleware::TotpScope,
@@ -175,7 +177,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Path to the validator list persistence file (CBOR). None = no persistence.
     pub validator_list_path: Option<std::path::PathBuf>,
 
-    /// Live connected peer info, keyed by hex peer_id. Updated by the node event loop. **Lock order: 6 (PeerInfo).**
+    /// Live connected peer info, keyed by hex peer_id. Updated by the node event loop. **Lock order: 7 (PeerInfo).**
     pub peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
 
     /// Mutable node identity. Loaded from identity.json (or noble.toml fallback).
@@ -185,19 +187,19 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// SHA-256 fingerprint of the active TLS certificate (hex). None when TLS is disabled.
     /// Wrapped in RwLock so `regenerateTlsCert` / `uploadTlsCert` can update it at runtime.
-    /// **Lock order: 9 (TlsCertInfo).**
+    /// **Lock order: 10 (TlsCertInfo).**
     pub tls_fingerprint: RwLock<Option<String>>,
 
     /// ISO 8601 `not_after` of the active TLS certificate. None when TLS is disabled.
-    /// **Lock order: 9 (TlsCertInfo).**
+    /// **Lock order: 10 (TlsCertInfo).**
     pub tls_expires_at: RwLock<Option<String>>,
 
     /// Unix timestamp (seconds) of `not_after` for `days_remaining` computation.
-    /// **Lock order: 9 (TlsCertInfo).**
+    /// **Lock order: 10 (TlsCertInfo).**
     pub tls_expiry_secs: RwLock<Option<i64>>,
 
     /// Subject Alternative Names of the active TLS certificate.
-    /// **Lock order: 9 (TlsCertInfo).**
+    /// **Lock order: 10 (TlsCertInfo).**
     pub tls_sans: RwLock<Vec<String>>,
 
     /// Callback to regenerate the self-signed TLS certificate.

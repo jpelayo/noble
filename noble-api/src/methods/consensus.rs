@@ -100,21 +100,16 @@ use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
 
-/// Helper to persist the validator list to disk (C-003).
-fn persist_validator_list<S: StorageEngine + Send + Sync + 'static>(
-    state: &ApiState<S>,
-    consensus: &parking_lot::RwLockWriteGuard<'_, noble_consensus::CycleEngine>,
+/// Helper to persist the validator registry to disk (C-003).
+fn persist_validator_registry<S: StorageEngine + Send + Sync + 'static>(
+    registry: &mut noble_consensus::ValidatorRegistry,
 ) -> Result<(), ErrorObjectOwned> {
-    if let Some(ref path) = state.validator_list_path {
-        let bytes = consensus
-            .validator_list()
-            .to_cbor()
-            .map_err(|e| ApiError::Internal(format!("serialize validator list: {e}")))?;
-        std::fs::write(path, &bytes)
-            .map_err(|e| ApiError::Internal(format!("persist validator list: {e}")))?;
-    }
+    registry
+        .persist_if_dirty()
+        .map_err(|e| -> ErrorObjectOwned { ApiError::Internal(e).into() })?;
     Ok(())
 }
+
 
 #[rpc(server, namespace = "noble")]
 pub trait ConsensusApi {
@@ -253,49 +248,45 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             }
         }
 
-        let mut consensus = self.consensus.write();
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        // Update last_seen in the registry (write lock, then drop).
+        {
+            let mut registry = self.validator_registry.write();
 
-        // 1. Update last_seen from peer records (historical data).
-        for rec in &peer_records {
-            if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
-                if consensus.validator_list().is_validator(&pk) {
-                    consensus
-                        .validator_list_mut()
-                        .update_last_seen(&pk, rec.last_seen);
+            // 1. Update last_seen from peer records (historical data).
+            for rec in &peer_records {
+                if let Ok(pk) = NoblePublicKey::from_wire_bytes(&rec.identity_key) {
+                    if registry.is_validator(&pk) {
+                        registry.update_last_seen(&pk, rec.last_seen);
+                    }
+                }
+            }
+
+            // 2. Override: any validator whose identity_key matches a connected peer → alive NOW.
+            for wire_key in &connected_identity_keys {
+                if let Ok(pk) = NoblePublicKey::from_wire_bytes(wire_key) {
+                    if registry.is_validator(&pk) {
+                        registry.update_last_seen(&pk, now);
+                    }
+                }
+            }
+
+            // 3. SELF is never in its own peer_records — inject current timestamp
+            //    so the local validator doesn't show as "unreachable".
+            if let Some(ref self_pk_hex) = self.validator_pubkey {
+                if let Ok(self_pk) = NoblePublicKey::from_wire_bytes(
+                    &hex::decode(self_pk_hex).unwrap_or_default(),
+                ) {
+                    if registry.is_validator(&self_pk) {
+                        registry.update_last_seen(&self_pk, now);
+                    }
                 }
             }
         }
 
-        // 2. Override: any validator whose identity_key matches a connected peer → alive NOW.
-        //    This works even with no PeerRecord (announce arrived, record not yet persisted,
-        //    or gossipsub forwarder PeerId differs from direct connection PeerId).
-        for wire_key in &connected_identity_keys {
-            if let Ok(pk) = NoblePublicKey::from_wire_bytes(wire_key) {
-                if consensus.validator_list().is_validator(&pk) {
-                    consensus
-                        .validator_list_mut()
-                        .update_last_seen(&pk, now);
-                }
-            }
-        }
-
-        // 3. SELF is never in its own peer_records — inject current timestamp
-        //    so the local validator doesn't show as "unreachable".
-        if let Some(ref self_pk_hex) = self.validator_pubkey {
-            if let Ok(self_pk) = NoblePublicKey::from_wire_bytes(
-                &hex::decode(self_pk_hex).unwrap_or_default(),
-            ) {
-                if consensus.validator_list().is_validator(&self_pk) {
-                    consensus
-                        .validator_list_mut()
-                        .update_last_seen(&self_pk, now);
-                }
-            }
-        }
-
-        let validators = consensus
-            .validator_list()
-            .list_validators_with_liveness(now);
+        // Read validator data from registry (read lock).
+        let registry = self.validator_registry.read();
+        let validators = registry.list_validators_with_liveness(now);
         // Compute alive count for listers_count (trust metric).
         let alive_count = validators
             .iter()
@@ -304,6 +295,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             })
             .count();
 
+        let consensus = self.consensus.read();
         let reputation = consensus.reputation();
         let candidate_tracker = consensus.candidate_tracker();
         let entries: Vec<ValidatorEntry> = validators
@@ -381,7 +373,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 let wants_validate = if is_self {
                     // Self always wants to validate (we're in the list).
                     true
-                } else if let Some(kp) = consensus.validator_list().known_peers().get(&key_hex) {
+                } else if let Some(kp) = registry.known_peers().get(&key_hex) {
                     kp.wants_to_validate
                 } else {
                     // No announce data — benefit of doubt.
@@ -452,23 +444,27 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 }
             }
         }
-        for wire in &auto_removed {
-            let wire_hex = hex::encode(wire);
-            match NoblePublicKey::from_wire_bytes(wire) {
-                Ok(pk) => {
-                    consensus.validator_list_mut().remove_validator(&pk);
-                    tracing::info!(
-                        key = %wire_hex,
-                        "Auto-removed non-proposer from validator list (wants_to_validate=false)"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(key = %wire_hex, err = %e, "Auto-kick: failed to parse pubkey");
+        // Drop read locks before acquiring registry write lock for auto-removal.
+        drop(consensus);
+        drop(registry);
+        if !auto_removed.is_empty() {
+            let mut registry = self.validator_registry.write();
+            for wire in &auto_removed {
+                let wire_hex = hex::encode(wire);
+                match NoblePublicKey::from_wire_bytes(wire) {
+                    Ok(pk) => {
+                        registry.remove_validator(&pk);
+                        tracing::info!(
+                            key = %wire_hex,
+                            "Auto-removed non-proposer from validator list (wants_to_validate=false)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(key = %wire_hex, err = %e, "Auto-kick: failed to parse pubkey");
+                    }
                 }
             }
-        }
-        if !auto_removed.is_empty() {
-            persist_validator_list(self, &consensus)?;
+            persist_validator_registry::<S>(&mut registry)?;
         }
 
         // Filter auto-removed entries from the response.
@@ -495,15 +491,17 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         };
         let filtered_count = filtered_entries.len();
 
-        let priority_order: Vec<String> = consensus
-            .validator_list()
-            .priority_order()
-            .iter()
-            .map(|wire| {
-                noble_crypto::noble_addr::encode_wire_bytes(wire)
-                    .unwrap_or_else(|| hex::encode(wire))
-            })
-            .collect();
+        let priority_order: Vec<String> = {
+            let registry = self.validator_registry.read();
+            registry
+                .priority_order()
+                .iter()
+                .map(|wire| {
+                    noble_crypto::noble_addr::encode_wire_bytes(wire)
+                        .unwrap_or_else(|| hex::encode(wire))
+                })
+                .collect()
+        };
 
         Ok(ValidatorListResponse {
             selection_policy: "weighted_random".to_string(),
@@ -519,11 +517,15 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     ) -> Result<ReputationScoreResponse, ErrorObjectOwned> {
         let pk = parse_pubkey_input(&pubkey)?;
 
-        let consensus = self.consensus.read();
-        if !consensus.validator_list().is_validator(&pk) {
-            return Err(ApiError::ValidatorNotFound(pubkey).into());
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        {
+            let registry = self.validator_registry.read();
+            if !registry.is_validator(&pk) {
+                return Err(ApiError::ValidatorNotFound(pubkey).into());
+            }
         }
 
+        let consensus = self.consensus.read();
         let rep_data = consensus.reputation().get(&pk.to_wire_bytes());
         let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
         let (
@@ -632,16 +634,13 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut consensus = self.consensus.write();
-        consensus
-            .validator_list_mut()
-            .add_validator(pk.clone(), effective_weight, now);
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        let mut registry = self.validator_registry.write();
+        registry.add_validator(pk.clone(), effective_weight, now);
         if let Some(n) = name {
-            consensus.validator_list_mut().set_friendly_name(&pk, n);
+            registry.set_friendly_name(&pk, n);
         }
-
-        // C-003: Persist validator list to disk.
-        persist_validator_list(self, &consensus)?;
+        persist_validator_registry::<S>(&mut registry)?;
 
         Ok(true)
     }
@@ -649,14 +648,14 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     async fn remove_validator(&self, public_key: String) -> Result<bool, ErrorObjectOwned> {
         let pk = parse_pubkey_input(&public_key)?;
 
-        let mut consensus = self.consensus.write();
-        let removed = consensus.validator_list_mut().remove_validator(&pk);
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        let mut registry = self.validator_registry.write();
+        let removed = registry.remove_validator(&pk);
         if !removed {
             return Err(ApiError::ValidatorNotFound(public_key).into());
         }
 
-        // C-003: Persist validator list to disk.
-        persist_validator_list(self, &consensus)?;
+        persist_validator_registry::<S>(&mut registry)?;
 
         Ok(true)
     }
@@ -738,12 +737,13 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        let registry = self.validator_registry.read();
         let consensus = self.consensus.read();
         let cycle = consensus.current_cycle();
         let phase = consensus.current_phase();
         let tallies = consensus.vote_tallies();
         let candidate_tracker = consensus.candidate_tracker();
-        let validator_list = consensus.validator_list();
 
         // Build peer announce name lookup as fallback for validators not in local list
         let peer_name_map: std::collections::HashMap<Vec<u8>, String> = {
@@ -784,7 +784,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 let validator = proposer_wire.map(|wire| {
                     let display_key = noble_crypto::noble_addr::encode_wire_bytes(&wire)
                         .unwrap_or_else(|| hex::encode(&wire));
-                    validator_list
+                    registry
                         .find_by_wire(&wire)
                         .map(|v| v.name())
                         .filter(|n| !n.is_empty())
@@ -939,14 +939,12 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             })
             .collect::<Result<Vec<_>, ErrorObjectOwned>>()?;
 
-        let mut consensus = self.consensus.write();
-        consensus
-            .validator_list_mut()
+        // Lock order: ValidatorRegistry(3) before Consensus(4).
+        let mut registry = self.validator_registry.write();
+        registry
             .set_priority_order(wire_order)
             .map_err(|e| ApiError::InvalidParam(e))?;
-
-        // Persist validator list
-        persist_validator_list(self, &consensus)?;
+        persist_validator_registry::<S>(&mut registry)?;
 
         Ok(true)
     }

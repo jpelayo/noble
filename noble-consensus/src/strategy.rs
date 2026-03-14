@@ -13,7 +13,7 @@ use noble_crypto::Hash256;
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::CandidateTracker;
-use crate::validator::ValidatorList;
+use crate::registry::ValidatorSnapshot;
 
 /// Configurable strategy for selecting which candidate block to vote for.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -88,7 +88,7 @@ impl VotingStrategy {
 pub fn select_candidate(
     strategy: &VotingStrategy,
     candidates: &CandidateTracker,
-    validator_list: &ValidatorList,
+    snapshot: &ValidatorSnapshot,
     current_cycle: u64,
     manual_vote: Option<Hash256>,
     vote_tallies: Option<&HashMap<Hash256, usize>>,
@@ -113,7 +113,7 @@ pub fn select_candidate(
         }
 
         VotingStrategy::RoundRobin => {
-            let validators = validator_list.ordered_validator_keys();
+            let validators = snapshot.ordered_validator_keys();
             if validators.is_empty() {
                 return fallback(&all, vote_tallies, current_cycle);
             }
@@ -154,7 +154,7 @@ pub fn select_candidate(
             let mut scored: Vec<(Hash256, u64)> = all
                 .iter()
                 .map(|e| {
-                    let weight = validator_list
+                    let weight = snapshot
                         .weight_of_wire(&e.block.header.validator_id.to_wire_bytes())
                         .unwrap_or(0);
                     (e.block_hash, weight)
@@ -167,7 +167,7 @@ pub fn select_candidate(
         VotingStrategy::FollowMajority => fallback(&all, vote_tallies, current_cycle),
 
         VotingStrategy::WeightedProbability => {
-            let validators = validator_list.ordered_validator_keys();
+            let validators = snapshot.ordered_validator_keys();
             if validators.is_empty() {
                 return fallback(&all, vote_tallies, current_cycle);
             }
@@ -233,11 +233,32 @@ fn fallback(
 mod tests {
     use super::*;
     use crate::candidate::CandidateTracker;
+    use crate::registry::{ValidatorRegistry, ValidatorSnapshot, SnapshotEntry};
     use crate::validator::ValidatorList;
     use noble_core::{Block, BlockHeader, PROTOCOL_VERSION};
     use noble_crypto::{
         ed25519, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
     };
+
+    /// Create an empty snapshot (no validators).
+    fn empty_snapshot() -> ValidatorSnapshot {
+        ValidatorSnapshot {
+            entries: vec![],
+            ordered_keys: vec![],
+            pubkey_vec: vec![],
+            count: 0,
+        }
+    }
+
+    /// Create a snapshot from a list of pubkeys (all weight=1, no names).
+    fn snapshot_from_keys(keys: &[NoblePublicKey]) -> ValidatorSnapshot {
+        let mut reg = ValidatorRegistry::empty();
+        for k in keys {
+            reg.add_validator(k.clone(), 1, 0);
+        }
+        // unwrap the Arc
+        std::sync::Arc::try_unwrap(reg.create_snapshot()).unwrap()
+    }
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
         let (sk, _) = ed25519::generate_keypair();
@@ -292,7 +313,7 @@ mod tests {
     #[test]
     fn first_valid_returns_first_inserted() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let result = select_candidate(&VotingStrategy::FirstValid, &tracker, &vl, 0, None, None);
         // FirstValid returns the first candidate inserted (insertion order = arrival time)
         assert_eq!(result, Some(infos[0].1));
@@ -301,7 +322,7 @@ mod tests {
     #[test]
     fn fixed_validator_selects_correct() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let target_hex = hex::encode(infos[1].0.to_wire_bytes());
         let strategy = VotingStrategy::FixedValidator {
             validator_key: target_hex,
@@ -313,7 +334,7 @@ mod tests {
     #[test]
     fn fixed_validator_fallback_no_tallies() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let strategy = VotingStrategy::FixedValidator {
             validator_key: "deadbeef".to_string(),
         };
@@ -326,7 +347,7 @@ mod tests {
     #[test]
     fn random_is_deterministic() {
         let (tracker, _infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let r1 = select_candidate(&VotingStrategy::Random, &tracker, &vl, 42, None, None);
         let r2 = select_candidate(&VotingStrategy::Random, &tracker, &vl, 42, None, None);
         assert_eq!(r1, r2);
@@ -335,7 +356,7 @@ mod tests {
     #[test]
     fn follow_majority_picks_leader() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let mut tallies = HashMap::new();
         tallies.insert(infos[2].1, 5);
         tallies.insert(infos[0].1, 2);
@@ -353,7 +374,7 @@ mod tests {
     #[test]
     fn follow_majority_fallback_no_tallies() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         // No tallies → Random picks cycle % len
         let result = select_candidate(
             &VotingStrategy::FollowMajority,
@@ -380,7 +401,7 @@ mod tests {
     #[test]
     fn manual_returns_manual_vote() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let result = select_candidate(
             &VotingStrategy::Manual,
             &tracker,
@@ -395,7 +416,7 @@ mod tests {
     #[test]
     fn manual_returns_none_without_vote() {
         let (tracker, _infos) = setup_tracker_3();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let result = select_candidate(&VotingStrategy::Manual, &tracker, &vl, 0, None, None);
         assert!(result.is_none());
     }
@@ -403,7 +424,7 @@ mod tests {
     #[test]
     fn empty_tracker_returns_none() {
         let tracker = CandidateTracker::new();
-        let vl = ValidatorList::new();
+        let vl = empty_snapshot();
         let result = select_candidate(&VotingStrategy::FirstValid, &tracker, &vl, 0, None, None);
         assert!(result.is_none());
     }
@@ -411,10 +432,8 @@ mod tests {
     #[test]
     fn round_robin_rotates() {
         let (tracker, infos) = setup_tracker_3();
-        let mut vl = ValidatorList::new();
-        for (pub_key, _) in &infos {
-            vl.add_validator(pub_key.clone(), 1, 0);
-        }
+        let keys: Vec<NoblePublicKey> = infos.iter().map(|(pk, _)| pk.clone()).collect();
+        let vl = snapshot_from_keys(&keys);
         // Different cycles should potentially select different validators
         let r0 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 0, None, None);
         let r1 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 1, None, None);
@@ -428,13 +447,14 @@ mod tests {
     #[test]
     fn round_robin_uses_manual_order() {
         let (tracker, infos) = setup_tracker_3();
-        let mut vl = ValidatorList::new();
+        let mut reg = ValidatorRegistry::empty();
         for (pub_key, _) in &infos {
-            vl.add_validator(pub_key.clone(), 1, 0);
+            reg.add_validator(pub_key.clone(), 1, 0);
         }
         // Reverse the order: infos[2], infos[1], infos[0]
         let reversed: Vec<Vec<u8>> = infos.iter().rev().map(|(pk, _)| pk.to_wire_bytes()).collect();
-        vl.set_priority_order(reversed).unwrap();
+        reg.set_priority_order(reversed).unwrap();
+        let vl = std::sync::Arc::try_unwrap(reg.create_snapshot()).unwrap();
 
         // Cycle 0 should pick infos[2] (first in reversed order)
         let r0 = select_candidate(&VotingStrategy::RoundRobin, &tracker, &vl, 0, None, None);
@@ -452,10 +472,8 @@ mod tests {
     #[test]
     fn weighted_probability_favors_first() {
         let (tracker, infos) = setup_tracker_3();
-        let mut vl = ValidatorList::new();
-        for (pub_key, _) in &infos {
-            vl.add_validator(pub_key.clone(), 1, 0);
-        }
+        let keys: Vec<NoblePublicKey> = infos.iter().map(|(pk, _)| pk.clone()).collect();
+        let vl = snapshot_from_keys(&keys);
         // With 3 validators, weights [3,2,1], total=6.
         // Cycles 0,1,2 → position 0; cycles 3,4 → position 1; cycle 5 → position 2
         let mut counts = [0usize; 3];
@@ -494,10 +512,8 @@ mod tests {
     #[test]
     fn weighted_probability_deterministic() {
         let (tracker, infos) = setup_tracker_3();
-        let mut vl = ValidatorList::new();
-        for (pub_key, _) in &infos {
-            vl.add_validator(pub_key.clone(), 1, 0);
-        }
+        let keys: Vec<NoblePublicKey> = infos.iter().map(|(pk, _)| pk.clone()).collect();
+        let vl = snapshot_from_keys(&keys);
         let r1 = select_candidate(&VotingStrategy::WeightedProbability, &tracker, &vl, 42, None, None);
         let r2 = select_candidate(&VotingStrategy::WeightedProbability, &tracker, &vl, 42, None, None);
         assert_eq!(r1, r2);
@@ -506,7 +522,7 @@ mod tests {
     #[test]
     fn weighted_probability_fallback_empty() {
         let (tracker, infos) = setup_tracker_3();
-        let vl = ValidatorList::new(); // empty validator list
+        let vl = empty_snapshot(); // empty validator list
         // No tallies → FollowMajority has nothing → Random picks cycle % len
         let result = select_candidate(
             &VotingStrategy::WeightedProbability,

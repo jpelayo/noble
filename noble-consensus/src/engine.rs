@@ -22,7 +22,6 @@ use crate::cycle::{CycleManager, CyclePhase};
 use crate::event::{CycleEvent, CycleIo};
 use crate::history::{CycleHistoryEntry, CycleProposal, CycleVoteTally};
 use crate::reputation::ReputationEngine;
-use crate::validator::ValidatorList;
 use crate::vote::{MigrationResult, PorVote, VoteManager};
 
 /// Accept votes from peers whose clocks are up to this many seconds ahead.
@@ -55,7 +54,6 @@ pub struct CycleEngine {
     cycle_mgr: CycleManager,
     vote_mgr: VoteManager,
     candidate_tracker: CandidateTracker,
-    validator_list: ValidatorList,
     /// Chain tip: (height, block_hash, timestamp).
     tip_height: u64,
     tip_hash: Hash256,
@@ -119,6 +117,9 @@ pub struct CycleEngine {
     /// Optional UTXO value lookup for accurate fee computation in proposals.
     /// When None, fees default to 0 (coinbase gets subsidy only).
     utxo_value_lookup: Option<Box<dyn crate::proposal::UtxoValueLookup + Send + Sync>>,
+    /// Immutable validator snapshot injected per tick from ValidatorRegistry.
+    /// When set, consensus operations use this instead of the internal validator_list.
+    validator_snapshot: Option<std::sync::Arc<crate::registry::ValidatorSnapshot>>,
 }
 
 impl CycleEngine {
@@ -131,7 +132,6 @@ impl CycleEngine {
     /// the engine will enter genesis-proposal mode until the first block is committed.
     pub fn new(
         config: ConsensusConfig,
-        validator_list: ValidatorList,
         tip_height: u64,
         tip_hash: Hash256,
         chain_id: u32,
@@ -152,7 +152,6 @@ impl CycleEngine {
             cycle_mgr,
             vote_mgr: VoteManager::new(),
             candidate_tracker: CandidateTracker::new(),
-            validator_list,
             tip_height,
             tip_hash,
             tip_timestamp: 0,
@@ -187,7 +186,21 @@ impl CycleEngine {
                 confirmation_threshold,
             ),
             utxo_value_lookup: None,
+            validator_snapshot: None,
         }
+    }
+
+    /// Inject a validator snapshot for this tick cycle.
+    ///
+    /// When set, consensus operations (voting strategies, block validation,
+    /// name resolution) use the snapshot instead of the internal validator_list.
+    pub fn set_validator_snapshot(&mut self, snap: std::sync::Arc<crate::registry::ValidatorSnapshot>) {
+        self.validator_snapshot = Some(snap);
+    }
+
+    /// Get the current validator snapshot, if set.
+    pub fn validator_snapshot(&self) -> Option<&std::sync::Arc<crate::registry::ValidatorSnapshot>> {
+        self.validator_snapshot.as_ref()
     }
 
     /// Set the UTXO value lookup for accurate fee computation in block proposals.
@@ -240,9 +253,7 @@ impl CycleEngine {
     fn candidate_label(&self, hash: &noble_crypto::Hash256) -> String {
         if let Some(entry) = self.candidate_tracker.get(hash) {
             let wire = entry.block.header.validator_id.to_wire_bytes();
-            let name = self.validator_list.find_by_wire(&wire)
-                .map(|v| v.name())
-                .unwrap_or_default();
+            let name = self.snapshot_find_name(&wire);
             if !name.is_empty() {
                 return name;
             }
@@ -304,14 +315,26 @@ impl CycleEngine {
         self.tracked_phase
     }
 
-    /// Get a reference to the validator list.
-    pub fn validator_list(&self) -> &ValidatorList {
-        &self.validator_list
+    /// Resolve a validator name from the snapshot.
+    fn snapshot_find_name(&self, wire: &[u8]) -> String {
+        self.validator_snapshot
+            .as_ref()
+            .and_then(|snap| snap.find_by_wire(wire))
+            .map(|e| e.name.clone())
+            .unwrap_or_default()
     }
 
-    /// Get a mutable reference to the validator list.
-    pub fn validator_list_mut(&mut self) -> &mut ValidatorList {
-        &mut self.validator_list
+    /// Get validator count from the snapshot.
+    fn snapshot_len(&self) -> usize {
+        self.validator_snapshot.as_ref().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Get pubkey vec from snapshot.
+    fn snapshot_pubkey_vec(&self) -> Vec<NoblePublicKey> {
+        self.validator_snapshot
+            .as_ref()
+            .map(|s| s.pubkey_vec.clone())
+            .unwrap_or_default()
     }
 
     /// Get a reference to the candidate tracker (for API queries).
@@ -771,7 +794,7 @@ impl CycleEngine {
         // denominator so that a single self-voter doesn't trivially win on an
         // otherwise idle network.
         let unique_voters = self.vote_mgr.unique_voter_count();
-        let validator_set_size = self.validator_list.len();
+        let validator_set_size = self.snapshot_len();
         let voter_count = unique_voters.max(validator_set_size).max(1);
         let result = self.vote_mgr.compute_majority(voter_count, &self.config);
 
@@ -845,11 +868,7 @@ impl CycleEngine {
                                 .iter()
                                 .map(|key| crate::history::BlockVoter {
                                     validator_key: hex::encode(key),
-                                    name: self
-                                        .validator_list
-                                        .find_by_wire(key)
-                                        .map(|ve| ve.name())
-                                        .unwrap_or_default(),
+                                    name: self.snapshot_find_name(key),
                                 })
                                 .collect();
                             let r2_voters: Vec<crate::history::BlockVoter> = self
@@ -858,11 +877,7 @@ impl CycleEngine {
                                 .iter()
                                 .map(|key| crate::history::BlockVoter {
                                     validator_key: hex::encode(key),
-                                    name: self
-                                        .validator_list
-                                        .find_by_wire(key)
-                                        .map(|ve| ve.name())
-                                        .unwrap_or_default(),
+                                    name: self.snapshot_find_name(key),
                                 })
                                 .collect();
                             let unique_witness =
@@ -1021,12 +1036,10 @@ impl CycleEngine {
 
         // S15-A: Update reputation scores at cycle boundary.
         {
-            let all_validators: Vec<Vec<u8>> = self
-                .validator_list
-                .list_validators()
-                .iter()
-                .map(|(pk, _)| pk.to_wire_bytes())
-                .collect();
+            let all_validators: Vec<Vec<u8>> = self.validator_snapshot
+                .as_ref()
+                .map(|snap| snap.entries.iter().map(|(wire, _)| wire.clone()).collect())
+                .unwrap_or_default();
 
             // Determine the winning proposer and losing proposers.
             let winner_wire: Option<Vec<u8>> = match &result {
@@ -1368,7 +1381,7 @@ impl CycleEngine {
         // signature is allowed to propose — the local validator_list only controls
         // who this node votes for, not who can propose.  We include the block's
         // own validator_id so B9 always passes for the proposer.
-        let mut val_list = self.validator_list.as_pubkey_vec();
+        let mut val_list = self.snapshot_pubkey_vec();
         if !val_list.contains(&block.header.validator_id) {
             val_list.push(block.header.validator_id.clone());
         }
@@ -1738,7 +1751,7 @@ impl CycleEngine {
             Ok(block) => {
                 // P0-3: Validate self-proposed block before broadcast (same checks as remote proposals).
                 let current_time = now;
-                let val_list = self.validator_list.as_pubkey_vec();
+                let val_list = self.snapshot_pubkey_vec();
                 let ctx = BlockValidationContext {
                     chain_id: self.chain_id,
                     current_time,
@@ -1839,10 +1852,14 @@ impl CycleEngine {
         let tallies = self.vote_mgr.current_tallies();
         // P1.3: Pass manual_vote to strategy selector
         let manual = self.manual_vote.take();
+        let empty_snap = crate::registry::ValidatorSnapshot {
+            entries: vec![], ordered_keys: vec![], pubkey_vec: vec![], count: 0,
+        };
+        let snap_ref = self.validator_snapshot.as_deref().unwrap_or(&empty_snap);
         let selected = crate::strategy::select_candidate(
             &self.config.voting_strategy,
             &self.candidate_tracker,
-            &self.validator_list,
+            snap_ref,
             cycle,
             manual,
             Some(&tallies),
@@ -1907,10 +1924,14 @@ impl CycleEngine {
 
         // Use confirmation_strategy applied to current R1 tallies.
         let tallies = self.vote_mgr.current_tallies();
+        let empty_snap = crate::registry::ValidatorSnapshot {
+            entries: vec![], ordered_keys: vec![], pubkey_vec: vec![], count: 0,
+        };
+        let snap_ref = self.validator_snapshot.as_deref().unwrap_or(&empty_snap);
         let selected = crate::strategy::select_candidate(
             &self.config.confirmation_strategy,
             &self.candidate_tracker,
-            &self.validator_list,
+            snap_ref,
             cycle,
             None,
             Some(&tallies),
@@ -2137,19 +2158,20 @@ mod tests {
         validators: &[NoblePublicKey],
         peers: usize,
     ) -> CycleEngine {
-        let mut val_list = ValidatorList::new();
+        let mut reg = crate::registry::ValidatorRegistry::empty();
         for v in validators {
-            val_list.add_validator(v.clone(), 100, 0);
+            reg.add_validator(v.clone(), 100, 0);
         }
+        let snap = reg.create_snapshot();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             test_chain_id(),
             validator_key,
             Some(noble_core::GENESIS_TIMESTAMP),
         );
+        engine.set_validator_snapshot(snap);
         engine.set_peer_count(peers);
         engine
     }
@@ -2749,10 +2771,8 @@ mod tests {
         // Engine with genesis_timestamp=None → first tick sets a wall-clock-aligned epoch.
         // `aligned = floor(now / 1200) * 1200`, so `current_cycle(now)` is 0 or 1.
         let (vp, vpub) = make_validator();
-        let val_list = ValidatorList::new();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             test_chain_id(),
@@ -2788,10 +2808,8 @@ mod tests {
     fn wall_clock_aligned_epoch_produces_cycle_zero() {
         // Regardless of when the node starts, bootstrap always produces cycle 0.
         let (vp, vpub) = make_validator();
-        let val_list = ValidatorList::new();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
-            val_list,
             0,
             Hash256::ZERO,
             test_chain_id(),

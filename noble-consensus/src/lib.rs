@@ -15,6 +15,7 @@ pub mod finality;
 pub mod fork_resolver;
 pub mod history;
 pub mod proposal;
+pub mod registry;
 pub mod reputation;
 pub mod strategy;
 pub mod validator;
@@ -41,5 +42,6 @@ pub use history::{BlockVoter, BlockVotes, CycleHistoryEntry, CycleProposal, Cycl
 pub use proposal::propose_block;
 pub use reputation::{ReputationData, ReputationEngine};
 pub use strategy::VotingStrategy;
+pub use registry::{ParticipantEntry, ParticipantSource, ValidatorRegistry, ValidatorSnapshot, SnapshotEntry};
 pub use validator::{KnownPeerEntry, PendingRotation, ValidatorList, ValidatorLiveness};
 pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteError, VoteManager};

@@ -29,7 +29,7 @@ use noble_api::methods::transaction::TransactionApiServer;
 use noble_api::methods::wallet::WalletApiServer;
 use noble_api::{ApiState, NetworkStats, NodeIdentityData};
 
-use noble_consensus::{ConsensusConfig, CycleEngine, ValidatorList};
+use noble_consensus::{ConsensusConfig, CycleEngine};
 use noble_mempool::Mempool;
 use noble_test_utils::fixtures::{test_chain_id, test_genesis_block, test_genesis_hash};
 use noble_storage::{MemoryStorage, StorageEngine};
@@ -60,7 +60,6 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let (network_cmd, _rx) = tokio::sync::mpsc::channel(16);
     let consensus = Arc::new(RwLock::new(CycleEngine::new(
         ConsensusConfig::default(),
-        ValidatorList::new(),
         0,
         block_hash,
         test_chain_id(),

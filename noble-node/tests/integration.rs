@@ -241,18 +241,19 @@ fn self_proposal_validates_before_broadcast() {
     let priv_key = NoblePrivateKey::Ed25519(sk);
     let pub_key = priv_key.public_key();
 
-    let mut val_list = ValidatorList::new();
-    val_list.add_validator(pub_key.clone(), 100, 0);
+    let mut reg = noble_consensus::ValidatorRegistry::empty();
+    reg.add_validator(pub_key.clone(), 100, 0);
+    let snap = reg.create_snapshot();
 
     let mut engine = CycleEngine::new(
         ConsensusConfig::default(),
-        val_list,
         0,
         Hash256::ZERO,
         test_chain_id(),
         Some((priv_key, pub_key)),
         Some(noble_core::GENESIS_TIMESTAMP),
     );
+    engine.set_validator_snapshot(snap);
     engine.set_peer_count(5);
 
     // Transition to Validation phase (triggers mempool request for validators)

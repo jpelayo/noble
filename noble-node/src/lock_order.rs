@@ -16,19 +16,21 @@
 //!     ↓
 //!   Storage (2)
 //!     ↓
-//!   Consensus (3)
+//!   ValidatorRegistry (3)
 //!     ↓
-//!   Mempool (4)
+//!   Consensus (4)
 //!     ↓
-//!   NetworkStats (5)
+//!   Mempool (5)
 //!     ↓
-//!   PeerInfo (6)
+//!   NetworkStats (6)
 //!     ↓
-//!   TotpValidator (7)
+//!   PeerInfo (7)
 //!     ↓
-//!   MaxNetworkVersion (8)
+//!   TotpValidator (8)
 //!     ↓
-//!   TlsCertInfo (9)
+//!   MaxNetworkVersion (9)
+//!     ↓
+//!   TlsCertInfo (10)
 //! ```
 //!
 //! # Rules
@@ -57,6 +59,8 @@
 //! | `transaction.rs` `submit_transaction` | storage → mempool | storage held during admit() |
 //! | `node.rs` `process_cycle_actions` (CommitBlock) | storage → consensus → mempool | sequential scoping |
 //! | `node.rs` (PeerConnected) | network_stats → consensus → peer_info | sequential scoping |
+//! | `node.rs` (NodeAnnounce) | validator_registry → consensus | registry write, then engine write |
+//! | API `getValidatorList` | validator_registry only | never held with consensus |
 
 /// Defines the canonical acquisition order for all shared locks.
 ///
@@ -73,20 +77,22 @@ pub enum LockOrder {
     WalletState = 1,
     /// `Arc<RwLock<S>>` — block and transaction persistence.
     Storage = 2,
+    /// `Arc<RwLock<ValidatorRegistry>>` — validator/participant metadata.
+    ValidatorRegistry = 3,
     /// `Arc<RwLock<CycleEngine>>` — PoR consensus FSM.
-    Consensus = 3,
+    Consensus = 4,
     /// `Arc<Mutex<Mempool>>` — pending transaction pool.
-    Mempool = 4,
+    Mempool = 5,
     /// `Arc<RwLock<NetworkStats>>` — peer count aggregates.
-    NetworkStats = 5,
+    NetworkStats = 6,
     /// `Arc<RwLock<HashMap<String, PeerInfoEntry>>>` — live peer metadata.
-    PeerInfo = 6,
+    PeerInfo = 7,
     /// `Arc<RwLock<TotpValidator>>` — TOTP authentication state.
-    TotpValidator = 7,
+    TotpValidator = 8,
     /// `Arc<RwLock<String>>` — highest observed peer software version.
-    MaxNetworkVersion = 8,
+    MaxNetworkVersion = 9,
     /// `RwLock<Option<String>>` in `ApiState` — TLS certificate metadata (fingerprint, expiry, SANs).
-    TlsCertInfo = 9,
+    TlsCertInfo = 10,
 }
 
 impl std::fmt::Display for LockOrder {
@@ -180,6 +186,7 @@ mod tests {
             LockOrder::WalletKeystore,
             LockOrder::WalletState,
             LockOrder::Storage,
+            LockOrder::ValidatorRegistry,
             LockOrder::Consensus,
             LockOrder::Mempool,
             LockOrder::NetworkStats,
@@ -201,10 +208,12 @@ mod tests {
     #[test]
     fn valid_ordering_does_not_panic() {
         acquire(LockOrder::Storage);
+        acquire(LockOrder::ValidatorRegistry);
         acquire(LockOrder::Consensus);
         acquire(LockOrder::Mempool);
         release(LockOrder::Mempool);
         release(LockOrder::Consensus);
+        release(LockOrder::ValidatorRegistry);
         release(LockOrder::Storage);
     }
 
@@ -212,7 +221,7 @@ mod tests {
     #[should_panic(expected = "LOCK ORDER VIOLATION")]
     fn invalid_ordering_panics_in_debug() {
         acquire(LockOrder::Mempool);
-        // Acquiring Storage (2) while holding Mempool (4) is a violation.
+        // Acquiring Storage (2) while holding Mempool (5) is a violation.
         acquire(LockOrder::Storage);
     }
 }

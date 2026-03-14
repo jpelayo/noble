@@ -9,7 +9,6 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_codec::NobleCbor;
 use noble_consensus::ConsensusStateMachine;
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
@@ -286,8 +285,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
 
         // Merge CBOR-persistent known_peers for any identity keys not in PeerRecords.
         // This ensures candidate discovery survives chain resets (PeerRecords wiped).
-        let engine = self.consensus.read();
-        for (key_hex, peer) in engine.validator_list().known_peers() {
+        let registry = self.validator_registry.read();
+        for (key_hex, peer) in registry.known_peers() {
             // Convert hex wire key to nbl1 display format for consistency.
             let display_key = hex::decode(key_hex).ok()
                 .and_then(|wire| noble_crypto::noble_addr::encode_wire_bytes(&wire))
@@ -321,7 +320,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key_bytes = hex::decode(&identity_key)
             .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-        // Lock order: Storage(2) before Consensus(3).
+        // Lock order: Storage(2) before ValidatorRegistry(3).
         let storage = self.storage.read();
         storage
             .remove_peer_record(&key_bytes)
@@ -329,13 +328,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         drop(storage);
         // Also remove from CBOR known_peers so it doesn't reappear after chain reset.
         {
-            let mut engine = self.consensus.write();
-            engine.validator_list_mut().remove_known_peer(&identity_key);
-            // Persist CBOR.
-            if let Some(ref path) = self.validator_list_path {
-                if let Ok(bytes) = engine.validator_list().to_cbor() {
-                    let _ = std::fs::write(path, &bytes);
-                }
+            let mut registry = self.validator_registry.write();
+            registry.remove_known_peer(&identity_key);
+            if let Err(e) = registry.persist_if_dirty() {
+                tracing::warn!("Failed to persist validator registry after peer removal: {e}");
             }
         }
         Ok(serde_json::json!({ "success": true }))

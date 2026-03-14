@@ -1691,8 +1691,10 @@ export function init(root, ctx) {
 
   // Track current display order for drag-and-drop
   let currentDisplayOrder = [];
+  let _isDragging = false; // suppress table rebuilds while drag is in progress
 
   async function loadValidators() {
+    if (_isDragging) return; // don't rebuild table mid-drag
     try {
       const [result, nodeInfo, peerMemory, identity, peerInfo] = await Promise.all([
         rpc.call('noble_getValidatorList'),
@@ -1903,7 +1905,7 @@ export function init(root, ctx) {
         const removeCell = `<td><button class="btn btn-danger btn-sm cs-remove-btn" data-pubkey="${keyHex}" title="Remove from your accepted list">&#10005;</button></td>`;
         const tr = document.createElement('tr');
         tr.className = 'clickable';
-        tr.draggable = true;
+        tr.draggable = false; // only enabled when grabbing the handle
         tr.dataset.idx = i;
         tr.dataset.key = keyHex;
         tr.innerHTML = `
@@ -1941,13 +1943,27 @@ export function init(root, ctx) {
           ${removeCell}
         `;
 
-        // Drag-and-drop handlers
+        // Drag-and-drop: only initiate from the grip handle
+        const handle = tr.querySelector('.cs-drag-handle');
+        if (handle) {
+          handle.addEventListener('mousedown', () => { tr.draggable = true; });
+          handle.addEventListener('touchstart', () => { tr.draggable = true; }, { passive: true });
+        }
         tr.addEventListener('dragstart', (e) => {
+          if (!e.target.closest('.cs-drag-handle') && e.target !== handle) {
+            e.preventDefault(); return; // only drag from handle
+          }
           dragSrcIdx = i;
+          _isDragging = true;
           e.dataTransfer.effectAllowed = 'move';
           tr.style.opacity = '0.5';
         });
-        tr.addEventListener('dragend', () => { tr.style.opacity = ''; });
+        tr.addEventListener('dragend', () => {
+          tr.style.opacity = '';
+          tr.draggable = false;
+          _isDragging = false;
+          dragSrcIdx = null;
+        });
         tr.addEventListener('dragover', (e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
@@ -1957,13 +1973,15 @@ export function init(root, ctx) {
         tr.addEventListener('drop', async (e) => {
           e.preventDefault();
           tr.style.background = '';
+          _isDragging = false;
           const destIdx = parseInt(tr.dataset.idx, 10);
-          if (dragSrcIdx === null || dragSrcIdx === destIdx) return;
+          if (dragSrcIdx === null || dragSrcIdx === destIdx) { dragSrcIdx = null; return; }
           // Reorder currentDisplayOrder
           const newOrder = [...currentDisplayOrder];
           const [moved] = newOrder.splice(dragSrcIdx, 1);
           newOrder.splice(destIdx, 0, moved);
           currentDisplayOrder = newOrder;
+          dragSrcIdx = null;
           try {
             await rpc.call('noble_setValidatorOrder', { order: newOrder });
             loadValidators();

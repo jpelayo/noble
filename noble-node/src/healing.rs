@@ -1405,7 +1405,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             None
         };
 
-        let validator_list = self.consensus.read().validator_list().as_pubkey_vec();
+        let validator_list = self.consensus.read().validator_snapshot()
+            .map(|snap| snap.pubkey_vec.clone())
+            .unwrap_or_default();
 
         // For sync imports, use the block's own timestamp as "current_time" so the
         // B6 skew check passes. Historical blocks are expected to have old timestamps.
@@ -1711,7 +1713,6 @@ mod tests {
         let storage = Arc::new(RwLock::new(MemoryStorage::new()));
         let consensus = Arc::new(RwLock::new(CycleEngine::new(
             noble_consensus::ConsensusConfig::default(),
-            noble_consensus::ValidatorList::new(),
             0,
             Hash256::ZERO,
             0,

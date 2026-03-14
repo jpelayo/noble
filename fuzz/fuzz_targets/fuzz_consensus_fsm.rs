@@ -1,7 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use noble_consensus::config::ConsensusConfig;
-use noble_consensus::validator::ValidatorList;
 use noble_consensus::{ConsensusStateMachine, CycleEngine, CycleEvent};
 use noble_crypto::Hash256;
 
@@ -18,7 +17,6 @@ fuzz_target!(|data: &[u8]| {
 
     let mut engine = CycleEngine::new(
         ConsensusConfig::default(),
-        ValidatorList::new(),
         0,
         Hash256::ZERO,
         0x4E4F424C,
