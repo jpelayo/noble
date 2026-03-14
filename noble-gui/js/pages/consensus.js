@@ -481,6 +481,9 @@ export function init(root, ctx) {
     fork_alignment_pending: '\u21c4',  // right-left arrows
     fork_alignment_clear:   '\u2713',  // checkmark
     chain_adoption_started: '\u21c4',  // right-left arrows
+    healing_clue:           '\u2764',  // heart (healing)
+    healing_action:         '\u2764',  // heart (healing)
+    fork_disagreement:      '\u26a0',  // warning triangle
     checkpoints_activated:  '\u2713',  // checkmark
     rejected:               '\u00d7',  // multiplication sign
     score_updated:          '\u26a0',  // warning triangle
@@ -522,6 +525,9 @@ export function init(root, ctx) {
       case 'checkpoints_activated': return 'var(--success, #22c55e)';
       case 'rejected': return '#f87171';
       case 'score_updated': return '#fbbf24';
+      case 'healing_clue': return '#c084fc';
+      case 'healing_action': return '#f43f5e';
+      case 'fork_disagreement': return '#f59e0b';
       default: return 'var(--text-muted)';
     }
   }
@@ -606,6 +612,12 @@ export function init(root, ctx) {
         return data.message;
       case 'chain_tip_updated':
         return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
+      case 'healing_clue':
+        return `Healing clue: ${data.clue} [${data.phase}]`;
+      case 'healing_action':
+        return `Healing: ${data.action.toUpperCase()} \u2014 ${data.reason} (${data.clue_count} clue${data.clue_count !== 1 ? 's' : ''})`;
+      case 'fork_disagreement':
+        return `Fork disagreement: peer block at height ${data.block_height} rejected (${data.reason})`;
       case 'fork_detected': {
         const heights = (data.remote_heights || []).join(', ');
         const peers = (data.remote_peer_counts || []).reduce((a, b) => a + b, 0);

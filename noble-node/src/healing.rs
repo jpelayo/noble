@@ -45,6 +45,7 @@ pub struct ManifestEntry {
 }
 
 /// Status of a single manifest entry.
+#[derive(Clone, Copy)]
 pub enum EntryStatus {
     Pending,
     Requested { at: u64 },
@@ -125,6 +126,12 @@ pub enum HealingClue {
         target_chain_id: u32,
         reason: String,
     },
+    /// Sync conveyor is persistently stalled — block fetches keep failing.
+    SyncStall {
+        stalled_height: u64,
+        target_height: u64,
+        reason: String,
+    },
 }
 
 /// Collects clues from all detection sources within a tick, then
@@ -174,7 +181,7 @@ pub enum HealingAction {
 }
 
 /// Pick the highest-priority action from a set of clues.
-/// Priority: Adopt > Resolve/SyncMismatch > ProposedBlockRejected(bootstrap) > None.
+/// Priority: Adopt > Resolve/SyncMismatch > SyncStall(bootstrap) > ProposedBlockRejected(bootstrap) > None.
 fn pick_healing_action(clues: &[HealingClue], local_height: u64) -> HealingAction {
     // Priority 1: Cross-chain adoption (most drastic).
     for clue in clues {
@@ -208,7 +215,21 @@ fn pick_healing_action(clues: &[HealingClue], local_height: u64) -> HealingActio
         }
     }
 
-    // Priority 4: Proposed block rejected — only resolve during bootstrap.
+    // Priority 4: Sync stall — during bootstrap, force resolution to retry from scratch.
+    // During steady state, the conveyor peer-switch handles it.
+    for clue in clues {
+        if let HealingClue::SyncStall { target_height, reason, .. } = clue {
+            if local_height < 10 {
+                return HealingAction::Resolve {
+                    target_hash: Hash256::ZERO,
+                    target_height: *target_height,
+                    reason: reason.clone(),
+                };
+            }
+        }
+    }
+
+    // Priority 5: Proposed block rejected — only resolve during bootstrap.
     for clue in clues {
         if let HealingClue::ProposedBlockRejected { block_height, reason, .. } = clue {
             if local_height < 10 {
@@ -376,6 +397,23 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Ingest a clue from any detection source. No action taken — clues
     /// accumulate until `evaluate_and_execute` runs at the end of the tick.
     pub fn ingest_clue(&mut self, clue: HealingClue) {
+        let label = match &clue {
+            HealingClue::ForkResolve { target_height, .. } =>
+                format!("fork_resolve (target height {target_height})"),
+            HealingClue::SyncChainMismatch { rejected_height, .. } =>
+                format!("sync_chain_mismatch (rejected height {rejected_height})"),
+            HealingClue::ProposedBlockRejected { block_height, .. } =>
+                format!("proposed_block_rejected (height {block_height})"),
+            HealingClue::CrossChainAdopt { target_chain_id, .. } =>
+                format!("cross_chain_adopt (chain {:#010X})", target_chain_id),
+            HealingClue::SyncStall { stalled_height, .. } =>
+                format!("sync_stall (block {stalled_height})"),
+        };
+        self.broadcast_event(serde_json::json!({
+            "event": "healing_clue",
+            "clue": label,
+            "phase": format!("{:?}", self.healing_phase),
+        }));
         self.clue_collector.ingest(clue);
     }
 
@@ -409,31 +447,30 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         match action {
             HealingAction::Adopt { target_chain_id, reason } => {
-                tracing::info!(
-                    task = "healing",
-                    "evaluate_and_execute: ADOPT chain {:#010X} ({reason})",
-                    target_chain_id,
-                );
+                self.broadcast_event(serde_json::json!({
+                    "event": "healing_action",
+                    "action": "adopt",
+                    "target_chain_id": format!("{:#010X}", target_chain_id),
+                    "reason": &reason,
+                    "clue_count": clues.len(),
+                }));
                 self.healing_phase = HealingPhase::Adopting;
                 self.execute_adoption(target_chain_id, &reason);
                 self.healing_phase = HealingPhase::Syncing;
             }
             HealingAction::Resolve { target_hash, target_height, reason } => {
-                tracing::info!(
-                    task = "healing",
-                    "evaluate_and_execute: RESOLVE to height {target_height} ({reason})",
-                );
+                self.broadcast_event(serde_json::json!({
+                    "event": "healing_action",
+                    "action": "resolve",
+                    "target_height": target_height,
+                    "reason": &reason,
+                    "clue_count": clues.len(),
+                }));
                 self.healing_phase = HealingPhase::Resolving;
                 self.execute_resolution(target_hash, target_height, &reason);
                 self.healing_phase = HealingPhase::Syncing;
             }
-            HealingAction::None => {
-                tracing::debug!(
-                    task = "healing",
-                    "evaluate_and_execute: {} clue(s) ingested, no action required",
-                    clues.len(),
-                );
-            }
+            HealingAction::None => {}
         }
     }
 
@@ -777,12 +814,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 }
 
                 if cursor < manifest.len() {
-                    let entry = &manifest[cursor];
-                    match entry.status {
+                    // Extract values before matching — avoids holding a borrow on
+                    // self.sync_state during ingest_clue/send_network calls.
+                    let entry_height = manifest[cursor].height;
+                    let entry_hash = manifest[cursor].hash;
+                    let entry_status = manifest[cursor].status;
+                    match entry_status {
                         EntryStatus::Pending => {
                             self.send_network(NetworkCommand::RequestBlockByHeight {
                                 peer_id: peer.clone(),
-                                height: entry.height,
+                                height: entry_height,
                             });
                             // Mark as requested.
                             if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
@@ -790,19 +831,68 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             }
                         }
                         EntryStatus::Requested { at } => {
-                            // Timeout — retry after SYNC_RETRY_SECS.
-                            if now.saturating_sub(at) >= SYNC_RETRY_SECS {
-                                tracing::debug!(
-                                    task = "sync",
-                                    "block {} fetch stalled — retrying",
-                                    entry.height,
-                                );
-                                self.send_network(NetworkCommand::RequestBlockByHeight {
-                                    peer_id: peer.clone(),
-                                    height: entry.height,
-                                });
-                                if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
-                                    manifest[cursor].status = EntryStatus::Requested { at: now };
+                            let stalled_secs = now.saturating_sub(at);
+                            // Retry every SYNC_RETRY_SECS. `retry_count` tracks
+                            // total retries since first request (at is never reset).
+                            let retry_count = stalled_secs / SYNC_RETRY_SECS;
+                            // Only act at each retry boundary (avoid re-firing every tick).
+                            let at_boundary = stalled_secs >= SYNC_RETRY_SECS
+                                && stalled_secs % SYNC_RETRY_SECS < 5; // 5s window around boundary
+                            if at_boundary {
+
+                                if retry_count >= 3 {
+                                    // Persistent stall — sync RPC is broken for this peer.
+                                    // Ingest a clue so evaluate_and_execute can decide.
+                                    tracing::warn!(
+                                        task = "sync",
+                                        "block {} fetch persistently stalled ({retry_count} retries, {}s) — escalating to healing",
+                                        entry_height, stalled_secs,
+                                    );
+                                    self.ingest_clue(HealingClue::SyncStall {
+                                        stalled_height: entry_height,
+                                        target_height: target,
+                                        reason: format!(
+                                            "sync block {} stalled after {} retries ({}s) — sync RPC may be broken",
+                                            entry_height, retry_count, stalled_secs,
+                                        ),
+                                    });
+                                    // Mark as failed so the conveyor switches peer.
+                                    if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
+                                        manifest[cursor].status = EntryStatus::Failed { attempts: MAX_BLOCK_RETRIES };
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        task = "sync",
+                                        "block {} fetch stalled ({}s, retry {}) — retrying via RPC + gossip",
+                                        entry_height, stalled_secs, retry_count,
+                                    );
+                                    // Retry via sync RPC.
+                                    self.send_network(NetworkCommand::RequestBlockByHeight {
+                                        peer_id: peer.clone(),
+                                        height: entry_height,
+                                    });
+                                    // Fallback: also request via gossip protocol.
+                                    {
+                                        let hash = entry_hash;
+                                        if hash != [0u8; 32] {
+                                            self.send_network(NetworkCommand::RequestBlock {
+                                                peer_id: peer.clone(),
+                                                hash,
+                                            });
+                                        }
+                                    }
+                                    self.broadcast_event(serde_json::json!({
+                                        "event": "sync_progress",
+                                        "height": entry_height,
+                                        "target": target,
+                                        "progress": 0,
+                                        "stalled": true,
+                                        "stalled_secs": stalled_secs,
+                                        "retry": retry_count,
+                                    }));
+                                    // NOTE: do NOT reset `at` — keep the original request time
+                                    // so stalled_secs accumulates and retry_count increases.
+                                    // The next tick will see stalled_secs=20, retry_count=2, etc.
                                 }
                             }
                         }
@@ -820,7 +910,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             // Retry.
                             self.send_network(NetworkCommand::RequestBlockByHeight {
                                 peer_id: peer.clone(),
-                                height: entry.height,
+                                height: entry_height,
                             });
                             if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
                                 manifest[cursor].status = EntryStatus::Requested { at: now };
