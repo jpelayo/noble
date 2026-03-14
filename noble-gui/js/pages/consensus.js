@@ -2287,10 +2287,34 @@ export function init(root, ctx) {
       try {
         confirmBtn.disabled = true;
         confirmBtn.textContent = 'Removing...';
+
+        // Fade out the row in the validator table before calling RPC
+        const removedRow = validatorsTbody.querySelector(`tr[data-key="${pubkey}"]`);
+        if (removedRow) {
+          removedRow.style.transition = 'opacity 0.35s ease, background 0.35s ease';
+          removedRow.style.opacity = '0.2';
+          removedRow.style.background = 'color-mix(in srgb, var(--danger) 10%, transparent)';
+        }
+
         await rpc.call('noble_removeValidator', { public_key: pubkey });
         closeModal();
         detailPanel.innerHTML = '';
-        loadValidators();
+
+        // Brief delay to let the fade finish, then reload both tables
+        await new Promise(r => setTimeout(r, 350));
+        await loadValidators();
+
+        // Highlight the newly-appeared candidate row (the expelled node)
+        const candidateRows = root.querySelectorAll('.cs-candidate-row');
+        for (const row of candidateRows) {
+          if (row.dataset.key === pubkey) {
+            row.style.transition = 'background 0.5s ease';
+            row.style.background = 'color-mix(in srgb, var(--accent) 18%, transparent)';
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => { row.style.background = ''; }, 2000);
+            break;
+          }
+        }
       } catch (e) {
         errorEl.textContent = e.message || 'Failed to remove validator.';
         confirmBtn.disabled = false;
@@ -2373,6 +2397,8 @@ export function init(root, ctx) {
         const isStale = live.label !== 'alive';
 
         const tr = document.createElement('tr');
+        tr.className = 'cs-candidate-row';
+        tr.dataset.key = peer.identity_key;
         if (isStale && !peer._isSelf) tr.style.opacity = '0.6';
         const youBadge = peer._isSelf
           ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;vertical-align:middle;margin-left:4px">YOU</span>'

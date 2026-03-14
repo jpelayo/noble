@@ -12,10 +12,9 @@
 //! state, make decisions, and perform side-effects (storage writes, network
 //! commands, broadcast events) in one call.
 //!
-//! The only exception is `CycleEvent` injection: methods that need to feed
-//! events into the consensus engine return `Vec<CycleEvent>` for Node to
-//! dispatch through `process_cycle_actions` (because `CycleIo` outputs like
-//! `CommitBlock` and `BroadcastBlock` are consensus business, not healing).
+//! Fork resolution and cross-chain adoption are handled inline — the
+//! `ForkResolver` instance lives here (shared with ApiState via `Arc<Mutex>`),
+//! eliminating the CycleEvent round-trip through the consensus engine.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,7 +23,8 @@ use std::sync::Arc;
 
 use noble_api::state::PeerInfoEntry;
 use noble_api::types::DiscoveredBlockchainInfo;
-use noble_consensus::{ConsensusStateMachine, CycleEngine, CycleEvent};
+use noble_consensus::{ConsensusStateMachine, CycleEngine};
+use noble_consensus::fork_resolver::{ForkResolver, ForkResolutionStrategy};
 use noble_core::NodeAnnounce;
 use noble_crypto::Hash256;
 use noble_mempool::Mempool;
@@ -81,6 +81,19 @@ const MAX_BLOCK_RETRIES: u8 = 3;
 const SYNC_RETRY_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
+// ForkEvalResult
+// ---------------------------------------------------------------------------
+
+/// Result of a fork evaluation tick — contains pre/post dwell counters
+/// and tracking state for GUI event emission in node.rs.
+pub struct ForkEvalResult {
+    pub dwell_before: u32,
+    pub dwell_after: u32,
+    pub tracked_height: Option<u64>,
+    pub min_fork_duration: u32,
+}
+
+// ---------------------------------------------------------------------------
 // HealingManager
 // ---------------------------------------------------------------------------
 
@@ -124,6 +137,11 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
     last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
 
+    // ── Fork resolver (owned by HealingManager, shared with ApiState) ──
+    fork_resolver: Arc<parking_lot::Mutex<ForkResolver>>,
+    fork_resolution_strategy: ForkResolutionStrategy,
+    fork_resolution_delay_cycles: u32,
+
     // ── IO channels (set after construction via set_io_channels) ──
     network_cmd: Option<mpsc::Sender<NetworkCommand>>,
     new_block_tx: Option<broadcast::Sender<serde_json::Value>>,
@@ -147,7 +165,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         sync_target_height_shared: Arc<AtomicU64>,
         sync_progress_current: Arc<AtomicU64>,
         sync_progress_total: Arc<AtomicU64>,
+        fork_resolution_strategy: ForkResolutionStrategy,
+        fork_resolution_delay_cycles: u32,
     ) -> Self {
+        let fork_resolver = Arc::new(parking_lot::Mutex::new(
+            ForkResolver::new(fork_resolution_strategy, fork_resolution_delay_cycles),
+        ));
         Self {
             sync_state: SyncState::Idle,
             sync_behind_shared,
@@ -166,11 +189,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             chain_id,
             peer_info,
             last_proposed,
+            fork_resolver,
+            fork_resolution_strategy,
+            fork_resolution_delay_cycles,
             network_cmd: None,
             new_block_tx: None,
             cycle_phase_tx: None,
             metrics: None,
         }
+    }
+
+    /// Get the shared fork resolver (for ApiState).
+    pub fn fork_resolver(&self) -> &Arc<parking_lot::Mutex<ForkResolver>> {
+        &self.fork_resolver
     }
 
     /// Inject IO channels after network and broadcast infrastructure is ready.
@@ -795,13 +826,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     /// Evaluate fork status among same-chain peers.
     ///
-    /// **Critical invariant**: Returns empty if `sync_behind` is true,
+    /// **Critical invariant**: Returns zeroed result if `sync_behind` is true,
     /// preventing the fork resolver from fighting the sync mechanism.
     ///
-    /// Returns `Vec<CycleEvent>` for Node to inject into the consensus engine.
-    pub fn on_tick_fork_eval(&mut self) -> Vec<CycleEvent> {
+    /// Calls `ForkResolver::evaluate()` directly and handles resolution inline.
+    pub fn on_tick_fork_eval(&mut self) -> ForkEvalResult {
+        let zero_result = ForkEvalResult {
+            dwell_before: 0,
+            dwell_after: 0,
+            tracked_height: None,
+            min_fork_duration: self.fork_resolver.lock().min_fork_duration(),
+        };
         // The sync_behind guard — never run fork resolution while syncing.
-        if self.is_syncing() { return vec![]; }
+        if self.is_syncing() { return zero_result; }
 
         // Read consensus state.
         let engine_read = self.consensus.read();
@@ -872,23 +909,65 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             }));
         }
 
-        if !fork_groups.is_empty() {
-            vec![CycleEvent::ForkStatus {
-                local_height: our_height,
-                forks: fork_groups,
-                total_peers,
-            }]
-        } else {
-            vec![]
+        if fork_groups.is_empty() {
+            return zero_result;
+        }
+
+        // Evaluate fork resolution directly.
+        let dwell_before;
+        let decision;
+        {
+            let mut resolver = self.fork_resolver.lock();
+            dwell_before = resolver.dwell_counter();
+            decision = resolver.evaluate(our_height, &fork_groups, total_peers, our_hash);
+        }
+        // Guard dropped — safe to call action handlers that acquire consensus write lock.
+
+        match decision {
+            noble_consensus::ForkDecision::Resolve {
+                target_hash,
+                target_height,
+                reason,
+            } => {
+                self.on_fork_resolution_requested(target_hash, target_height, &reason);
+            }
+            noble_consensus::ForkDecision::Pending { cycles_remaining } => {
+                tracing::info!(
+                    task = "fork_resolution",
+                    "fork resolution pending: {cycles_remaining} cycle(s) remaining"
+                );
+            }
+            noble_consensus::ForkDecision::NoAction => {}
+        }
+
+        // Read post-evaluation state for GUI events.
+        let resolver = self.fork_resolver.lock();
+        ForkEvalResult {
+            dwell_before,
+            dwell_after: resolver.dwell_counter(),
+            tracked_height: resolver.tracked_fork_height(),
+            min_fork_duration: resolver.min_fork_duration(),
         }
     }
 
     // ── Cross-chain evaluation (tick handler) ──
 
-    /// Build cross-chain fork info and return CycleEvents for consensus injection.
-    pub fn on_tick_cross_chain_eval(&self) -> Vec<CycleEvent> {
+    /// Evaluate cross-chain fork data and handle adoption inline.
+    pub fn on_tick_cross_chain_eval(&mut self) {
         let local_chain_id = self.get_chain_id();
-        let tip_height = self.consensus.read().chain_tip().0;
+
+        // Read consensus state (chain_owner_key + our validator wire bytes).
+        let engine_read = self.consensus.read();
+        let tip_height = engine_read.chain_tip().0;
+        let chain_owner_key = engine_read.chain_owner_key().map(|k| k.to_vec());
+        let our_validator_wire_bytes = engine_read.our_validator_wire_bytes();
+        drop(engine_read);
+
+        let is_local_chain_owner = match (&chain_owner_key, &our_validator_wire_bytes) {
+            (Some(owner), Some(ours)) => owner.as_slice() == ours.as_slice(),
+            _ => false,
+        };
+
         let local_vote_weight = self.chain_vote_weight.load(Ordering::Relaxed);
 
         let same_chain_peer_count = {
@@ -921,15 +1000,37 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             .collect();
         drop(discovered);
 
-        if cross_chain_forks.is_empty() { return vec![]; }
+        if cross_chain_forks.is_empty() { return; }
 
-        vec![CycleEvent::CrossChainStatus {
-            local_chain_id,
-            local_height: tip_height,
-            local_vote_weight,
-            same_chain_peer_count,
-            cross_chain_forks,
-        }]
+        // Evaluate cross-chain resolution directly.
+        let decision = {
+            let mut resolver = self.fork_resolver.lock();
+            resolver.evaluate_cross_chain(
+                local_chain_id,
+                tip_height,
+                local_vote_weight,
+                same_chain_peer_count,
+                &cross_chain_forks,
+                is_local_chain_owner,
+            )
+        };
+        // Guard dropped — safe to call action handlers.
+
+        match decision {
+            noble_consensus::CrossChainDecision::Adopt {
+                target_chain_id,
+                reason,
+            } => {
+                self.on_chain_adoption_requested(target_chain_id, &reason);
+            }
+            noble_consensus::CrossChainDecision::Pending { cycles_remaining } => {
+                tracing::info!(
+                    task = "fork_resolution",
+                    "cross-chain adoption pending: {cycles_remaining} cycle(s) remaining"
+                );
+            }
+            noble_consensus::CrossChainDecision::NoAction => {}
+        }
     }
 
     // ── PeerChainTipUpdated handler ──
@@ -1011,10 +1112,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }));
     }
 
-    // ── RequestForkResolution handler ──
+    // ── Fork resolution handler ──
 
-    /// Handle fork resolution request from the consensus engine.
-    /// Directly rolls back storage and resets consensus.
+    /// Handle fork resolution: rollback storage and reset consensus.
     pub fn on_fork_resolution_requested(
         &mut self,
         target_hash: Hash256,
@@ -1039,6 +1139,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         // Clear pending proposals.
         self.clear_pending_proposals();
+
+        // Reset fork resolver when rolling back to genesis.
+        if rollback_height == 0 {
+            *self.fork_resolver.lock() = ForkResolver::new(
+                self.fork_resolution_strategy,
+                self.fork_resolution_delay_cycles,
+            );
+        }
 
         // Reset sync state after rollback — advance_sync will restart from new tip.
         self.reset_sync_idle();
@@ -1092,6 +1200,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         if let Err(e) = self.consensus.write().reset_tip(0, Hash256::ZERO, true) {
             tracing::error!(task = "healing", "reset_tip failed: {e}");
         }
+
+        // 4b. Reset fork resolver (full chain wipe).
+        *self.fork_resolver.lock() = ForkResolver::new(
+            self.fork_resolution_strategy,
+            self.fork_resolution_delay_cycles,
+        );
 
         // 5. Reset sync state.
         self.reset_sync_idle();
@@ -1738,6 +1852,8 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            ForkResolutionStrategy::LongestMostLegitimate,
+            3,
         )
     }
 
@@ -1809,16 +1925,17 @@ mod tests {
             target: 10,
             requested_at: 50,
         };
-        let events = hm.on_tick_fork_eval();
-        assert!(events.is_empty());
+        let result = hm.on_tick_fork_eval();
+        assert_eq!(result.dwell_before, 0);
+        assert_eq!(result.dwell_after, 0);
     }
 
     #[test]
     fn fork_eval_single_group_no_fork() {
         let mut hm = make_healing_manager();
-        let events = hm.on_tick_fork_eval();
-        // Single group (local only) — ForkStatus still injected.
-        assert!(!events.is_empty());
+        let result = hm.on_tick_fork_eval();
+        // Single group (local only) — no fork, dwell stays 0.
+        assert_eq!(result.dwell_after, 0);
         assert!(!hm.fork_visible);
     }
 

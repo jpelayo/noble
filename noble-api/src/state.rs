@@ -307,6 +307,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Shared with the Node event loop which writes; API reads.
     pub discovered_blockchains: Arc<Mutex<HashMap<u32, crate::types::DiscoveredBlockchainInfo>>>,
 
+    /// Fork resolver shared with HealingManager for RPC reads.
+    pub fork_resolver: Arc<parking_lot::Mutex<noble_consensus::ForkResolver>>,
+
     /// True when the node is catching up blocks from an ahead peer (shared with Node event loop).
     pub sync_behind: Arc<std::sync::atomic::AtomicBool>,
 

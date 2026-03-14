@@ -28,20 +28,6 @@ pub enum CycleEvent {
     Tick { now: u64 },
     /// Response from node: mempool transactions for block proposal (P0.3).
     MempoolTransactions(Vec<Transaction>),
-    /// Fork status update from node (peer chain tip data).
-    ForkStatus {
-        local_height: u64,
-        forks: Vec<crate::fork_resolver::ForkInfo>,
-        total_peers: usize,
-    },
-    /// Cross-chain fork status from discovered_blockchains.
-    CrossChainStatus {
-        local_chain_id: u32,
-        local_height: u64,
-        local_vote_weight: u64,
-        same_chain_peer_count: usize,
-        cross_chain_forks: Vec<crate::fork_resolver::CrossChainForkInfo>,
-    },
 }
 
 /// Output actions emitted by the consensus engine.
@@ -108,19 +94,8 @@ pub enum CycleIo {
     PersistFinalityState { height: u64, hash: Hash256, cycle: u64 },
     /// Publish misbehavior evidence to the network and store locally.
     PublishEvidence(Box<noble_core::MisbehaviorEvidence>),
-    /// Request automatic fork resolution (reset + re-sync).
-    RequestForkResolution {
-        target_hash: Hash256,
-        target_height: u64,
-        reason: String,
-    },
     /// Persist a checkpoint to storage.
     PersistCheckpoint(Box<crate::checkpoint::Checkpoint>),
     /// Notify that checkpoints have activated.
     CheckpointsActivated { heights: Vec<u64> },
-    /// Request cross-chain adoption: wipe all data and re-sync from a different chain.
-    RequestChainAdoption {
-        target_chain_id: u32,
-        reason: String,
-    },
 }

@@ -81,6 +81,10 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let state = Arc::new(ApiState {
         storage,
         mempool,
+        validator_registry: Arc::new(RwLock::new(noble_consensus::ValidatorRegistry::new(
+            noble_consensus::ValidatorList::new(),
+            None,
+        ))),
         consensus,
         network_cmd,
         wallet_keystore,
@@ -159,6 +163,12 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         network_name: format!("{:08X}", test_chain_id()),
         genesis_hash: hex::encode(test_genesis_hash().as_bytes()),
         discovered_blockchains: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        fork_resolver: std::sync::Arc::new(parking_lot::Mutex::new(
+            noble_consensus::ForkResolver::new(
+                noble_consensus::ForkResolutionStrategy::LongestMostLegitimate,
+                3,
+            ),
+        )),
         max_peers: std::sync::atomic::AtomicU32::new(50),
         sync_behind: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sync_target_height: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

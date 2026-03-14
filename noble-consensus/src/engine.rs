@@ -110,8 +110,6 @@ pub struct CycleEngine {
     /// when stale blocks from prior cycles re-arrive after `previous_hashes`
     /// has been cleared.  Checked before `add_candidate()` in `handle_block_proposed`.
     delivered_block_log: DeliveredBlockLog,
-    /// Phase 3: Automatic fork resolution state machine.
-    fork_resolver: crate::fork_resolver::ForkResolver,
     /// Phase 3: Periodic checkpoint manager.
     checkpoint_mgr: crate::checkpoint::CheckpointManager,
     /// Optional UTXO value lookup for accurate fee computation in proposals.
@@ -140,8 +138,6 @@ impl CycleEngine {
     ) -> Self {
         let cycle_mgr = CycleManager::new(noble_core::CYCLE_DURATION_SECS, genesis_timestamp);
         let confirmation_threshold = config.confirmation_threshold;
-        let fork_strategy = config.fork_resolution_strategy;
-        let fork_delay = config.fork_resolution_delay_cycles;
         let checkpoint_interval = config.checkpoint_interval;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -177,10 +173,6 @@ impl CycleEngine {
             finality_tracker: FinalityTracker::new(confirmation_threshold),
             chain_owner_key: None,
             delivered_block_log: DeliveredBlockLog::new(2048),
-            fork_resolver: crate::fork_resolver::ForkResolver::new(
-                fork_strategy,
-                fork_delay,
-            ),
             checkpoint_mgr: crate::checkpoint::CheckpointManager::new(
                 checkpoint_interval,
                 confirmation_threshold,
@@ -276,11 +268,6 @@ impl CycleEngine {
     /// Get the chain owner key (block 1 validator's wire bytes).
     pub fn chain_owner_key(&self) -> Option<&[u8]> {
         self.chain_owner_key.as_deref()
-    }
-
-    /// Get fork resolver (read-only) for RPC queries.
-    pub fn fork_resolver(&self) -> &crate::fork_resolver::ForkResolver {
-        &self.fork_resolver
     }
 
     /// Get checkpoint manager (read-only) for RPC queries.
@@ -418,10 +405,6 @@ impl CycleEngine {
             self.chain_owner_key = None;
             self.finality_tracker.reset_full();
             self.checkpoint_mgr.reset();
-            self.fork_resolver = crate::fork_resolver::ForkResolver::new(
-                self.config.fork_resolution_strategy,
-                self.config.fork_resolution_delay_cycles,
-            );
         } else {
             self.finality_tracker.reset();
         }
@@ -926,9 +909,6 @@ impl CycleEngine {
                                 });
                             }
                             // Sync fork resolver's finality floor.
-                            self.fork_resolver.set_finalized_height(
-                                self.finality_tracker.finalized_height,
-                            );
                             // Checkpoint: if height qualifies, create one.
                             if let Some(cp) = self.checkpoint_mgr.on_block_committed(
                                 new_height,
@@ -2015,75 +1995,6 @@ impl ConsensusStateMachine for CycleEngine {
                 self.handle_vote_received(vote, from_peer)
             }
             CycleEvent::MempoolTransactions(txs) => self.handle_mempool_transactions(txs),
-            CycleEvent::ForkStatus {
-                local_height,
-                forks,
-                total_peers,
-            } => {
-                let mut outputs = Vec::new();
-                let (_, local_hash) = self.chain_tip();
-                let decision = self.fork_resolver.evaluate(local_height, &forks, total_peers, local_hash);
-                match decision {
-                    crate::fork_resolver::ForkDecision::Resolve {
-                        target_hash,
-                        target_height,
-                        reason,
-                    } => {
-                        outputs.push(CycleIo::RequestForkResolution {
-                            target_hash,
-                            target_height,
-                            reason,
-                        });
-                    }
-                    crate::fork_resolver::ForkDecision::Pending { cycles_remaining } => {
-                        outputs.push(CycleIo::Log(format!(
-                            "fork resolution pending: {cycles_remaining} cycle(s) remaining"
-                        )));
-                    }
-                    crate::fork_resolver::ForkDecision::NoAction => {}
-                }
-                outputs
-            }
-            CycleEvent::CrossChainStatus {
-                local_chain_id,
-                local_height,
-                local_vote_weight,
-                same_chain_peer_count,
-                cross_chain_forks,
-            } => {
-                let mut outputs = Vec::new();
-                // Check if we are the chain owner for cross-chain scoring bonus.
-                let is_local_chain_owner = match (&self.chain_owner_key, &self.our_validator_key) {
-                    (Some(owner), Some((_, pk))) => owner.as_slice() == pk.to_wire_bytes().as_slice(),
-                    _ => false,
-                };
-                let decision = self.fork_resolver.evaluate_cross_chain(
-                    local_chain_id,
-                    local_height,
-                    local_vote_weight,
-                    same_chain_peer_count,
-                    &cross_chain_forks,
-                    is_local_chain_owner,
-                );
-                match decision {
-                    crate::fork_resolver::CrossChainDecision::Adopt {
-                        target_chain_id,
-                        reason,
-                    } => {
-                        outputs.push(CycleIo::RequestChainAdoption {
-                            target_chain_id,
-                            reason,
-                        });
-                    }
-                    crate::fork_resolver::CrossChainDecision::Pending { cycles_remaining } => {
-                        outputs.push(CycleIo::Log(format!(
-                            "cross-chain adoption pending: {cycles_remaining} cycle(s) remaining"
-                        )));
-                    }
-                    crate::fork_resolver::CrossChainDecision::NoAction => {}
-                }
-                outputs
-            }
         }
     }
 

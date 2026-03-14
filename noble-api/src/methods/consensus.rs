@@ -417,78 +417,13 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             })
             .collect();
 
-        // Auto-kick: remove validators that explicitly announced wants_to_validate=false.
-        // Skip self — our own node is never auto-removed.
-        // Collect as wire bytes (not display strings) so hex::decode succeeds downstream.
-        let mut auto_removed: Vec<Vec<u8>> = Vec::new();
-        for entry in &entries {
-            if !entry.wants_to_validate {
-                // Decode display key (bech32 or hex) back to wire bytes for comparison.
-                let wire_bytes = match noble_crypto::noble_addr::decode(&entry.public_key)
-                    .map(|pk| pk.to_wire_bytes())
-                    .or_else(|_| hex::decode(&entry.public_key))
-                {
-                    Ok(wb) => Some(wb),
-                    Err(e) => {
-                        tracing::warn!(key = %entry.public_key, "auto-kick: cannot decode validator key: {e}");
-                        None
-                    }
-                };
-                let is_self = wire_bytes.as_ref().map_or(false, |wb| {
-                    self.validator_pubkey.as_deref().map_or(false, |s| hex::encode(wb) == *s)
-                });
-                if !is_self {
-                    if let Some(wb) = wire_bytes {
-                        auto_removed.push(wb);
-                    }
-                }
-            }
-        }
-        // Drop read locks before acquiring registry write lock for auto-removal.
+        // NOTE: No auto-kick. The validator list is operator-sovereign.
+        // Validators are only removed by explicit removeValidator RPC/GUI action.
+        // wants_to_validate=false is shown as a status flag in the GUI but does
+        // NOT trigger automatic removal.
         drop(consensus);
         drop(registry);
-        if !auto_removed.is_empty() {
-            let mut registry = self.validator_registry.write();
-            for wire in &auto_removed {
-                let wire_hex = hex::encode(wire);
-                match NoblePublicKey::from_wire_bytes(wire) {
-                    Ok(pk) => {
-                        registry.remove_validator(&pk);
-                        tracing::info!(
-                            key = %wire_hex,
-                            "Auto-removed non-proposer from validator list (wants_to_validate=false)"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(key = %wire_hex, err = %e, "Auto-kick: failed to parse pubkey");
-                    }
-                }
-            }
-            persist_validator_registry::<S>(&mut registry)?;
-        }
-
-        // Filter auto-removed entries from the response.
-        // auto_removed holds wire bytes; entry.public_key is bech32 display.
-        // Decode each entry's display key to wire bytes for comparison.
-        let filtered_entries: Vec<ValidatorEntry> = if auto_removed.is_empty() {
-            entries
-        } else {
-            let removed_set: std::collections::HashSet<Vec<u8>> =
-                auto_removed.into_iter().collect();
-            entries
-                .into_iter()
-                .filter(|e| {
-                    let wire = noble_crypto::noble_addr::decode(&e.public_key)
-                        .map(|pk| pk.to_wire_bytes())
-                        .or_else(|_| hex::decode(&e.public_key))
-                        .unwrap_or_else(|e_err| {
-                            tracing::warn!(key = %e.public_key, "filter: cannot decode key: {e_err}");
-                            Vec::new()
-                        });
-                    !removed_set.contains(&wire)
-                })
-                .collect()
-        };
+        let filtered_entries = entries;
         let filtered_count = filtered_entries.len();
 
         let priority_order: Vec<String> = {

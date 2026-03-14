@@ -3,12 +3,9 @@
 
 //! Automatic fork resolution state machine.
 //!
-//! Pure decision logic — no I/O.  The node feeds fork data via
-//! `CycleEvent::ForkStatus` and acts on `CycleIo::RequestForkResolution`.
-//!
-//! Cross-chain fork evaluation uses `CycleEvent::CrossChainStatus` and
-//! emits `CycleIo::RequestChainAdoption` when a foreign chain is objectively
-//! stronger than the local one.
+//! Pure decision logic — no I/O.  `HealingManager` owns an instance and
+//! calls `evaluate()` / `evaluate_cross_chain()` directly each tick,
+//! acting on the returned decisions inline.
 
 use noble_crypto::Hash256;
 use serde::{Deserialize, Serialize};

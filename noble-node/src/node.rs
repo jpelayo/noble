@@ -507,6 +507,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let sync_progress_total = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let discovered_arc = Arc::new(Mutex::new(discovered_blockchains));
 
+        let fork_strategy = crate::healing::parse_fork_resolution_strategy(
+            &config.consensus.fork_resolution_strategy,
+        );
         let healing = crate::healing::HealingManager::new(
             storage.clone(),
             consensus.clone(),
@@ -520,6 +523,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height_shared,
             sync_progress_current,
             sync_progress_total,
+            fork_strategy,
+            config.consensus.fork_resolution_delay_cycles,
         );
 
         Ok(Self {
@@ -1647,6 +1652,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .unwrap_or_default()
             },
             discovered_blockchains: self.healing.discovered_blockchains().clone(),
+            fork_resolver: self.healing.fork_resolver().clone(),
             sync_behind: self.healing.sync_behind_shared().clone(),
             sync_target_height: self.healing.sync_target_height_shared().clone(),
             sync_progress_current: self.healing.sync_progress_current().clone(),
@@ -1918,32 +1924,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // ── Fork evaluation (delegated to healing manager) ──
                     // The sync_behind guard is enforced inside on_tick_fork_eval().
                     {
-                        let dwell_before = self.consensus.read().fork_resolver().dwell_counter();
-                        let cycle_events = self.healing.on_tick_fork_eval();
-                        for ce in cycle_events {
-                            let io = {
-                                let mut engine = self.consensus.write();
-                                engine.step(ce)
-                            };
-                            self.process_cycle_actions(io, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
-                        }
-
-                        // Emit fork alignment status to GUI (requires post-injection dwell check).
+                        let result = self.healing.on_tick_fork_eval();
                         if !self.healing.sync_behind() {
-                            let dwell_after = self.consensus.read().fork_resolver().dwell_counter();
-                            if dwell_after > 0 {
-                                let engine = self.consensus.read();
-                                let resolver = engine.fork_resolver();
-                                let remaining = resolver.min_fork_duration().saturating_sub(dwell_after);
-                                let tracked = resolver.tracked_fork_height();
-                                drop(engine);
+                            if result.dwell_after > 0 {
+                                let remaining = result.min_fork_duration.saturating_sub(result.dwell_after);
                                 let _ = cycle_phase_tx.send(serde_json::json!({
                                     "event": "fork_alignment_pending",
                                     "cycles_remaining": remaining,
-                                    "dwell_counter": dwell_after,
-                                    "tracked_height": tracked,
+                                    "dwell_counter": result.dwell_after,
+                                    "tracked_height": result.tracked_height,
                                 }));
-                            } else if dwell_before > 0 {
+                            } else if result.dwell_before > 0 {
                                 let _ = cycle_phase_tx.send(serde_json::json!({
                                     "event": "fork_alignment_clear",
                                 }));
@@ -1952,16 +1943,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
 
                     // ── Cross-chain evaluation (delegated to healing manager) ──
-                    {
-                        let cycle_events = self.healing.on_tick_cross_chain_eval();
-                        for ce in cycle_events {
-                            let io = {
-                                let mut engine = self.consensus.write();
-                                engine.step(ce)
-                            };
-                            self.process_cycle_actions(io, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
-                        }
-                    }
+                    self.healing.on_tick_cross_chain_eval();
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
                     {
@@ -2514,37 +2496,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 {
                     let mut registry = self.validator_registry.write();
 
-                    // Auto-register remote validators into entries so that:
-                    //   - WeightedProbability sees all validators (not just self)
-                    //   - set_friendly_name() / update_network_info() land (not silent NO-OPs)
-                    //   - find_by_wire() resolves names in vote tallies
-                    // Peers that stop validating are removed when they re-announce
-                    // with wants_to_validate=false.
-                    if announce.wants_to_validate {
-                        if !registry.is_validator(&announce.identity_key) {
-                            registry.add_validator(
-                                announce.identity_key.clone(),
-                                1,
-                                now_ts,
-                            );
-                            tracing::info!(
-                                task = "peer_tracking",
-                                "Auto-registered remote validator from NodeAnnounce: {}",
-                                hex::encode(&identity_wire),
-                            );
-                        }
-                    } else {
-                        // Peer no longer validates — remove from entries so
-                        // ordered_validator_keys() stays accurate.
-                        if registry.is_validator(&announce.identity_key) {
-                            registry.remove_validator(&announce.identity_key);
-                            tracing::info!(
-                                task = "peer_tracking",
-                                "Removed remote validator (wants_to_validate=false): {}",
-                                hex::encode(&identity_wire),
-                            );
-                        }
-                    }
+                    // NOTE: Remote peers are NEVER auto-added to the validator list.
+                    // The validator list is operator-sovereign — only explicit
+                    // addValidator RPC or GUI action can add entries.
+                    // NodeAnnounce only updates metadata for already-accepted validators
+                    // and tracks the peer in known_peers for candidate discovery.
 
                     registry.update_network_info(
                         &announce.identity_key,
@@ -3192,6 +3148,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if let Err(e) = storage.store_finality_state(&data) {
                         tracing::warn!(task = "finality", "failed to persist finality state: {e}");
                     }
+                    // Sync fork resolver's finality floor.
+                    self.healing.fork_resolver().lock().set_finalized_height(height);
                 }
                 CycleIo::PhaseChanged { cycle, phase } => {
                     let phase_name = format!("{phase:?}");
@@ -3497,9 +3455,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
                 }
-                CycleIo::RequestForkResolution { target_hash, target_height, reason } => {
-                    self.healing.on_fork_resolution_requested(target_hash, target_height, &reason);
-                }
                 CycleIo::PersistCheckpoint(cp) => {
                     let cbor = noble_codec::NobleCbor::to_cbor(&*cp).unwrap_or_default();
                     if let Err(e) = self.storage.read().store_checkpoint(cp.height, &cbor) {
@@ -3518,9 +3473,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "event": "checkpoints_activated",
                         "heights": heights,
                     }));
-                }
-                CycleIo::RequestChainAdoption { target_chain_id, reason } => {
-                    self.healing.on_chain_adoption_requested(target_chain_id, &reason);
                 }
                 other => {
                     // Emit protocol activity events for votes and bans

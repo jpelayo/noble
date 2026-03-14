@@ -1356,21 +1356,26 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     }
 
     async fn get_fork_resolution_status(&self) -> Result<ForkResolutionStatusResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read();
-        let resolver = consensus.fork_resolver();
-        let cp_mgr = consensus.checkpoint_manager();
+        let resolver = self.fork_resolver.lock();
         let strategy = match resolver.strategy() {
             noble_consensus::ForkResolutionStrategy::Manual => "manual",
             noble_consensus::ForkResolutionStrategy::PeerSupermajority => "peer_supermajority",
             noble_consensus::ForkResolutionStrategy::LongestMostLegitimate => "longest_most_legitimate",
         };
+        let dwell_counter = resolver.dwell_counter();
+        let delay_cycles = resolver.min_fork_duration();
+        let tracking_fork = resolver.tracked_fork_height().map(|h| format!("height:{h}"));
+        drop(resolver);
+        let consensus = self.consensus.read();
+        let finalized_floor = consensus.finality_tracker().finalized_height;
+        let checkpoint_floor = consensus.checkpoint_manager().highest_active_height();
         Ok(ForkResolutionStatusResponse {
             strategy: strategy.to_string(),
-            delay_cycles: resolver.min_fork_duration(),
-            dwell_counter: resolver.dwell_counter(),
-            tracking_fork: resolver.tracked_fork_height().map(|h| format!("height:{h}")),
-            finalized_floor: consensus.finality_tracker().finalized_height,
-            checkpoint_floor: cp_mgr.highest_active_height(),
+            delay_cycles,
+            dwell_counter,
+            tracking_fork,
+            finalized_floor,
+            checkpoint_floor,
         })
     }
 
