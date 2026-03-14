@@ -123,6 +123,13 @@ enum Commands {
         #[arg(long, default_value_os_t = default_data_dir())]
         data_dir: PathBuf,
     },
+
+    /// Verify frozen wire format test vectors.
+    ///
+    /// Checks that this binary produces byte-identical output for known
+    /// inputs. A failure means the binary's wire format is inconsistent
+    /// with the protocol spec — blocks and transactions will be rejected.
+    VerifyWire,
 }
 
 #[derive(Subcommand)]
@@ -340,6 +347,7 @@ fn main() {
             delete_peers,
         } => cmd_reset_chain(data_dir, confirm, delete_peers),
         Commands::ChainInfo { data_dir } => cmd_chain_info(data_dir),
+        Commands::VerifyWire => cmd_verify_wire(),
     }
 }
 
@@ -2243,5 +2251,44 @@ mod tests {
         // Verify chain_meta preserved
         let reloaded = noble_crypto::file_encrypt::load_or_create_chain_meta(dir.path(), "automatic", None).unwrap();
         assert_eq!(meta, reloaded);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// verify-wire
+// ---------------------------------------------------------------------------
+
+fn cmd_verify_wire() {
+    println!("Wire Format V{} — Frozen Vector Verification", noble_wire::WIRE_FORMAT_VERSION);
+    println!("{}", "=".repeat(60));
+
+    let results = noble_wire::vectors::verify_all_vectors();
+    let mut all_pass = true;
+
+    for r in &results {
+        let status = if r.pass { "PASS" } else { "FAIL" };
+        let icon = if r.pass { "+" } else { "X" };
+        println!("  [{}] {} {} ({} bytes)", icon, status, r.name, r.actual_len);
+        if !r.pass {
+            all_pass = false;
+            println!("       expected {} bytes, got {} bytes", r.expected_len, r.actual_len);
+        }
+    }
+
+    println!("{}", "-".repeat(60));
+    if all_pass {
+        println!(
+            "  All {} vectors passed. Wire format is consistent.",
+            results.len()
+        );
+    } else {
+        let fail_count = results.iter().filter(|r| !r.pass).count();
+        println!(
+            "  {} of {} vectors FAILED. THIS BINARY IS INCOMPATIBLE.",
+            fail_count,
+            results.len()
+        );
+        println!("  Block hashes and transaction IDs will not match the network.");
+        std::process::exit(1);
     }
 }

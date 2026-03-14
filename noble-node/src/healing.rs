@@ -1996,6 +1996,31 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             validator_list: &val_list,
         };
 
+        // Diagnostic: log chain_id and merkle details for debugging B4 mismatches.
+        {
+            let diag_tx_ids: Vec<String> = block.transactions.iter().enumerate().map(|(i, tx)| {
+                match tx.compute_tx_id(chain_id) {
+                    Ok(id) => format!("tx[{}]={}", i, hex::encode(id.as_bytes())),
+                    Err(e) => format!("tx[{}]=ERR({})", i, e),
+                }
+            }).collect();
+            let diag_tx_id_hashes: Vec<noble_crypto::Hash256> = block.transactions.iter()
+                .filter_map(|tx| tx.compute_tx_id(chain_id).ok())
+                .collect();
+            let computed_root = noble_core::compute_merkle_root(&diag_tx_id_hashes);
+            tracing::info!(
+                task = "sync_import",
+                height = block.header.height,
+                chain_id = format_args!("{:#010X}", chain_id),
+                block_merkle = %hex::encode(block.header.merkle_root.as_bytes()),
+                computed_merkle = %hex::encode(computed_root.as_bytes()),
+                match_ok = (block.header.merkle_root == computed_root),
+                tx_count = block.transactions.len(),
+                "B4 diagnostic: {}",
+                diag_tx_ids.join(", "),
+            );
+        }
+
         if let Err(e) = noble_core::validate_block(block, &ctx) {
             let is_fork = matches!(
                 e,

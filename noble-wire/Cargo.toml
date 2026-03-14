@@ -1,0 +1,15 @@
+[package]
+name = "noble-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Frozen wire format encoder for NOBLE protocol cryptographic hashing"
+
+[dependencies]
+noble-crypto = { path = "../noble-crypto" }
+noble-core = { path = "../noble-core" }
+hex = "0.4"
+
+[dev-dependencies]

@@ -1,0 +1,19 @@
+The CBOR encoder in src/cbor.rs is derived from ciborium-ll 0.2.2.
+
+Copyright (c) the ciborium contributors
+Licensed under the Apache License, Version 2.0
+https://github.com/enarx/ciborium
+https://crates.io/crates/ciborium-ll
+
+Original source: ciborium-ll/src/enc.rs (encoder) and ciborium-ll/src/hdr.rs (header types).
+
+Modifications by InfiniteContext.com <blockchain@infinitecontext.com>:
+- Extracted minimal encoding functions only (write_uint, write_bytes, write_text,
+  write_array, write_map, write_null). No decoder, no serde integration, no Value
+  type, no Tag support.
+- Removed all external dependencies (original depended on ciborium-io).
+- Simplified the major/minor header encoding into standalone functions.
+- Added write_bool helper.
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy at:
+http://www.apache.org/licenses/LICENSE-2.0

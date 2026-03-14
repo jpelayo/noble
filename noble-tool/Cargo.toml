@@ -20,6 +20,7 @@ noble-consensus.workspace = true
 noble-crypto.workspace = true
 noble-storage.workspace = true
 noble-wallet.workspace = true
+noble-wire = { path = "../noble-wire" }
 clap = { workspace = true }
 hex.workspace = true
 serde_json.workspace = true
