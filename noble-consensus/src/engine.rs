@@ -444,6 +444,16 @@ impl CycleEngine {
         self.vote_mgr.current_tallies()
     }
 
+    /// Look up the proposer of a candidate block.
+    ///
+    /// Checks candidate_tracker first (full block data), then vote_mgr proposer
+    /// hints (survives candidate pruning within the cycle).
+    pub fn proposer_of(&self, block_hash: &Hash256) -> Option<Vec<u8>> {
+        self.candidate_tracker
+            .validator_of(block_hash)
+            .or_else(|| self.vote_mgr.proposer_of(block_hash).cloned())
+    }
+
     /// Get current R2 (confirmation) vote tallies (candidate_hash → vote count).
     pub fn r2_tallies(&self) -> std::collections::HashMap<Hash256, usize> {
         self.vote_mgr.r2_tallies()
@@ -489,17 +499,15 @@ impl CycleEngine {
     fn handle_tick(&mut self, now: u64) -> Vec<CycleIo> {
         let mut outputs = Vec::new();
 
-        // No block committed yet — continuously re-align the epoch to the
-        // current wall-clock window so bootstrap ALWAYS sees cycle 0.
-        // `aligned = floor(now / cycle_duration) * cycle_duration`.
-        // All nodes in the same 1200s window compute the same epoch.
-        // Nodes in adjacent windows differ by ±1 cycle, handled by
-        // bootstrap_tolerance on VoteManager.
+        // Bootstrap epoch alignment: set the epoch ONCE on first tick so all
+        // nodes in the same wall-clock window compute the same cycle 0 start.
+        // After that, do NOT re-align — the epoch must stay fixed so the cycle
+        // number naturally increments from 0 → 1 at the boundary, triggering
+        // handle_cycle_boundary() which commits the winning block.
         //
-        // IMPORTANT: Use tip_height (not has_genesis) because set_genesis_timestamp
-        // is called on the first tick, making has_genesis() true forever — but the
-        // epoch must keep re-aligning until block 1 actually commits.
-        if self.tip_height == 0 {
+        // Re-aligning on every tick kept `current_cycle()` permanently at 0,
+        // preventing the cycle boundary from ever firing (bootstrap deadlock).
+        if self.tip_height == 0 && self.first_tick {
             let cd = self.cycle_mgr.cycle_duration();
             let aligned = (now / cd) * cd;
             self.cycle_mgr.set_genesis_timestamp(aligned);
@@ -1463,6 +1471,9 @@ impl CycleEngine {
             return outputs;
         }
 
+        // Record proposer hint for name resolution (survives candidate pruning).
+        self.vote_mgr.record_proposer(block_hash, new_header.validator_id.to_wire_bytes());
+
         // Add to candidate tracker
         match self.candidate_tracker.add_candidate(block, block_hash, 0) {
             Ok(()) => {
@@ -1772,6 +1783,8 @@ impl CycleEngine {
                         return outputs;
                     }
                 };
+                // Record proposer hint for self-proposed block.
+                self.vote_mgr.record_proposer(block_hash, block.header.validator_id.to_wire_bytes());
                 // Add to our own candidate tracker
                 let block_box = Box::new(block);
                 if let Err(e) =

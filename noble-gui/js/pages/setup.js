@@ -1045,7 +1045,7 @@ export function init(root, ctx) {
           value="${esc(state.seeds)}"
           style="font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
         <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs)">
-          Comma-separated hostnames or IPs of seed peers. Clear to run standalone.
+          Comma-separated hostnames or IPs of seed peers for discovery and recovery. Default: <b>node.infinitecontext.com</b>. Clear to run standalone.
         </div>
       </div>
 

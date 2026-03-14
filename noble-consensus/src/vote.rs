@@ -197,6 +197,11 @@ pub struct VoteManager {
     /// First vote per (voter_key, round) — retained for evidence construction.
     /// Cleared on `clear()`.
     first_votes: HashMap<(Vec<u8>, u8), PorVote>,
+    /// Proposer hints: block_hash → proposer wire bytes.
+    /// Populated by the engine when a block proposal is received.
+    /// Survives within the cycle even if the candidate tracker prunes the block.
+    /// Used by the RPC to resolve validator names for vote tallies.
+    proposer_hints: HashMap<Hash256, Vec<u8>>,
     /// Current cycle number for vote validation (AUD2-M4).
     current_cycle: u64,
     /// When true, accept votes with cycle ±1 of current_cycle (bootstrap tolerance).
@@ -213,6 +218,7 @@ impl VoteManager {
             voted_validators: HashSet::new(),
             vote_commitments: HashMap::new(),
             first_votes: HashMap::new(),
+            proposer_hints: HashMap::new(),
             current_cycle: 0,
             bootstrap_tolerance: false,
         }
@@ -526,6 +532,17 @@ impl VoteManager {
         keys.into_iter().collect()
     }
 
+    /// Record the proposer of a block (called from engine when a proposal is received).
+    /// Used by the RPC as a fallback when the candidate tracker no longer has the block.
+    pub fn record_proposer(&mut self, block_hash: Hash256, proposer_wire: Vec<u8>) {
+        self.proposer_hints.insert(block_hash, proposer_wire);
+    }
+
+    /// Look up the proposer wire bytes for a given block hash.
+    pub fn proposer_of(&self, block_hash: &Hash256) -> Option<&Vec<u8>> {
+        self.proposer_hints.get(block_hash)
+    }
+
     /// Clear all votes for a new cycle.
     ///
     /// Optionally set the new cycle number via `set_current_cycle()` after clearing.
@@ -535,6 +552,7 @@ impl VoteManager {
         self.voted_validators.clear();
         self.vote_commitments.clear();
         self.first_votes.clear();
+        self.proposer_hints.clear();
     }
 }
 

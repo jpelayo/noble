@@ -322,3 +322,95 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Overall sync target height (shared with HealingManager for real-time reads).
     pub sync_progress_total: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// Canonical node name resolution from validator wire bytes.
+///
+/// Checks four sources in priority order:
+/// 1. **Validator snapshot** — operator-set friendly name.
+/// 2. **Peer records** — `node_name` from the most recent `NodeAnnounce`.
+/// 3. **Self identity** — this node's own `node_name` (when `wire` is our key).
+/// 4. **Display key** — `nbl1…` bech32 address, or hex wire bytes.
+///
+/// Returns `(friendly_name, is_resolved)` where `is_resolved` is `true` when
+/// sources 1–3 provided a non-empty name (not the raw key fallback).
+///
+/// This is the **single canonical** name resolver. Every UI surface (RPC
+/// responses, WebSocket events, CLI output) MUST use this function.
+pub fn resolve_node_name<S: StorageEngine>(
+    wire: &[u8],
+    validator_registry: &noble_consensus::ValidatorRegistry,
+    storage: &S,
+    self_validator_pubkey_hex: Option<&str>,
+    self_node_name: &str,
+) -> (String, bool) {
+    // 1. Validator registry (operator-set friendly name).
+    if let Some(entry) = validator_registry.find_by_wire(wire) {
+        let n = entry.name();
+        if !n.is_empty() {
+            return (n, true);
+        }
+    }
+
+    // 2. Peer records (NodeAnnounce history).
+    if let Ok(records) = storage.list_peer_records() {
+        for rec in &records {
+            if rec.identity_key == wire {
+                if let Some(ref ann) = rec.last_announce {
+                    if !ann.node_name.is_empty() {
+                        return (ann.node_name.clone(), true);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // 3. Self identity.
+    if let Some(pk_hex) = self_validator_pubkey_hex {
+        let wire_hex = hex::encode(wire);
+        if pk_hex == wire_hex && !self_node_name.is_empty() {
+            return (self_node_name.to_string(), true);
+        }
+    }
+
+    // 4. Display key fallback (bech32 or hex).
+    let display = noble_crypto::noble_addr::encode_wire_bytes(wire)
+        .unwrap_or_else(|| hex::encode(wire));
+    (display, false)
+}
+
+impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
+    /// Resolve a node name from wire bytes using all available sources.
+    /// Convenience method that delegates to the free function [`resolve_node_name`].
+    ///
+    /// Lock acquisition order: Storage(2) < ValidatorRegistry(3).
+    pub fn resolve_name(&self, wire: &[u8]) -> String {
+        let storage = self.storage.read();         // Lock order: 2
+        let registry = self.validator_registry.read(); // Lock order: 3
+        let self_name = self.node_identity.read().node_name.clone();
+        resolve_node_name(
+            wire,
+            &registry,
+            &*storage,
+            self.validator_pubkey.as_deref(),
+            &self_name,
+        ).0
+    }
+
+    /// Resolve a node name, returning `None` if only the raw key fallback was available.
+    ///
+    /// Lock acquisition order: Storage(2) < ValidatorRegistry(3).
+    pub fn resolve_friendly_name(&self, wire: &[u8]) -> Option<String> {
+        let storage = self.storage.read();         // Lock order: 2
+        let registry = self.validator_registry.read(); // Lock order: 3
+        let self_name = self.node_identity.read().node_name.clone();
+        let (name, resolved) = resolve_node_name(
+            wire,
+            &registry,
+            &*storage,
+            self.validator_pubkey.as_deref(),
+            &self_name,
+        );
+        if resolved { Some(name) } else { None }
+    }
+}

@@ -17,14 +17,104 @@ use crate::error::ApiError;
 use crate::state::ApiState;
 use crate::types::*;
 
-/// Auto-convert bare IP (e.g. "192.168.5.20") to multiaddr "/ip4/{ip}/tcp/8780".
-fn normalize_multiaddr(input: &str) -> String {
+/// Maximum length for a raw multiaddr/address input (bytes).
+const MAX_ADDR_INPUT_LEN: usize = 512;
+
+/// Maximum number of seed nodes a node will store.
+const MAX_SEED_COUNT: usize = 64;
+
+/// Default P2P port appended when the user omits one.
+const DEFAULT_P2P_PORT: u16 = 8780;
+
+/// Robustly convert user input into a libp2p multiaddr string.
+///
+/// Accepts:
+/// - Full multiaddr: `/ip4/1.2.3.4/tcp/8780`, `/dns4/host.com/tcp/8780`
+/// - Bare IPv4: `192.168.5.20` → `/ip4/192.168.5.20/tcp/8780`
+/// - Bare IPv6: `::1`, `[::1]` → `/ip6/::1/tcp/8780`
+/// - Hostname: `node.infinitecontext.com` → `/dns4/node.infinitecontext.com/tcp/8780`
+/// - `host:port` or `ip:port`: `1.2.3.4:9000` → `/ip4/1.2.3.4/tcp/9000`
+/// - URL form: `https://host:8783` → `/dns4/host/tcp/8783` (explicit port preserved)
+///
+/// Returns `Err` if the input is empty, overlong, or contains invalid characters.
+fn normalize_multiaddr(input: &str) -> Result<String, String> {
+    let input = input.trim();
+
+    if input.is_empty() {
+        return Err("address is empty".into());
+    }
+    if input.len() > MAX_ADDR_INPUT_LEN {
+        return Err(format!("address too long ({} bytes, max {})", input.len(), MAX_ADDR_INPUT_LEN));
+    }
+
+    // Already a multiaddr — pass through (libp2p will validate).
     if input.starts_with('/') {
-        input.to_string()
-    } else if input.chars().any(|c| c.is_ascii_alphabetic()) {
-        format!("/dns4/{}/tcp/8780", input)
+        return Ok(input.to_string());
+    }
+
+    // Strip URL scheme if present (https://host:port → host:port).
+    let stripped = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))
+        .unwrap_or(input);
+
+    // Strip path/query from URL-style input (host:port/path?q → host:port).
+    let stripped = stripped.split('/').next().unwrap_or(stripped);
+    let stripped = stripped.split('?').next().unwrap_or(stripped);
+
+    // Strip brackets from IPv6 (e.g. [::1]:8780 → ::1:8780 handled below, [::1] → ::1).
+    let stripped = if stripped.starts_with('[') {
+        // [::1]:8780 or [::1]
+        if let Some(bracket_end) = stripped.find(']') {
+            let ip6 = &stripped[1..bracket_end];
+            let rest = &stripped[bracket_end + 1..];
+            if let Some(port_str) = rest.strip_prefix(':') {
+                // [::1]:8780
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return Ok(format!("/ip6/{}/tcp/{}", ip6, port));
+                }
+            }
+            // [::1] without port
+            return Ok(format!("/ip6/{}/tcp/{}", ip6, DEFAULT_P2P_PORT));
+        }
+        stripped
     } else {
-        format!("/ip4/{}/tcp/8780", input)
+        stripped
+    };
+
+    // Reject control characters and whitespace within the address.
+    if stripped.chars().any(|c| c.is_control() || c == ' ') {
+        return Err("address contains invalid characters".into());
+    }
+
+    // Determine if this is IPv4, IPv6, or hostname, with optional :port.
+    let has_alpha = stripped.chars().any(|c| c.is_ascii_alphabetic());
+    let colon_count = stripped.chars().filter(|&c| c == ':').count();
+
+    // IPv6 (multiple colons, e.g. "::1" or "fe80::1")
+    if colon_count > 1 {
+        return Ok(format!("/ip6/{}/tcp/{}", stripped, DEFAULT_P2P_PORT));
+    }
+
+    // host:port or ip:port (exactly one colon)
+    if colon_count == 1 {
+        let (host, port_str) = stripped.rsplit_once(':').unwrap();
+        let port = port_str.parse::<u16>().unwrap_or(DEFAULT_P2P_PORT);
+        if host.is_empty() {
+            return Err("empty hostname before port".into());
+        }
+        return if has_alpha {
+            Ok(format!("/dns4/{}/tcp/{}", host, port))
+        } else {
+            Ok(format!("/ip4/{}/tcp/{}", host, port))
+        };
+    }
+
+    // Bare hostname or bare IPv4 (no colon).
+    if has_alpha {
+        Ok(format!("/dns4/{}/tcp/{}", stripped, DEFAULT_P2P_PORT))
+    } else {
+        Ok(format!("/ip4/{}/tcp/{}", stripped, DEFAULT_P2P_PORT))
     }
 }
 
@@ -353,7 +443,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn dial_peer(&self, multiaddr: String) -> Result<DialPeerResponse, ErrorObjectOwned> {
-        let multiaddr = normalize_multiaddr(&multiaddr);
+        let multiaddr = normalize_multiaddr(&multiaddr)
+            .map_err(|e| ApiError::InvalidAddress(e))?;
         let addr: libp2p::Multiaddr = multiaddr
             .parse()
             .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
@@ -388,15 +479,21 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn add_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned> {
-        let multiaddr = normalize_multiaddr(&multiaddr);
+        let multiaddr = normalize_multiaddr(&multiaddr)
+            .map_err(|e| ApiError::InvalidAddress(e))?;
         // Validate multiaddr syntax.
         let addr: libp2p::Multiaddr = multiaddr
             .parse()
             .map_err(|e| ApiError::InvalidAddress(format!("invalid multiaddr: {e}")))?;
 
-        // Add to live list (skip duplicates).
+        // Add to live list (skip duplicates, enforce max count).
         {
             let mut seeds = self.seeds.write();
+            if seeds.len() >= MAX_SEED_COUNT {
+                return Err(ApiError::InvalidAddress(
+                    format!("maximum seed count reached ({MAX_SEED_COUNT})")
+                ).into());
+            }
             if !seeds.contains(&multiaddr) {
                 seeds.push(multiaddr.clone());
             }
@@ -416,9 +513,11 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn remove_seed(&self, multiaddr: String) -> Result<SeedsResponse, ErrorObjectOwned> {
+        // Normalize so the match key is the same form as what add_seed stored.
+        let normalized = normalize_multiaddr(&multiaddr).unwrap_or_else(|_| multiaddr.clone());
         {
             let mut seeds = self.seeds.write();
-            seeds.retain(|s| s != &multiaddr);
+            seeds.retain(|s| s != &normalized && s != &multiaddr);
         }
 
         // Persist to noble.toml.

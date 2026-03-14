@@ -672,70 +672,28 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     }
 
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
-        // Lock order: ValidatorRegistry(3) before Consensus(4).
-        let registry = self.validator_registry.read();
-        let consensus = self.consensus.read();
-        let cycle = consensus.current_cycle();
-        let phase = consensus.current_phase();
-        let tallies = consensus.vote_tallies();
-        let candidate_tracker = consensus.candidate_tracker();
-
-        // Build peer announce name lookup as fallback for validators not in local list
-        let peer_name_map: std::collections::HashMap<Vec<u8>, String> = {
-            let storage = self.storage.read();
-            storage
-                .list_peer_records()
-                .unwrap_or_default()
+        // Extract data from consensus engine, then drop the lock before
+        // calling resolve_name (which acquires Storage(2) + Registry(3)).
+        let (cycle, phase, tally_data) = {
+            let consensus = self.consensus.read(); // Lock order: 4
+            let cycle = consensus.current_cycle();
+            let phase = consensus.current_phase();
+            let tallies = consensus.vote_tallies();
+            let data: Vec<_> = tallies
                 .into_iter()
-                .filter_map(|rec| {
-                    let name = rec
-                        .last_announce
-                        .as_ref()
-                        .map(|ann| ann.node_name.clone())
-                        .unwrap_or_default();
-                    if name.is_empty() {
-                        None
-                    } else {
-                        Some((rec.identity_key.clone(), name))
-                    }
+                .map(|(h, c)| {
+                    let proposer = consensus.proposer_of(&h);
+                    (h, c, proposer)
                 })
-                .collect()
-        };
+                .collect();
+            (cycle, phase, data)
+        }; // consensus lock dropped
 
-        // Self-node identity: the local node's own validator key may not be
-        // in its own validator_list — use node_identity.node_name as fallback.
-        let self_validator_name: Option<(String, String)> = self.validator_pubkey.as_ref().map(|pk| {
-            let id = self.node_identity.read();
-            (pk.clone(), id.node_name.clone())
-        });
-
-        let mut entries: Vec<VoteTallyEntry> = tallies
+        let mut entries: Vec<VoteTallyEntry> = tally_data
             .into_iter()
-            .map(|(h, c)| {
-                // Look up proposer wire bytes once (used for both name and key).
-                let proposer_wire = candidate_tracker.validator_of(&h);
-                let validator_key = proposer_wire.as_ref()
-                    .map(|wire| hex::encode(wire));
-                let validator = proposer_wire.map(|wire| {
-                    let display_key = noble_crypto::noble_addr::encode_wire_bytes(&wire)
-                        .unwrap_or_else(|| hex::encode(&wire));
-                    registry
-                        .find_by_wire(&wire)
-                        .map(|v| v.name())
-                        .filter(|n| !n.is_empty())
-                        .or_else(|| peer_name_map.get(&wire).cloned())
-                        .or_else(|| {
-                            self_validator_name.as_ref().and_then(|(pk_hex, name)| {
-                                let wire_hex = hex::encode(&wire);
-                                if *pk_hex == wire_hex && !name.is_empty() {
-                                    Some(name.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                        .unwrap_or(display_key)
-                });
+            .map(|(h, c, proposer_wire): (noble_crypto::Hash256, usize, Option<Vec<u8>>)| {
+                let validator_key = proposer_wire.as_ref().map(|wire| hex::encode(wire));
+                let validator = proposer_wire.as_ref().map(|wire| self.resolve_name(wire));
                 VoteTallyEntry {
                     block_hash: hash_to_hex(&h),
                     vote_count: c,

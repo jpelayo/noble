@@ -577,15 +577,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(|s| {
-                if s.starts_with('/') {
-                    s
-                } else if s.chars().any(|c| c.is_ascii_alphabetic()) {
-                    format!("/dns4/{}/tcp/8780", s)
-                } else {
-                    format!("/ip4/{}/tcp/8780", s)
-                }
-            })
+            .map(|s| normalize_seed_addr(&s))
             .collect();
 
         let peers: u32 = Input::new()
@@ -1109,6 +1101,37 @@ fn summary_line(label: &str, value: &str) {
 
 /// Extract the TCP port number from a `/ip4/.../tcp/PORT` multiaddr string.
 ///
+/// Normalize a single seed address from user input into multiaddr form.
+///
+/// Handles bare IP, hostname, host:port, URL, and bracketed IPv6.
+fn normalize_seed_addr(input: &str) -> String {
+    let input = input.trim();
+    if input.starts_with('/') { return input.to_string(); }
+    let stripped = input
+        .strip_prefix("https://").or_else(|| input.strip_prefix("http://"))
+        .unwrap_or(input);
+    let stripped = stripped.split('/').next().unwrap_or(stripped);
+    let stripped = stripped.split('?').next().unwrap_or(stripped);
+    if stripped.starts_with('[') {
+        if let Some(end) = stripped.find(']') {
+            let ip6 = &stripped[1..end];
+            let rest = &stripped[end + 1..];
+            let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok()).unwrap_or(8780);
+            return format!("/ip6/{ip6}/tcp/{port}");
+        }
+    }
+    let has_alpha = stripped.chars().any(|c| c.is_ascii_alphabetic());
+    let colons = stripped.chars().filter(|&c| c == ':').count();
+    if colons > 1 { return format!("/ip6/{stripped}/tcp/8780"); }
+    if colons == 1 {
+        if let Some((host, port_str)) = stripped.rsplit_once(':') {
+            let port = port_str.parse::<u16>().unwrap_or(8780);
+            return if has_alpha { format!("/dns4/{host}/tcp/{port}") } else { format!("/ip4/{host}/tcp/{port}") };
+        }
+    }
+    if has_alpha { format!("/dns4/{stripped}/tcp/8780") } else { format!("/ip4/{stripped}/tcp/8780") }
+}
+
 /// Returns 8780 if the port cannot be parsed.
 fn extract_port_from_listen_addr(addr: &str) -> u16 {
     addr.rsplit("/tcp/")

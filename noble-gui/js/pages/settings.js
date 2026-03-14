@@ -158,14 +158,14 @@ export function init(root, ctx) {
       </div>
       <div class="panel-body">
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
-          Seed nodes are dialed on startup and used for initial peer discovery.
-          Changes are persisted to <code>noble.toml</code>.
+          Seed nodes are dialed on startup and used for peer discovery and chain recovery.
+          Default: <code>node.infinitecontext.com</code>. Changes are persisted to <code>noble.toml</code>.
         </p>
 
         <div id="s-seed-list" style="margin-bottom:var(--gap)"></div>
 
         <div style="display:flex;gap:var(--gap-sm);align-items:center;margin-bottom:var(--gap)">
-          <input id="s-new-seed" type="text" placeholder="e.g. node.infinitecontext.com or 192.168.5.20"
+          <input id="s-new-seed" type="text" maxlength="256" placeholder="e.g. node.infinitecontext.com or 192.168.5.20"
             style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
           <button id="s-add-seed" class="btn-sm" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm);white-space:nowrap">Add Seed</button>
         </div>
@@ -452,16 +452,23 @@ export function init(root, ctx) {
   // Validate an IP or CIDR string
   function isValidIpOrCidr(str) {
     const trimmed = str.trim();
-    if (!trimmed) return false;
-    // Simple IPv4 pattern
-    const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
-    // IPv4 with CIDR
-    const ipv4Cidr = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
-    // IPv6 pattern (simplified)
-    const ipv6 = /^[0-9a-fA-F:]+$/;
-    // IPv6 with CIDR
-    const ipv6Cidr = /^[0-9a-fA-F:]+\/\d{1,3}$/;
-    return ipv4.test(trimmed) || ipv4Cidr.test(trimmed) || ipv6.test(trimmed) || ipv6Cidr.test(trimmed);
+    if (!trimmed || trimmed.length > 128) return false;
+    // IPv4: each octet 0-255
+    const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+    const ipv4Match = trimmed.match(ipv4Re);
+    if (ipv4Match) return ipv4Match.slice(1).every(o => +o <= 255);
+    // IPv4/CIDR: octets + prefix 0-32
+    const ipv4CidrRe = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
+    const cidrMatch = trimmed.match(ipv4CidrRe);
+    if (cidrMatch) return cidrMatch.slice(1, 5).every(o => +o <= 255) && +cidrMatch[5] <= 32;
+    // IPv6: at least 2 colons, only hex+colon, max 39 chars (without CIDR)
+    const ipv6Re = /^[0-9a-fA-F:]{2,39}$/;
+    if (ipv6Re.test(trimmed) && (trimmed.match(/:/g) || []).length >= 2) return true;
+    // IPv6/CIDR: ipv6 part + /0-128
+    const ipv6CidrRe = /^([0-9a-fA-F:]{2,39})\/(\d{1,3})$/;
+    const v6m = trimmed.match(ipv6CidrRe);
+    if (v6m && (v6m[1].match(/:/g) || []).length >= 2 && +v6m[2] <= 128) return true;
+    return false;
   }
 
   // Render the IP list
@@ -870,7 +877,24 @@ export function init(root, ctx) {
   // --- Seed node management ---
   function renderSeedList(seeds) {
     if (!seeds || seeds.length === 0) {
-      seedListEl.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm);font-style:italic">No seed nodes configured (using default bootstrap)</div>`;
+      seedListEl.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm);font-style:italic;margin-bottom:6px">No seed nodes configured.</div>
+        <button id="s-restore-default" class="btn-sm" style="padding:4px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs);color:var(--text-secondary)">Restore default (node.infinitecontext.com)</button>`;
+      const restoreBtn = seedListEl.querySelector('#s-restore-default');
+      if (restoreBtn) {
+        restoreBtn.addEventListener('click', async () => {
+          try {
+            const result = await rpc.call('noble_addSeed', { multiaddr: 'node.infinitecontext.com' });
+            renderSeedList(result.seeds);
+            seedMsg.style.display = 'block';
+            seedMsg.style.color = 'var(--success)';
+            seedMsg.textContent = 'Default seed restored and dial initiated';
+            setTimeout(() => { seedMsg.style.display = 'none'; }, 3000);
+          } catch (e) {
+            seedError.textContent = e.message || 'Failed to restore default';
+            seedError.style.display = 'block';
+          }
+        });
+      }
       seedBadge.textContent = '0 seeds';
       seedBadge.className = 'badge';
       seedBadge.style.background = 'var(--text-muted)';

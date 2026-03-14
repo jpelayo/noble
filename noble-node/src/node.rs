@@ -103,6 +103,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub chain_meta: [u8; 32],
     /// Keypair for signing NodeAnnounce messages (cloned from validator key before CycleEngine consumes it).
     pub announce_keypair: Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
+    /// Hex-encoded validator wire bytes (for name resolution without locking consensus).
+    pub validator_pubkey_hex: Option<String>,
     /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
     /// While true, block proposals are suppressed.
     pub clock_drift_paused: std::sync::atomic::AtomicBool,
@@ -542,6 +544,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             pki_attestation,
             ca_store,
             chain_meta,
+            validator_pubkey_hex: announce_keypair.as_ref().map(|(_, pk)| hex::encode(pk.to_wire_bytes())),
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             validator_list_path: Some(validator_list_path),
@@ -2748,11 +2751,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Enrich block_received with proposer identity for GUI display.
                 let proposer_wire = block.header.validator_id.to_wire_bytes();
                 let proposer_name = {
-                    let engine = self.consensus.read();
-                    engine.validator_snapshot()
-                        .and_then(|snap| snap.find_by_wire(&proposer_wire))
-                        .map(|e| e.name.clone())
-                        .filter(|n| !n.is_empty())
+                    let self_name = shared_identity.read().node_name.clone();
+                    let storage = self.storage.read();         // Lock order: 2
+                    let registry = self.validator_registry.read(); // Lock order: 3
+                    let (name, resolved) = noble_api::resolve_node_name(
+                        &proposer_wire, &registry, &*storage,
+                        self.validator_pubkey_hex.as_deref(), &self_name,
+                    );
+                    if resolved { Some(name) } else { None }
                 };
                 // Only emit individual block_received events when not syncing
                 // (during sync, sync_progress events replace per-block noise).
@@ -2817,65 +2823,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine
                 if let NetworkEvent::VoteReceived { voter_id, cycle, candidate_hash, round, .. } = event {
-                    // Resolve voter name and candidate proposer name for GUI display.
-                    // Priority: validator_list → peer records → self identity.
                     let (voter_name, candidate_name) = {
-                        let engine = self.consensus.read();
-                        let our_wire = engine.our_validator_wire_bytes();
-
-                        // Resolve voter name: validator_list → peer records → self identity
-                        let vn = engine.validator_snapshot()
-                            .and_then(|snap| snap.find_by_wire(voter_id))
-                            .map(|e| e.name.clone())
-                            .filter(|n| !n.is_empty())
-                            .or_else(|| {
-                                self.storage.read()
-                                    .list_peer_records()
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .find(|r| r.identity_key == *voter_id)
-                                    .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
-                                    .filter(|n| !n.is_empty())
-                            })
-                            .or_else(|| {
-                                if our_wire.as_deref() == Some(voter_id) {
-                                    let id = shared_identity.read();
-                                    if !id.node_name.is_empty() {
-                                        return Some(id.node_name.clone());
-                                    }
-                                }
-                                None
-                            })
-                            .unwrap_or_default();
-
-                        // Resolve candidate proposer name: validator_list → peer records → self identity
-                        let cn = engine.candidate_tracker().get(&noble_crypto::Hash256(*candidate_hash))
-                            .and_then(|entry| {
-                                let wire = entry.block.header.validator_id.to_wire_bytes();
-                                engine.validator_snapshot()
-                                    .and_then(|snap| snap.find_by_wire(&wire))
-                                    .map(|e| e.name.clone())
-                                    .filter(|n| !n.is_empty())
-                                    .or_else(|| {
-                                        self.storage.read()
-                                            .list_peer_records()
-                                            .unwrap_or_default()
-                                            .into_iter()
-                                            .find(|r| r.identity_key == wire)
-                                            .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
-                                            .filter(|n| !n.is_empty())
-                                    })
-                                    .or_else(|| {
-                                        if our_wire.as_deref() == Some(&wire) {
-                                            let id = shared_identity.read();
-                                            if !id.node_name.is_empty() {
-                                                return Some(id.node_name.clone());
-                                            }
-                                        }
-                                        None
-                                    })
-                            })
-                            .unwrap_or_default();
+                        let self_name = shared_identity.read().node_name.clone();
+                        let self_pk = self.validator_pubkey_hex.as_deref();
+                        let storage = self.storage.read();         // Lock order: 2
+                        let registry = self.validator_registry.read(); // Lock order: 3
+                        let vn = noble_api::resolve_node_name(
+                            voter_id, &registry, &*storage, self_pk, &self_name,
+                        ).0;
+                        let cn = {
+                            let engine = self.consensus.read();
+                            engine.proposer_of(&noble_crypto::Hash256(*candidate_hash))
+                                .map(|wire| noble_api::resolve_node_name(
+                                    &wire, &registry, &*storage, self_pk, &self_name,
+                                ).0)
+                                .unwrap_or_default()
+                        };
                         (vn, cn)
                     };
                     let _ = cycle_phase_tx.send(serde_json::json!({
@@ -3012,12 +2975,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                     // Protocol activity: block committed (with proposer name)
                     let proposer_name = {
-                        let engine = self.consensus.read();
                         let wire = block.header.validator_id.to_wire_bytes();
-                        engine.validator_snapshot()
-                            .and_then(|snap| snap.find_by_wire(&wire))
-                            .map(|e| e.name.clone())
-                            .filter(|n| !n.is_empty())
+                        let self_name = shared_identity.read().node_name.clone();
+                        let storage_r = self.storage.read();          // Lock order: 2
+                        let registry = self.validator_registry.read(); // Lock order: 3
+                        let (name, resolved) = noble_api::resolve_node_name(
+                            &wire, &registry, &*storage_r,
+                            self.validator_pubkey_hex.as_deref(), &self_name,
+                        );
+                        if resolved { Some(name) } else { None }
                     };
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "block_committed",
@@ -3170,103 +3136,75 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     match phase {
                         noble_consensus::CyclePhase::Reflection => {
                             // Reflection start: R1 votes are in — show current leader.
-                            let (tallies_data, validator_wire) = {
+                            let (total_votes, best, proposer_wire) = {
                                 let engine = self.consensus.read();
-                                let tallies = engine.vote_tallies(); // R1
-                                let total_votes: usize = tallies.values().sum();
-                                let best = tallies.iter().max_by_key(|e| e.1).map(|(h, c)| (*h, *c));
-                                let wire = best.and_then(|(hash, _)| {
-                                    engine.candidate_tracker().get(&hash).map(|entry| {
-                                        entry.block.header.validator_id.to_wire_bytes()
-                                    })
-                                });
-                                let name_from_list = wire.as_ref().and_then(|w| {
-                                    let n = engine.validator_snapshot().and_then(|s| s.find_by_wire(w)).map(|e| e.name.clone()).unwrap_or_default();
-                                    if n.is_empty() { None } else { Some(n) }
-                                });
-                                ((total_votes, best, name_from_list), wire)
-                            }; // consensus lock released
-                            let (total_votes, best, name_from_list) = tallies_data;
+                                let tallies = engine.vote_tallies();
+                                let total: usize = tallies.values().sum();
+                                let b = tallies.iter().max_by_key(|e| e.1).map(|(h, c)| (*h, *c));
+                                let w = b.and_then(|(hash, _)| engine.proposer_of(&hash));
+                                (total, b, w)
+                            };
                             if let Some((best_hash, best_count)) = best {
                                 let pct = if total_votes > 0 { (best_count * 100) / total_votes } else { 0 };
-                                // Resolve name: validator list first, then peer records fallback.
-                                let validator_wire_for_key = validator_wire.clone();
-                                let name = name_from_list.or_else(|| {
-                                    validator_wire.and_then(|wire| {
-                                        let storage = self.storage.read();
-                                        storage.list_peer_records().ok().and_then(|records| {
-                                            records.into_iter()
-                                                .find(|r| r.peer_id_bytes == wire)
-                                                .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
-                                                .filter(|n| !n.is_empty())
-                                        })
-                                    })
-                                });
-                                event["leader_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
+                                let (name, key_display) = match &proposer_wire {
+                                    Some(wire) => {
+                                        let self_name = shared_identity.read().node_name.clone();
+                                        let storage = self.storage.read();         // Lock order: 2
+                                        let registry = self.validator_registry.read(); // Lock order: 3
+                                        let (n, resolved) = noble_api::resolve_node_name(
+                                            wire, &registry, &*storage,
+                                            self.validator_pubkey_hex.as_deref(), &self_name,
+                                        );
+                                        let key = noble_crypto::noble_addr::encode_wire_bytes(wire)
+                                            .unwrap_or_else(|| hex::encode(wire));
+                                        (if resolved { n } else { String::new() }, Some(key))
+                                    }
+                                    None => (String::new(), None),
+                                };
+                                event["leader_name"] = serde_json::json!(name);
                                 event["leader_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
-                                if let Some(ref w) = validator_wire_for_key {
-                                    event["leader_key"] = serde_json::json!(
-                                        noble_crypto::noble_addr::encode_wire_bytes(w)
-                                            .unwrap_or_else(|| hex::encode(w))
-                                    );
+                                if let Some(key) = key_display {
+                                    event["leader_key"] = serde_json::json!(key);
                                 }
                                 event["leader_pct"] = serde_json::json!(pct);
                                 event["total_votes"] = serde_json::json!(total_votes);
                             }
                         }
                         noble_consensus::CyclePhase::Propagation => {
-                            // Propagation start: R2 votes are in — show winner
-                            // only when there is a clear (non-tied) leader.
-                            let (best_info, wire_bytes) = {
+                            // Propagation start: R2 votes are in — show winner.
+                            let (best_hash, proposer_wire) = {
                                 let engine = self.consensus.read();
                                 let r2 = engine.r2_tallies();
                                 let total_r2: usize = r2.values().sum();
-                                let (source_tallies, label) = if total_r2 > 0 {
-                                    (r2, "r2")
-                                } else {
-                                    (engine.vote_tallies(), "r1_fallback")
+                                let source = if total_r2 > 0 { r2 } else { engine.vote_tallies() };
+                                let max_count = source.values().copied().max().unwrap_or(0);
+                                let tied = source.values().filter(|&&c| c == max_count).count() > 1;
+                                let b = if tied { None } else {
+                                    source.iter().max_by_key(|e| e.1).map(|(h, _)| *h)
                                 };
-                                // Check for ties: only emit winner when one
-                                // candidate has strictly more votes than all others.
-                                let max_count = source_tallies.values().copied().max().unwrap_or(0);
-                                let tied = source_tallies.values().filter(|&&c| c == max_count).count() > 1;
-                                let best = if tied {
-                                    None
-                                } else {
-                                    source_tallies.iter().max_by_key(|e| e.1).map(|(h, _)| *h)
+                                let w = b.and_then(|hash| engine.proposer_of(&hash));
+                                (b, w)
+                            };
+                            if let Some(best_hash) = best_hash {
+                                let (name, key_display) = match &proposer_wire {
+                                    Some(wire) => {
+                                        let self_name = shared_identity.read().node_name.clone();
+                                        let storage = self.storage.read();         // Lock order: 2
+                                        let registry = self.validator_registry.read(); // Lock order: 3
+                                        let (n, resolved) = noble_api::resolve_node_name(
+                                            wire, &registry, &*storage,
+                                            self.validator_pubkey_hex.as_deref(), &self_name,
+                                        );
+                                        let key = noble_crypto::noble_addr::encode_wire_bytes(wire)
+                                            .unwrap_or_else(|| hex::encode(wire));
+                                        (if resolved { n } else { String::new() }, Some(key))
+                                    }
+                                    None => (String::new(), None),
                                 };
-                                let wire = best.and_then(|hash| {
-                                    engine.candidate_tracker().get(&hash).map(|entry| {
-                                        entry.block.header.validator_id.to_wire_bytes()
-                                    })
-                                });
-                                let name_from_list = wire.as_ref().and_then(|w| {
-                                    let n = engine.validator_snapshot().and_then(|s| s.find_by_wire(w)).map(|e| e.name.clone()).unwrap_or_default();
-                                    if n.is_empty() { None } else { Some(n) }
-                                });
-                                ((best, name_from_list, label), wire)
-                            }; // consensus lock released
-                            let (best, name_from_list, _label) = best_info;
-                            if let Some(best_hash) = best {
-                                let wire_bytes_for_key = wire_bytes.clone();
-                                let name = name_from_list.or_else(|| {
-                                    wire_bytes.and_then(|wire| {
-                                        let storage = self.storage.read();
-                                        storage.list_peer_records().ok().and_then(|records| {
-                                            records.into_iter()
-                                                .find(|r| r.peer_id_bytes == wire)
-                                                .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
-                                                .filter(|n| !n.is_empty())
-                                        })
-                                    })
-                                });
-                                event["winner_name"] = serde_json::json!(name.as_deref().unwrap_or(""));
+                                event["winner_name"] = serde_json::json!(name);
                                 event["winner_hash"] = serde_json::json!(hex::encode(best_hash.as_bytes()));
-                                if let Some(ref w) = wire_bytes_for_key {
-                                    event["winner_key"] = serde_json::json!(
-                                        noble_crypto::noble_addr::encode_wire_bytes(w)
-                                            .unwrap_or_else(|| hex::encode(w))
-                                    );
+                                if let Some(key) = key_display {
+                                    event["winner_key"] = serde_json::json!(key);
                                 }
                             }
                         }
@@ -3478,40 +3416,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Emit protocol activity events for votes and bans
                     match &other {
                         CycleIo::BroadcastVote(vote) => {
-                            // Resolve candidate proposer name for activity display.
-                            // Priority: validator_list → peer records → self identity.
                             let proposer_name = {
-                                let engine = self.consensus.read();
-                                let our_wire = engine.our_validator_wire_bytes();
-                                engine.candidate_tracker().get(&vote.candidate_hash)
-                                    .and_then(|entry| {
-                                        let wire = entry.block.header.validator_id.to_wire_bytes();
-                                        // 1. Validator snapshot lookup
-                                        engine.validator_snapshot()
-                                            .and_then(|snap| snap.find_by_wire(&wire))
-                                            .map(|e| e.name.clone())
-                                            .filter(|n| !n.is_empty())
-                                            .or_else(|| {
-                                                // 2. Peer records lookup
-                                                self.storage.read()
-                                                    .list_peer_records()
-                                                    .unwrap_or_default()
-                                                    .into_iter()
-                                                    .find(|r| r.identity_key == wire)
-                                                    .and_then(|r| r.last_announce.as_ref().map(|a| a.node_name.clone()))
-                                                    .filter(|n| !n.is_empty())
-                                            })
-                                            .or_else(|| {
-                                                // 3. Self identity fallback
-                                                if our_wire.as_deref() == Some(&wire) {
-                                                    let id = shared_identity.read();
-                                                    if !id.node_name.is_empty() {
-                                                        return Some(id.node_name.clone());
-                                                    }
-                                                }
-                                                None
-                                            })
-                                    })
+                                let proposer_wire = {
+                                    let engine = self.consensus.read(); // Lock order: 4
+                                    engine.proposer_of(&vote.candidate_hash)
+                                }; // consensus lock dropped
+                                proposer_wire.map(|wire| {
+                                    let self_name = shared_identity.read().node_name.clone();
+                                    let storage = self.storage.read();         // Lock order: 2
+                                    let registry = self.validator_registry.read(); // Lock order: 3
+                                    noble_api::resolve_node_name(
+                                        &wire, &registry, &*storage,
+                                        self.validator_pubkey_hex.as_deref(), &self_name,
+                                    ).0
+                                })
                             };
                             let _ = cycle_phase_tx.send(serde_json::json!({
                                 "event": "vote_broadcast",

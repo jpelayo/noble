@@ -1150,16 +1150,54 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
+/// Normalize bare IP / hostname / host:port / URL into a libp2p multiaddr string.
+/// The RPC server re-normalizes, but doing it client-side gives better error messages
+/// and display strings in the CLI output.
+fn cli_normalize_addr(input: &str) -> String {
+    let input = input.trim();
+    if input.starts_with('/') { return input.to_string(); }
+    // Strip URL scheme.
+    let stripped = input
+        .strip_prefix("https://").or_else(|| input.strip_prefix("http://"))
+        .unwrap_or(input);
+    let stripped = stripped.split('/').next().unwrap_or(stripped);
+    let stripped = stripped.split('?').next().unwrap_or(stripped);
+    // Bracketed IPv6.
+    if stripped.starts_with('[') {
+        if let Some(end) = stripped.find(']') {
+            let ip6 = &stripped[1..end];
+            let rest = &stripped[end + 1..];
+            let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok()).unwrap_or(8780);
+            return format!("/ip6/{}/tcp/{}", ip6, port);
+        }
+    }
+    let has_alpha = stripped.chars().any(|c| c.is_ascii_alphabetic());
+    let colon_count = stripped.chars().filter(|&c| c == ':').count();
+    // IPv6 (multiple colons).
+    if colon_count > 1 { return format!("/ip6/{}/tcp/8780", stripped); }
+    // host:port or ip:port.
+    if colon_count == 1 {
+        if let Some((host, port_str)) = stripped.rsplit_once(':') {
+            let port = port_str.parse::<u16>().unwrap_or(8780);
+            return if has_alpha {
+                format!("/dns4/{}/tcp/{}", host, port)
+            } else {
+                format!("/ip4/{}/tcp/{}", host, port)
+            };
+        }
+    }
+    // Bare hostname or bare IPv4.
+    if has_alpha {
+        format!("/dns4/{}/tcp/8780", stripped)
+    } else {
+        format!("/ip4/{}/tcp/8780", stripped)
+    }
+}
+
 fn cmd_peer(action: PeerCommand) {
     match action {
         PeerCommand::Dial { multiaddr, rpc_url } => {
-            let multiaddr = if multiaddr.starts_with('/') {
-                multiaddr.clone()
-            } else if multiaddr.chars().any(|c| c.is_ascii_alphabetic()) {
-                format!("/dns4/{}/tcp/8780", multiaddr)
-            } else {
-                format!("/ip4/{}/tcp/8780", multiaddr)
-            };
+            let multiaddr = cli_normalize_addr(&multiaddr);
             let params = serde_json::json!({ "multiaddr": multiaddr });
             match rpc_call(&rpc_url, "noble_dialPeer", params) {
                 Ok(result) => {
@@ -1183,7 +1221,10 @@ fn cmd_peer(action: PeerCommand) {
                                 println!("  {}", seed.as_str().unwrap_or("?"));
                             }
                         }
-                        _ => println!("No seeds configured."),
+                        _ => {
+                            println!("No seeds configured.");
+                            println!("  Hint: noble-tool peer add-seed node.infinitecontext.com");
+                        }
                     }
                 }
                 Err(e) => {
@@ -1193,13 +1234,7 @@ fn cmd_peer(action: PeerCommand) {
             }
         }
         PeerCommand::AddSeed { multiaddr, rpc_url } => {
-            let multiaddr = if multiaddr.starts_with('/') {
-                multiaddr.clone()
-            } else if multiaddr.chars().any(|c| c.is_ascii_alphabetic()) {
-                format!("/dns4/{}/tcp/8780", multiaddr)
-            } else {
-                format!("/ip4/{}/tcp/8780", multiaddr)
-            };
+            let multiaddr = cli_normalize_addr(&multiaddr);
             let params = serde_json::json!({ "multiaddr": multiaddr });
             match rpc_call(&rpc_url, "noble_addSeed", params) {
                 Ok(result) => {
