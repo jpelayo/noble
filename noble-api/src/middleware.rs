@@ -78,6 +78,15 @@ impl std::fmt::Display for TotpScope {
 ///
 /// Exposed for use by dashboard/client code that needs to determine
 /// whether to include auth headers.
+/// Returns `true` if the given JSON-RPC method does NOT require TOTP
+/// authentication in `WriteOnly` scope.
+///
+/// Two categories pass through without TOTP:
+/// - **Read methods**: `get*`, `estimate*`, `lookup*`, `verify*`, `validate*`
+///   (except trace methods which expose sensitive operational data).
+/// - **Public protocol operations**: `submitTransaction`, `submitDocumentBatch`
+///   — these carry their own cryptographic authorization (transaction signature)
+///   and must be callable by remote client apps without TOTP.
 pub fn is_read_method(method: &str) -> bool {
     // Strip the "noble_" namespace prefix if present.
     let name = method.strip_prefix("noble_").unwrap_or(method);
@@ -88,6 +97,11 @@ pub fn is_read_method(method: &str) -> bool {
         || name.starts_with("clearTrace")
     {
         return false;
+    }
+    // Public protocol operations: transactions carry their own signature-based
+    // authorization.  Client apps submit these without TOTP.
+    if name == "submitTransaction" || name == "submitDocumentBatch" {
+        return true;
     }
     name.starts_with("get")
         || name.starts_with("estimate")
@@ -386,8 +400,11 @@ mod tests {
         assert!(is_read_method("noble_getMempoolInfo"));
         assert!(is_read_method("noble_getAllowedIps"));
 
-        // Write methods
-        assert!(!is_read_method("noble_submitTransaction"));
+        // Public protocol operations (no TOTP — tx carries its own signature)
+        assert!(is_read_method("noble_submitTransaction"));
+        assert!(is_read_method("noble_submitDocumentBatch"));
+
+        // Write methods (require TOTP in WriteOnly mode)
         assert!(!is_read_method("noble_walletUnlock"));
         assert!(!is_read_method("noble_walletLock"));
         assert!(!is_read_method("noble_walletSendTransfer"));
@@ -398,7 +415,6 @@ mod tests {
         assert!(!is_read_method("noble_rotateTotpSecret"));
         assert!(!is_read_method("noble_rotateGatewayKey"));
         assert!(!is_read_method("noble_castVote"));
-        assert!(!is_read_method("noble_submitDocumentBatch"));
         assert!(!is_read_method("noble_importMnemonic"));
 
         // AUD4-F1: Trace methods always require auth (sensitive operational data).

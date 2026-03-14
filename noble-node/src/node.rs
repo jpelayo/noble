@@ -1669,11 +1669,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         } else {
             config.api.rpc_addr.clone()
         };
-        let ws_bind_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
-            config.api.ws_addr.replace("127.0.0.1", "0.0.0.0")
-        } else {
-            config.api.ws_addr.clone()
-        };
+        // WebSocket port is localhost-only: it serves the local GUI via the
+        // dashboard proxy (/ws → 8784).  Never bind to 0.0.0.0 — remote clients
+        // use the JSON-RPC HTTP endpoint (8783) which has its own IP filter.
+        let ws_bind_addr = config.api.ws_addr.clone();
 
         // Clone rate limiter reference before api_state is consumed.
         let rate_limiter_ref = api_state.rate_limiter.clone();

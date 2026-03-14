@@ -131,7 +131,7 @@ export function init(root, ctx) {
       <div class="panel-body">
         <div class="split-layout">
           <div>
-            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 1 — REFLECTION</div>
+            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 1 — VOTING</div>
             <select id="cs-r1-strategy" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
               <option value="first_valid">First Valid</option>
               <option value="fixed_validator">Fixed Validator</option>
@@ -145,7 +145,7 @@ export function init(root, ctx) {
             <div id="cs-r1-desc" style="font-size:var(--font-size-xs);color:var(--text-muted)"></div>
           </div>
           <div>
-            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 2 — CONFIRMATION</div>
+            <div class="kpi-label" style="margin-bottom:var(--gap-xs)">ROUND 2 — REFLECTION</div>
             <select id="cs-r2-strategy" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
               <option value="first_valid">First Valid</option>
               <option value="fixed_validator">Fixed Validator</option>

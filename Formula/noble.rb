@@ -186,7 +186,6 @@ class Noble < Formula
 
         8780  P2P (open to internet for full connectivity)
         8783  JSON-RPC HTTP-only (HTTPS) — open for client/wallet access
-        8784  WebSocket-only (WSS) — open for real-time subscriptions
 
       Paths:
         Config:    #{etc}/noble/noble.toml

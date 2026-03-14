@@ -230,11 +230,17 @@ async fn proxy_to_rpc(
 
 /// Proxy a WebSocket connection from the browser (port 8785) to the WS-only
 /// server (port 8784) over localhost.  Bidirectionally forwards all frames.
+///
+/// TOTP: The browser sends `?token=<sha256_hash>` on the WS URL.  We extract
+/// it and forward as `Authorization: Bearer <hash>` to the backend so the
+/// TOTP middleware can validate it.
 async fn ws_proxy_handler(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     ws: axum::extract::WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<WsProxyState>,
 ) -> axum::response::Response {
-    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state))
+    let auth_token = params.get("token").cloned();
+    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state, auth_token))
 }
 
 #[derive(Clone)]
@@ -243,7 +249,7 @@ struct WsProxyState {
     tls_connector: Option<tokio_rustls::TlsConnector>,
 }
 
-async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
+async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState, auth_token: Option<String>) {
     use tokio_tungstenite::tungstenite::Message as TungMsg;
 
     let url = if state.tls_connector.is_some() {
@@ -308,11 +314,11 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
         }};
     }
 
-    // Build a WebSocket upgrade request with the gatekeeper header so the
-    // WS-only server (which runs the same middleware stack) accepts the proxy
-    // connection.  `tokio_tungstenite::client_async` accepts `Into<Request>`.
+    // Build a WebSocket upgrade request with the gatekeeper header and
+    // TOTP auth (if provided) so the WS-only server (which runs the same
+    // middleware stack) accepts the proxy connection.
     let ws_req = || {
-        tokio_tungstenite::tungstenite::http::Request::builder()
+        let mut builder = tokio_tungstenite::tungstenite::http::Request::builder()
             .uri(&url)
             .header("Host", format!("127.0.0.1:{}", state.ws_port))
             .header("Connection", "Upgrade")
@@ -322,8 +328,12 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState) {
                 "Sec-WebSocket-Key",
                 tokio_tungstenite::tungstenite::handshake::client::generate_key(),
             )
-            .header(GATEKEEPER_HEADER, GATEKEEPER_VALUE)
-            .body(())
+            .header(GATEKEEPER_HEADER, GATEKEEPER_VALUE);
+        // Forward TOTP token from browser ?token=<hash> as Authorization header.
+        if let Some(ref token) = auth_token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        builder.body(())
             .expect("ws request must build")
     };
 
