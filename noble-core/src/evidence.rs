@@ -207,12 +207,8 @@ pub struct VoteEquivocationEvidence {
 
 /// Internal payload for vote evidence signing — must produce identical CBOR
 /// to `VoteSigningPayload` in `noble-consensus/src/vote.rs`.
-#[derive(Serialize)]
-struct VoteEvidencePayload {
-    cycle: u64,
-    candidate_hash: Hash256,
-    round: u8,
-}
+// NOTE: VoteEvidencePayload removed — verification now uses
+// crate::wire::v1::vote_signing_payload_bytes() directly.
 
 impl VoteEquivocationEvidence {
     /// Verify that this evidence is valid:
@@ -225,30 +221,22 @@ impl VoteEquivocationEvidence {
             return Err(EvidenceError::SameCandidateHash);
         }
 
-        // 2. Verify signature A
-        let payload_a = VoteEvidencePayload {
-            cycle: self.cycle,
-            candidate_hash: self.candidate_a,
-            round: self.round,
-        };
-        let cbor_a = noble_codec::to_canonical_cbor(&payload_a)
-            .map_err(|e| EvidenceError::HashError(e.to_string()))?;
-        let msg_a = sha256(&cbor_a).0;
+        // 2. Verify signature A (uses frozen wire format for vote signing payload)
+        let msg_a = crate::wire::v1::vote_signing_payload_bytes(
+            self.cycle, &self.candidate_a, self.round,
+        );
+        let hash_a = sha256(&msg_a).0;
         self.voter_pubkey
-            .verify(&msg_a, &self.signature_a)
+            .verify(&hash_a, &self.signature_a)
             .map_err(|e| EvidenceError::InvalidSignature(format!("vote_a: {e}")))?;
 
         // 3. Verify signature B
-        let payload_b = VoteEvidencePayload {
-            cycle: self.cycle,
-            candidate_hash: self.candidate_b,
-            round: self.round,
-        };
-        let cbor_b = noble_codec::to_canonical_cbor(&payload_b)
-            .map_err(|e| EvidenceError::HashError(e.to_string()))?;
-        let msg_b = sha256(&cbor_b).0;
+        let msg_b = crate::wire::v1::vote_signing_payload_bytes(
+            self.cycle, &self.candidate_b, self.round,
+        );
+        let hash_b = sha256(&msg_b).0;
         self.voter_pubkey
-            .verify(&msg_b, &self.signature_b)
+            .verify(&hash_b, &self.signature_b)
             .map_err(|e| EvidenceError::InvalidSignature(format!("vote_b: {e}")))?;
 
         Ok(())
@@ -291,7 +279,7 @@ impl InvalidBlockEvidence {
     pub fn verify(&self, chain_id: u32) -> Result<(), EvidenceError> {
         match &self.failure_code {
             InvalidBlockCode::BlockTooLarge { size, max } => {
-                let cbor = noble_codec::to_canonical_cbor(&self.block)
+                let cbor = noble_codec::NobleCbor::to_cbor(&self.block)
                     .map_err(|e| EvidenceError::HashError(e.to_string()))?;
                 if cbor.len() > *max && cbor.len() == *size {
                     Ok(())
@@ -612,13 +600,8 @@ mod tests {
         candidate: Hash256,
         round: u8,
     ) -> SignatureEnvelope {
-        let payload = VoteEvidencePayload {
-            cycle,
-            candidate_hash: candidate,
-            round,
-        };
-        let cbor = noble_codec::to_canonical_cbor(&payload).unwrap();
-        let msg = noble_crypto::sha256(&cbor).0;
+        let payload_bytes = crate::wire::v1::vote_signing_payload_bytes(cycle, &candidate, round);
+        let msg = noble_crypto::sha256(&payload_bytes).0;
         priv_key.sign(&msg).unwrap()
     }
 

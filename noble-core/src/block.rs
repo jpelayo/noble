@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use noble_codec::NobleCbor;
 use noble_crypto::{sha256, Hash256, NoblePublicKey, SignatureEnvelope};
 
 use crate::transaction::Transaction;
@@ -34,42 +33,24 @@ pub struct BlockHeader {
     pub validator_sig: SignatureEnvelope,
 }
 
-/// Internal struct for computing the header signing message.
-/// Includes all header fields EXCEPT validator_sig (circular otherwise).
-#[derive(Serialize)]
-struct HeaderSigningPayload {
-    version: u16,
-    prev_block_hash: Hash256,
-    merkle_root: Hash256,
-    timestamp: u64,
-    height: u64,
-    tx_count: u32,
-    validator_id: NoblePublicKey,
-}
+// NOTE: The old `HeaderSigningPayload` struct was removed — signing now uses
+// `crate::wire::v1::header_signing_payload_bytes()` directly.
 
 impl BlockHeader {
-    /// Compute the block hash: `sha256(canonical_cbor(full_header))`.
+    /// Compute the block hash: `sha256(wire_bytes(full_header))`.
+    ///
+    /// Uses the frozen wire format (no serde, no ciborium).
     pub fn compute_block_hash(&self) -> Result<Hash256, noble_codec::CodecError> {
-        let canonical = self.canonical_bytes()?;
-        Ok(sha256(&canonical))
+        use crate::wire::WireFormat;
+        Ok(sha256(&self.wire_bytes()))
     }
 
-    /// Compute the 32-byte signing message: `sha256(canonical_cbor(header_without_sig))`.
+    /// Compute the 32-byte signing message: `sha256(wire_bytes(header_without_sig))`.
     ///
-    /// The validator_sig is excluded to avoid circularity.
+    /// Uses the frozen wire format. Excludes validator_sig.
     pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
-        let payload = HeaderSigningPayload {
-            version: self.version,
-            prev_block_hash: self.prev_block_hash,
-            merkle_root: self.merkle_root,
-            timestamp: self.timestamp,
-            height: self.height,
-            tx_count: self.tx_count,
-            validator_id: self.validator_id.clone(),
-        };
-
-        let canonical = noble_codec::to_canonical_cbor(&payload)?;
-        Ok(sha256(&canonical).0)
+        let payload_bytes = crate::wire::v1::header_signing_payload_bytes(self);
+        Ok(sha256(&payload_bytes).0)
     }
 }
 
@@ -85,6 +66,7 @@ pub struct Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_codec::NobleCbor;
     use noble_crypto::{ed25519, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
 
     fn make_test_header() -> BlockHeader {

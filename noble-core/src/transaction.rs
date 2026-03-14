@@ -9,12 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use noble_codec::NobleCbor;
 use noble_crypto::{double_sha256, sha256, Hash256, SignatureEnvelope};
 
 use crate::encrypted_locator::{EncryptedLocator, ExternalAttestation};
 use crate::metadata::MetadataEntry;
-use crate::utxo::{OutPoint, TxIn, TxOut};
+use crate::utxo::{TxIn, TxOut};
 
 /// A NOBLE transaction: consumes UTXOs (inputs) and creates new ones (outputs).
 ///
@@ -65,81 +64,34 @@ pub struct Transaction {
     pub gateway_address: Option<Vec<u8>>,
 }
 
-/// Internal struct used to compute the signing message.
-///
-/// The signing payload commits to all fields the signer intends to authorize:
-/// input outpoints (which UTXOs are spent), outputs (values + addresses),
-/// checksum, timestamp, metadata, and chain_id. The publisher_sig and
-/// additional_sigs are NOT included (they're what we're producing/verifying).
-///
-/// Fee is implicit: sum(input UTXO values) - sum(output values).
-/// The signature commits to both sides, making fee tampering impossible.
-#[derive(Serialize)]
-struct SigningPayload {
-    version: u16,
-    tx_type: u8,
-    /// Outpoints of all inputs — commits which UTXOs are spent.
-    input_outpoints: Vec<OutPoint>,
-    /// All outputs — commits values and destination addresses.
-    outputs: Vec<TxOut>,
-    /// Document checksum (notarizations). Hash256::ZERO otherwise.
-    checksum: Hash256,
-    timestamp: u64,
-    metadata: Vec<MetadataEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    encrypted_locator: Option<EncryptedLocator>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    external_attestations: Vec<ExternalAttestation>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    gateway_address: Option<Vec<u8>>,
-    /// Chain identifier prevents cross-chain signature replay.
-    #[serde(default)]
-    chain_id: u32,
-}
+// NOTE: The old `SigningPayload` struct was removed — signing now uses
+// `crate::wire::v1::tx_signing_payload_bytes()` directly.
 
 impl Transaction {
-    /// Compute the transaction ID: `double_sha256(chain_id_be || canonical_cbor(tx))`.
+    /// Compute the transaction ID: `double_sha256(chain_id_be || wire_bytes(tx))`.
     ///
-    /// The chain_id is prepended to prevent cross-chain replay attacks.
+    /// Uses the frozen wire format (no serde, no ciborium) for
+    /// architecture-independent determinism.
     pub fn compute_tx_id(&self, chain_id: u32) -> Result<Hash256, noble_codec::CodecError> {
-        let tx_bytes = self.canonical_bytes()?;
+        use crate::wire::WireFormat;
+        let tx_bytes = self.wire_bytes();
         let mut preimage = Vec::with_capacity(4 + tx_bytes.len());
         preimage.extend_from_slice(&chain_id.to_be_bytes());
         preimage.extend_from_slice(&tx_bytes);
         Ok(double_sha256(&preimage))
     }
 
-    /// Compute the 32-byte signing message: `sha256(canonical_cbor(SigningPayload))`.
+    /// Compute the 32-byte signing message: `sha256(wire_bytes(signing_payload))`.
     ///
-    /// The signing payload commits to input outpoints (which UTXOs are spent)
-    /// and outputs (values + addresses). Fee is implicit and tamper-proof because
-    /// the signature locks both sides of the equation.
+    /// Uses the frozen wire format for the signing payload. The payload commits
+    /// to input outpoints, outputs, checksum, timestamp, metadata, and chain_id.
+    /// Excludes publisher_sig and additional_sigs.
     pub fn compute_signing_message_for_chain(
         &self,
         chain_id: u32,
     ) -> Result<[u8; 32], noble_codec::CodecError> {
-        let mut sorted_metadata = self.metadata.clone();
-        sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
-
-        let input_outpoints: Vec<OutPoint> =
-            self.inputs.iter().map(|i| i.prev_output.clone()).collect();
-
-        let payload = SigningPayload {
-            version: self.version,
-            tx_type: self.tx_type,
-            input_outpoints,
-            outputs: self.outputs.clone(),
-            checksum: self.checksum,
-            timestamp: self.timestamp,
-            metadata: sorted_metadata,
-            encrypted_locator: self.encrypted_locator.clone(),
-            external_attestations: self.external_attestations.clone(),
-            gateway_address: self.gateway_address.clone(),
-            chain_id,
-        };
-
-        let canonical = noble_codec::to_canonical_cbor(&payload)?;
-        Ok(sha256(&canonical).0)
+        let payload_bytes = crate::wire::v1::tx_signing_payload_bytes(self, chain_id);
+        Ok(sha256(&payload_bytes).0)
     }
 
     /// Whether this is a coinbase transaction (block reward).
@@ -170,6 +122,8 @@ mod tests {
     use super::*;
     use crate::address::NobleAddress;
     use crate::constants::TX_TYPE_COINBASE;
+    use crate::utxo::OutPoint;
+    use noble_codec::NobleCbor;
     use noble_crypto::{ed25519, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
 
     fn make_test_keypair() -> (NoblePrivateKey, noble_crypto::NoblePublicKey) {
@@ -325,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_roundtrip() {
+    fn cbor_roundtrip_via_codec() {
         let tx = make_test_tx();
-        let canonical = tx.canonical_bytes().unwrap();
-        let decoded = Transaction::from_cbor(&canonical).unwrap();
+        let bytes = tx.to_cbor().unwrap();
+        let decoded = Transaction::from_cbor(&bytes).unwrap();
         assert_eq!(tx, decoded);
     }
 

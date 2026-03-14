@@ -7,7 +7,6 @@
 //! declare their identity metadata (organization type, role, contact info).
 //! The signature cryptographically binds the NOBLE identity key to the record.
 
-use noble_codec::to_canonical_cbor;
 use noble_crypto::{sha256, CryptoError, NoblePublicKey, NobleSigner, SignatureEnvelope};
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +99,24 @@ impl OrgType {
         }
     }
 
+    /// Frozen wire format index. NEVER change the mapping.
+    pub fn wire_index(&self) -> u8 {
+        match self {
+            Self::Individual => 0,
+            Self::PrivateNonProfit => 1,
+            Self::PrivateCorporation => 2,
+            Self::PrivateStartup => 3,
+            Self::PrivateAcademic => 4,
+            Self::PrivateInstitution => 5,
+            Self::PublicNational => 6,
+            Self::PublicRegional => 7,
+            Self::PublicSupranational => 8,
+            Self::PublicCorporation => 9,
+            Self::PublicAcademic => 10,
+            Self::PublicInstitution => 11,
+        }
+    }
+
     /// All OrgType variants, useful for exhaustive iteration.
     pub fn all() -> &'static [OrgType] {
         &[
@@ -130,6 +147,17 @@ pub enum NodeRole {
 }
 
 impl NodeRole {
+    /// Frozen wire format index. NEVER change the mapping.
+    pub fn wire_index(&self) -> u8 {
+        match self {
+            Self::FullNode => 0,
+            Self::Validator => 1,
+            Self::ArchiveNode => 2,
+            Self::LightClient => 3,
+            Self::Gateway => 4,
+        }
+    }
+
     /// All NodeRole variants, useful for exhaustive iteration.
     pub fn all() -> &'static [NodeRole] {
         &[
@@ -203,30 +231,8 @@ pub struct NodeAnnounce {
 
 /// Internal payload used to compute the signing message.
 /// All fields of [`NodeAnnounce`] except `signature`.
-#[derive(Serialize)]
-struct AnnounceSigningPayload<'a> {
-    version: u16,
-    identity_key: &'a NoblePublicKey,
-    node_name: &'a str,
-    org_type: &'a OrgType,
-    org_name: &'a Option<String>,
-    node_role: &'a NodeRole,
-    contact_email: &'a Option<String>,
-    website: &'a Option<String>,
-    host_address: &'a Option<String>,
-    country_code: &'a Option<String>,
-    software_version: &'a str,
-    wants_to_validate: bool,
-    wants_to_vote: bool,
-    chain_tip_height: &'a Option<u64>,
-    chain_tip_hash: &'a Option<[u8; 32]>,
-    proposed_height: &'a Option<u64>,
-    proposed_hash: &'a Option<[u8; 32]>,
-    chain_id: u32,
-    network_name: &'a str,
-    chain_vote_weight: &'a Option<u64>,
-    timestamp: u64,
-}
+// NOTE: AnnounceSigningPayload removed — signing now uses
+// crate::wire::v1::announce_signing_payload_bytes() directly.
 
 /// Compute the PKI binding message for a given identity key (free function).
 ///
@@ -252,31 +258,8 @@ impl NodeAnnounce {
 
     /// Compute the 32-byte signing message: `sha256(canonical_cbor(payload))`.
     pub fn compute_signing_message(&self) -> Result<[u8; 32], noble_codec::CodecError> {
-        let payload = AnnounceSigningPayload {
-            version: self.version,
-            identity_key: &self.identity_key,
-            node_name: &self.node_name,
-            org_type: &self.org_type,
-            org_name: &self.org_name,
-            node_role: &self.node_role,
-            contact_email: &self.contact_email,
-            website: &self.website,
-            host_address: &self.host_address,
-            country_code: &self.country_code,
-            software_version: &self.software_version,
-            wants_to_validate: self.wants_to_validate,
-            wants_to_vote: self.wants_to_vote,
-            chain_tip_height: &self.chain_tip_height,
-            chain_tip_hash: &self.chain_tip_hash,
-            proposed_height: &self.proposed_height,
-            proposed_hash: &self.proposed_hash,
-            chain_id: self.chain_id,
-            network_name: &self.network_name,
-            chain_vote_weight: &self.chain_vote_weight,
-            timestamp: self.timestamp,
-        };
-        let cbor = to_canonical_cbor(&payload)?;
-        Ok(*sha256(&cbor).as_bytes())
+        let payload_bytes = crate::wire::v1::announce_signing_payload_bytes(self);
+        Ok(*sha256(&payload_bytes).as_bytes())
     }
 
     /// Verify the embedded signature against the signing payload.

@@ -16,7 +16,6 @@ use hmac::{Hmac, Mac};
 use k256::ecdsa::{signature::Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256, Sha512};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 // ============================================================================
 // BIP-39: Mnemonic Generation & Validation
@@ -260,7 +259,7 @@ pub fn sign_notarization(
         chain_id,
     );
 
-    let payload_bytes = canonical_cbor_encode(&payload);
+    let payload_bytes = payload;
     let signing_message = sha256_hash(&payload_bytes);
     let signature = sign(&signing_message, private_key)?;
 
@@ -278,7 +277,7 @@ pub fn sign_notarization(
         None,
     );
 
-    let tx_bytes = canonical_cbor_encode(&tx_cbor);
+    let tx_bytes = tx_cbor;
     Ok(hex::encode(tx_bytes))
 }
 
@@ -338,7 +337,7 @@ pub fn sign_transfer(
         chain_id,
     );
 
-    let payload_bytes = canonical_cbor_encode(&payload);
+    let payload_bytes = payload;
     let signing_message = sha256_hash(&payload_bytes);
     let signature = sign(&signing_message, private_key)?;
 
@@ -355,7 +354,7 @@ pub fn sign_transfer(
         None,
     );
 
-    let tx_bytes = canonical_cbor_encode(&tx_cbor);
+    let tx_bytes = tx_cbor;
     Ok(hex::encode(tx_bytes))
 }
 
@@ -373,11 +372,10 @@ struct CborOutput {
     address_wire: Vec<u8>,
 }
 
-/// Build the signing payload as a ciborium Value.
+/// Build the signing payload as raw CBOR bytes using frozen wire format V1.
 ///
-/// Must produce byte-identical CBOR to SwiftCBOR's canonical encoding.
-/// Uses BTreeMap for deterministic key ordering (CBOR canonical: sort by
-/// encoded key length, then lexicographically).
+/// Must produce byte-identical output to noble-core::wire::v1::tx_signing_payload_bytes().
+/// Keys are sorted alphabetically (NOT RFC 8949 length-first).
 fn build_signing_payload(
     version: u16,
     tx_type: u8,
@@ -388,118 +386,78 @@ fn build_signing_payload(
     metadata: &[(String, String)],
     gateway_address: Option<&[u8]>,
     chain_id: u32,
-) -> ciborium::Value {
-    // Use a Vec of (key, value) pairs to control serialization order.
-    // SwiftCBOR's canonical encoding sorts map keys by encoded bytes.
-    // For text string keys: shorter keys first, then lexicographic.
-    let mut entries: Vec<(ciborium::Value, ciborium::Value)> = Vec::new();
+) -> Vec<u8> {
+    use crate::cbor;
 
-    // input_outpoints
-    let input_arr: Vec<ciborium::Value> = inputs
-        .iter()
-        .map(|inp| {
-            ciborium::Value::Map(vec![
-                (
-                    ciborium::Value::Text("txid".to_string()),
-                    ciborium::Value::Bytes(inp.txid.clone()),
-                ),
-                (
-                    ciborium::Value::Text("vout".to_string()),
-                    ciborium::Value::Integer(u64::from(inp.vout).into()),
-                ),
-            ])
-        })
-        .collect();
+    // Sort metadata by key for order-independent signing
+    let mut sorted_meta: Vec<&(String, String)> = metadata.iter().collect();
+    sorted_meta.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // outputs
-    let output_arr: Vec<ciborium::Value> = outputs
-        .iter()
-        .map(|out| {
-            ciborium::Value::Map(vec![
-                (
-                    ciborium::Value::Text("address".to_string()),
-                    ciborium::Value::Bytes(out.address_wire.clone()),
-                ),
-                (
-                    ciborium::Value::Text("value".to_string()),
-                    ciborium::Value::Integer(out.value.into()),
-                ),
-            ])
-        })
-        .collect();
+    let mut field_count = 8usize; // always-present fields
+    if gateway_address.is_some() { field_count += 1; }
 
-    // metadata
-    let meta_arr: Vec<ciborium::Value> = metadata
-        .iter()
-        .map(|(k, v)| {
-            ciborium::Value::Map(vec![
-                (
-                    ciborium::Value::Text("key".to_string()),
-                    ciborium::Value::Text(k.clone()),
-                ),
-                (
-                    ciborium::Value::Text("value".to_string()),
-                    ciborium::Value::Bytes(v.as_bytes().to_vec()),
-                ),
-            ])
-        })
-        .collect();
+    let mut buf = Vec::with_capacity(256);
+    cbor::write_map(&mut buf, field_count);
 
-    // Build entries sorted by key (canonical CBOR order for text keys:
-    // shorter key first, then lexicographic)
-    let mut map_entries: BTreeMap<String, ciborium::Value> = BTreeMap::new();
+    // Alphabetical order: chain_id, checksum, gateway_address(?),
+    // input_outpoints, metadata, outputs, timestamp, tx_type, version
 
-    map_entries.insert(
-        "version".to_string(),
-        ciborium::Value::Integer(u64::from(version).into()),
-    );
-    map_entries.insert(
-        "tx_type".to_string(),
-        ciborium::Value::Integer(u64::from(tx_type).into()),
-    );
-    map_entries.insert(
-        "input_outpoints".to_string(),
-        ciborium::Value::Array(input_arr),
-    );
-    map_entries.insert("outputs".to_string(), ciborium::Value::Array(output_arr));
-    map_entries.insert(
-        "checksum".to_string(),
-        ciborium::Value::Bytes(checksum.to_vec()),
-    );
-    map_entries.insert(
-        "timestamp".to_string(),
-        ciborium::Value::Integer(timestamp.into()),
-    );
-    map_entries.insert("metadata".to_string(), ciborium::Value::Array(meta_arr));
+    cbor::write_text(&mut buf, "chain_id");
+    cbor::write_uint(&mut buf, chain_id as u64);
+
+    cbor::write_text(&mut buf, "checksum");
+    cbor::write_bytes(&mut buf, checksum);
 
     if let Some(gw) = gateway_address {
-        map_entries.insert(
-            "gateway_address".to_string(),
-            ciborium::Value::Bytes(gw.to_vec()),
-        );
+        cbor::write_text(&mut buf, "gateway_address");
+        cbor::write_bytes(&mut buf, gw);
     }
 
-    map_entries.insert(
-        "chain_id".to_string(),
-        ciborium::Value::Integer(u64::from(chain_id).into()),
-    );
-
-    // Sort by CBOR canonical order: shorter encoded key first, then lexicographic
-    let mut sorted: Vec<(String, ciborium::Value)> = map_entries.into_iter().collect();
-    sorted.sort_by(|a, b| {
-        let a_len = a.0.len();
-        let b_len = b.0.len();
-        a_len.cmp(&b_len).then_with(|| a.0.cmp(&b.0))
-    });
-
-    for (k, v) in sorted {
-        entries.push((ciborium::Value::Text(k), v));
+    cbor::write_text(&mut buf, "input_outpoints");
+    cbor::write_array(&mut buf, inputs.len());
+    for inp in inputs {
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "txid");
+        cbor::write_bytes(&mut buf, &inp.txid);
+        cbor::write_text(&mut buf, "vout");
+        cbor::write_uint(&mut buf, inp.vout as u64);
     }
 
-    ciborium::Value::Map(entries)
+    cbor::write_text(&mut buf, "metadata");
+    cbor::write_array(&mut buf, sorted_meta.len());
+    for (k, v) in &sorted_meta {
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "key");
+        cbor::write_text(&mut buf, k);
+        cbor::write_text(&mut buf, "value");
+        cbor::write_bytes(&mut buf, v.as_bytes());
+    }
+
+    cbor::write_text(&mut buf, "outputs");
+    cbor::write_array(&mut buf, outputs.len());
+    for out in outputs {
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "address");
+        cbor::write_bytes(&mut buf, &out.address_wire);
+        cbor::write_text(&mut buf, "value");
+        cbor::write_uint(&mut buf, out.value);
+    }
+
+    cbor::write_text(&mut buf, "timestamp");
+    cbor::write_uint(&mut buf, timestamp);
+
+    cbor::write_text(&mut buf, "tx_type");
+    cbor::write_uint(&mut buf, tx_type as u64);
+
+    cbor::write_text(&mut buf, "version");
+    cbor::write_uint(&mut buf, version as u64);
+
+    buf
 }
 
-/// Build the full transaction CBOR with signature.
+/// Build the full transaction CBOR bytes using frozen wire format V1.
+///
+/// Must match noble-core::wire::v1::Transaction::encode_wire().
 fn build_transaction_cbor(
     version: u16,
     tx_type: u8,
@@ -511,113 +469,79 @@ fn build_transaction_cbor(
     signature: &[u8],
     metadata: &[(String, String)],
     gateway_address: Option<&[u8]>,
-) -> ciborium::Value {
-    let mut entries: Vec<(ciborium::Value, ciborium::Value)> = Vec::new();
+) -> Vec<u8> {
+    use crate::cbor;
 
-    // inputs: array of TxIn maps (different structure from signing payload)
-    let input_arr: Vec<ciborium::Value> = inputs
-        .iter()
-        .map(|inp| {
-            ciborium::Value::Map(vec![(
-                ciborium::Value::Text("prev_output".to_string()),
-                ciborium::Value::Map(vec![
-                    (
-                        ciborium::Value::Text("txid".to_string()),
-                        ciborium::Value::Bytes(inp.txid.clone()),
-                    ),
-                    (
-                        ciborium::Value::Text("vout".to_string()),
-                        ciborium::Value::Integer(u64::from(inp.vout).into()),
-                    ),
-                ]),
-            )])
-        })
-        .collect();
+    let mut field_count = 9usize;
+    if gateway_address.is_some() { field_count += 1; }
 
-    // outputs
-    let output_arr: Vec<ciborium::Value> = outputs
-        .iter()
-        .map(|out| {
-            ciborium::Value::Map(vec![
-                (
-                    ciborium::Value::Text("address".to_string()),
-                    ciborium::Value::Bytes(out.address_wire.clone()),
-                ),
-                (
-                    ciborium::Value::Text("value".to_string()),
-                    ciborium::Value::Integer(out.value.into()),
-                ),
-            ])
-        })
-        .collect();
+    let mut buf = Vec::with_capacity(512);
+    cbor::write_map(&mut buf, field_count);
 
-    // publisher_sig
-    let publisher_sig = ciborium::Value::Map(vec![
-        (
-            ciborium::Value::Text("public_key".to_string()),
-            ciborium::Value::Bytes(public_key.to_vec()),
-        ),
-        (
-            ciborium::Value::Text("scheme_id".to_string()),
-            ciborium::Value::Integer(u64::from(NobleProtocol::SCHEME_SECP256K1).into()),
-        ),
-        (
-            ciborium::Value::Text("signature".to_string()),
-            ciborium::Value::Bytes(signature.to_vec()),
-        ),
-    ]);
+    // Alphabetical order: additional_sigs, checksum, gateway_address(?),
+    // inputs, metadata, outputs, publisher_sig, timestamp, tx_type, version
 
-    // metadata
-    let meta_arr: Vec<ciborium::Value> = metadata
-        .iter()
-        .map(|(k, v)| {
-            ciborium::Value::Map(vec![
-                (
-                    ciborium::Value::Text("key".to_string()),
-                    ciborium::Value::Text(k.clone()),
-                ),
-                (
-                    ciborium::Value::Text("value".to_string()),
-                    ciborium::Value::Bytes(v.as_bytes().to_vec()),
-                ),
-            ])
-        })
-        .collect();
+    cbor::write_text(&mut buf, "additional_sigs");
+    cbor::write_array(&mut buf, 0);
 
-    // Build and sort entries by canonical CBOR key order
-    let mut map_entries: BTreeMap<String, ciborium::Value> = BTreeMap::new();
-
-    map_entries.insert("version".to_string(), ciborium::Value::Integer(u64::from(version).into()));
-    map_entries.insert("tx_type".to_string(), ciborium::Value::Integer(u64::from(tx_type).into()));
-    map_entries.insert("inputs".to_string(), ciborium::Value::Array(input_arr));
-    map_entries.insert("outputs".to_string(), ciborium::Value::Array(output_arr));
-    map_entries.insert("checksum".to_string(), ciborium::Value::Bytes(checksum.to_vec()));
-    map_entries.insert("timestamp".to_string(), ciborium::Value::Integer(timestamp.into()));
-    map_entries.insert("publisher_sig".to_string(), publisher_sig);
-    map_entries.insert("additional_sigs".to_string(), ciborium::Value::Array(vec![]));
-    map_entries.insert("metadata".to_string(), ciborium::Value::Array(meta_arr));
+    cbor::write_text(&mut buf, "checksum");
+    cbor::write_bytes(&mut buf, checksum);
 
     if let Some(gw) = gateway_address {
-        map_entries.insert("gateway_address".to_string(), ciborium::Value::Bytes(gw.to_vec()));
+        cbor::write_text(&mut buf, "gateway_address");
+        cbor::write_bytes(&mut buf, gw);
     }
 
-    // Sort by key length then lexicographic (canonical CBOR text key order)
-    let mut sorted: Vec<(String, ciborium::Value)> = map_entries.into_iter().collect();
-    sorted.sort_by(|a, b| {
-        a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0))
-    });
-
-    for (k, v) in sorted {
-        entries.push((ciborium::Value::Text(k), v));
+    cbor::write_text(&mut buf, "inputs");
+    cbor::write_array(&mut buf, inputs.len());
+    for inp in inputs {
+        cbor::write_map(&mut buf, 1);
+        cbor::write_text(&mut buf, "prev_output");
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "txid");
+        cbor::write_bytes(&mut buf, &inp.txid);
+        cbor::write_text(&mut buf, "vout");
+        cbor::write_uint(&mut buf, inp.vout as u64);
     }
 
-    ciborium::Value::Map(entries)
-}
+    cbor::write_text(&mut buf, "metadata");
+    cbor::write_array(&mut buf, metadata.len());
+    for (k, v) in metadata {
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "key");
+        cbor::write_text(&mut buf, k);
+        cbor::write_text(&mut buf, "value");
+        cbor::write_bytes(&mut buf, v.as_bytes());
+    }
 
-/// Encode a ciborium Value to canonical CBOR bytes.
-fn canonical_cbor_encode(value: &ciborium::Value) -> Vec<u8> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf).expect("CBOR encoding should not fail");
+    cbor::write_text(&mut buf, "outputs");
+    cbor::write_array(&mut buf, outputs.len());
+    for out in outputs {
+        cbor::write_map(&mut buf, 2);
+        cbor::write_text(&mut buf, "address");
+        cbor::write_bytes(&mut buf, &out.address_wire);
+        cbor::write_text(&mut buf, "value");
+        cbor::write_uint(&mut buf, out.value);
+    }
+
+    // publisher_sig as wire bytes: [scheme_id(1) || pubkey_len(1) || pubkey || sig]
+    cbor::write_text(&mut buf, "publisher_sig");
+    let mut sig_wire = Vec::with_capacity(2 + public_key.len() + signature.len());
+    sig_wire.push(NobleProtocol::SCHEME_SECP256K1);
+    sig_wire.push(public_key.len() as u8);
+    sig_wire.extend_from_slice(public_key);
+    sig_wire.extend_from_slice(signature);
+    cbor::write_bytes(&mut buf, &sig_wire);
+
+    cbor::write_text(&mut buf, "timestamp");
+    cbor::write_uint(&mut buf, timestamp);
+
+    cbor::write_text(&mut buf, "tx_type");
+    cbor::write_uint(&mut buf, tx_type as u64);
+
+    cbor::write_text(&mut buf, "version");
+    cbor::write_uint(&mut buf, version as u64);
+
     buf
 }
 

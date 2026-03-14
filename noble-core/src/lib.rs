@@ -19,6 +19,7 @@ pub mod pst;
 pub mod transaction;
 pub mod utxo;
 pub mod validation;
+pub mod wire;
 
 pub use address::{AddressError, NobleAddress};
 pub use block::{Block, BlockHeader};

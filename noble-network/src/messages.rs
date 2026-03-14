@@ -391,8 +391,8 @@ mod tests {
             max_count: 500,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&req, &mut buf).unwrap();
-        let decoded: SyncRequest = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&req).unwrap(); };
+        let decoded: SyncRequest = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         match decoded {
             SyncRequest::GetHeaders {
                 start_hash,
@@ -411,8 +411,8 @@ mod tests {
             hashes: vec![[1; 32], [2; 32]],
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&req, &mut buf).unwrap();
-        let decoded: SyncRequest = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&req).unwrap(); };
+        let decoded: SyncRequest = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         match decoded {
             SyncRequest::GetBlocks { hashes } => {
                 assert_eq!(hashes.len(), 2);
@@ -425,8 +425,8 @@ mod tests {
     fn sync_request_get_status_roundtrip() {
         let req = SyncRequest::GetStatus;
         let mut buf = Vec::new();
-        ciborium::into_writer(&req, &mut buf).unwrap();
-        let decoded: SyncRequest = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&req).unwrap(); };
+        let decoded: SyncRequest = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert!(matches!(decoded, SyncRequest::GetStatus));
     }
 
@@ -442,8 +442,8 @@ mod tests {
             sender_timestamp: 1_700_000_000,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&resp, &mut buf).unwrap();
-        let decoded: SyncResponse = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&resp).unwrap(); };
+        let decoded: SyncResponse = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         match decoded {
             SyncResponse::Status {
                 height,
@@ -463,8 +463,8 @@ mod tests {
     fn sync_response_error_roundtrip() {
         let resp = SyncResponse::Error("not found".into());
         let mut buf = Vec::new();
-        ciborium::into_writer(&resp, &mut buf).unwrap();
-        let decoded: SyncResponse = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&resp).unwrap(); };
+        let decoded: SyncResponse = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         match decoded {
             SyncResponse::Error(msg) => assert_eq!(msg, "not found"),
             _ => panic!("wrong variant"),
@@ -475,8 +475,8 @@ mod tests {
     fn tx_request_roundtrip() {
         let req = TxRequest { tx_id: [0xCC; 32] };
         let mut buf = Vec::new();
-        ciborium::into_writer(&req, &mut buf).unwrap();
-        let decoded: TxRequest = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&req).unwrap(); };
+        let decoded: TxRequest = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(decoded.tx_id, [0xCC; 32]);
     }
 
@@ -484,8 +484,8 @@ mod tests {
     fn tx_response_none_roundtrip() {
         let resp = TxResponse { transaction: None };
         let mut buf = Vec::new();
-        ciborium::into_writer(&resp, &mut buf).unwrap();
-        let decoded: TxResponse = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&resp).unwrap(); };
+        let decoded: TxResponse = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert!(decoded.transaction.is_none());
     }
 
@@ -496,8 +496,8 @@ mod tests {
             height: 100,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -505,8 +505,8 @@ mod tests {
     fn gossip_tx_announce_roundtrip() {
         let msg = GossipMessage::TxAnnounce { tx_id: [0xEE; 32] };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -542,8 +542,8 @@ mod tests {
             attestation_data: None,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -579,8 +579,8 @@ mod tests {
             attestation_data: Some(vec![0xCC; 256]),
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -593,8 +593,8 @@ mod tests {
             ],
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -605,8 +605,8 @@ mod tests {
             evidence_bytes: evidence_bytes.clone(),
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -620,8 +620,8 @@ mod tests {
             round: 1,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
     }
 
@@ -635,8 +635,8 @@ mod tests {
             round: 2,
         };
         let mut buf = Vec::new();
-        ciborium::into_writer(&msg, &mut buf).unwrap();
-        let decoded: GossipMessage = ciborium::from_reader(&buf[..]).unwrap();
+        { buf = noble_codec::cbor_ser::to_cbor(&msg).unwrap(); };
+        let decoded: GossipMessage = noble_codec::cbor_de::from_cbor(&buf).unwrap();
         assert_eq!(msg, decoded);
         match decoded {
             GossipMessage::PorVote { round, .. } => assert_eq!(round, 2),

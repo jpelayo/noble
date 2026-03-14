@@ -99,9 +99,9 @@ mod tests {
             peer_id_bytes: vec![0xBB; 38],
             last_addr: Some("/ip4/1.2.3.4/tcp/8780".into()),
         };
-        let mut buf = Vec::new();
-        ciborium::into_writer(&rec, &mut buf).unwrap();
-        let decoded: PeerRecord = ciborium::from_reader(&buf[..]).unwrap();
+        use noble_codec::NobleCbor;
+        let buf = rec.to_cbor().unwrap();
+        let decoded = PeerRecord::from_cbor(&buf).unwrap();
         assert_eq!(rec, decoded);
     }
 }

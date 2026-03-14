@@ -9,7 +9,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use noble_codec::NobleCbor;
 
 use crate::error::CryptoError;
 
@@ -135,25 +134,8 @@ pub fn tagged_hash(tag: &str, msg: &[u8]) -> Hash256 {
     Hash256(hasher.finalize().into())
 }
 
-/// Compute the SHA-256 hash of a type's canonical CBOR encoding.
-///
-/// This is the standard way to hash protocol objects in NOBLE.
-pub fn canonical_hash<T: NobleCbor>(value: &T) -> Result<Hash256, CryptoError> {
-    let bytes = value
-        .canonical_bytes()
-        .map_err(|e| CryptoError::HashError(e.to_string()))?;
-    Ok(sha256(&bytes))
-}
-
-/// Compute the double SHA-256 hash of a type's canonical CBOR encoding.
-///
-/// Used for computing transaction IDs and other critical identifiers.
-pub fn canonical_double_hash<T: NobleCbor>(value: &T) -> Result<Hash256, CryptoError> {
-    let bytes = value
-        .canonical_bytes()
-        .map_err(|e| CryptoError::HashError(e.to_string()))?;
-    Ok(double_sha256(&bytes))
-}
+// canonical_hash and canonical_double_hash removed — hashing now uses
+// noble-core::wire::WireFormat::wire_bytes() directly.
 
 #[cfg(test)]
 mod tests {
@@ -304,39 +286,6 @@ mod tests {
         assert_eq!(bytes[0], 0x58, "should be CBOR byte string header");
         assert_eq!(bytes[1], 0x20, "should be length 32");
         assert_eq!(bytes.len(), 34, "header(2) + data(32)");
-    }
-
-    // --- Canonical hash helpers ---
-
-    #[test]
-    fn canonical_hash_deterministic() {
-        use serde::Deserialize;
-
-        #[derive(Serialize, Deserialize)]
-        struct TestStruct {
-            z: u32,
-            a: u32,
-        }
-
-        let val = TestStruct { z: 1, a: 2 };
-        let h1 = canonical_hash(&val).unwrap();
-        let h2 = canonical_hash(&val).unwrap();
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn canonical_double_hash_differs_from_single() {
-        use serde::Deserialize;
-
-        #[derive(Serialize, Deserialize)]
-        struct TestStruct {
-            x: u32,
-        }
-
-        let val = TestStruct { x: 42 };
-        let single = canonical_hash(&val).unwrap();
-        let double = canonical_double_hash(&val).unwrap();
-        assert_ne!(single, double);
     }
 
     // --- BIP-340 tagged hash ---

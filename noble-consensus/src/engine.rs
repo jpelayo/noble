@@ -1110,7 +1110,7 @@ impl CycleEngine {
                 .list_all()
                 .into_iter()
                 .filter_map(|(k, v)| {
-                    match noble_codec::to_canonical_cbor(v) {
+                    match noble_codec::cbor_ser::to_cbor(v) {
                         Ok(cbor) => Some((k.clone(), cbor)),
                         Err(e) => {
                             warn!("badge CBOR encode failed for key {}: {e}", hex::encode(&k));
@@ -1123,7 +1123,7 @@ impl CycleEngine {
                 .badge_proposals
                 .iter()
                 .filter_map(|(k, v)| {
-                    match noble_codec::to_canonical_cbor(v) {
+                    match noble_codec::cbor_ser::to_cbor(v) {
                         Ok(cbor) => Some((k.clone(), cbor)),
                         Err(e) => {
                             warn!("badge proposal CBOR encode failed for {k}: {e}");
@@ -1213,7 +1213,7 @@ impl CycleEngine {
                         current_cycle,
                     );
 
-                    let cbor_bytes = match noble_codec::to_canonical_cbor(tx) {
+                    let cbor_bytes = match noble_codec::cbor_ser::to_cbor(tx) {
                         Ok(b) => b,
                         Err(e) => {
                             warn!("badge proposal CBOR encoding failed: {e}");

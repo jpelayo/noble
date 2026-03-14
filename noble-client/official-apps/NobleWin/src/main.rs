@@ -14,6 +14,7 @@ mod api;
 mod app;
 mod assets;
 mod bridge;
+mod cbor;
 mod crypto;
 mod models;
 mod security;

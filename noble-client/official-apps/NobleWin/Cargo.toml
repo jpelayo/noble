@@ -17,7 +17,6 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 sha2 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa"] }
-ciborium = "0.2"
 include_dir = "0.7"
 dirs = "6"
 keyring = "3"

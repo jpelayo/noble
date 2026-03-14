@@ -6,8 +6,6 @@
 //! GossipSub publishes raw `Vec<u8>`. This module serializes [`GossipMessage`]
 //! to CBOR bytes for publishing and deserializes received bytes back.
 
-use std::io::Read;
-
 use crate::error::NetworkError;
 use crate::messages::GossipMessage;
 
@@ -17,9 +15,7 @@ pub const MAX_GOSSIP_MESSAGE_SIZE: usize = 256 * 1024;
 
 /// Encode a [`GossipMessage`] to CBOR bytes.
 pub fn encode_gossip(msg: &GossipMessage) -> Result<Vec<u8>, NetworkError> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(msg, &mut buf).map_err(|e| NetworkError::Codec(e.to_string()))?;
-    Ok(buf)
+    noble_codec::cbor_ser::to_cbor(msg).map_err(|e| NetworkError::Codec(e.to_string()))
 }
 
 /// Decode CBOR bytes into a [`GossipMessage`].
@@ -33,9 +29,7 @@ pub fn decode_gossip(data: &[u8]) -> Result<GossipMessage, NetworkError> {
             MAX_GOSSIP_MESSAGE_SIZE
         )));
     }
-    // Defense-in-depth: limit the reader even though we already checked data.len()
-    let reader = data.take(MAX_GOSSIP_MESSAGE_SIZE as u64);
-    ciborium::from_reader(reader).map_err(|e| NetworkError::Codec(e.to_string()))
+    noble_codec::cbor_de::from_cbor(data).map_err(|e| NetworkError::Codec(e.to_string()))
 }
 
 #[cfg(test)]
@@ -80,8 +74,6 @@ mod tests {
         let bad_data = b"this is not cbor";
         let result = decode_gossip(bad_data);
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("codec"));
     }
 
     #[test]

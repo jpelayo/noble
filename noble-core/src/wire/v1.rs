@@ -10,18 +10,19 @@
 //! # Canonical Map Key Order
 //!
 //! All struct fields are encoded as CBOR map entries with text string keys,
-//! sorted alphabetically (RFC 8949 deterministic encoding). The sort order
-//! is by raw UTF-8 bytes, which for ASCII field names is the same as
-//! lexicographic string order.
+//! sorted alphabetically by field name (ASCII lexicographic). This is NOT
+//! the same as RFC 8949 Section 4.2.1 (which sorts by encoded byte length
+//! first). The alphabetical ordering is simpler, deterministic, and frozen
+//! as part of Wire Format V1.
 
-use crate::cbor;
-use crate::WireFormat;
-use noble_core::address::NobleAddress;
-use noble_core::block::BlockHeader;
-use noble_core::encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
-use noble_core::metadata::MetadataEntry;
-use noble_core::transaction::Transaction;
-use noble_core::utxo::{OutPoint, TxIn, TxOut};
+use super::cbor;
+use super::WireFormat;
+use crate::address::NobleAddress;
+use crate::block::BlockHeader;
+use crate::encrypted_locator::{EncryptedLocator, ExternalAttestation, LocatorRecipient};
+use crate::metadata::MetadataEntry;
+use crate::transaction::Transaction;
+use crate::utxo::{OutPoint, TxIn, TxOut};
 use noble_crypto::{Hash256, NoblePublicKey, SignatureEnvelope};
 
 // ── Leaf types ──────────────────────────────────────────────────────────
@@ -306,9 +307,13 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     cbor::write_array(&mut buf, tx.inputs.len());
     for inp in &tx.inputs { inp.prev_output.encode_wire(&mut buf); }
 
+    // Sort metadata by key for order-independent signing.
+    let mut sorted_metadata: Vec<&crate::metadata::MetadataEntry> = tx.metadata.iter().collect();
+    sorted_metadata.sort_by(|a, b| a.key.cmp(&b.key));
+
     cbor::write_text(&mut buf, "metadata");
-    cbor::write_array(&mut buf, tx.metadata.len());
-    for m in &tx.metadata { m.encode_wire(&mut buf); }
+    cbor::write_array(&mut buf, sorted_metadata.len());
+    for m in &sorted_metadata { m.encode_wire(&mut buf); }
 
     cbor::write_text(&mut buf, "outputs");
     cbor::write_array(&mut buf, tx.outputs.len());
@@ -355,12 +360,155 @@ pub fn header_signing_payload_bytes(header: &BlockHeader) -> Vec<u8> {
     buf
 }
 
+// ── Vote Signing Payload ─────────────────────────────────────────────────
+
+/// Encode a vote signing payload to frozen wire bytes.
+///
+/// Fields (3): candidate_hash, cycle, round — sorted alphabetically.
+pub fn vote_signing_payload_bytes(cycle: u64, candidate_hash: &Hash256, round: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(48);
+    cbor::write_map(&mut buf, 3);
+
+    cbor::write_text(&mut buf, "candidate_hash");
+    candidate_hash.encode_wire(&mut buf);
+
+    cbor::write_text(&mut buf, "cycle");
+    cbor::write_uint(&mut buf, cycle);
+
+    cbor::write_text(&mut buf, "round");
+    cbor::write_uint(&mut buf, round as u64);
+
+    buf
+}
+
+// ── NodeAnnounce Signing Payload ────────────────────────────────────────
+
+/// Encode a NodeAnnounce signing payload to frozen wire bytes.
+///
+/// Includes all announce fields EXCEPT signature and identity_attestation.
+/// Uses the node_announce module types directly.
+pub fn announce_signing_payload_bytes(announce: &crate::node_announce::NodeAnnounce) -> Vec<u8> {
+
+    // Count present fields. Base: 15 always-present fields:
+    // chain_id, contact_email, host_address, identity_key, network_name,
+    // node_name, node_role, org_name, org_type, software_version,
+    // timestamp, version, wants_to_validate, wants_to_vote, website.
+    // Conditional (6): chain_tip_hash, chain_tip_height, chain_vote_weight,
+    // country_code, proposed_hash, proposed_height.
+    let mut field_count: usize = 15;
+    if announce.country_code.is_some() { field_count += 1; }
+    if announce.chain_tip_height.is_some() { field_count += 1; }
+    if announce.chain_tip_hash.is_some() { field_count += 1; }
+    if announce.proposed_height.is_some() { field_count += 1; }
+    if announce.proposed_hash.is_some() { field_count += 1; }
+    if announce.chain_vote_weight.is_some() { field_count += 1; }
+
+    let mut buf = Vec::with_capacity(512);
+    cbor::write_map(&mut buf, field_count);
+
+    // Sorted keys alphabetically (21 total, 15 always + 6 conditional):
+    // chain_id, chain_tip_hash(?), chain_tip_height(?), chain_vote_weight(?),
+    // contact_email, country_code(?), host_address, identity_key,
+    // network_name, node_name, node_role, org_name, org_type,
+    // proposed_hash(?), proposed_height(?), software_version,
+    // timestamp, version, wants_to_validate, wants_to_vote, website
+
+    cbor::write_text(&mut buf, "chain_id");
+    cbor::write_uint(&mut buf, announce.chain_id as u64);
+
+    if let Some(ref h) = announce.chain_tip_hash {
+        cbor::write_text(&mut buf, "chain_tip_hash");
+        cbor::write_bytes(&mut buf, h);
+    }
+
+    if let Some(h) = announce.chain_tip_height {
+        cbor::write_text(&mut buf, "chain_tip_height");
+        cbor::write_uint(&mut buf, h);
+    }
+
+    if let Some(w) = announce.chain_vote_weight {
+        cbor::write_text(&mut buf, "chain_vote_weight");
+        cbor::write_uint(&mut buf, w);
+    }
+
+    cbor::write_text(&mut buf, "contact_email");
+    match &announce.contact_email {
+        Some(s) => cbor::write_text(&mut buf, s),
+        None => cbor::write_null(&mut buf),
+    }
+
+    if let Some(ref cc) = announce.country_code {
+        cbor::write_text(&mut buf, "country_code");
+        cbor::write_text(&mut buf, cc);
+    }
+
+    cbor::write_text(&mut buf, "host_address");
+    match &announce.host_address {
+        Some(s) => cbor::write_text(&mut buf, s),
+        None => cbor::write_null(&mut buf),
+    }
+
+    cbor::write_text(&mut buf, "identity_key");
+    announce.identity_key.encode_wire(&mut buf);
+
+    cbor::write_text(&mut buf, "network_name");
+    cbor::write_text(&mut buf, &announce.network_name);
+
+    cbor::write_text(&mut buf, "node_name");
+    cbor::write_text(&mut buf, &announce.node_name);
+
+    cbor::write_text(&mut buf, "node_role");
+    cbor::write_uint(&mut buf, announce.node_role.wire_index() as u64);
+
+    cbor::write_text(&mut buf, "org_name");
+    match &announce.org_name {
+        Some(s) => cbor::write_text(&mut buf, s),
+        None => cbor::write_null(&mut buf),
+    }
+
+    cbor::write_text(&mut buf, "org_type");
+    cbor::write_uint(&mut buf, announce.org_type.wire_index() as u64);
+
+    if let Some(ref h) = announce.proposed_hash {
+        cbor::write_text(&mut buf, "proposed_hash");
+        cbor::write_bytes(&mut buf, h);
+    }
+
+    if let Some(h) = announce.proposed_height {
+        cbor::write_text(&mut buf, "proposed_height");
+        cbor::write_uint(&mut buf, h);
+    }
+
+    cbor::write_text(&mut buf, "software_version");
+    cbor::write_text(&mut buf, &announce.software_version);
+
+    cbor::write_text(&mut buf, "timestamp");
+    cbor::write_uint(&mut buf, announce.timestamp);
+
+    cbor::write_text(&mut buf, "version");
+    cbor::write_uint(&mut buf, announce.version as u64);
+
+    cbor::write_text(&mut buf, "wants_to_validate");
+    cbor::write_bool(&mut buf, announce.wants_to_validate);
+
+    cbor::write_text(&mut buf, "wants_to_vote");
+    cbor::write_bool(&mut buf, announce.wants_to_vote);
+
+    cbor::write_text(&mut buf, "website");
+    match &announce.website {
+        Some(s) => cbor::write_text(&mut buf, s),
+        None => cbor::write_null(&mut buf),
+    }
+
+    buf
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::utxo::OutPoint;
+    use crate::utxo::OutPoint;
     use noble_crypto::{Hash256, SCHEME_ED25519};
 
     #[test]

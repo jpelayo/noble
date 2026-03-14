@@ -427,7 +427,7 @@ mod tests {
             timestamp: 1_700_000_000,
             reporter_signature: vec![0xAA; 64],
         };
-        let bytes = noble_codec::to_canonical_cbor(&notice).unwrap();
+        let bytes = noble_codec::cbor_ser::to_cbor(&notice).unwrap();
         let decoded = SuspensionNotice::from_cbor(&bytes).unwrap();
         assert_eq!(decoded.target_pubkey, notice.target_pubkey);
         assert_eq!(decoded.reporter_pubkey, notice.reporter_pubkey);

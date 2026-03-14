@@ -24,7 +24,7 @@ pub mod secp256k1;
 pub mod signature;
 
 pub use error::CryptoError;
-pub use hash::{canonical_double_hash, canonical_hash, double_sha256, sha256, tagged_hash, Hash256};
+pub use hash::{double_sha256, sha256, tagged_hash, Hash256};
 pub use keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, NobleVerifier, SignatureEnvelope};
 pub use schemes::{
     is_recognized_scheme, is_signing_scheme, SCHEME_BIP137, SCHEME_ED25519, SCHEME_P2P_IDENTITY,

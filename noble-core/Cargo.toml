@@ -21,7 +21,6 @@ hex.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]
-ciborium.workspace = true
 noble-test-utils.workspace = true
 hex.workspace = true
 proptest.workspace = true

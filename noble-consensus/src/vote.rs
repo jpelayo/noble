@@ -99,25 +99,18 @@ fn default_round() -> u8 {
     1
 }
 
-/// Internal payload for vote signing.
-#[derive(Serialize)]
-struct VoteSigningPayload {
-    cycle: u64,
-    candidate_hash: Hash256,
-    round: u8,
-}
+// NOTE: VoteSigningPayload removed — signing now uses
+// noble_core::wire::v1::vote_signing_payload_bytes() directly.
 
 impl PorVote {
-    /// Compute the 32-byte signing payload: `sha256(canonical_cbor(cycle, candidate_hash, round))`.
+    /// Compute the 32-byte signing payload using frozen wire format.
     pub fn signing_payload(cycle: u64, candidate_hash: Hash256, round: u8) -> [u8; 32] {
-        let payload = VoteSigningPayload {
+        let payload_bytes = noble_core::wire::v1::vote_signing_payload_bytes(
             cycle,
-            candidate_hash,
+            &candidate_hash,
             round,
-        };
-        let canonical = noble_codec::to_canonical_cbor(&payload)
-            .expect("vote signing payload serialization should never fail");
-        sha256(&canonical).0
+        );
+        sha256(&payload_bytes).0
     }
 
     /// Create a signed R1 vote (default round=1).

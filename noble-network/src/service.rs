@@ -1670,7 +1670,7 @@ fn emit_misbehavior_event(
 
 /// Handle a double-proposal evidence gossip message.
 fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
-    match ciborium::from_reader::<noble_core::DoubleProposalEvidence, _>(evidence_bytes) {
+    match noble_codec::cbor_de::from_cbor::<noble_core::DoubleProposalEvidence>(evidence_bytes) {
         Ok(evidence) => match evidence.verify() {
             Ok(()) => {
                 tracing::warn!(
@@ -1696,7 +1696,7 @@ fn handle_double_proposal(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<
 
 /// Handle a vote equivocation evidence gossip message.
 fn handle_vote_equivocation(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
-    match ciborium::from_reader::<noble_core::VoteEquivocationEvidence, _>(evidence_bytes) {
+    match noble_codec::cbor_de::from_cbor::<noble_core::VoteEquivocationEvidence>(evidence_bytes) {
         Ok(evidence) => match evidence.verify() {
             Ok(()) => {
                 tracing::warn!(
@@ -1722,7 +1722,7 @@ fn handle_vote_equivocation(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Optio
 
 /// Handle an invalid block evidence gossip message.
 fn handle_invalid_block_evidence(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
-    match ciborium::from_reader::<noble_core::InvalidBlockEvidence, _>(evidence_bytes) {
+    match noble_codec::cbor_de::from_cbor::<noble_core::InvalidBlockEvidence>(evidence_bytes) {
         Ok(evidence) => {
             // NOTE: We can't verify InvalidBlockEvidence here because it requires chain_id.
             // The node.rs EvidenceReceived handler will verify it.
@@ -1744,7 +1744,7 @@ fn handle_invalid_block_evidence(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> 
 
 /// Handle an announce equivocation evidence gossip message.
 fn handle_announce_equivocation_evidence(evidence_bytes: &[u8], peer_bytes: Vec<u8>) -> Option<NetworkEvent> {
-    match ciborium::from_reader::<noble_core::AnnounceEquivocationEvidence, _>(evidence_bytes) {
+    match noble_codec::cbor_de::from_cbor::<noble_core::AnnounceEquivocationEvidence>(evidence_bytes) {
         Ok(evidence) => match evidence.verify() {
             Ok(()) => {
                 tracing::warn!(
@@ -2089,28 +2089,28 @@ async fn handle_command(
             let (gossip_msg, label) = match &*evidence {
                 noble_core::MisbehaviorEvidence::DoubleProposal(e) => {
                     let mut bytes = Vec::new();
-                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                    if noble_codec::cbor_ser::to_cbor(e).map(|b| bytes = b).is_err() {
                         return false;
                     }
                     (GossipMessage::DoubleProposalEvidence { evidence_bytes: bytes }, "double_proposal")
                 }
                 noble_core::MisbehaviorEvidence::VoteEquivocation(e) => {
                     let mut bytes = Vec::new();
-                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                    if noble_codec::cbor_ser::to_cbor(e).map(|b| bytes = b).is_err() {
                         return false;
                     }
                     (GossipMessage::VoteEquivocationEvidence { evidence_bytes: bytes }, "vote_equivocation")
                 }
                 noble_core::MisbehaviorEvidence::InvalidBlock(e) => {
                     let mut bytes = Vec::new();
-                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                    if noble_codec::cbor_ser::to_cbor(e).map(|b| bytes = b).is_err() {
                         return false;
                     }
                     (GossipMessage::InvalidBlockEvidence { evidence_bytes: bytes }, "invalid_block")
                 }
                 noble_core::MisbehaviorEvidence::AnnounceEquivocation(e) => {
                     let mut bytes = Vec::new();
-                    if ciborium::into_writer(e, &mut bytes).is_err() {
+                    if noble_codec::cbor_ser::to_cbor(e).map(|b| bytes = b).is_err() {
                         return false;
                     }
                     (GossipMessage::AnnounceEquivocationEvidence { evidence_bytes: bytes }, "announce_equivocation")
