@@ -28,6 +28,22 @@ use tao::{
 };
 use wry::WebViewBuilder;
 
+/// Build the NativeConfig init script.
+/// No webkit shim needed — bridge.js detects window.ipc (WRY) directly.
+fn build_init_script(state: app::SharedState) -> String {
+    let st = state.lock().unwrap();
+    let config = serde_json::json!({
+        "platform": if cfg!(target_os = "windows") { "windows" } else { "desktop" },
+        "version": "1.0.0",
+        "isConnected": st.is_connected,
+        "hasWallet": st.has_wallet,
+        "walletAddress": st.wallet_address,
+        "chainId": st.chain_id,
+        "initialRoute": "home",
+    });
+    format!("window.NativeConfig = {};", config)
+}
+
 fn main() {
     // Initialize tokio runtime for async operations (API calls, polling)
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -35,6 +51,9 @@ fn main() {
 
     // Create shared application state
     let state = app::create_shared_state();
+
+    // Build init scripts (webkit shim + NativeConfig).
+    let init_script = build_init_script(state.clone());
 
     // Build the tao event loop with custom UserEvent support
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
@@ -49,49 +68,8 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create window");
 
-    // ========================================================================
-    // Init Scripts
-    // ========================================================================
-
-    // Script 1: WebKit shim — makes WRY look like WKWebView to bridge.js.
-    //
-    // bridge.js checks `window.webkit && window.webkit.messageHandlers` to
-    // decide whether to use NativeBridge or MockBridge. Our shim provides
-    // the same interface, routing all handler.postMessage calls through
-    // WRY's single IPC channel with the handler name embedded in the payload.
-    let webkit_shim = r#"
-        window.webkit = {
-            messageHandlers: new Proxy({}, {
-                get: function(_, handler) {
-                    return {
-                        postMessage: function(msg) {
-                            window.ipc.postMessage(JSON.stringify(
-                                Object.assign({}, msg, { handler: handler })
-                            ));
-                        }
-                    };
-                }
-            })
-        };
-    "#;
-
-    // Script 2: NativeConfig injection — provides initial state to app.js
-    // before it runs, matching WebContentView.swift's atDocumentStart injection.
-    let native_config = {
-        let st = state.lock().unwrap();
-        let config = json!({
-            "platform": "windows",
-            "version": "1.0.0",
-            "isConnected": st.is_connected,
-            "hasWallet": st.has_wallet,
-            "walletAddress": st.wallet_address,
-            "chainId": st.chain_id,
-            "initialRoute": "home",
-        });
-        format!("window.NativeConfig = {};", config)
-    };
-
-    let init_script = format!("{webkit_shim}\n{native_config}");
+    // Init scripts are injected into index.html by the asset server above.
+    // No with_initialization_script needed.
 
     // ========================================================================
     // IPC Handler
@@ -141,37 +119,20 @@ fn main() {
     };
 
     // ========================================================================
-    // Custom Protocol Handler — serves embedded WebUI assets
-    // ========================================================================
-
-    let custom_protocol_handler =
-        move |_webview_id: wry::WebViewId, request: wry::http::Request<Vec<u8>>| -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
-            let path = request.uri().path();
-
-            match assets::serve_asset(path) {
-                Some((bytes, mime)) => wry::http::Response::builder()
-                    .status(200)
-                    .header("Content-Type", &mime)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .body(bytes.into())
-                    .unwrap(),
-                None => wry::http::Response::builder()
-                    .status(404)
-                    .header("Content-Type", "text/plain")
-                    .body("Not Found".as_bytes().into())
-                    .unwrap(),
-            }
-        };
-
-    // ========================================================================
     // WebView Creation
     // ========================================================================
 
+    // Build self-contained HTML with all CSS + JS inlined.
+    // bridge.js now detects window.ipc directly — no webkit shim needed.
+    let full_html = assets::build_self_contained_html(&init_script);
+    eprintln!("[startup] self-contained HTML: {} bytes", full_html.len());
+
+    // WRY's with_html handles the HTML directly. with_initialization_script
+    // injects NativeConfig before any page scripts run.
     let webview = WebViewBuilder::new()
         .with_initialization_script(&init_script)
         .with_ipc_handler(ipc_handler)
-        .with_custom_protocol("noble-app".to_string(), custom_protocol_handler)
-        .with_url("http://noble-app.localhost/index.html")
+        .with_html(&full_html)
         .with_devtools(cfg!(debug_assertions))
         .build(&window)
         .expect("Failed to create WebView");

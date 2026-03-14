@@ -7,10 +7,15 @@ const DEFAULT_TIMEOUT_MS = 10000;
 const TX_TIMEOUT_MS = 30000;
 const TX_ACTIONS = new Set(['submitTransaction', 'signNotarization', 'signTransfer']);
 
-/** Real bridge for WKWebView — calls Swift via webkit.messageHandlers. */
+/** Real bridge for native hosts — WKWebView (Swift) or WRY (Rust).
+ *
+ * Detection order:
+ * 1. WRY (window.ipc) — single IPC channel, handler name embedded in payload.
+ * 2. WKWebView (window.webkit.messageHandlers) — named message handlers.
+ */
 class NativeBridge {
     static get isNative() {
-        return !!(window.webkit && window.webkit.messageHandlers);
+        return !!(window.ipc || (window.webkit && window.webkit.messageHandlers));
     }
 
     static call(handler, action, params = {}) {
@@ -25,11 +30,14 @@ class NativeBridge {
                 resolve: v => { clearTimeout(timer); resolve(v); },
                 reject: e => { clearTimeout(timer); reject(e); }
             };
-            window.webkit.messageHandlers[handler].postMessage({
-                callbackId: id,
-                action,
-                params
-            });
+            const msg = { callbackId: id, action, params };
+            if (window.ipc) {
+                // WRY: single IPC channel — embed handler name in payload.
+                window.ipc.postMessage(JSON.stringify(Object.assign({}, msg, { handler })));
+            } else {
+                // WKWebView (Swift): named message handlers.
+                window.webkit.messageHandlers[handler].postMessage(msg);
+            }
         });
     }
 

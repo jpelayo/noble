@@ -12,11 +12,42 @@ export function init(root, ctx) {
     const state = ctx.state;
 
     if (!state.isConnected) {
-        root.appendChild(emptyState({
-            icon: '\u{1F517}',
-            title: 'Not Connected',
-            subtitle: 'Connect to a NOBLE node to view your dashboard.'
-        }));
+        root.classList.add('page-content');
+        const welcome = document.createElement('div');
+        welcome.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:var(--gap)';
+        welcome.innerHTML = `
+            <div style="font-size:64px;margin-bottom:var(--gap)">&#x2B22;</div>
+            <h1 style="margin:0 0 8px">Welcome to Noble</h1>
+            <p style="color:var(--text-secondary);margin:0 0 var(--gap-lg);max-width:400px">
+                Document notarization on the blockchain. Connect to a node to get started, or configure your settings.
+            </p>
+            <div style="display:flex;gap:var(--gap);flex-wrap:wrap;justify-content:center">
+                <button id="welcome-settings" style="padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-size:var(--font-size-sm);font-weight:600">
+                    Settings
+                </button>
+                <button id="welcome-connect" style="padding:10px 24px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;font-size:var(--font-size-sm)">
+                    Connect to node.infinitecontext.com
+                </button>
+            </div>
+            <p style="color:var(--text-muted);font-size:var(--font-size-xs);margin-top:var(--gap)">
+                Run your own node or use the public seed at <strong>node.infinitecontext.com</strong>
+            </p>
+        `;
+        root.appendChild(welcome);
+        welcome.querySelector('#welcome-settings')?.addEventListener('click', () => {
+            if (window.App) window.App.navigateTo('settings');
+        });
+        welcome.querySelector('#welcome-connect')?.addEventListener('click', async () => {
+            const btn = welcome.querySelector('#welcome-connect');
+            btn.disabled = true;
+            btn.textContent = 'Connecting...';
+            try {
+                await Bridge.call('noble_app', 'connectToNode', { url: 'https://node.infinitecontext.com:8783' });
+            } catch (e) {
+                btn.textContent = 'Connection failed — try Settings';
+                btn.disabled = false;
+            }
+        });
         return { destroy() { alive = false; }, refresh() {} };
     }
 
