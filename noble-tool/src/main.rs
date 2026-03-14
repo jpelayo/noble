@@ -130,6 +130,13 @@ enum Commands {
     /// inputs. A failure means the binary's wire format is inconsistent
     /// with the protocol spec — blocks and transactions will be rejected.
     VerifyWire,
+
+    /// Verify CBOR codec round-trip consistency.
+    ///
+    /// Checks that the in-house serializer and deserializer produce
+    /// byte-identical round-trips for all protocol types. A failure means
+    /// the binary cannot correctly encode/decode network messages.
+    VerifyCodec,
 }
 
 #[derive(Subcommand)]
@@ -348,6 +355,7 @@ fn main() {
         } => cmd_reset_chain(data_dir, confirm, delete_peers),
         Commands::ChainInfo { data_dir } => cmd_chain_info(data_dir),
         Commands::VerifyWire => cmd_verify_wire(),
+        Commands::VerifyCodec => cmd_verify_codec(),
     }
 }
 
@@ -2289,6 +2297,44 @@ fn cmd_verify_wire() {
             results.len()
         );
         println!("  Block hashes and transaction IDs will not match the network.");
+        std::process::exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// verify-codec
+// ---------------------------------------------------------------------------
+
+fn cmd_verify_codec() {
+    println!("CBOR Codec — Round-Trip Verification");
+    println!("{}", "=".repeat(60));
+
+    let results = noble_codec::verify::verify_all_codecs();
+    let mut all_pass = true;
+
+    for r in &results {
+        let status = if r.pass { "PASS" } else { "FAIL" };
+        let icon = if r.pass { "+" } else { "X" };
+        println!("  [{}] {} {} ({} bytes)", icon, status, r.name, r.bytes);
+        if !r.pass {
+            all_pass = false;
+            println!("       {}", r.detail);
+        }
+    }
+
+    println!("{}", "-".repeat(60));
+    if all_pass {
+        println!(
+            "  All {} checks passed. Codec is consistent.",
+            results.len()
+        );
+    } else {
+        let fail_count = results.iter().filter(|r| !r.pass).count();
+        println!(
+            "  {} of {} checks FAILED. NETWORK SERIALIZATION IS BROKEN.",
+            fail_count,
+            results.len()
+        );
         std::process::exit(1);
     }
 }

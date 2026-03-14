@@ -81,9 +81,10 @@ class Noble < Formula
     (var/"noble/keystore").mkpath
     (var/"noble/logs").mkpath
 
-    # Verify wire format consistency — catches cross-compilation or
-    # architecture-specific CBOR encoding bugs before the node starts.
+    # Verify binary consistency — catches cross-compilation or
+    # architecture-specific encoding bugs before the node starts.
     system bin/"noble-tool", "verify-wire"
+    system bin/"noble-tool", "verify-codec"
 
     unless (etc/"noble/noble.toml").exist?
       config = (etc/"noble/noble.toml.sample").read

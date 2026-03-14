@@ -28,6 +28,7 @@ mod error;
 pub mod cbor;
 pub mod cbor_ser;
 pub mod cbor_de;
+pub mod verify;
 
 pub use error::CodecError;
 
