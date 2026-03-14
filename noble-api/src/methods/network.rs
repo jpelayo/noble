@@ -355,8 +355,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     .unwrap_or_else(|| hex::encode(&rec.identity_key));
                 seen_keys.insert(key.clone());
                 let announce = rec.last_announce.as_ref();
+                let key_hex = hex::encode(&rec.identity_key);
                 PeerRecordResponse {
                     identity_key: key,
+                    identity_key_hex: key_hex,
                     first_seen: rec.first_seen,
                     last_seen: rec.last_seen,
                     connection_count: rec.connection_count,
@@ -386,6 +388,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             }
             result.push(PeerRecordResponse {
                 identity_key: display_key,
+                identity_key_hex: key_hex.clone(),
                 first_seen: peer.first_seen,
                 last_seen: peer.last_seen,
                 connection_count: 0,

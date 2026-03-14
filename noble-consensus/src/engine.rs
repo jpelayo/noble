@@ -1394,6 +1394,11 @@ impl CycleEngine {
                 outputs.push(CycleIo::Log(format!(
                     "rejected block from fork peer (different chain): {e}"
                 )));
+                outputs.push(CycleIo::ForkDisagreement {
+                    peer_id: from_peer.clone(),
+                    block_height: block.header.height,
+                    reason: format!("{e}"),
+                });
             } else {
                 outputs.push(CycleIo::Log(format!(
                     "rejected invalid block from peer: {e}"

@@ -98,4 +98,12 @@ pub enum CycleIo {
     PersistCheckpoint(Box<crate::checkpoint::Checkpoint>),
     /// Notify that checkpoints have activated.
     CheckpointsActivated { heights: Vec<u64> },
+    /// Signal that a proposed block was rejected due to chain disagreement
+    /// (PrevHashMismatch, HeightMismatch, etc.).  The healing system uses
+    /// this as a clue to detect bootstrap forks and trigger resolution.
+    ForkDisagreement {
+        peer_id: Vec<u8>,
+        block_height: u64,
+        reason: String,
+    },
 }

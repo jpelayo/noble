@@ -3411,6 +3411,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "heights": heights,
                     }));
                 }
+                CycleIo::ForkDisagreement { peer_id, block_height, reason } => {
+                    // Clue: a proposed block was rejected because its parent doesn't
+                    // match our chain.  During bootstrap, trigger immediate resolution.
+                    // Read tip height in its own scope to avoid holding consensus lock
+                    // during on_fork_resolution_requested (which acquires consensus write).
+                    let our_height = {
+                        self.consensus.read().chain_tip().0
+                    }; // consensus lock released
+                    tracing::warn!(
+                        task = "fork_clue",
+                        "fork disagreement clue: peer block at height {block_height} rejected ({reason}), our tip={our_height}"
+                    );
+                    let _ = cycle_phase_tx.send(serde_json::json!({
+                        "event": "fork_disagreement",
+                        "peer_id": hex::encode(&peer_id),
+                        "block_height": block_height,
+                        "our_height": our_height,
+                        "reason": reason,
+                    }));
+                    if our_height < 10 {
+                        tracing::warn!(
+                            task = "fork_clue",
+                            "bootstrap fork: triggering immediate resolution (our height {our_height})"
+                        );
+                        self.healing.on_fork_resolution_requested(
+                            noble_crypto::Hash256::ZERO,
+                            block_height,
+                            &format!("fork clue: proposed block rejected at height {block_height} ({reason})"),
+                        );
+                    }
+                }
                 other => {
                     // Emit protocol activity events for votes and bans
                     match &other {

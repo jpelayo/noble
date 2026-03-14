@@ -1709,21 +1709,35 @@ export function init(root, ctx) {
       csPolicy.textContent = `Selection: ${result.selection_policy.replace('_', ' ')}`;
 
       // Populate validator name lookup for use by timeline and other panels.
+      // Keys are stored in BOTH bech32 (nbl1…) and hex formats because:
+      // - Validator list & peer memory return bech32 keys
+      // - Cycle history proposals/votes store hex keys
+      // Both must resolve to the same friendly name.
+
       // Layer 1: peer memory (identity_key → node_name from NodeAnnounce).
       if (Array.isArray(peerMemory)) {
         for (const r of peerMemory) {
-          if (r.identity_key && r.node_name) validatorNameMap.set(r.identity_key, r.node_name);
+          if (r.identity_key && r.node_name) {
+            validatorNameMap.set(r.identity_key, r.node_name);
+            // Also store hex form if key is bech32.
+            if (r.identity_key_hex) validatorNameMap.set(r.identity_key_hex, r.node_name);
+          }
         }
       }
       // Layer 2: self identity (overrides peer memory for own key).
       if (selfKey && identity.node_name) {
         validatorNameMap.set(selfKey, identity.node_name);
+        if (nodeInfo.validator_pubkey) validatorNameMap.set(nodeInfo.validator_pubkey, identity.node_name);
       }
       // Layer 3: validator list names (highest priority — operator-set).
       for (const v of validators) {
         const keyHex = valKey(v.public_key);
         const name = v.name || (selfKey && keyHex === selfKey ? (identity.node_name || 'This Node') : null);
-        if (name) validatorNameMap.set(keyHex, name);
+        if (name) {
+          validatorNameMap.set(keyHex, name);
+          // Also store the hex wire bytes form from public_key_hex.
+          if (v.public_key_hex) validatorNameMap.set(v.public_key_hex, name);
+        }
       }
 
       // Display chain identity in timeline header (only when blockchain exists)
@@ -2222,6 +2236,7 @@ export function init(root, ctx) {
         await rpc.call('noble_addValidator', { public_key: hexKey, name: name || undefined });
         closeModal();
         loadValidators();
+        loadCandidates();
       } catch (e) {
         errorEl.textContent = e.message || 'Failed to add validator.';
         submitBtn.disabled = false;
@@ -2302,7 +2317,7 @@ export function init(root, ctx) {
 
         // Brief delay to let the fade finish, then reload both tables
         await new Promise(r => setTimeout(r, 350));
-        await loadValidators();
+        await Promise.all([loadValidators(), loadCandidates()]);
 
         // Highlight the newly-appeared candidate row (the expelled node)
         const candidateRows = root.querySelectorAll('.cs-candidate-row');

@@ -430,10 +430,28 @@ async function updateForkStatus() {
           detailText = `height ${myHeight} \u00b7 different tip hash`;
         }
       } else {
-        // All peers either share our tip or are behind us — aligned.
-        severity = 'zero';
-        statusText = 'Aligned';
-        detailText = `height ${myHeight}`;
+        // No same-height forks. Either all peers share our tip, or they're behind.
+        // Check if any peer matches our exact height in the fork groups.
+        // The local fork group includes peers sharing our tip; any non-local
+        // fork at a lower height means peers are behind.
+        const localFork = forkData.forks.find(f => f.is_local);
+        const peersAtOurHeight = localFork ? localFork.peer_count : 0;
+        if (peersAtOurHeight > 0) {
+          // At least one peer shares our exact tip — genuinely aligned.
+          severity = 'zero';
+          statusText = 'Aligned';
+          detailText = `height ${myHeight}`;
+        } else if (peerCount > 0) {
+          // We're ahead of all peers — they're catching up.
+          severity = 'low';
+          statusText = 'Ahead';
+          detailText = `height ${myHeight} \u00b7 peers syncing`;
+        } else {
+          // Solo — no peers at all.
+          severity = 'zero';
+          statusText = 'Aligned';
+          detailText = `height ${myHeight}`;
+        }
       }
     } else if (behind <= 3) {
       severity = 'low';

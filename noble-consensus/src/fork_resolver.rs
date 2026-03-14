@@ -195,11 +195,20 @@ impl ForkResolver {
                     .saturating_add(if dominant.has_chain_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
                 let local_effective = local_height
                     .saturating_add(if local_has_owner { CHAIN_OWNER_EDGE_BLOCKS } else { 0 });
-                // Strict > preserves original 4+ block lead requirement when no owner info.
-                // With owner edge (5 blocks), equal actual height becomes 15 > 13 = true.
-                // Owner 2 behind: 13 > 13 = false → does NOT switch (tight bound).
-                // Owner 1 behind: 14 > 13 = true → switches.
-                dominant_effective > local_effective.saturating_add(3)
+
+                // Bootstrap fork: when both chains are very short (< EARLY_CHAIN_LIMIT),
+                // any lead is enough to trigger resolution after the dwell delay.
+                // Without this, two nodes that independently created different genesis
+                // blocks would need a 4-block lead before resolving — far too slow
+                // during the critical bootstrap phase.
+                const EARLY_CHAIN_LIMIT: u64 = 10;
+                if local_height < EARLY_CHAIN_LIMIT && dominant.height < EARLY_CHAIN_LIMIT {
+                    // Any strictly-ahead fork triggers (after dwell).
+                    dominant_effective > local_effective
+                } else {
+                    // Steady state: 4+ block lead required.
+                    dominant_effective > local_effective.saturating_add(3)
+                }
             }
             ForkResolutionStrategy::Manual => false,
         };
@@ -592,9 +601,21 @@ mod tests {
     #[test]
     fn longest_most_legitimate_below_threshold() {
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 3);
-        // Fork 2 blocks ahead (local=5, fork=7, diff=2 <= 3), no owner info
-        let forks = vec![local_fork(5), remote_fork(1, 7, 2)];
-        assert_eq!(fr.evaluate(5, &forks, 3, hash(0)), ForkDecision::NoAction);
+        // Fork 2 blocks ahead but both above EARLY_CHAIN_LIMIT (10) — uses steady-state threshold.
+        // local=15, fork=17, diff=2 <= 3 → NoAction.
+        let forks = vec![local_fork(15), remote_fork(1, 17, 2)];
+        assert_eq!(fr.evaluate(15, &forks, 3, hash(0)), ForkDecision::NoAction);
+    }
+
+    #[test]
+    fn bootstrap_fork_resolves_with_any_lead() {
+        // During bootstrap (both < 10), any lead triggers resolution after dwell.
+        let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
+        let forks = vec![local_fork(1), remote_fork(1, 3, 1)];
+        match fr.evaluate(1, &forks, 1, hash(0)) {
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 3),
+            other => panic!("expected Resolve, got {:?}", other),
+        }
     }
 
     #[test]
@@ -889,19 +910,19 @@ mod tests {
 
     #[test]
     fn no_owner_info_original_behavior() {
-        // When has_chain_owner is false on all forks, behaviour is the original >3 threshold.
+        // Steady-state (both above EARLY_CHAIN_LIMIT=10): original >3 threshold applies.
         let mut fr = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks = vec![local_fork(5), remote_fork(1, 9, 2)];
-        let result = fr.evaluate(5, &forks, 3, hash(0));
+        let forks = vec![local_fork(15), remote_fork(1, 19, 2)];
+        let result = fr.evaluate(15, &forks, 3, hash(0));
         match result {
-            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 9),
+            ForkDecision::Resolve { target_height, .. } => assert_eq!(target_height, 19),
             other => panic!("expected Resolve, got {:?}", other),
         }
 
-        // 3 blocks ahead is NOT enough (must be >3)
+        // 3 blocks ahead is NOT enough in steady state (must be >3)
         let mut fr2 = ForkResolver::new(ForkResolutionStrategy::LongestMostLegitimate, 1);
-        let forks2 = vec![local_fork(5), remote_fork(1, 8, 2)];
-        assert_eq!(fr2.evaluate(5, &forks2, 3, hash(0)), ForkDecision::NoAction);
+        let forks2 = vec![local_fork(15), remote_fork(1, 18, 2)];
+        assert_eq!(fr2.evaluate(15, &forks2, 3, hash(0)), ForkDecision::NoAction);
     }
 
     // ── Chain owner tiebreaker tests ──

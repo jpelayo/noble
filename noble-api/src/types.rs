@@ -376,6 +376,8 @@ pub struct SyncStatusResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerRecordResponse {
     pub identity_key: String,
+    /// Hex-encoded wire bytes of the identity key (for matching cycle history entries).
+    pub identity_key_hex: String,
     pub first_seen: u64,
     pub last_seen: u64,
     pub connection_count: u32,
@@ -402,6 +404,8 @@ pub struct ReputationBreakdown {
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatorEntry {
     pub public_key: String,
+    /// Hex-encoded wire bytes (for matching cycle history entries that use hex keys).
+    pub public_key_hex: String,
     pub name: Option<String>,
     pub status: String,
     pub weight: u64,

@@ -382,6 +382,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
                 ValidatorEntry {
                     public_key: key_display.clone(),
+                    public_key_hex: key_hex.clone(),
                     name: friendly_name,
                     status: liveness.as_str().to_string(),
                     weight,

@@ -730,6 +730,28 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         }));
                     }
                     SyncImportResult::Rejected { reason } => {
+                        // Bootstrap fork detection: if the rejection is a chain
+                        // disagreement (PrevHashMismatch) and we're early in the chain,
+                        // we're on a different fork than the sync peer.  Reset to
+                        // genesis and re-sync from the dominant chain.
+                        let is_fork_reject = reason.contains("PrevHash")
+                            || reason.contains("prev_block_hash")
+                            || reason.contains("HeightMismatch");
+                        let our_height = self.consensus.read().chain_tip().0;
+                        if is_fork_reject && our_height < 10 {
+                            let sync_target = target;
+                            tracing::warn!(
+                                task = "sync",
+                                "bootstrap fork detected: sync block {} rejected due to chain disagreement ({reason}) — resetting to genesis",
+                                height,
+                            );
+                            self.on_fork_resolution_requested(
+                                Hash256::ZERO,
+                                sync_target,
+                                &format!("bootstrap fork: sync peer at height {sync_target} on different chain"),
+                            );
+                            return;
+                        }
                         let attempts = match manifest[*cursor].status {
                             EntryStatus::Failed { attempts } => attempts + 1,
                             _ => 1,
