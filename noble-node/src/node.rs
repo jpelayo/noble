@@ -1923,10 +1923,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // ── Sync advancement (manifest-based) ──
                     self.healing.advance_sync(now);
 
-                    // ── Fork evaluation (delegated to healing manager) ──
-                    // The sync_behind guard is enforced inside on_tick_fork_eval().
+                    // ── Fork detection (clue ingestion only) ──
                     {
-                        let result = self.healing.on_tick_fork_eval();
+                        let result = self.healing.detect_forks();
                         if !self.healing.sync_behind() {
                             if result.dwell_after > 0 {
                                 let remaining = result.min_fork_duration.saturating_sub(result.dwell_after);
@@ -1944,8 +1943,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         }
                     }
 
-                    // ── Cross-chain evaluation (delegated to healing manager) ──
-                    self.healing.on_tick_cross_chain_eval();
+                    // ── Cross-chain detection (clue ingestion only) ──
+                    self.healing.detect_cross_chain();
+
+                    // ── SINGLE healing decision + execution point ──
+                    self.healing.evaluate_and_execute();
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
                     {
@@ -3412,35 +3414,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }));
                 }
                 CycleIo::ForkDisagreement { peer_id, block_height, reason } => {
-                    // Clue: a proposed block was rejected because its parent doesn't
-                    // match our chain.  During bootstrap, trigger immediate resolution.
-                    // Read tip height in its own scope to avoid holding consensus lock
-                    // during on_fork_resolution_requested (which acquires consensus write).
-                    let our_height = {
-                        self.consensus.read().chain_tip().0
-                    }; // consensus lock released
-                    tracing::warn!(
-                        task = "fork_clue",
-                        "fork disagreement clue: peer block at height {block_height} rejected ({reason}), our tip={our_height}"
-                    );
+                    // Ingest clue — do NOT trigger resolution directly.
+                    // evaluate_and_execute() will decide at the end of the tick.
                     let _ = cycle_phase_tx.send(serde_json::json!({
                         "event": "fork_disagreement",
                         "peer_id": hex::encode(&peer_id),
                         "block_height": block_height,
-                        "our_height": our_height,
-                        "reason": reason,
+                        "reason": &reason,
                     }));
-                    if our_height < 10 {
-                        tracing::warn!(
-                            task = "fork_clue",
-                            "bootstrap fork: triggering immediate resolution (our height {our_height})"
-                        );
-                        self.healing.on_fork_resolution_requested(
-                            noble_crypto::Hash256::ZERO,
-                            block_height,
-                            &format!("fork clue: proposed block rejected at height {block_height} ({reason})"),
-                        );
-                    }
+                    self.healing.ingest_clue(crate::healing::HealingClue::ProposedBlockRejected {
+                        peer_id,
+                        block_height,
+                        reason,
+                    });
                 }
                 other => {
                     // Emit protocol activity events for votes and bans

@@ -81,6 +81,150 @@ const MAX_BLOCK_RETRIES: u8 = 3;
 const SYNC_RETRY_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
+// Healing Clue System
+// ---------------------------------------------------------------------------
+
+/// What the healing system is currently doing.
+/// This is the single source of truth for healing coordination.
+/// All detection paths ingest clues; only `evaluate_and_execute()` transitions this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealingPhase {
+    /// Nothing active — ready to accept healing actions.
+    Idle,
+    /// Manifest-based sync is fetching blocks from a peer.
+    Syncing,
+    /// Fork resolution is in progress (rollback + re-sync).
+    Resolving,
+    /// Cross-chain adoption is in progress (wipe + re-sync).
+    Adopting,
+}
+
+/// A clue ingested from any detection source.
+#[derive(Debug, Clone)]
+pub enum HealingClue {
+    /// Fork resolver determined we should switch to a dominant fork.
+    ForkResolve {
+        target_hash: Hash256,
+        target_height: u64,
+        reason: String,
+    },
+    /// Sync import rejected a block due to chain disagreement.
+    SyncChainMismatch {
+        rejected_height: u64,
+        sync_target: u64,
+        reason: String,
+    },
+    /// Consensus engine rejected a proposed block (different parent chain).
+    ProposedBlockRejected {
+        peer_id: Vec<u8>,
+        block_height: u64,
+        reason: String,
+    },
+    /// Cross-chain evaluation determined we should adopt a different chain.
+    CrossChainAdopt {
+        target_chain_id: u32,
+        reason: String,
+    },
+}
+
+/// Collects clues from all detection sources within a tick, then
+/// dispatches a single coordinated healing action.
+pub struct ClueCollector {
+    clues: Vec<HealingClue>,
+}
+
+impl ClueCollector {
+    pub fn new() -> Self {
+        Self { clues: Vec::new() }
+    }
+
+    /// Ingest a clue. Duplicates and lower-priority clues are kept —
+    /// `evaluate()` picks the best action from all accumulated evidence.
+    pub fn ingest(&mut self, clue: HealingClue) {
+        self.clues.push(clue);
+    }
+
+    /// True if any clues have been ingested since last drain.
+    pub fn has_clues(&self) -> bool {
+        !self.clues.is_empty()
+    }
+
+    /// Take all accumulated clues, leaving the collector empty.
+    pub fn drain(&mut self) -> Vec<HealingClue> {
+        std::mem::take(&mut self.clues)
+    }
+}
+
+/// Action determined by `evaluate_and_execute` from accumulated clues.
+#[derive(Debug)]
+pub enum HealingAction {
+    /// No action needed.
+    None,
+    /// Fork resolution: rollback to common ancestor and re-sync.
+    Resolve {
+        target_hash: Hash256,
+        target_height: u64,
+        reason: String,
+    },
+    /// Cross-chain adoption: wipe all data and sync from a different chain.
+    Adopt {
+        target_chain_id: u32,
+        reason: String,
+    },
+}
+
+/// Pick the highest-priority action from a set of clues.
+/// Priority: Adopt > Resolve/SyncMismatch > ProposedBlockRejected(bootstrap) > None.
+fn pick_healing_action(clues: &[HealingClue], local_height: u64) -> HealingAction {
+    // Priority 1: Cross-chain adoption (most drastic).
+    for clue in clues {
+        if let HealingClue::CrossChainAdopt { target_chain_id, reason } = clue {
+            return HealingAction::Adopt {
+                target_chain_id: *target_chain_id,
+                reason: reason.clone(),
+            };
+        }
+    }
+
+    // Priority 2: Fork resolution (rollback + re-sync).
+    for clue in clues {
+        if let HealingClue::ForkResolve { target_hash, target_height, reason } = clue {
+            return HealingAction::Resolve {
+                target_hash: *target_hash,
+                target_height: *target_height,
+                reason: reason.clone(),
+            };
+        }
+    }
+
+    // Priority 3: Sync chain mismatch → escalate to fork resolution.
+    for clue in clues {
+        if let HealingClue::SyncChainMismatch { sync_target, reason, .. } = clue {
+            return HealingAction::Resolve {
+                target_hash: Hash256::ZERO,
+                target_height: *sync_target,
+                reason: reason.clone(),
+            };
+        }
+    }
+
+    // Priority 4: Proposed block rejected — only resolve during bootstrap.
+    for clue in clues {
+        if let HealingClue::ProposedBlockRejected { block_height, reason, .. } = clue {
+            if local_height < 10 {
+                return HealingAction::Resolve {
+                    target_hash: Hash256::ZERO,
+                    target_height: *block_height,
+                    reason: reason.clone(),
+                };
+            }
+        }
+    }
+
+    HealingAction::None
+}
+
+// ---------------------------------------------------------------------------
 // ForkEvalResult
 // ---------------------------------------------------------------------------
 
@@ -117,6 +261,12 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     // ── Fork state ──
     fork_visible: bool,
     fork_common_ancestor: Option<(u64, [u8; 32])>,
+
+    // ── Healing coordination ──
+    /// Unified state machine for all healing operations.
+    healing_phase: HealingPhase,
+    /// Accumulates clues from all detection sources within a tick.
+    clue_collector: ClueCollector,
 
     // ── Cross-chain state ──
     /// Blockchains discovered via NodeAnnounce. Shared with ApiState.
@@ -179,6 +329,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_progress_total,
             fork_visible: false,
             fork_common_ancestor: None,
+            healing_phase: HealingPhase::Idle,
+            clue_collector: ClueCollector::new(),
             discovered_blockchains,
             discovered_blockchains_path,
             announce_cache: parking_lot::Mutex::new(HashMap::new()),
@@ -217,6 +369,72 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.new_block_tx = Some(new_block_tx);
         self.cycle_phase_tx = Some(cycle_phase_tx);
         self.metrics = metrics;
+    }
+
+    // ── Healing coordination ──
+
+    /// Ingest a clue from any detection source. No action taken — clues
+    /// accumulate until `evaluate_and_execute` runs at the end of the tick.
+    pub fn ingest_clue(&mut self, clue: HealingClue) {
+        self.clue_collector.ingest(clue);
+    }
+
+    /// Current healing phase (for API/GUI visibility).
+    pub fn current_healing_phase(&self) -> HealingPhase {
+        self.healing_phase
+    }
+
+    /// Evaluate all accumulated clues and execute the highest-priority
+    /// healing action. Called ONCE per tick, AFTER all detection has run.
+    ///
+    /// This is the SINGLE decision + execution point for all healing.
+    pub fn evaluate_and_execute(&mut self) {
+        // Don't drain if we can't act — leave clues for next tick.
+        if matches!(self.healing_phase, HealingPhase::Resolving | HealingPhase::Adopting) {
+            if self.clue_collector.has_clues() {
+                tracing::debug!(
+                    task = "healing",
+                    "clues pending during active {:?} — deferred to next tick",
+                    self.healing_phase,
+                );
+            }
+            return;
+        }
+
+        let clues = self.clue_collector.drain();
+        if clues.is_empty() { return; }
+
+        let local_height = self.consensus.read().chain_tip().0;
+        let action = pick_healing_action(&clues, local_height);
+
+        match action {
+            HealingAction::Adopt { target_chain_id, reason } => {
+                tracing::info!(
+                    task = "healing",
+                    "evaluate_and_execute: ADOPT chain {:#010X} ({reason})",
+                    target_chain_id,
+                );
+                self.healing_phase = HealingPhase::Adopting;
+                self.execute_adoption(target_chain_id, &reason);
+                self.healing_phase = HealingPhase::Syncing;
+            }
+            HealingAction::Resolve { target_hash, target_height, reason } => {
+                tracing::info!(
+                    task = "healing",
+                    "evaluate_and_execute: RESOLVE to height {target_height} ({reason})",
+                );
+                self.healing_phase = HealingPhase::Resolving;
+                self.execute_resolution(target_hash, target_height, &reason);
+                self.healing_phase = HealingPhase::Syncing;
+            }
+            HealingAction::None => {
+                tracing::debug!(
+                    task = "healing",
+                    "evaluate_and_execute: {} clue(s) ingested, no action required",
+                    clues.len(),
+                );
+            }
+        }
     }
 
     // ── Accessors ──
@@ -423,14 +641,25 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     fn reset_sync_idle(&mut self) {
         self.sync_state = SyncState::Idle;
         self.sync_atomics_from_state();
+        // If we were Syncing, transition back to Idle.
+        // Don't change phase if we're Resolving/Adopting (those manage their own transitions).
+        if self.healing_phase == HealingPhase::Syncing {
+            self.healing_phase = HealingPhase::Idle;
+        }
     }
 
-    /// THE single entry point for all sync decisions. Called from:
-    /// - tick handler (periodic)
-    /// - on_peer_chain_tip_updated (peer status)
-    /// - advance_after_import (after each committed block)
-    /// - on_fork_resolution_requested (after rollback)
+    /// Sync conveyor: advance the manifest-based sync state machine.
+    ///
+    /// **Isolated from healing decisions.** The conveyor only runs when the
+    /// healing phase allows it (Idle or Syncing). During Resolving/Adopting,
+    /// the conveyor is paused — the execute_* methods reset sync state and
+    /// the conveyor restarts naturally on the next tick.
     pub fn advance_sync(&mut self, now: u64) {
+        // Guard: don't advance conveyor during resolution/adoption.
+        if matches!(self.healing_phase, HealingPhase::Resolving | HealingPhase::Adopting) {
+            return;
+        }
+
         let our_height = self.consensus.read().chain_tip().0;
 
         match &self.sync_state {
@@ -439,6 +668,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 let (best_peer, best_height) = self.find_best_sync_peer(our_height);
                 if let Some(peer) = best_peer {
                     let behind = best_height - our_height;
+                    // Transition healing phase to Syncing.
+                    self.healing_phase = HealingPhase::Syncing;
                     tracing::info!(
                         task = "sync",
                         "peer {} at height {}, we're at {} ({} behind) — requesting manifest",
@@ -738,18 +969,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                             || reason.contains("prev_block_hash")
                             || reason.contains("HeightMismatch");
                         let our_height = self.consensus.read().chain_tip().0;
-                        if is_fork_reject && our_height < 10 {
+                        if is_fork_reject {
                             let sync_target = target;
                             tracing::warn!(
                                 task = "sync",
-                                "bootstrap fork detected: sync block {} rejected due to chain disagreement ({reason}) — resetting to genesis",
+                                "chain mismatch clue: sync block {} rejected ({reason})",
                                 height,
                             );
-                            self.on_fork_resolution_requested(
-                                Hash256::ZERO,
+                            self.ingest_clue(HealingClue::SyncChainMismatch {
+                                rejected_height: height,
                                 sync_target,
-                                &format!("bootstrap fork: sync peer at height {sync_target} on different chain"),
-                            );
+                                reason: format!("sync block {height} rejected: {reason}"),
+                            });
+                            // Pause conveyor — evaluate_and_execute will decide.
                             return;
                         }
                         let attempts = match manifest[*cursor].status {
@@ -846,13 +1078,13 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     // ── Fork evaluation (tick handler) ──
 
-    /// Evaluate fork status among same-chain peers.
+    /// Detect fork status among same-chain peers.
     ///
-    /// **Critical invariant**: Returns zeroed result if `sync_behind` is true,
-    /// preventing the fork resolver from fighting the sync mechanism.
+    /// **Detection only** — ingests clues but never triggers resolution directly.
+    /// Resolution is handled by `evaluate_and_execute()` at the end of the tick.
     ///
-    /// Calls `ForkResolver::evaluate()` directly and handles resolution inline.
-    pub fn on_tick_fork_eval(&mut self) -> ForkEvalResult {
+    /// Returns `ForkEvalResult` for GUI event emission in node.rs.
+    pub fn detect_forks(&mut self) -> ForkEvalResult {
         let zero_result = ForkEvalResult {
             dwell_before: 0,
             dwell_after: 0,
@@ -951,7 +1183,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 target_height,
                 reason,
             } => {
-                self.on_fork_resolution_requested(target_hash, target_height, &reason);
+                self.ingest_clue(HealingClue::ForkResolve {
+                    target_hash,
+                    target_height,
+                    reason,
+                });
             }
             noble_consensus::ForkDecision::Pending { cycles_remaining } => {
                 tracing::info!(
@@ -974,8 +1210,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     // ── Cross-chain evaluation (tick handler) ──
 
-    /// Evaluate cross-chain fork data and handle adoption inline.
-    pub fn on_tick_cross_chain_eval(&mut self) {
+    /// Detect cross-chain fork conditions.
+    ///
+    /// **Detection only** — ingests clues but never triggers adoption directly.
+    pub fn detect_cross_chain(&mut self) {
         let local_chain_id = self.get_chain_id();
 
         // Read consensus state (chain_owner_key + our validator wire bytes).
@@ -1043,7 +1281,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 target_chain_id,
                 reason,
             } => {
-                self.on_chain_adoption_requested(target_chain_id, &reason);
+                self.ingest_clue(HealingClue::CrossChainAdopt {
+                    target_chain_id,
+                    reason,
+                });
             }
             noble_consensus::CrossChainDecision::Pending { cycles_remaining } => {
                 tracing::info!(
@@ -1136,8 +1377,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     // ── Fork resolution handler ──
 
-    /// Handle fork resolution: rollback storage and reset consensus.
-    pub fn on_fork_resolution_requested(
+    /// Execute fork resolution: rollback storage and reset consensus.
+    ///
+    /// Called ONLY from `evaluate_and_execute`. Phase transitions are handled
+    /// by the caller — this method performs the raw rollback and cleanup.
+    fn execute_resolution(
         &mut self,
         target_hash: Hash256,
         target_height: u64,
@@ -1170,14 +1414,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             );
         }
 
-        // Reset sync state after rollback — advance_sync will restart from new tip.
+        // Reset sync state — the conveyor will restart on the next tick
+        // when evaluate_and_execute transitions to HealingPhase::Syncing.
         self.reset_sync_idle();
-
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.advance_sync(now_ts);
 
         self.broadcast_event(serde_json::json!({
             "event": "fork_auto_resolved",
@@ -1190,8 +1429,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
     // ── Chain adoption ──
 
-    /// Prepare and execute chain adoption: wipes and resets all state.
-    pub fn on_chain_adoption_requested(&mut self, target_chain_id: u32, reason: &str) {
+    /// Execute chain adoption: wipe all data and reset for re-sync.
+    ///
+    /// Called ONLY from `evaluate_and_execute`. Phase transitions are handled
+    /// by the caller.
+    fn execute_adoption(&mut self, target_chain_id: u32, reason: &str) {
         tracing::warn!(
             task = "chain_adoption",
             "CROSS-CHAIN ADOPTION: adopting chain {:#010X} — {reason}",
@@ -1229,12 +1471,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.fork_resolution_delay_cycles,
         );
 
-        // 5. Reset sync state.
+        // 5. Reset sync state — conveyor restarts on next tick.
         self.reset_sync_idle();
 
-        // 6. Clear stale proposals and request sync.
+        // 6. Clear stale proposals.
         self.clear_pending_proposals();
-        self.request_sync();
 
         self.broadcast_event(serde_json::json!({
             "event": "chain_adoption_started",
@@ -1343,7 +1584,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     announce.node_name, announce.chain_id, their_height, their_weight,
                     our_chain_id, our_height, our_weight,
                 );
-                self.on_chain_adoption_requested(announce.chain_id, &reason);
+                self.ingest_clue(HealingClue::CrossChainAdopt {
+                    target_chain_id: announce.chain_id,
+                    reason,
+                });
             } else {
                 tracing::info!(
                     task = "chain_adoption",
@@ -1947,7 +2191,7 @@ mod tests {
             target: 10,
             requested_at: 50,
         };
-        let result = hm.on_tick_fork_eval();
+        let result = hm.detect_forks();
         assert_eq!(result.dwell_before, 0);
         assert_eq!(result.dwell_after, 0);
     }
@@ -1955,7 +2199,7 @@ mod tests {
     #[test]
     fn fork_eval_single_group_no_fork() {
         let mut hm = make_healing_manager();
-        let result = hm.on_tick_fork_eval();
+        let result = hm.detect_forks();
         // Single group (local only) — no fork, dwell stays 0.
         assert_eq!(result.dwell_after, 0);
         assert!(!hm.fork_visible);
@@ -2031,7 +2275,8 @@ mod tests {
     }
 
     #[test]
-    fn chain_adoption_resets_state() {
+    #[test]
+    fn chain_adoption_via_clue_resets_state() {
         let mut hm = make_healing_manager();
         hm.sync_state = SyncState::AwaitingManifest {
             peer: vec![1, 2, 3],
@@ -2041,11 +2286,48 @@ mod tests {
         hm.fork_visible = true;
         hm.fork_common_ancestor = Some((5, [0xAA; 32]));
         hm.chain_vote_weight.store(100, Ordering::Relaxed);
-        hm.on_chain_adoption_requested(0xDEADBEEF, "test");
+        // Ingest adoption clue and evaluate.
+        hm.ingest_clue(HealingClue::CrossChainAdopt {
+            target_chain_id: 0xDEADBEEF,
+            reason: "test".into(),
+        });
+        hm.evaluate_and_execute();
         assert!(matches!(hm.sync_state, SyncState::Idle));
         assert!(!hm.fork_visible);
         assert!(hm.fork_common_ancestor.is_none());
         assert_eq!(hm.chain_vote_weight.load(Ordering::Relaxed), 0);
+        // After evaluate_and_execute, phase should be Syncing (post-adoption).
+        assert_eq!(hm.healing_phase, HealingPhase::Syncing);
+    }
+
+    #[test]
+    fn evaluate_no_clues_is_noop() {
+        let mut hm = make_healing_manager();
+        hm.evaluate_and_execute();
+        assert_eq!(hm.healing_phase, HealingPhase::Idle);
+    }
+
+    #[test]
+    fn evaluate_ignores_clues_during_resolving() {
+        let mut hm = make_healing_manager();
+        hm.healing_phase = HealingPhase::Resolving;
+        hm.ingest_clue(HealingClue::ForkResolve {
+            target_hash: Hash256::ZERO,
+            target_height: 5,
+            reason: "test".into(),
+        });
+        hm.evaluate_and_execute();
+        // Phase unchanged — clues deferred.
+        assert_eq!(hm.healing_phase, HealingPhase::Resolving);
+    }
+
+    #[test]
+    fn advance_sync_blocked_during_resolving() {
+        let mut hm = make_healing_manager();
+        hm.healing_phase = HealingPhase::Resolving;
+        hm.advance_sync(100);
+        // Should remain Idle sync state — conveyor blocked.
+        assert!(matches!(hm.sync_state, SyncState::Idle));
     }
 
     // Equivocation detection is tested in integration tests where
