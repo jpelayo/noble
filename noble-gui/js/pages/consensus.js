@@ -1842,9 +1842,15 @@ export function init(root, ctx) {
       const needRadio = r1Strat === 'fixed_validator' || r2Strat === 'fixed_validator';
       const hasStratCol = needProbability || needCheckbox || needRadio;
 
-      // Update column header
+      // Update column header dynamically based on active strategy
       const colHeader = root.querySelector('#cs-strategy-col-header');
-      if (colHeader) colHeader.textContent = '';
+      if (colHeader) {
+        if (needProbability && !needCheckbox && !needRadio) colHeader.textContent = 'Probability';
+        else if (needCheckbox && !needProbability && !needRadio) colHeader.textContent = 'Subset';
+        else if (needRadio && !needProbability && !needCheckbox) colHeader.textContent = 'Target';
+        else if (hasStratCol) colHeader.textContent = 'Strategy';
+        else colHeader.textContent = '';
+      }
 
       // Compute probability weights for WeightedProbability strategy
       const n = ordered.length;
@@ -1909,9 +1915,13 @@ export function init(root, ctx) {
         tr.dataset.idx = i;
         tr.dataset.key = keyHex;
         tr.innerHTML = `
-          <td style="cursor:grab;color:var(--text-secondary);font-size:1.3em;text-align:center;user-select:none;padding:0 6px;letter-spacing:2px;opacity:0.7;transition:opacity 0.15s,color 0.15s" class="cs-drag-handle" title="Drag to set priority order"
-              onmouseenter="this.style.opacity='1';this.style.color='var(--accent)'"
-              onmouseleave="this.style.opacity='0.7';this.style.color='var(--text-secondary)'">&#8942;&#8942;</td>
+          <td class="cs-drag-handle" title="Drag to reorder, or use arrows" style="cursor:grab;text-align:center;user-select:none;padding:0 4px;position:relative;min-width:38px">
+            <span class="cs-grip" style="font-size:1.3em;letter-spacing:2px;color:var(--text-secondary);opacity:0.7;transition:opacity 0.15s">&#8942;&#8942;</span>
+            <span class="cs-move-arrows" style="display:none;flex-direction:column;gap:0;position:absolute;inset:0;align-items:center;justify-content:center">
+              <button class="cs-move-up" data-dir="up" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:14px;line-height:1;padding:0 4px;opacity:${i === 0 ? '0.25' : '1'}" ${i === 0 ? 'disabled' : ''} title="Move up">&#9650;</button>
+              <button class="cs-move-down" data-dir="down" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:14px;line-height:1;padding:0 4px;opacity:${i === ordered.length - 1 ? '0.25' : '1'}" ${i === ordered.length - 1 ? 'disabled' : ''} title="Move down">&#9660;</button>
+            </span>
+          </td>
           <td>${i + 1}</td>
           ${strategyCell(keyHex, i)}
           <td>
@@ -1943,19 +1953,56 @@ export function init(root, ctx) {
           ${removeCell}
         `;
 
-        // Drag-and-drop: only initiate from the grip handle
+        // ── Hover: show move arrows, hide grip ──
         const handle = tr.querySelector('.cs-drag-handle');
+        const grip = tr.querySelector('.cs-grip');
+        const arrows = tr.querySelector('.cs-move-arrows');
+        if (handle && grip && arrows) {
+          handle.addEventListener('mouseenter', () => {
+            grip.style.display = 'none';
+            arrows.style.display = 'flex';
+          });
+          handle.addEventListener('mouseleave', () => {
+            grip.style.display = '';
+            arrows.style.display = 'none';
+          });
+        }
+
+        // ── Move arrows: click to reorder ──
+        async function moveRow(dir) {
+          const srcIdx = parseInt(tr.dataset.idx, 10);
+          const destIdx = dir === 'up' ? srcIdx - 1 : srcIdx + 1;
+          if (destIdx < 0 || destIdx >= currentDisplayOrder.length) return;
+          const newOrder = [...currentDisplayOrder];
+          const [moved] = newOrder.splice(srcIdx, 1);
+          newOrder.splice(destIdx, 0, moved);
+          currentDisplayOrder = newOrder;
+          try {
+            await rpc.call('noble_setValidatorOrder', { order: newOrder });
+            loadValidators();
+          } catch (err) {
+            console.error('[consensus] move validator:', err);
+            loadValidators();
+          }
+        }
+        const upBtn = tr.querySelector('.cs-move-up');
+        const downBtn = tr.querySelector('.cs-move-down');
+        if (upBtn) upBtn.addEventListener('click', (e) => { e.stopPropagation(); moveRow('up'); });
+        if (downBtn) downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveRow('down'); });
+
+        // ── Drag-and-drop: set draggable on the row directly for reliable initiation ──
         if (handle) {
           handle.addEventListener('mousedown', () => { tr.draggable = true; });
           handle.addEventListener('touchstart', () => { tr.draggable = true; }, { passive: true });
         }
         tr.addEventListener('dragstart', (e) => {
-          if (!e.target.closest('.cs-drag-handle') && e.target !== handle) {
-            e.preventDefault(); return; // only drag from handle
+          if (!e.target.closest('.cs-drag-handle')) {
+            e.preventDefault(); return;
           }
           dragSrcIdx = i;
           _isDragging = true;
           e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(i));
           tr.style.opacity = '0.5';
         });
         tr.addEventListener('dragend', () => {
@@ -1976,7 +2023,6 @@ export function init(root, ctx) {
           _isDragging = false;
           const destIdx = parseInt(tr.dataset.idx, 10);
           if (dragSrcIdx === null || dragSrcIdx === destIdx) { dragSrcIdx = null; return; }
-          // Reorder currentDisplayOrder
           const newOrder = [...currentDisplayOrder];
           const [moved] = newOrder.splice(dragSrcIdx, 1);
           newOrder.splice(destIdx, 0, moved);
@@ -1987,7 +2033,7 @@ export function init(root, ctx) {
             loadValidators();
           } catch (err) {
             console.error('[consensus] set validator order:', err);
-            loadValidators(); // refresh to revert visual
+            loadValidators();
           }
         });
 
