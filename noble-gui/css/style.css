@@ -555,6 +555,12 @@ body {
 .search-bar button:hover,
 .btn:hover { background: var(--accent-hover); }
 
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
 .btn-secondary {
   background: var(--bg-tertiary);
   color: var(--text-primary);
@@ -566,6 +572,20 @@ body {
   color: #fff;
 }
 .btn-danger:hover { background: color-mix(in srgb, var(--error) 85%, #000); }
+
+.form-select {
+  padding: var(--gap-sm) var(--gap);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-select:focus { border-color: var(--accent); }
 
 .btn-sm {
   padding: 2px 8px;

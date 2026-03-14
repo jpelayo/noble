@@ -248,7 +248,14 @@ impl ForkResolver {
                     dominant.tip_hash.as_bytes() < local_tip_hash.as_bytes()
                 };
                 if should_yield {
-                    // Override threshold_met — proceed to resolution.
+                    // Same-height deadlock resolved — skip normal dwell tracking
+                    // and jump directly to resolution. Safety: never resolve
+                    // past finalized height.
+                    if dominant.height <= self.finalized_height {
+                        self.reset_tracking();
+                        return ForkDecision::NoAction;
+                    }
+                    // Fall through to build ForkDecision::Resolve below.
                 } else {
                     self.reset_tracking();
                     return ForkDecision::NoAction;
@@ -261,37 +268,39 @@ impl ForkResolver {
         } else if !threshold_met {
             self.reset_tracking();
             return ForkDecision::NoAction;
-        }
+        } else {
+            // threshold_met == true: normal dwell tracking path.
 
-        // Safety: never resolve past finalized height.
-        if dominant.height <= self.finalized_height {
-            self.reset_tracking();
-            return ForkDecision::NoAction;
-        }
-
-        // Track the fork by height.  If the dominant fork's height decreased,
-        // a different (shorter) fork took over — reset the dwell counter.
-        // A growing fork (increasing height) keeps its dwell time, even though
-        // its tip_hash changes every cycle.
-        match self.tracked_fork_height {
-            Some(prev_h) if dominant.height < prev_h => {
-                // Different fork became dominant (shorter) — reset.
-                self.fork_dwell_counter = 0;
+            // Safety: never resolve past finalized height.
+            if dominant.height <= self.finalized_height {
+                self.reset_tracking();
+                return ForkDecision::NoAction;
             }
-            None => {
-                // First time tracking — start fresh.
-                self.fork_dwell_counter = 0;
+
+            // Track the fork by height.  If the dominant fork's height decreased,
+            // a different (shorter) fork took over — reset the dwell counter.
+            // A growing fork (increasing height) keeps its dwell time, even though
+            // its tip_hash changes every cycle.
+            match self.tracked_fork_height {
+                Some(prev_h) if dominant.height < prev_h => {
+                    // Different fork became dominant (shorter) — reset.
+                    self.fork_dwell_counter = 0;
+                }
+                None => {
+                    // First time tracking — start fresh.
+                    self.fork_dwell_counter = 0;
+                }
+                _ => {} // Same or growing fork — keep dwell counter.
             }
-            _ => {} // Same or growing fork — keep dwell counter.
-        }
-        self.tracked_fork_height = Some(dominant.height);
+            self.tracked_fork_height = Some(dominant.height);
 
-        self.fork_dwell_counter += 1;
+            self.fork_dwell_counter += 1;
 
-        if self.fork_dwell_counter < self.min_fork_duration {
-            return ForkDecision::Pending {
-                cycles_remaining: self.min_fork_duration - self.fork_dwell_counter,
-            };
+            if self.fork_dwell_counter < self.min_fork_duration {
+                return ForkDecision::Pending {
+                    cycles_remaining: self.min_fork_duration - self.fork_dwell_counter,
+                };
+            }
         }
 
         // Dwell expired — resolve.

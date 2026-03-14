@@ -600,7 +600,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         let banned_until = now + dur;
         {
             let storage = self.storage.read();
-            let _ = storage.store_ban(&peer_bytes, banned_until, 0x0C, None); // ManualBan
+            if let Err(e) = storage.store_ban(&peer_bytes, banned_until, 0x0C, None) { // ManualBan
+                tracing::warn!(task = "api", "failed to persist ban to storage: {e}");
+            }
         }
 
         Ok(serde_json::json!({ "success": true, "banned_until": banned_until }))
@@ -617,7 +619,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         // Remove from storage
         {
             let storage = self.storage.read();
-            let _ = storage.remove_ban(&peer_bytes);
+            if let Err(e) = storage.remove_ban(&peer_bytes) {
+                tracing::warn!(task = "api", "failed to remove ban from storage: {e}");
+            }
         }
 
         Ok(serde_json::json!({ "success": true }))

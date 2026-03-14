@@ -416,8 +416,8 @@ async function updateForkStatus() {
         // Same height, different tip hash — genuine fork.
         // Check majority: if more peers agree with us, we are aligned.
         const localFork = forkData.forks.find(f => f.is_local);
-        const localPeers = localFork ? localFork.peer_count : 0;
-        const divergentPeers = sameHeightForks.reduce((s, f) => s + f.peer_count, 0);
+        const localPeers = localFork ? localFork.peers : 0;
+        const divergentPeers = sameHeightForks.reduce((s, f) => s + f.peers, 0);
         if (localPeers >= divergentPeers) {
           // Majority agrees with us — aligned despite minor fork.
           severity = 'zero';
@@ -435,7 +435,7 @@ async function updateForkStatus() {
         // The local fork group includes peers sharing our tip; any non-local
         // fork at a lower height means peers are behind.
         const localFork = forkData.forks.find(f => f.is_local);
-        const peersAtOurHeight = localFork ? localFork.peer_count : 0;
+        const peersAtOurHeight = localFork ? localFork.peers : 0;
         if (peersAtOurHeight > 0) {
           // At least one peer shares our exact tip — genuinely aligned.
           severity = 'zero';

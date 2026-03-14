@@ -396,13 +396,23 @@ impl CycleEngine {
         // When hopping to a new chain (height 0), clear the cycle epoch.
         // Next tick sets a wall-clock-aligned epoch; the new chain's block 1
         // resets it to the real timestamp when committed.
+        // NOTE(stale-cache-#6): genesis_timestamp is reset to u64::MAX here,
+        // which marks it as uninitialized. first_tick re-aligns it on the next
+        // engine tick. During sync import, cycle phase timing is not used, so
+        // the stale window is harmless. No additional fix needed.
         if height == 0 {
             self.cycle_mgr.set_genesis_timestamp(u64::MAX);
             self.vote_mgr.set_bootstrap_tolerance(true);
             self.tracked_cycle = u64::MAX;
             self.tracked_phase = CyclePhase::Propagation;
             self.first_tick = true;
+            // NOTE(stale-cache-#8): chain_owner_key is cleared here on full
+            // reset (height 0). The only risk of staleness would be block 1
+            // reorg without a full reset — but finality prevents reorg past
+            // finalized height, and block 1 finalizes after 3 cycles. Safe.
             self.chain_owner_key = None;
+            self.badge_store = BadgeStore::new();
+            self.badge_proposals.clear();
             self.finality_tracker.reset_full();
             self.checkpoint_mgr.reset();
         } else {
@@ -1203,7 +1213,14 @@ impl CycleEngine {
                         current_cycle,
                     );
 
-                    let tx_hash = hex::encode(noble_crypto::sha256(&noble_codec::to_canonical_cbor(tx).unwrap_or_default()));
+                    let cbor_bytes = match noble_codec::to_canonical_cbor(tx) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("badge proposal CBOR encoding failed: {e}");
+                            continue;
+                        }
+                    };
+                    let tx_hash = hex::encode(noble_crypto::sha256(&cbor_bytes));
                     info!(
                         "badge proposal recorded: type={:?}, target={}..., hash={}",
                         proposal_type,
@@ -1357,6 +1374,16 @@ impl CycleEngine {
         // parent's computed hash, so we use the stored tip_hash directly. B5 uses
         // parent.timestamp for ordering checks.
         let parent_header = self.tip_header.clone();
+
+        // stale-cache-#9: warn when tip_header is missing at non-genesis height.
+        // B2 (prev_hash) and B5 (timestamp ordering) checks are skipped when
+        // parent is None, degrading validation to signature-only.
+        if parent_header.is_none() && self.tip_height > 0 {
+            tracing::warn!(
+                "tip_header is None at tip_height {} — B2/B3/B5 parent validation degraded (parent header not loaded after rollback or restart)",
+                self.tip_height,
+            );
+        }
 
         // Validate the block
         // AUD3-H1: Use wall-clock time for B6 future/past skew checks,
@@ -1767,9 +1794,14 @@ impl CycleEngine {
                             current_time,
                             chain_height: self.tip_height + 1,
                         };
-                        if let Ok(tx_id) = tx.compute_tx_id(self.chain_id) {
-                            if validate_transaction(tx, &tx_id, &tx_ctx).is_err() {
-                                bad_tx_ids.push(tx_id);
+                        match tx.compute_tx_id(self.chain_id) {
+                            Ok(tx_id) => {
+                                if validate_transaction(tx, &tx_id, &tx_ctx).is_err() {
+                                    bad_tx_ids.push(tx_id);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("failed to compute tx_id for eviction check: {e}");
                             }
                         }
                     }

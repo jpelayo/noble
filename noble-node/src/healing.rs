@@ -621,6 +621,19 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         *self.last_proposed.lock() = None;
     }
 
+    /// Clear chain-specific fields from all peer_info entries so stale
+    /// chain state doesn't poison sync peer selection after a chain reset
+    /// or adoption (stale-cache-#3).
+    fn clear_peer_chain_state(&self) {
+        let mut peers = self.peer_info.write();
+        for entry in peers.values_mut() {
+            entry.chain_id = None;
+            entry.chain_tip_height = None;
+            entry.chain_tip_hash = None;
+            entry.proposed_height = None;
+        }
+    }
+
     fn evict_from_mempool(&self, tx_ids: &[Hash256]) {
         let mut mempool = self.mempool.lock();
         for tx_id in tx_ids {
@@ -1058,7 +1071,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                         let is_fork_reject = reason.contains("PrevHash")
                             || reason.contains("prev_block_hash")
                             || reason.contains("HeightMismatch");
-                        let our_height = self.consensus.read().chain_tip().0;
                         if is_fork_reject {
                             let sync_target = target;
                             tracing::warn!(
@@ -1391,6 +1403,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Handle a peer reporting its chain tip. Performs integrity probe,
     /// then delegates sync decisions to `advance_sync`.
     pub fn on_peer_chain_tip_updated(&mut self, _peer_id: &[u8], peer_height: u64) {
+        // Guard: never perform integrity wipe during active resolution/adoption.
+        if matches!(self.healing_phase, HealingPhase::Resolving | HealingPhase::Adopting) {
+            tracing::debug!(
+                task = "healing",
+                phase = ?self.healing_phase,
+                "skipping peer chain tip update during active healing"
+            );
+            return;
+        }
+
         let (our_height, our_tip_hash) = self.consensus.read().chain_tip();
         let tip_block_exists = if our_height > 0 {
             self.storage.read().get_block_header(&our_tip_hash).is_ok()
@@ -1415,6 +1437,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.send_network(NetworkCommand::UpdateChainId(0));
             self.update_tip_height(0);
             self.clear_pending_proposals();
+
+            // Clear stale caches that reference the wiped chain (stale-cache-#4/#5/#7).
+            self.announce_cache.lock().clear();
+            self.discovered_blockchains.lock().clear();
+            self.persist_discovered_blockchains();
+            self.fork_common_ancestor = None;
 
             // Reset sync state.
             self.reset_sync_idle();
@@ -1493,15 +1521,25 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.fork_visible = false;
         self.fork_common_ancestor = None;
 
+        // Clear stale chain state from peer_info (stale-cache-#3).
+        self.clear_peer_chain_state();
+
         // Clear pending proposals.
         self.clear_pending_proposals();
 
-        // Reset fork resolver when rolling back to genesis.
+        // Reset fork resolver and stale caches when rolling back to genesis.
         if rollback_height == 0 {
             *self.fork_resolver.lock() = ForkResolver::new(
                 self.fork_resolution_strategy,
                 self.fork_resolution_delay_cycles,
             );
+            // Clear announce cache — stale NodeAnnounce entries could cause
+            // false ChainTipRegression equivocation detection after reset.
+            self.announce_cache.lock().clear();
+            // Clear cross-chain discovery data — stale entries could trigger
+            // premature re-adoption after genesis-level resolution.
+            self.discovered_blockchains.lock().clear();
+            self.persist_discovered_blockchains();
         }
 
         // Reset sync state — the conveyor will restart on the next tick
@@ -1546,6 +1584,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.discovered_blockchains.lock().clear();
         self.persist_discovered_blockchains();
 
+        // 2d. Clear stale chain state from peer_info (stale-cache-#3).
+        self.clear_peer_chain_state();
+
         // 3. Tell network service.
         self.send_network(NetworkCommand::UpdateChainId(0));
         self.update_tip_height(0);
@@ -1562,6 +1603,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         );
 
         // 5. Reset sync state — conveyor restarts on next tick.
+        // NOTE(stale-cache-#12): reset_sync_idle() → sync_atomics_from_state()
+        // sets sync_target_height_shared, sync_progress_current, and
+        // sync_progress_total all to 0 when state is Idle. No separate reset needed.
         self.reset_sync_idle();
 
         // 6. Clear stale proposals.
@@ -1657,6 +1701,15 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         if we_are_early {
             // Case A: We're short-chain — decide whether to adopt theirs.
+            //
+            // SAFETY(stale-cache-#2): chain_vote_weight is read here at detection
+            // time to compute the adoption score. If adoption is triggered, the
+            // clue carries the decision and execute_adoption() resets the weight
+            // to 0 (line ~1538). The score comparison uses the *current* weight
+            // at detection time, which is correct: the clue captures the decision
+            // made with the state that existed when the announce arrived. The
+            // weight reset happens later during execution, before any new chain's
+            // blocks accumulate votes.
             let their_weight = announce.chain_vote_weight.unwrap_or(0);
             let our_weight = self.chain_vote_weight.load(Ordering::Relaxed);
             let their_score = their_height
@@ -1848,7 +1901,54 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// mempool eviction, network commands, broadcast events).
     pub fn try_sync_import(&self, block: &noble_core::Block) -> SyncImportResult {
         let (tip_height, _) = self.consensus.read().chain_tip();
-        let chain_id = self.get_chain_id();
+        let mut chain_id = self.get_chain_id();
+
+        // When chain_id is 0 (pre-genesis or post-reset), derive it from the
+        // block being imported.  Block 1's hash IS the genesis hash from which
+        // chain_id is derived.  For blocks after height 1, read the genesis
+        // hash from storage.  This ensures tx_id computation (which depends on
+        // chain_id) matches the proposer's computation — preventing false
+        // merkle root mismatches during sync after chain reset.
+        if chain_id == 0 {
+            if block.header.height == 1 {
+                match block.header.compute_block_hash() {
+                    Ok(bh) => {
+                        chain_id = noble_core::derive_chain_id(&bh);
+                        tracing::debug!(
+                            task = "sync_import",
+                            "derived chain_id {:#010X} from block 1 hash for validation",
+                            chain_id,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(task = "sync_import", "block 1 hash computation failed: {e}");
+                        return SyncImportResult::Rejected {
+                            reason: format!("block 1 hash computation failed: {e}"),
+                        };
+                    }
+                }
+            } else {
+                // For blocks > 1, try to get chain_id from storage (genesis hash).
+                let storage = self.storage.read();
+                if let Ok(genesis_hash) = storage.get_block_hash_by_height(0) {
+                    chain_id = noble_core::derive_chain_id(&genesis_hash);
+                } else if let Ok(block1_hash) = storage.get_block_hash_by_height(1) {
+                    chain_id = noble_core::derive_chain_id(&block1_hash);
+                }
+            }
+            // If chain_id is still 0 for a block above height 0, reject — we
+            // cannot validate tx_ids or merkle roots without a valid chain_id.
+            if chain_id == 0 && block.header.height > 0 {
+                tracing::error!(
+                    task = "sync_import",
+                    height = block.header.height,
+                    "could not derive chain_id — rejecting sync import",
+                );
+                return SyncImportResult::Rejected {
+                    reason: "could not derive chain_id from storage".to_string(),
+                };
+            }
+        }
 
         // Load parent header from storage for B2/B3/B5 validation.
         let parent_header = if tip_height > 0 {
@@ -2152,20 +2252,27 @@ pub(crate) fn compute_fork_groups(
 
     groups
         .into_iter()
-        .map(|(tip_hash, (height, peer_count))| noble_consensus::ForkInfo {
-            tip_hash: {
-                let mut bytes = [0u8; 32];
-                if let Ok(decoded) = hex::decode(&tip_hash) {
-                    if decoded.len() == 32 {
-                        bytes.copy_from_slice(&decoded);
-                    }
+        .filter_map(|(tip_hash, (height, peer_count))| {
+            let decoded = match hex::decode(&tip_hash) {
+                Ok(d) if d.len() == 32 => d,
+                Ok(_) => {
+                    tracing::warn!(task = "fork_groups", "invalid tip_hash length: {}", tip_hash);
+                    return None;
                 }
-                Hash256::from_bytes(bytes)
-            },
-            height,
-            peer_count,
-            is_local: tip_hash == local_tip_hex,
-            has_chain_owner: owner_group.as_ref() == Some(&tip_hash),
+                Err(e) => {
+                    tracing::warn!(task = "fork_groups", "invalid tip_hash hex: {e}");
+                    return None;
+                }
+            };
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&decoded);
+            Some(noble_consensus::ForkInfo {
+                tip_hash: Hash256::from_bytes(bytes),
+                height,
+                peer_count,
+                is_local: tip_hash == local_tip_hex,
+                has_chain_owner: owner_group.as_ref() == Some(&tip_hash),
+            })
         })
         .collect()
 }
@@ -2364,7 +2471,6 @@ mod tests {
         assert_eq!(hm.fork_common_ancestor, Some((5, [0xAA; 32])));
     }
 
-    #[test]
     #[test]
     fn chain_adoption_via_clue_resets_state() {
         let mut hm = make_healing_manager();

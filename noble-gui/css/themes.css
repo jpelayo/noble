@@ -19,9 +19,14 @@
   --accent-hover: #2563eb;
   --accent-subtle: rgba(59, 130, 246, 0.12);
   --success: #10b981;
+  --success-rgb: 16, 185, 129;
   --warning: #f59e0b;
   --error: #ef4444;
   --info: #06b6d4;
+  --accent-green: #34d399;
+  --accent-blue: #60a5fa;
+  --accent-yellow: #fbbf24;
+  --accent-orange: #fb923c;
 
   /* Borders & shadows */
   --border: #e2e8f0;

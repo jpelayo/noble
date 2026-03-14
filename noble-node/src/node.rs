@@ -88,6 +88,10 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Active chain ID (mutable via AtomicU32 for cross-chain adoption). Shared with ApiState.
     pub chain_id: Arc<std::sync::atomic::AtomicU32>,
     /// Chain label (hex chain ID or "pre-genesis").
+    /// NOTE(stale-cache-#11): Display-only field set at startup. May become
+    /// stale after cross-chain adoption changes the chain_id. The API layer
+    /// rebuilds the label dynamically from `chain_id` AtomicU32, so this
+    /// staleness has no functional impact beyond the sidebar label.
     pub network_name: String,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
@@ -104,6 +108,10 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Keypair for signing NodeAnnounce messages (cloned from validator key before CycleEngine consumes it).
     pub announce_keypair: Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
     /// Hex-encoded validator wire bytes (for name resolution without locking consensus).
+    /// NOTE(stale-cache-#10): Set once at startup from the announce keypair.
+    /// If key rotation is ever supported (Year 2), this field must be updated
+    /// to reflect the new key. Currently safe because keys are immutable for
+    /// the lifetime of the node process.
     pub validator_pubkey_hex: Option<String>,
     /// S49: Set to `true` when median clock drift exceeds `CLOCK_DRIFT_CRITICAL_SECS`.
     /// While true, block proposals are suppressed.
@@ -270,7 +278,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
                 keystore.lock();
-                let _ = keystore.unlock(&wallet_passphrase);
+                if keystore.unlock(&wallet_passphrase).is_err() {
+                    tracing::warn!(task = "wallet_key", "keystore unlock failed after passphrase migration");
+                }
             }
         }
 
@@ -495,7 +505,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     std::collections::HashMap::<u32, noble_api::types::DiscoveredBlockchainInfo>::from_cbor(&bytes)
                         .unwrap_or_default()
                 }
-                Err(_) => std::collections::HashMap::new(),
+                Err(e) => {
+                    tracing::debug!(task = "startup", "failed to read discovered_blockchains.cbor: {e}");
+                    std::collections::HashMap::new()
+                }
             }
         } else {
             std::collections::HashMap::new()
@@ -1950,27 +1963,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     self.healing.evaluate_and_execute();
 
                     // H-002: Persist cycle history if a cycle boundary just occurred.
-                    {
+                    // Extract data under consensus lock, then drop it before
+                    // acquiring storage (lock order: Storage(2) < Consensus(4)).
+                    let cycle_history_data = {
                         let mut engine = self.consensus.write();
-                        if let Some(history) = engine.take_cycle_history() {
+                        engine.take_cycle_history().map(|history| {
                             let (tip_height, _) = engine.chain_tip();
-                            // Don't persist during bootstrap (tip=0): cycle numbers
-                            // are based on a temporary epoch and become meaningless
-                            // once the real chain's block 1 resets the epoch.
-                            // This also prevents race conditions where a chain reset
-                            // clears the DB but a concurrent tick re-inserts a stale
-                            // entry before the engine is fully reset.
-                            if tip_height == 0 {
-                                tracing::debug!(
-                                    task = "consensus",
-                                    cycle = history.cycle_number,
-                                    "skipping cycle history persist during bootstrap (tip=0)"
-                                );
-                            } else if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
-                                let storage = self.storage.read();
-                                if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
-                                    tracing::warn!(task = "consensus", "Failed to persist cycle history: {e}");
-                                }
+                            (history, tip_height)
+                        })
+                    };
+                    if let Some((history, tip_height)) = cycle_history_data {
+                        // Don't persist during bootstrap (tip=0): cycle numbers
+                        // are based on a temporary epoch and become meaningless
+                        // once the real chain's block 1 resets the epoch.
+                        if tip_height == 0 {
+                            tracing::debug!(
+                                task = "consensus",
+                                cycle = history.cycle_number,
+                                "skipping cycle history persist during bootstrap (tip=0)"
+                            );
+                        } else if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&history) {
+                            let storage = self.storage.read();
+                            if let Err(e) = storage.store_cycle_history(history.cycle_number, &bytes) {
+                                tracing::warn!(task = "consensus", "Failed to persist cycle history: {e}");
                             }
                         }
                     }
@@ -2421,6 +2436,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "peer_id": hex_pid,
                     "reason": reason,
                 }));
+                // Notify healing manager — PeerBanned removes the peer from
+                // peer_manager BEFORE disconnect, so PeerDisconnected may never
+                // fire. Without this, the sync conveyor wastes time on timeouts
+                // if the banned peer was the active sync target.
+                if let Ok(peer_bytes) = hex::decode(&hex_pid) {
+                    self.healing.on_sync_peer_disconnected(&peer_bytes);
+                }
             }
             NetworkEvent::TransactionAnnounced { tx_id, peer_id } => {
                 let _ = cycle_phase_tx.send(serde_json::json!({
@@ -2780,8 +2802,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // Already have this block — ignore.
                 } else if self.healing.is_sync_block(block.header.height)
                     || (self.healing.is_syncing() && block.header.height == tip_height + 1)
+                    || (block.header.height > tip_height && block.header.height <= tip_height + 256)
                 {
-                    // Sync import: block is in the manifest or is the next expected block.
+                    // Sync import: block is in the manifest, is the next expected block,
+                    // or is in the catch-up range (≤256 blocks ahead). This catches
+                    // late-arriving sync responses after manifest reset, preventing
+                    // the consensus engine from banning the peer for stale blocks.
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -2898,14 +2924,39 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .filter_map(|tx| tx.compute_tx_id(self.get_chain_id()).ok())
                         .collect();
 
+                    // Save pre-commit tip so we can revert the consensus engine
+                    // if storage commit fails. The engine already advanced its
+                    // internal tip inside handle_cycle_boundary before emitting
+                    // this CommitBlock IO action.
+                    let prev_tip = {
+                        let engine = self.consensus.read();
+                        // The engine tip was ALREADY updated to this block's height.
+                        // The previous tip is one height below.
+                        let (tip_h, tip_hash) = engine.chain_tip();
+                        let prev_h = tip_h.saturating_sub(1);
+                        (prev_h, tip_hash) // tip_hash is the NEW hash; we need the old one
+                    };
+                    // We can't easily recover the old hash from the engine,
+                    // but we can read it from storage (which hasn't been updated yet).
+                    let prev_tip_hash = if prev_tip.0 > 0 {
+                        self.storage.read().get_block_hash_by_height(prev_tip.0)
+                            .unwrap_or(noble_crypto::Hash256::ZERO)
+                    } else {
+                        noble_crypto::Hash256::ZERO
+                    };
+
                     {
                         let storage = self.storage.read();
                         if let Err(e) = storage.commit_block(&block, &block_hash, &tx_ids) {
                             tracing::error!(
                                 task = "block_commit",
-                                "Failed to commit block {}: {e}",
+                                "Failed to commit block {}: {e} — reverting consensus tip",
                                 block.header.height
                             );
+                            // Revert the consensus engine tip to prevent
+                            // engine/storage desynchronization.
+                            let mut engine = self.consensus.write();
+                            engine.update_tip(prev_tip.0, prev_tip_hash);
                             continue;
                         }
                     }
@@ -4495,8 +4546,9 @@ mod tests {
         let height1 = node1.chain_height();
 
         // Init again with the same storage — should not duplicate genesis.
-        // Drop consensus first (it holds an Arc<RwLock<S>> via UTXO value lookup).
+        // Drop consensus and healing first (they hold Arc<RwLock<S>> references).
         drop(node1.consensus);
+        drop(node1.healing);
         let storage = Arc::try_unwrap(node1.storage)
             .unwrap_or_else(|_| panic!("storage has multiple owners"))
             .into_inner();
