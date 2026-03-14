@@ -748,6 +748,25 @@ async fn handle_swarm_event(
                             }
                         }
                     }
+
+                    // Immediate PeerExchange: share our known peer addresses with
+                    // the newcomer so it can discover additional peers without
+                    // waiting for the next 20-minute periodic exchange.
+                    {
+                        let mut addrs = peer_manager.connected_addrs();
+                        addrs.truncate(config.max_addrs_per_exchange);
+                        if !addrs.is_empty() {
+                            let msg = GossipMessage::PeerExchange { addrs };
+                            if let Ok(data) = codec::encode_gossip(&msg) {
+                                let topic = IdentTopic::new(topics::TOPIC_PEER_EXCHANGE);
+                                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic, data) {
+                                    tracing::debug!(task = "peer_discovery", "peer-connect exchange: {e}");
+                                } else {
+                                    tracing::debug!(task = "peer_discovery", "published peer exchange on new peer connect");
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(reason) => {
                     tracing::debug!(task = "peer_management", %peer_id, %reason, "peer rejected");
