@@ -1099,8 +1099,11 @@ export function init(root, ctx) {
       ]);
 
       const tipHeight = blockCount.height || 0;
-      if (tipHeight === 0 && !cycleStatus) {
-        csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
+      const creating = cycleStatus && cycleStatus.cycle_number === 0 && tipHeight >= 1;
+      if ((tipHeight === 0 && !cycleStatus) || creating) {
+        csTimeline.innerHTML = creating
+          ? '<div class="empty-state">Chain created — waiting for first consensus cycle</div>'
+          : '<div class="empty-state">No consensus cycles yet</div>';
         return;
       }
 
@@ -1617,21 +1620,41 @@ export function init(root, ctx) {
   let lastPhaseKey = null; // track phase changes for activity log
   function updateCycleDisplay(status) {
     // null cycle_number = bootstrapping (no genesis block yet).
-    const sane = status.cycle_number != null;
-    csCycleNum.textContent = sane ? formatNumber(status.cycle_number) : '—';
-    csPhaseName.textContent = status.phase || 'Bootstrapping';
-    csCycleInfo.textContent = sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain';
+    // cycle_number == 0 with blocks committed = post-genesis re-alignment ("Creating").
+    const blockHeight = window.state?.blockHeight || 0;
+    const creating = status.cycle_number === 0 && blockHeight >= 1;
+    const sane = status.cycle_number != null && !creating;
+    csCycleNum.textContent = creating ? '—' : (sane ? formatNumber(status.cycle_number) : '—');
+    csPhaseName.textContent = creating ? 'Creating' : (status.phase || 'Bootstrapping');
+    csCycleInfo.textContent = creating ? 'Forming consensus' : (sane ? `#${formatNumber(status.cycle_number)}` : 'Forming chain');
 
     // Track phase key for UI updates (phase_change activity comes from WS only).
     lastPhaseKey = `${status.cycle_number || 'boot'}:${status.phase_index}`;
 
+    if (creating) {
+      // Post-genesis re-alignment: block 1 committed, engine resetting epoch.
+      // Hide cycle details and pipeline — show "Creating" status only.
+      csPhaseName.textContent = 'Creating';
+      csPhaseRemaining.textContent = formatCountdown(status.cycle_remaining_secs || 0);
+      csCycleRemaining.textContent = formatCountdown(status.cycle_remaining_secs || 0);
+      csValidator.textContent = '—';
+      csPipeline.innerHTML = `<div style="text-align:center;padding:var(--gap);color:var(--text-muted);font-size:var(--font-size-sm)">Chain created — waiting for first consensus cycle</div>`;
+      clearInterval(countdownInterval);
+      let rem = status.cycle_remaining_secs || 0;
+      countdownInterval = setInterval(() => {
+        rem = Math.max(0, rem - 1);
+        csPhaseRemaining.textContent = formatCountdown(rem);
+        csCycleRemaining.textContent = formatCountdown(rem);
+        if (rem <= 0 && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
+      }, 1000);
+      return;
+    }
+
     if (!sane) {
-      // Bootstrap: the engine IS running full consensus (proposals, votes, phases).
-      // Derive phase from cycle_remaining_secs so the pipeline looks alive.
-      const cycleDur = PHASE_DURATION * 4; // 1200s
+      // Bootstrap: no genesis yet. Derive phase from timers.
+      const cycleDur = PHASE_DURATION * 4;
       let cycleRemaining = status.cycle_remaining_secs || 0;
       const elapsed = cycleDur - cycleRemaining;
-      // 4 phases of PHASE_DURATION each
       const activeIdx = Math.min(3, Math.floor(elapsed / PHASE_DURATION));
       const phaseElapsed = elapsed - (activeIdx * PHASE_DURATION);
       let phaseRemaining = Math.max(0, PHASE_DURATION - phaseElapsed);
@@ -1641,12 +1664,8 @@ export function init(root, ctx) {
       csCycleRemaining.textContent = formatCountdown(cycleRemaining);
       csValidator.textContent = '—';
 
-      // (Phase Progression replaced by Protocol Activity log panel)
-
-      // Pipeline header
       csPipeline.innerHTML = renderPipeline(activeIdx, phaseRemaining);
 
-      // Countdown ticker
       clearInterval(countdownInterval);
       countdownInterval = setInterval(() => {
         phaseRemaining = Math.max(0, phaseRemaining - 1);

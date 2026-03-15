@@ -488,7 +488,9 @@ async function bootstrap() {
     state.peerCount = networkInfo.peer_count;
     state.mempoolSize = mempoolInfo.count;
     // null cycle_number = bootstrapping (no blocks beyond genesis).
-    state.cyclePhase = cycleStatus.cycle_number == null ? 'Awaiting genesis' : cycleStatus.phase;
+    // cycle_number == 0 with blocks = post-genesis re-alignment ("Creating").
+    const creating = cycleStatus.cycle_number === 0 && blockCount.height >= 1;
+    state.cyclePhase = creating ? 'Creating' : (cycleStatus.cycle_number == null ? 'Awaiting genesis' : cycleStatus.phase);
 
     // Force-render status bar values — the reactive store skips same-value
     // assignments (0→0), so initial "-- " placeholders would persist.
