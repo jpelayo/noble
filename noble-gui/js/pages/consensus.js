@@ -618,21 +618,18 @@ export function init(root, ctx) {
         return `Healing: ${data.action.toUpperCase()} \u2014 ${data.reason} (${data.clue_count} clue${data.clue_count !== 1 ? 's' : ''})`;
       case 'fork_disagreement':
         return `Fork disagreement: peer block at height ${data.block_height} rejected (${data.reason})`;
-      case 'fork_detected': {
-        const heights = (data.remote_heights || []).join(', ');
-        const peers = (data.remote_peer_counts || []).reduce((a, b) => a + b, 0);
-        return `Fork detected: ${data.fork_count} chain tips (${peers} peer(s) at height ${heights}, local at ${data.local_height})`;
-      }
+      case 'fork_detected':
       case 'fork_aligned':
-        return `Fork aligned \u2014 all peers on same chain at height ${data.height}`;
       case 'fork_divergence':
-        return `Fork divergence: chains split at height ${data.ancestor_height} (${data.divergence_depth} block(s) deep)`;
-      case 'fork_auto_resolved':
-        return `Fork auto-resolved \u2192 rollback to height ${data.rollback_height ?? 0}, target ${data.target_height} (${data.reason})`;
+        // Transient fork detection — suppress from activity log.
+        // Only healing manager decisions (alignment_pending, auto_resolved) are actionable.
+        return null;
       case 'fork_alignment_pending':
         return `Fork alignment: ${data.cycles_remaining} cycle(s) to resolution`;
       case 'fork_alignment_clear':
         return `Fork alignment cleared \u2014 no dominant fork`;
+      case 'fork_auto_resolved':
+        return `Fork auto-resolved \u2192 rollback to height ${data.rollback_height ?? 0}, target ${data.target_height} (${data.reason})`;
       case 'chain_adoption_started':
         return `Chain adoption \u2192 ${data.target_chain_id} (${data.reason})`;
       case 'checkpoints_activated':

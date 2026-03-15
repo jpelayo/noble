@@ -348,8 +348,11 @@ function populateChainIdentity(nodeInfo) {
 }
 
 // ── Fork / alignment status indicator ──
-// Continuous self-assessment: "Is THIS node aligned with its peers?"
-// Driven by: newBlocks, peerUpdates (including chain_tip_updated), bootstrap.
+// Shows only states the operator can act on. Reflects the healing manager's
+// assessment, not raw peer_info snapshots. Transient propagation delays
+// (1-3 blocks, seconds) are invisible — only persistent divergence and
+// active sync appear.
+
 async function updateForkStatus() {
   const bar = document.getElementById('fork-status-bar');
   if (!bar) return;
@@ -364,104 +367,33 @@ async function updateForkStatus() {
     const highestKnown = forkData.highest_known || myHeight;
     const behind = highestKnown - myHeight;
 
-    // Check for divergence: any non-local fork that definitively disagrees
-    // with our local chain (agrees_with_local === false).
-    const nonLocalForks = forkData.forks.filter(f => !f.is_local);
-    let diverged = false;
-    for (const fork of nonLocalForks) {
-      if (fork.agrees_with_local === false) {
-        diverged = true;
-        break;
-      }
+    // Hide during genesis formation — nothing meaningful to show.
+    if (myHeight === 0) {
+      bar.style.display = 'none';
+      return;
     }
 
     let severity, statusText, detailText;
 
     if (peerCount === 0) {
-      // No peers reporting chain data — cannot assess alignment.
+      // Actionable: operator needs to connect peers.
       severity = 'high';
       statusText = 'Isolated';
       detailText = `height ${myHeight} \u00b7 no peers`;
     } else if (behind > 10) {
-      // Far behind — actively syncing or severely lagging.
+      // Actionable: operator should know sync is in progress.
       severity = 'syncing';
       const pct = highestKnown > 0 ? (myHeight / highestKnown * 100).toFixed(1) + '%' : '';
       statusText = `<span class="fork-sync-spinner"></span>Syncing`;
       detailText = pct
         ? `block ${myHeight} / ${highestKnown} (${pct})`
         : `${behind} blocks behind`;
-    } else if (diverged) {
-      // On a different chain than one or more peers (verified by block hash comparison).
-      severity = 'high';
-      statusText = 'Diverged';
-      detailText = behind > 0
-        ? `wrong fork, ${behind} block${behind !== 1 ? 's' : ''} behind`
-        : 'wrong fork';
-    } else if (behind === 0 && myHeight === 0) {
-      // All peers also at height 0 — no chain formed yet.
-      severity = 'syncing';
-      statusText = 'Bootstrap';
-      detailText = `forming chain \u00b7 ${peerCount} peer${peerCount !== 1 ? 's' : ''}`;
-    } else if (behind === 0) {
-      // We are at the highest known height.
-      //
-      // "Aligned" = majority of peers share the same chain, same height,
-      // same chain tip.  Peers behind us are simply catching up — that is
-      // their normal operation, not a problem for THIS node.
-      //
-      // Only show divergence when peer(s) at OUR SAME height have a
-      // different tip hash — a genuine fork that may need resolution.
-      const sameHeightForks = nonLocalForks.filter(f => f.height === myHeight);
-      if (sameHeightForks.length > 0) {
-        // Same height, different tip hash — genuine fork.
-        // Check majority: if more peers agree with us, we are aligned.
-        const localFork = forkData.forks.find(f => f.is_local);
-        const localPeers = localFork ? localFork.peers : 0;
-        const divergentPeers = sameHeightForks.reduce((s, f) => s + f.peers, 0);
-        if (localPeers >= divergentPeers) {
-          // Majority agrees with us — aligned despite minor fork.
-          severity = 'zero';
-          statusText = 'Aligned';
-          detailText = `height ${myHeight}`;
-        } else {
-          // We are in the minority position.
-          severity = 'medium';
-          statusText = 'Diverged';
-          detailText = `height ${myHeight} \u00b7 different tip hash`;
-        }
-      } else {
-        // No same-height forks. Either all peers share our tip, or they're behind.
-        // Check if any peer matches our exact height in the fork groups.
-        // The local fork group includes peers sharing our tip; any non-local
-        // fork at a lower height means peers are behind.
-        const localFork = forkData.forks.find(f => f.is_local);
-        const peersAtOurHeight = localFork ? localFork.peers : 0;
-        if (peersAtOurHeight > 0) {
-          // At least one peer shares our exact tip — genuinely aligned.
-          severity = 'zero';
-          statusText = 'Aligned';
-          detailText = `height ${myHeight}`;
-        } else if (peerCount > 0) {
-          // We're ahead of all peers — they're catching up.
-          severity = 'low';
-          statusText = 'Ahead';
-          detailText = `height ${myHeight} \u00b7 peers syncing`;
-        } else {
-          // Solo — no peers at all.
-          severity = 'zero';
-          statusText = 'Aligned';
-          detailText = `height ${myHeight}`;
-        }
-      }
-    } else if (behind <= 3) {
-      severity = 'low';
-      statusText = 'Behind';
-      detailText = `${behind} block${behind !== 1 ? 's' : ''} behind`;
     } else {
-      // 4-10 blocks behind.
-      severity = 'medium';
-      statusText = 'Drifting';
-      detailText = `${behind} blocks behind`;
+      // Normal operation: aligned, slightly behind (propagation), or ahead.
+      // None of these require operator action — show green "Aligned".
+      severity = 'zero';
+      statusText = 'Aligned';
+      detailText = `height ${myHeight}`;
     }
 
     bar.dataset.severity = severity;
@@ -470,6 +402,34 @@ async function updateForkStatus() {
     bar.style.display = '';
   } catch (e) {
     bar.style.display = 'none';
+  }
+}
+
+// Listen for healing manager events via WebSocket. Only show "Diverged"
+// when the healing manager has confirmed a persistent fork (dwell timer
+// started). This replaces the raw fork detection with the healing
+// manager's evaluated assessment.
+function onHealingEvent(data) {
+  const bar = document.getElementById('fork-status-bar');
+  if (!bar) return;
+  const label = document.getElementById('fork-status-label');
+  const detail = document.getElementById('fork-status-detail');
+
+  if (data.event === 'fork_alignment_pending') {
+    // Healing manager confirmed: persistent fork, dwell timer running.
+    bar.dataset.severity = 'medium';
+    label.innerHTML = 'Diverged';
+    detail.textContent = `${data.cycles_remaining} cycle(s) to resolution`;
+    bar.style.display = '';
+  } else if (data.event === 'fork_auto_resolved') {
+    // Fork resolved — back to aligned.
+    bar.dataset.severity = 'zero';
+    label.innerHTML = 'Aligned';
+    detail.textContent = `resolved \u2192 height ${data.target_height || '?'}`;
+    bar.style.display = '';
+  } else if (data.event === 'fork_alignment_clear') {
+    // Dwell timer cleared — no longer diverged.
+    updateForkStatus();
   }
 }
 
@@ -517,11 +477,9 @@ async function bootstrap() {
 ws.subscribe('newBlocks', (block) => {
   const wasBootstrap = state.blockHeight === 0;
   state.blockHeight = block.height;
-  // First real block committed — show chain identity bar (was hidden during bootstrap).
   if (wasBootstrap && block.height > 0) {
     rpc.call('noble_getNodeInfo').then(populateChainIdentity).catch(() => {});
   }
-  // Refresh fork status on every new block.
   updateForkStatus();
 });
 
@@ -535,6 +493,8 @@ ws.subscribe('newTransactions', () => {
 
 ws.subscribe('cyclePhaseChange', (data) => {
   if (data.phase) state.cyclePhase = data.phase;
+  // Healing manager events arrive on this channel.
+  if (data && data.event) onHealingEvent(data);
 });
 
 // ── Global connectivity log (survives page navigation) ──
@@ -558,6 +518,8 @@ ws.subscribe('peerUpdates', (data) => {
   }
   // Peer topology changed — fork picture may differ now.
   updateForkStatus();
+  // Check for healing manager events (fork_alignment_pending, etc.)
+  if (data && data.event) onHealingEvent(data);
 });
 
 // ── Network online/offline resilience ──
