@@ -863,7 +863,20 @@ impl CycleEngine {
         let unique_voters = self.vote_mgr.unique_voter_count();
         let validator_set_size = self.snapshot_len();
         let voter_count = unique_voters.max(validator_set_size).max(1);
-        let result = self.vote_mgr.compute_majority(voter_count, &self.config);
+        // Post-genesis: allow solo operation. The min_peers_for_consensus
+        // check in compute_majority is redundant after block 1 — the
+        // Dual-Witness Rule (R1-only) already enforces multi-party genesis.
+        // After genesis, a solo validator must be able to keep the chain
+        // growing when peers disconnect. A stuck chain is worse than a
+        // potential fork (resolved by healing on reconnect).
+        let effective_config = if self.tip_height >= 1 {
+            let mut cfg = self.config.clone();
+            cfg.min_peers_for_consensus = 1;
+            cfg
+        } else {
+            self.config.clone()
+        };
+        let result = self.vote_mgr.compute_majority(voter_count, &effective_config);
 
         match result {
             MigrationResult::Adopt {
