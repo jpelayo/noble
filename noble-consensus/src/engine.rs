@@ -509,7 +509,41 @@ impl CycleEngine {
             info!("block 1 tip update — cycle epoch set to {}", timestamp);
             self.cycle_mgr.set_genesis_timestamp(timestamp);
             self.vote_mgr.set_bootstrap_tolerance(false);
-            self.first_tick = true;
+
+            // Clear stale vote commitments from the pre-genesis epoch.
+            // Without this, votes from the old epoch's cycle numbers
+            // persist in vote_commitments. When the new epoch produces
+            // the same cycle number, legitimate new votes are flagged
+            // as equivocation against the stale commitments.
+            self.vote_mgr.clear();
+
+            // Re-initialize cycle tracking from the new epoch.
+            // Do NOT use first_tick=true — that defers initialization
+            // to the next tick, during which stale cycle/phase values
+            // can cause spurious phase transitions and vote casting.
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let new_cycle = self.cycle_mgr.current_cycle(now_ts);
+            let new_phase = self.cycle_mgr.current_phase(now_ts);
+            self.tracked_cycle = new_cycle;
+            self.tracked_phase = new_phase;
+            self.vote_mgr.set_current_cycle(new_cycle);
+
+            // Suppress voting for the remainder of this cycle.
+            // Peers may still hold votes from the old epoch's cycle
+            // with the same number — re-voting would trigger equivocation.
+            self.r1_vote_cast = true;
+            self.r2_vote_cast = true;
+            self.r1_retry_logged = true;
+            self.r2_retry_logged = true;
+
+            info!(
+                "epoch reset (tip update): cycle {} phase {:?} (votes suppressed)",
+                new_cycle, new_phase
+            );
+
             // Cache the chain owner (block 1 validator) for fork resolution.
             self.chain_owner_key = Some(
                 self.tip_header.as_ref().unwrap().validator_id.to_wire_bytes()
@@ -536,8 +570,8 @@ impl CycleEngine {
             debug!("cycle engine: bootstrap epoch set to wall-clock-aligned {aligned} (cycle 0)");
         }
 
-        let new_cycle = self.cycle_mgr.current_cycle(now);
-        let new_phase = self.cycle_mgr.current_phase(now);
+        let mut new_cycle = self.cycle_mgr.current_cycle(now);
+        let mut new_phase = self.cycle_mgr.current_phase(now);
 
         // First tick (or late genesis — sentinel still set): initialize tracked
         // state without firing a spurious boundary.
@@ -569,6 +603,18 @@ impl CycleEngine {
                 self.tracked_cycle = new_cycle;
                 self.vote_mgr.set_current_cycle(new_cycle);
                 outputs.extend(self.handle_cycle_boundary(completed));
+
+                // If block 1 committed, handle_cycle_boundary reset the epoch.
+                // The local `new_cycle` and `new_phase` are stale (computed from
+                // the old epoch). Re-read from the updated cycle manager to
+                // prevent stale phase transitions, stale vote casting, and
+                // stale proposal deadlines in the remainder of this tick.
+                if self.tip_height == 1 {
+                    new_cycle = self.cycle_mgr.current_cycle(now);
+                    new_phase = self.cycle_mgr.current_phase(now);
+                    // tracked_cycle/tracked_phase were already set by the
+                    // epoch reset code inside handle_cycle_boundary.
+                }
 
                 // Tick checkpoint activation after cycle boundary.
                 let activated = self.checkpoint_mgr.tick_activation(new_cycle);
@@ -865,7 +911,40 @@ impl CycleEngine {
                                 self.cycle_mgr
                                     .set_genesis_timestamp(block.header.timestamp);
                                 self.vote_mgr.set_bootstrap_tolerance(false);
-                                self.first_tick = true;
+
+                                // Re-initialize cycle tracking to the new epoch.
+                                // CRITICAL: do NOT use first_tick=true here. That
+                                // would set tracked_cycle on the next tick, which
+                                // could produce the SAME cycle number as the one
+                                // that just committed block 1. The node would then
+                                // re-propose and re-vote in that cycle — peers still
+                                // have the old vote, detect equivocation, and ban.
+                                //
+                                // Instead: compute the new cycle directly and mark
+                                // votes as already cast so the node stays silent
+                                // until the next cycle boundary.
+                                let now_ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let new_cycle = self.cycle_mgr.current_cycle(now_ts);
+                                let new_phase = self.cycle_mgr.current_phase(now_ts);
+                                self.tracked_cycle = new_cycle;
+                                self.tracked_phase = new_phase;
+                                self.vote_mgr.set_current_cycle(new_cycle);
+                                // Suppress voting in the remainder of this cycle —
+                                // peers may still have votes from the old epoch's
+                                // cycle with the same number.
+                                self.r1_vote_cast = true;
+                                self.r2_vote_cast = true;
+                                self.r1_retry_logged = true;
+                                self.r2_retry_logged = true;
+
+                                info!(
+                                    "epoch reset: entering cycle {} phase {:?} (votes suppressed until next boundary)",
+                                    new_cycle, new_phase
+                                );
+
                                 // Cache chain owner for fork resolution.
                                 self.chain_owner_key = Some(
                                     block.header.validator_id.to_wire_bytes()
@@ -1150,14 +1229,25 @@ impl CycleEngine {
             }
         }
 
-        // Clear state for next cycle
+        // Clear state for next cycle.
+        //
+        // After block 1 commit, the epoch was reset and vote flags were
+        // set to `true` to suppress re-voting (preventing equivocation
+        // with peers that still hold pre-reset votes). The `r1_vote_cast`
+        // flag is already `true` from the epoch reset code above.
+        // We must NOT undo that suppression here.
+        let epoch_just_reset = self.r1_vote_cast && self.r2_vote_cast && self.tip_height == 1;
+
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
-        self.r1_vote_cast = false;
-        self.r1_retry_logged = false;
-        self.r2_vote_cast = false;
-        self.r2_retry_logged = false;
+
+        if !epoch_just_reset {
+            self.r1_vote_cast = false;
+            self.r1_retry_logged = false;
+            self.r2_vote_cast = false;
+            self.r2_retry_logged = false;
+        }
 
         outputs
     }
