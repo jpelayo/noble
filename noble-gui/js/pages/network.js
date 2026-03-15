@@ -368,6 +368,14 @@ export function init(root, ctx) {
     } catch { /* ignore */ }
   }));
 
+  // WS: new blocks — peer tip heights change after block commits.
+  unsubs.push(ws.subscribe('newBlocks', async () => {
+    try {
+      const peers = await rpc.call('noble_getPeerInfo');
+      renderPeerTable(peers);
+    } catch { /* ignore */ }
+  }));
+
   // ── Copy-to-clipboard delegation ──
   root.addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-copy');
