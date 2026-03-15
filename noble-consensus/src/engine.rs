@@ -74,6 +74,11 @@ pub struct CycleEngine {
     /// AUD-M7: Monotonic clock anchor (Instant, unix_timestamp) captured at creation.
     /// Used by phase_timing() to avoid NTP jumps affecting phase reporting.
     clock_anchor: (std::time::Instant, u64),
+    /// Cycle number where the epoch was reset (block 1 commit). Used as a
+    /// one-shot guard to prevent the generic cleanup at the end of
+    /// handle_cycle_boundary from undoing vote suppression. Set once,
+    /// consumed once.
+    epoch_reset_cycle: Option<u64>,
     /// H-002: Last completed cycle's history entry, ready for persistence.
     last_cycle_history: Option<CycleHistoryEntry>,
     /// P1.3: Manual vote target for the Manual voting strategy (set via castVote RPC).
@@ -158,6 +163,7 @@ impl CycleEngine {
             our_validator_key: validator_key,
             total_peers: 0,
             clock_anchor: (std::time::Instant::now(), now_unix),
+            epoch_reset_cycle: None,
             last_cycle_history: None,
             manual_vote: None,
             r1_vote_cast: false,
@@ -404,6 +410,7 @@ impl CycleEngine {
         self.r1_retry_logged = false;
         self.r2_vote_cast = false;
         self.r2_retry_logged = false;
+        self.epoch_reset_cycle = None;
         // When hopping to a new chain (height 0), clear the cycle epoch.
         // Next tick sets a wall-clock-aligned epoch; the new chain's block 1
         // resets it to the real timestamp when committed.
@@ -502,9 +509,9 @@ impl CycleEngine {
         self.tip_header = Some(header);
 
         // Block 1 sets (or resets) the cycle epoch regardless of the import path
-        // (consensus commit, sync import).  Safe to call multiple times — block 1
-        // import only happens once (height 0→1).  Re-setting first_tick ensures
-        // the engine re-initializes cycle tracking with the real epoch.
+        // (consensus commit, sync import). Clears stale vote commitments,
+        // re-initializes cycle tracking, and suppresses voting to prevent
+        // equivocation with peers that still hold pre-reset votes.
         if height == 1 {
             info!("block 1 tip update — cycle epoch set to {}", timestamp);
             self.cycle_mgr.set_genesis_timestamp(timestamp);
@@ -538,6 +545,8 @@ impl CycleEngine {
             self.r2_vote_cast = true;
             self.r1_retry_logged = true;
             self.r2_retry_logged = true;
+            // One-shot guard for the next handle_cycle_boundary cleanup.
+            self.epoch_reset_cycle = Some(new_cycle);
 
             info!(
                 "epoch reset (tip update): cycle {} phase {:?} (votes suppressed)",
@@ -939,6 +948,10 @@ impl CycleEngine {
                                 self.r2_vote_cast = true;
                                 self.r1_retry_logged = true;
                                 self.r2_retry_logged = true;
+                                // One-shot flag: prevents the generic cleanup at the
+                                // end of this handle_cycle_boundary from undoing the
+                                // suppression. Consumed after one use.
+                                self.epoch_reset_cycle = Some(completed_cycle);
 
                                 info!(
                                     "epoch reset: entering cycle {} phase {:?} (votes suppressed until next boundary)",
@@ -1230,19 +1243,20 @@ impl CycleEngine {
         }
 
         // Clear state for next cycle.
-        //
-        // After block 1 commit, the epoch was reset and vote flags were
-        // set to `true` to suppress re-voting (preventing equivocation
-        // with peers that still hold pre-reset votes). The `r1_vote_cast`
-        // flag is already `true` from the epoch reset code above.
-        // We must NOT undo that suppression here.
-        let epoch_just_reset = self.r1_vote_cast && self.r2_vote_cast && self.tip_height == 1;
-
         self.vote_mgr.clear();
         self.vote_mgr.set_current_cycle(self.tracked_cycle);
         self.candidate_tracker.clear();
 
-        if !epoch_just_reset {
+        // After block 1 commit, the epoch was reset and vote flags were
+        // set to `true` to suppress re-voting. The one-shot
+        // `epoch_reset_cycle` flag prevents THIS cleanup from undoing
+        // the suppression. It fires exactly once (the boundary that
+        // committed block 1), then is consumed. Subsequent boundaries
+        // at tip_height==1 reset vote flags normally, allowing the node
+        // to vote for block 2.
+        if self.epoch_reset_cycle == Some(completed_cycle) {
+            self.epoch_reset_cycle = None; // consumed — one-shot
+        } else {
             self.r1_vote_cast = false;
             self.r1_retry_logged = false;
             self.r2_vote_cast = false;
