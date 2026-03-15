@@ -3324,8 +3324,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     //
                     // Bootstrap suppression (tip == 0 only):
                     //   0 peers              → suppress (solo, wait for peers)
-                    //   no status received   → suppress (wait for PeerChainTipUpdated)
-                    //   all peers at height 0→ allow (form new chain together)
+                    //   all peers at height 0 (or status unknown) → allow (form new chain)
                     //
                     // Normal operation (tip > 0, no peer ahead):
                     //   allow
@@ -3380,18 +3379,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             }));
                             continue;
                         }
-                        if known_heights.is_empty() {
-                            tracing::debug!(
-                                task = "bootstrap",
-                                "Block proposal suppressed — waiting for peer status"
-                            );
-                            let _ = cycle_phase_tx.send(serde_json::json!({
-                                "event": "warning",
-                                "message": "Block proposal suppressed — waiting for peer chain status",
-                            }));
-                            continue;
-                        }
-                        // All known peers at height 0 → form new chain together
+                        // If peers are connected but haven't reported chain
+                        // status yet, allow proposals anyway at genesis. Both
+                        // nodes are at height 0 — there's no chain to sync from.
+                        // Waiting for status delays genesis formation unnecessarily.
+                        // All known peers at height 0 (or unknown) → form new chain together
                     }
 
                     // Allow: caught up (or ahead), or bootstrap with all peers at 0
