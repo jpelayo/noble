@@ -788,14 +788,16 @@ export function init(root, ctx) {
         scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
       // Refresh tallies on vote events and block arrivals (live updates).
-      // block_received triggers re-resolve of validator names that were
-      // unknown when the vote arrived before the block.
       if (data.event === 'vote_received' || data.event === 'vote_broadcast' || data.event === 'block_received') {
         scheduleReload(loadVoteTallies);
       }
-      // Refresh cycle display on phase changes
+      // Block proposed — update timeline to show the new candidate.
+      if (data.event === 'block_proposed') {
+        scheduleReload(loadTimeline, loadVoteTallies);
+      }
+      // Phase change — refresh cycle display AND timeline (phase highlights).
       if (data.event === 'phase_change') {
-        scheduleReload(loadCycle, loadVoteTallies);
+        scheduleReload(loadCycle, loadTimeline, loadVoteTallies);
       }
       // Sync banner: show on sync_started, update on sync_progress, hide on sync_complete
       if (data.event === 'sync_started') {
@@ -1642,7 +1644,11 @@ export function init(root, ctx) {
         rem = Math.max(0, rem - 1);
         csPhaseRemaining.textContent = formatCountdown(rem);
         csCycleRemaining.textContent = formatCountdown(rem);
-        if (rem <= 0 && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
+        if (rem <= 0 && countdownInterval) {
+          clearInterval(countdownInterval); countdownInterval = null;
+          loadCycle(); loadTimeline(); loadVoteTallies();
+          setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
+        }
       }, 1000);
       return;
     }
@@ -1671,7 +1677,11 @@ export function init(root, ctx) {
         csCycleRemaining.textContent = formatCountdown(cycleRemaining);
         const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
         if (activeTimer) activeTimer.textContent = formatCountdown(phaseRemaining);
-        if ((phaseRemaining <= 0 || cycleRemaining <= 0) && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
+        if ((phaseRemaining <= 0 || cycleRemaining <= 0) && countdownInterval) {
+          clearInterval(countdownInterval); countdownInterval = null;
+          loadCycle(); loadTimeline(); loadVoteTallies();
+          setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
+        }
       }, 1000);
       return;
     }
@@ -1698,7 +1708,13 @@ export function init(root, ctx) {
       // Update active timer in pipeline
       const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
       if (activeTimer) activeTimer.textContent = formatCountdown(remaining);
-      if (remaining <= 0 && countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; loadCycle(); loadTimeline(); loadVoteTallies(); }
+      if (remaining <= 0 && countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+        loadCycle(); loadTimeline(); loadVoteTallies();
+        // Retry after 3s in case the boundary hasn't processed yet.
+        setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
+      }
     }, 1000);
     csPhaseRemaining.textContent = formatCountdown(remaining);
     csCycleRemaining.textContent = formatCountdown(cycleRemaining);
