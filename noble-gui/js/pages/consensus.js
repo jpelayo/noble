@@ -806,8 +806,18 @@ export function init(root, ctx) {
         updateSyncBanner(true, data.target, data.height, data.progress);
       } else if (data.event === 'sync_complete') {
         updateSyncBanner(false);
+        // After sync finishes, all panels need a full refresh — the timeline,
+        // cycle display, vote tallies, and validator list are all stale.
+        scheduleReload(loadCycle, loadTimeline, loadVoteTallies, loadValidators);
       }
     }));
+
+    // Block commits via sync import may not emit block_committed on cyclePhaseChange.
+    // Subscribe to newBlocks as a reliable fallback: any new block → refresh timeline.
+    unsubs.push(ws.subscribe('newBlocks', () => {
+      scheduleReload(loadCycle, loadTimeline, loadVoteTallies);
+    }));
+
     unsubs.push(ws.subscribe('peerUpdates', (data) => {
       // Normalize peerUpdates event names to match activity log conventions.
       const normalized = { ...data };
