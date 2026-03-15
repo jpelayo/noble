@@ -1,13 +1,13 @@
 //
-//  NobleDocUITestsLaunchTests.swift
-//  NobleDocUITests
+//  NobleMacUITestsLaunchTests.swift
+//  NobleMacUITests
 //
 //  Created by pelayo on 25/2/26.
 //
 
 import XCTest
 
-final class NobleDocUITestsLaunchTests: XCTestCase {
+final class NobleMacUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true

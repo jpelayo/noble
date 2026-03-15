@@ -14,7 +14,7 @@ struct WelcomeStepView: View {
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
 
-            Text("Welcome to NobleDoc")
+            Text("Welcome to NobleMac")
                 .font(.largeTitle)
                 .bold()
 

@@ -6,7 +6,7 @@ import { emptyState } from '../components/empty-state.js';
 import { formatAmount } from '../components/amount-text.js';
 import { esc } from '../utils.js';
 
-const COOLDOWN_KEY = 'nobledoc.faucet.lastRequest';
+const COOLDOWN_KEY = 'noble.faucet.lastRequest';
 const COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export function init(root, ctx) {

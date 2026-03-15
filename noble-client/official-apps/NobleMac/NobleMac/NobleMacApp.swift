@@ -4,7 +4,7 @@
 import SwiftUI
 
 @main
-struct NobleDocApp: App {
+struct NobleMacApp: App {
     @State private var appState = AppState()
 
     var body: some Scene {

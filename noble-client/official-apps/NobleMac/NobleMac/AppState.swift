@@ -121,7 +121,7 @@ final class AppState {
     var apiService: (any NobleAPIService)?
 
     /// Keychain service for secure key storage.
-    let keychainService: any KeychainService = LiveKeychainService()
+    let keychainService: any KeychainService = LiveKeychainService(service: "com.infinitecontext.noblemac")
 
     /// Mnemonic provider for wallet creation/import.
     let mnemonicProvider: any MnemonicProviding = LiveMnemonicProvider()
@@ -134,19 +134,19 @@ final class AppState {
 
     // MARK: - Keychain Labels
 
-    static let privateKeyLabel = "nobledoc.wallet.privatekey"
-    static let mnemonicLabel = "nobledoc.wallet.mnemonic"
-    static let nodeURLLabel = "nobledoc.settings.nodeurl"
+    static let privateKeyLabel = "noblemac.wallet.privatekey"
+    static let mnemonicLabel = "noblemac.wallet.mnemonic"
+    static let nodeURLLabel = "noblemac.settings.nodeurl"
 
     // MARK: - UserDefaults Keys
 
-    private static let contactsKey = "nobledoc.contacts"
-    private static let appLockEnabledKey = "nobledoc.settings.appLockEnabled"
-    private static let lockTimeoutKey = "nobledoc.settings.lockTimeout"
-    private static let reAuthForSendsKey = "nobledoc.settings.reAuthForSends"
-    private static let autoConnectKey = "nobledoc.settings.autoConnect"
-    private static let onboardingCompleteKey = "nobledoc.onboardingComplete"
-    private static let draftsKey = "nobledoc.documentDrafts"
+    private static let contactsKey = "noblemac.contacts"
+    private static let appLockEnabledKey = "noblemac.settings.appLockEnabled"
+    private static let lockTimeoutKey = "noblemac.settings.lockTimeout"
+    private static let reAuthForSendsKey = "noblemac.settings.reAuthForSends"
+    private static let autoConnectKey = "noblemac.settings.autoConnect"
+    private static let onboardingCompleteKey = "noblemac.onboardingComplete"
+    private static let draftsKey = "noblemac.documentDrafts"
 
     // MARK: - Lifecycle
 

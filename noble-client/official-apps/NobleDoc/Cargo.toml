@@ -1,0 +1,32 @@
+[workspace]
+
+[package]
+name = "noble-doc"
+version = "0.1.0"
+edition = "2021"
+description = "Noble Document Client for Linux (WRY + WebKitGTK)"
+authors = ["InfiniteContext <blockchain@infinitecontext.com>"]
+license = "Apache-2.0"
+
+[dependencies]
+wry = "0.48"
+tao = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+sha2 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+include_dir = "0.7"
+dirs = "6"
+keyring = "3"
+bip39 = { version = "2", features = ["rand"] }
+bip32 = "0.5"
+bech32 = "0.11"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rfd = "0.15"
+arboard = "3"
+hmac = "0.12"
+sha2_digest = { package = "digest", version = "0.10" }
+pbkdf2 = { version = "0.12", features = ["hmac"] }

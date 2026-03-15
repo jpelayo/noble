@@ -17,7 +17,7 @@ public struct LiveKeychainService: KeychainService, Sendable {
     /// Access group for sharing across app targets (nil = app-only).
     private let accessGroup: String?
 
-    public init(service: String = "com.infinitecontext.nobledoc", accessGroup: String? = nil) {
+    public init(service: String, accessGroup: String? = nil) {
         self.service = service
         self.accessGroup = accessGroup
     }

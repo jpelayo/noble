@@ -14,7 +14,7 @@ struct MainView: View {
         } detail: {
             detailContent
         }
-        .navigationTitle(appState.selectedSection?.label ?? "NobleDoc")
+        .navigationTitle(appState.selectedSection?.label ?? "NobleMac")
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 HStack(spacing: 8) {
