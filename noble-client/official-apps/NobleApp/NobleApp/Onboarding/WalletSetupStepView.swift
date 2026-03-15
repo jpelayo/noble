@@ -1,6 +1,7 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
+import NobleClientCore
 import NobleClientCrypto
 import SwiftUI
 
@@ -8,6 +9,7 @@ import SwiftUI
 struct WalletSetupStepView: View {
     @Bindable var appState: AppState
     @State private var importText = ""
+    @State private var confirmedWords: [String] = []
     @State private var errorMessage: String?
     @State private var isProcessing = false
     @State private var showMnemonic = false
@@ -112,31 +114,41 @@ struct WalletSetupStepView: View {
     // MARK: - Import Existing Wallet
 
     private var importExistingWallet: some View {
-        VStack(spacing: 16) {
+        let totalWords = confirmedWords.count
+        let remaining = max(0, 24 - totalWords)
+
+        return VStack(spacing: 16) {
             Text("Enter Recovery Phrase")
                 .font(.headline)
 
-            Text("Enter your 24-word recovery phrase, separated by spaces.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+            Text("\(totalWords) of 24 words")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(totalWords == 24 ? Color.accentColor : .secondary)
 
-            TextEditor(text: $importText)
-                .font(.body.monospaced())
-                .frame(height: 100)
-                .clipShape(.rect(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.quaternary)
-                )
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
+            // Tokenized input — inline capsules like Mail.app "To:" field
+            TokenizedWordField(
+                confirmedWords: $confirmedWords,
+                errorMessage: $errorMessage,
+                placeholder: "Type word 1..."
+            )
+            .frame(height: 140)
+            .clipShape(.rect(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.quaternary)
+            )
+
+            if remaining > 0 && totalWords > 0 {
+                Text("\(remaining) word\(remaining == 1 ? "" : "s") remaining")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
 
             HStack {
                 Button("Back") {
                     appState.walletSetupMode = nil
                     importText = ""
+                    confirmedWords = []
                     errorMessage = nil
                 }
                 .buttonStyle(.bordered)
@@ -147,7 +159,7 @@ struct WalletSetupStepView: View {
                     importWallet()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProcessing)
+                .disabled(confirmedWords.count != 24 || isProcessing)
             }
         }
     }
@@ -183,7 +195,7 @@ struct WalletSetupStepView: View {
             appState.walletSetupMode = .createNew
             showMnemonic = true
         } catch {
-            errorMessage = "Failed to generate mnemonic: \(error.localizedDescription)"
+            errorMessage = NE.message("Failed to generate mnemonic: \(error.localizedDescription)", code: NE.entropyFailed)
         }
     }
 
@@ -196,7 +208,7 @@ struct WalletSetupStepView: View {
             try appState.createWallet(mnemonic: appState.mnemonicWords)
             appState.onboardingStep = .nodeConnection
         } catch {
-            errorMessage = "Failed to create wallet: \(error.localizedDescription)"
+            errorMessage = NE.message("Failed to create wallet: \(error.localizedDescription)", code: NE.walletCreationFailed)
         }
     }
 
@@ -205,21 +217,16 @@ struct WalletSetupStepView: View {
         isProcessing = true
         defer { isProcessing = false }
 
-        let words = importText
-            .lowercased()
-            .split(separator: /\s+/)
-            .map(String.init)
-
-        guard words.count == 24 else {
-            errorMessage = "Please enter exactly 24 words."
+        guard confirmedWords.count == 24 else {
+            errorMessage = NE.message("Please enter exactly 24 words.", code: NE.mnemonicWordCount)
             return
         }
 
         do {
-            try appState.importWallet(mnemonic: words)
+            try appState.importWallet(mnemonic: confirmedWords)
             appState.onboardingStep = .nodeConnection
         } catch {
-            errorMessage = "Invalid recovery phrase. Please check your words and try again."
+            errorMessage = NE.message("Invalid recovery phrase. Please check your words and try again.", code: NE.invalidMnemonic)
         }
     }
 }

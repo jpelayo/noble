@@ -57,7 +57,7 @@ pub struct Settings {
 }
 
 fn default_node_url() -> String {
-    "https://localhost:8783".to_string()
+    "https://node.infinitecontext.com:8783".to_string()
 }
 
 fn default_true() -> bool {

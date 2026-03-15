@@ -64,7 +64,7 @@ final class AppState {
     var blockHeight: UInt64 = 0
 
     /// Node base URL for JSON-RPC.
-    var nodeURL = "https://localhost:8783"
+    var nodeURL = "https://node.infinitecontext.com:8783"
 
     /// Error message from last connection attempt.
     var connectionError: String?
@@ -254,7 +254,7 @@ final class AppState {
         connectionError = nil
 
         guard let url = URL(string: nodeURL) else {
-            connectionError = "Invalid URL"
+            connectionError = NE.message("Invalid URL", code: NE.invalidURL)
             return
         }
 
@@ -276,11 +276,13 @@ final class AppState {
                 || desc.localizedCaseInsensitiveContains("certificate")
                 || desc.localizedCaseInsensitiveContains("secure connection")
             {
-                connectionError = "Could not establish a secure connection. Verify the node is running and reachable."
+                connectionError = NE.message("Could not establish a secure connection. Verify the node is running and reachable.", code: NE.tlsFailed)
             } else if desc.localizedCaseInsensitiveContains("Could not connect") || desc.localizedCaseInsensitiveContains("network") {
-                connectionError = "Could not reach the node. Check the IP address and that the node is running."
+                connectionError = NE.message("Could not reach the node. Check the IP address and that the node is running.", code: NE.nodeUnreachable)
+            } else if desc.localizedCaseInsensitiveContains("timed out") {
+                connectionError = NE.message("Connection timed out.", code: NE.timeout)
             } else {
-                connectionError = desc
+                connectionError = "\(desc) [\(NE.nodeUnreachable)]"
             }
         }
     }

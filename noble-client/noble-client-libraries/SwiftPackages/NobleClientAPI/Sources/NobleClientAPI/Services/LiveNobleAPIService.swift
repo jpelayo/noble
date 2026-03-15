@@ -89,6 +89,17 @@ public struct LiveNobleAPIService: NobleAPIService {
         )
     }
 
+    /// Fetch total wallet balance across all keys (wallet + validator).
+    /// Uses the parameterless `noble_getWalletInfo` which sums all address buckets.
+    public func getFullWalletInfo() async throws -> WalletBalance {
+        let dto = try await client.call(method: "noble_getWalletInfo", expecting: WalletInfoDTO.self)
+        return WalletBalance(
+            balance: NobleAmount(atomic: dto.balance ?? 0),
+            available: NobleAmount(atomic: dto.available ?? dto.balance ?? 0),
+            pending: NobleAmount(atomic: dto.pending ?? 0)
+        )
+    }
+
     public func getBalance(address: String) async throws -> AddressBalance {
         struct Params: Encodable, Sendable { let address: String }
         let dto = try await client.call(

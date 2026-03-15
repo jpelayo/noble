@@ -47,20 +47,20 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Connection failed: {e}"))?;
+            .map_err(|e| format!("Connection failed: {e} [{}]", crate::errors::NE_NODE_UNREACHABLE))?;
 
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|e| format!("Failed to read response: {e}"))?;
+            .map_err(|e| format!("Failed to read response: {e} [{}]", crate::errors::NE_INVALID_RESPONSE))?;
 
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {text}"));
+            return Err(format!("HTTP {status}: {text} [{}]", crate::errors::NE_HTTP_ERROR));
         }
 
         let rpc_response: Value =
-            serde_json::from_str(&text).map_err(|e| format!("Invalid JSON response: {e}"))?;
+            serde_json::from_str(&text).map_err(|e| format!("Invalid JSON response: {e} [{}]", crate::errors::NE_INVALID_RESPONSE))?;
 
         if let Some(error) = rpc_response.get("error") {
             let msg = error

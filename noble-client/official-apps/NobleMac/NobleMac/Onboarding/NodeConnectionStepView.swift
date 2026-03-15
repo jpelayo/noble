@@ -9,7 +9,7 @@ private let defaultNodeHostname = "node.infinitecontext.com"
 /// Step 3: Connect to a NOBLE node.
 struct NodeConnectionStepView: View {
     @Bindable var appState: AppState
-    @State private var nodeIP = "localhost"
+    @State private var nodeIP = ""
     @State private var isConnecting = false
 
     var body: some View {
@@ -18,7 +18,7 @@ struct NodeConnectionStepView: View {
                 .font(.title)
                 .bold()
 
-            Text("Enter the IP address of your NOBLE node. Use **localhost** for a local node, or **\(defaultNodeHostname)** for the public seed node.")
+            Text("Enter the IP address or hostname of your NOBLE node. If you don't run your own node, try **\(defaultNodeHostname)**.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -30,7 +30,7 @@ struct NodeConnectionStepView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                TextField("localhost", text: $nodeIP)
+                TextField(defaultNodeHostname, text: $nodeIP)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
                     .onChange(of: nodeIP) { _, newValue in
@@ -39,15 +39,6 @@ struct NodeConnectionStepView: View {
                         }
                     }
                     .onSubmit { testConnection() }
-
-                HStack(spacing: 12) {
-                    Button("Local") { nodeIP = "localhost" }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    Button("Public Node") { nodeIP = defaultNodeHostname }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
             }
 
             if let error = appState.connectionError {

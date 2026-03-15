@@ -4,26 +4,39 @@
 import Foundation
 import CryptoKit
 
-/// URLSession delegate that handles TLS certificate trust for self-signed NOBLE node certs.
+/// URLSession delegate that accepts self-signed TLS certificates.
 ///
-/// Supports two modes:
-/// - **Trust On First Use (TOFU)**: Accept any self-signed cert on first connect,
-///   then capture its fingerprint for future verification.
-/// - **Pinned fingerprint**: Only accept certificates matching a known SHA-256 fingerprint.
-final class TLSTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+/// Used by WebSocketClient (which requires URLSession). The JSON-RPC client
+/// uses Network.framework (NWConnection) instead, bypassing ATS entirely.
+///
+/// On iOS 26, ATS may reject self-signed certs even when this delegate
+/// accepts them. WebSocket connections to self-signed nodes may fail on iOS;
+/// polling via JSONRPCClient (NWConnection) remains functional.
+final class TLSTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
 
-    /// SHA-256 hex fingerprint of the trusted certificate. If set, only this cert is accepted.
     var trustedFingerprint: String?
-
-    /// Whether to accept any self-signed cert on first connect.
     var trustOnFirstUse: Bool = true
-
-    /// The fingerprint captured from the last successful connection.
     private(set) var lastCapturedFingerprint: String?
 
     func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    private func handleChallenge(
+        _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
@@ -32,39 +45,41 @@ final class TLSTrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable 
             return
         }
 
-        // Extract the server certificate
         guard let certificates = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
               let serverCert = certificates.first else {
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
 
+        // Make self-signed cert pass trust evaluation
+        let policy = SecPolicyCreateBasicX509()
+        SecTrustSetPolicies(serverTrust, policy)
+        SecTrustSetAnchorCertificates(serverTrust, [serverCert] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(serverTrust, true)
+        var error: CFError?
+        _ = SecTrustEvaluateWithError(serverTrust, &error)
+
         let fingerprint = Self.sha256Fingerprint(of: serverCert)
 
-        // Mode 1: Pinned fingerprint — strict match required
         if let trusted = trustedFingerprint {
             if fingerprint.lowercased() == trusted.lowercased() {
                 lastCapturedFingerprint = fingerprint
                 completionHandler(.useCredential, URLCredential(trust: serverTrust))
             } else {
-                // Fingerprint mismatch — reject
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
             return
         }
 
-        // Mode 2: Trust On First Use — accept and capture fingerprint
         if trustOnFirstUse {
             lastCapturedFingerprint = fingerprint
             completionHandler(.useCredential, URLCredential(trust: serverTrust))
             return
         }
 
-        // No trust policy configured — fall back to system default
         completionHandler(.performDefaultHandling, nil)
     }
 
-    /// Compute SHA-256 fingerprint of a DER-encoded certificate.
     static func sha256Fingerprint(of certificate: SecCertificate) -> String {
         let derData = SecCertificateCopyData(certificate) as Data
         let digest = SHA256.hash(data: derData)

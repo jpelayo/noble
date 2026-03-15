@@ -17,25 +17,25 @@ pub const KEY_NODE_URL: &str = "nobledoc.settings.nodeurl";
 /// Store a value in the OS credential store.
 pub fn store_credential(key: &str, value: &[u8]) -> Result<(), String> {
     let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring error: {e}"))?;
+        .map_err(|e| format!("Keyring error: {e} [{}]", crate::errors::NE_KEYCHAIN_STORE))?;
     let hex_value = hex::encode(value);
     entry
         .set_password(&hex_value)
-        .map_err(|e| format!("Failed to store credential: {e}"))
+        .map_err(|e| format!("Failed to store credential: {e} [{}]", crate::errors::NE_KEYCHAIN_STORE))
 }
 
 /// Load a value from the OS credential store.
 pub fn load_credential(key: &str) -> Result<Option<Vec<u8>>, String> {
     let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .map_err(|e| format!("Keyring error: {e}"))?;
+        .map_err(|e| format!("Keyring error: {e} [{}]", crate::errors::NE_KEYCHAIN_LOAD))?;
     match entry.get_password() {
         Ok(hex_value) => {
             let bytes = hex::decode(&hex_value)
-                .map_err(|e| format!("Invalid stored credential: {e}"))?;
+                .map_err(|e| format!("Invalid stored credential: {e} [{}]", crate::errors::NE_INVALID_KEY_DATA))?;
             Ok(Some(bytes))
         }
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Failed to load credential: {e}")),
+        Err(e) => Err(format!("Failed to load credential: {e} [{}]", crate::errors::NE_KEYCHAIN_LOAD)),
     }
 }
 

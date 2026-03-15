@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// BIP-39 English wordlist (2048 words).
-enum BIP39Wordlist {
+public enum BIP39Wordlist {
+
+    /// Check whether a word belongs to the BIP-39 English wordlist.
+    public static func isValid(_ word: String) -> Bool {
+        english.contains(word.lowercased())
+    }
     static let english: [String] = [
     "abandon",
     "ability",

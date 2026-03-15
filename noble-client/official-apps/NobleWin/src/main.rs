@@ -16,6 +16,7 @@ mod assets;
 mod bridge;
 mod cbor;
 mod crypto;
+mod errors;
 mod models;
 mod security;
 mod storage;
@@ -244,7 +245,7 @@ async fn dispatch_bridge_action(
             let (node_url, wallet_address, block_height) = {
                 let st = state.lock().unwrap();
                 if !st.is_connected && action != "getNodeInfo" {
-                    return Err("Not connected to a NOBLE node".to_string());
+                    return Err(errors::ne_message("Not connected to a NOBLE node", errors::NE_NOT_CONNECTED));
                 }
                 (
                     st.node_url.clone(),
@@ -271,7 +272,7 @@ async fn dispatch_bridge_action(
             };
             let private_key = security::load_credential(security::KEY_PRIVATE_KEY)
                 .map_err(|e| e.to_string())?
-                .ok_or("No private key available")?;
+                .ok_or(errors::ne_message("No private key available", errors::NE_NO_PRIVATE_KEY))?;
             crypto::handle_crypto_action(action, params, &private_key, &wallet_address, &chain_id)
         }
 
@@ -283,6 +284,6 @@ async fn dispatch_bridge_action(
 
         "noble_storage" => storage::handle_storage_action(action, params),
 
-        _ => Err(format!("Unknown bridge handler: {handler}")),
+        _ => Err(errors::ne_message(&format!("Unknown bridge handler: {handler}"), errors::NE_UNKNOWN_HANDLER)),
     }
 }
