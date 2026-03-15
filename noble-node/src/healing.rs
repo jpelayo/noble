@@ -1903,42 +1903,28 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         let (tip_height, _) = self.consensus.read().chain_tip();
         let mut chain_id = self.get_chain_id();
 
-        // When chain_id is 0 (pre-genesis or post-reset), derive it from the
-        // block being imported.  Block 1's hash IS the genesis hash from which
-        // chain_id is derived.  For blocks after height 1, read the genesis
-        // hash from storage.  This ensures tx_id computation (which depends on
-        // chain_id) matches the proposer's computation — preventing false
-        // merkle root mismatches during sync after chain reset.
-        if chain_id == 0 {
-            if block.header.height == 1 {
-                match block.header.compute_block_hash() {
-                    Ok(bh) => {
-                        chain_id = noble_core::derive_chain_id(&bh);
-                        tracing::debug!(
-                            task = "sync_import",
-                            "derived chain_id {:#010X} from block 1 hash for validation",
-                            chain_id,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(task = "sync_import", "block 1 hash computation failed: {e}");
-                        return SyncImportResult::Rejected {
-                            reason: format!("block 1 hash computation failed: {e}"),
-                        };
-                    }
-                }
-            } else {
-                // For blocks > 1, try to get chain_id from storage (genesis hash).
-                let storage = self.storage.read();
-                if let Ok(genesis_hash) = storage.get_block_hash_by_height(0) {
-                    chain_id = noble_core::derive_chain_id(&genesis_hash);
-                } else if let Ok(block1_hash) = storage.get_block_hash_by_height(1) {
-                    chain_id = noble_core::derive_chain_id(&block1_hash);
-                }
+        // Block 1 is ALWAYS proposed with chain_id = 0 (the node has no chain
+        // identity yet at proposal time). After block 1 commits, the real
+        // chain_id is derived from block 1's hash. So:
+        //   - Block 1 validation: MUST use chain_id = 0 (matching the proposer)
+        //   - Block 2+: use the derived chain_id from storage
+        //
+        // Getting this wrong causes merkle root mismatches: the proposer
+        // computed tx_ids with chain_id=0, but the validator recomputes with
+        // the derived chain_id → different preimage → different merkle → B4.
+        if block.header.height == 1 {
+            // Block 1 was proposed with chain_id = 0, always validate with 0.
+            chain_id = 0;
+        } else if chain_id == 0 && block.header.height > 1 {
+            // For blocks > 1 when we don't have a chain_id yet (post-reset),
+            // derive it from the stored block 1 hash.
+            let storage = self.storage.read();
+            if let Ok(block1_hash) = storage.get_block_hash_by_height(1) {
+                chain_id = noble_core::derive_chain_id(&block1_hash);
+            } else if let Ok(genesis_hash) = storage.get_block_hash_by_height(0) {
+                chain_id = noble_core::derive_chain_id(&genesis_hash);
             }
-            // If chain_id is still 0 for a block above height 0, reject — we
-            // cannot validate tx_ids or merkle roots without a valid chain_id.
-            if chain_id == 0 && block.header.height > 0 {
+            if chain_id == 0 {
                 tracing::error!(
                     task = "sync_import",
                     height = block.header.height,
@@ -1995,31 +1981,6 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             parent: parent_header.as_ref(),
             validator_list: &val_list,
         };
-
-        // Diagnostic: log chain_id and merkle details for debugging B4 mismatches.
-        {
-            let diag_tx_ids: Vec<String> = block.transactions.iter().enumerate().map(|(i, tx)| {
-                match tx.compute_tx_id(chain_id) {
-                    Ok(id) => format!("tx[{}]={}", i, hex::encode(id.as_bytes())),
-                    Err(e) => format!("tx[{}]=ERR({})", i, e),
-                }
-            }).collect();
-            let diag_tx_id_hashes: Vec<noble_crypto::Hash256> = block.transactions.iter()
-                .filter_map(|tx| tx.compute_tx_id(chain_id).ok())
-                .collect();
-            let computed_root = noble_core::compute_merkle_root(&diag_tx_id_hashes);
-            tracing::info!(
-                task = "sync_import",
-                height = block.header.height,
-                chain_id = format_args!("{:#010X}", chain_id),
-                block_merkle = %hex::encode(block.header.merkle_root.as_bytes()),
-                computed_merkle = %hex::encode(computed_root.as_bytes()),
-                match_ok = (block.header.merkle_root == computed_root),
-                tx_count = block.transactions.len(),
-                "B4 diagnostic: {}",
-                diag_tx_ids.join(", "),
-            );
-        }
 
         if let Err(e) = noble_core::validate_block(block, &ctx) {
             let is_fork = matches!(

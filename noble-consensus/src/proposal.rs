@@ -135,6 +135,8 @@ pub fn propose_block(
         .map_err(|e| format!("failed to compute tx_id: {e}"))?;
     let merkle_root = compute_merkle_root(&tx_ids);
 
+
+
     // Build header
     let mut header = BlockHeader {
         version: PROTOCOL_VERSION,

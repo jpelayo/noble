@@ -807,8 +807,10 @@ impl CycleEngine {
                 // Dual-Witness Rule: only the genesis block (block 1) requires ≥ min_unique_voters
                 // distinct keys voting for the winning candidate. After block 1 is committed,
                 // normal plurality consensus applies.
+                // Genesis (block 1): require R1-only witnesses. R2 FollowMajority
+                // echoes don't count — they're automatic, not independent validation.
                 let witness_ok = self.tip_height >= 1
-                    || self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash) >= self.config.min_unique_voters;
+                    || self.vote_mgr.unique_r1_voter_count_for_candidate(&candidate_hash) >= self.config.min_unique_voters;
 
                 if witness_ok {
                     info!(

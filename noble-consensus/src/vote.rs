@@ -489,6 +489,7 @@ impl VoteManager {
 
     /// Count of unique validator keys that cast any vote (R1 or R2) for a specific candidate.
     /// Used by the engine-level Dual-Witness check: the winning block must have ≥N distinct witnesses.
+    /// Count unique voters (R1 + R2) for a candidate.
     pub fn unique_voter_count_for_candidate(&self, candidate: &Hash256) -> usize {
         let mut keys: HashSet<&Vec<u8>> = HashSet::new();
         if let Some(voters) = self.votes.get(candidate) {
@@ -498,6 +499,19 @@ impl VoteManager {
             keys.extend(voters.iter());
         }
         keys.len()
+    }
+
+    /// Count unique R1-only voters for a candidate.
+    ///
+    /// Used exclusively by the Dual-Witness Rule for genesis (block 1).
+    /// R2 FollowMajority votes are echoes — they don't represent independent
+    /// block validation. A solo node could otherwise bootstrap by getting an
+    /// automatic R2 echo from any connected peer.
+    pub fn unique_r1_voter_count_for_candidate(&self, candidate: &Hash256) -> usize {
+        self.votes
+            .get(candidate)
+            .map(|v| v.iter().collect::<HashSet<_>>().len())
+            .unwrap_or(0)
     }
 
     /// Return the wire-format public key bytes of all R1 voters for a specific candidate.
