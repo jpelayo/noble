@@ -280,6 +280,17 @@ impl CycleEngine {
         self.checkpoint_mgr.restore(cps);
     }
 
+    /// Update the chain_id after block 1 commits.
+    ///
+    /// The engine starts with chain_id=0 (pre-genesis). After block 1 commits
+    /// and the real chain_id is derived from block 1's hash, this must be called
+    /// so that blocks 2+ are proposed/validated with the correct chain_id.
+    /// Without this, the engine uses chain_id=0 for all blocks in the session,
+    /// causing tx_id mismatches at storage commit time.
+    pub fn set_chain_id(&mut self, id: u32) {
+        self.chain_id = id;
+    }
+
     /// Whether a validator key is configured.
     pub fn has_validator_key(&self) -> bool {
         self.our_validator_key.is_some()
@@ -885,7 +896,7 @@ impl CycleEngine {
                                 .collect();
                             let unique_witness =
                                 self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
-                            let dual_required = self.tip_height < 1;
+                            let dual_required = new_height == 1;
                             // For block 1, the bootstrap-era cycle number is meaningless
                             // (it resets when the epoch changes). Store cycle 0 instead.
                             let vote_cycle = if new_height == 1 { 0 } else { completed_cycle };
@@ -946,8 +957,8 @@ impl CycleEngine {
                     }
                 } else {
                     debug!(
-                        "cycle {cl}: Dual-Witness not met for genesis block ({} unique voter(s) for winner {}, need {})",
-                        self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash),
+                        "cycle {cl}: Dual-Witness not met for genesis block ({} R1 voter(s) for winner {}, need {})",
+                        self.vote_mgr.unique_r1_voter_count_for_candidate(&candidate_hash),
                         candidate_hash, self.config.min_unique_voters
                     );
                     // Treat as indeterminate — don't commit, readmit txs

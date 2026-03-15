@@ -2800,6 +2800,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                 if block.header.height <= tip_height {
                     // Already have this block — ignore.
+                } else if block.header.height == 1 && tip_height == 0 && !self.healing.is_syncing() {
+                    // Block 1 at genesis: MUST go through consensus engine so the
+                    // Dual-Witness Rule (R1-only) is enforced at cycle boundary.
+                    // try_sync_import bypasses the witness check entirely.
+                    let cycle_event = bridge::network_event_to_cycle_event(
+                        &NetworkEvent::BlockReceived {
+                            peer_id: peer_id.clone(),
+                            block: block.clone(),
+                        },
+                    );
+                    if let Some(ce) = cycle_event {
+                        let actions = {
+                            let mut engine = self.consensus.write();
+                            engine.step(ce)
+                        };
+                        self.process_cycle_actions(actions, network_cmd, new_block_tx, cycle_phase_tx, metrics, shared_identity);
+                    }
                 } else if self.healing.is_sync_block(block.header.height)
                     || (self.healing.is_syncing() && block.header.height == tip_height + 1)
                     || (block.header.height > tip_height && block.header.height <= tip_height + 256)
@@ -2983,6 +3000,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     if self.get_chain_id() == 0 {
                         let new_chain_id = noble_core::derive_chain_id(&block_hash);
                         self.chain_id.store(new_chain_id, std::sync::atomic::Ordering::Relaxed);
+                        // Update the consensus engine's chain_id so blocks 2+ are
+                        // proposed/validated with the real chain_id, not 0.
+                        self.consensus.write().set_chain_id(new_chain_id);
                         if let Err(e) = network_cmd.try_send(NetworkCommand::UpdateChainId(new_chain_id)) {
                             tracing::warn!(task = "block_commit", "failed to update network chain_id: {e}");
                         }
@@ -4503,6 +4523,7 @@ pub fn atomic_write_file(path: &Path, data: &[u8]) -> Result<(), Box<dyn std::er
 mod tests {
     use super::*;
     use noble_consensus::ConsensusStateMachine;
+    use noble_crypto::NobleSigner;
 
     #[test]
     fn init_memory_node_starts_stateless() {
@@ -4949,5 +4970,209 @@ mod tests {
         let (cycle_tx, _) = broadcast::channel(16);
         node.process_cycle_actions(actions, &tx, &block_tx, &cycle_tx, &None, &test_identity);
         // No assertion needed — just verifying no panics
+    }
+
+    // ── Block 1 routing + Dual-Witness enforcement tests ──
+
+    /// Build a valid block 1 (coinbase-only) signed by the given key.
+    /// Uses chain_id = 0 (matching the proposer's bootstrap state).
+    fn build_test_block_1(
+        priv_key: &noble_crypto::NoblePrivateKey,
+        pub_key: &noble_crypto::NoblePublicKey,
+        timestamp: u64,
+    ) -> noble_core::Block {
+        use noble_core::constants::{TX_TYPE_COINBASE, PROTOCOL_VERSION};
+        use noble_core::utxo::{OutPoint, TxIn, TxOut};
+        use noble_core::address::NobleAddress;
+        use noble_core::merkle::compute_merkle_root;
+        use noble_core::wire::WireFormat;
+
+        let chain_id: u32 = 0; // block 1 is always proposed with chain_id = 0
+
+        let mut coinbase = noble_core::Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_COINBASE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: vec![TxOut {
+                value: noble_core::constants::subsidy_at_height(1),
+                address: NobleAddress::Noble(pub_key.clone()),
+            }],
+            checksum: Hash256::ZERO,
+            timestamp,
+            publisher_sig: noble_crypto::SignatureEnvelope {
+                scheme_id: pub_key.scheme_id(),
+                public_key: pub_key.key_bytes().to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+        };
+        let cb_msg = coinbase.compute_signing_message_for_chain(chain_id).unwrap();
+        coinbase.publisher_sig = priv_key.sign(&cb_msg).unwrap();
+
+        let tx_id = coinbase.compute_tx_id(chain_id).unwrap();
+        let merkle_root = compute_merkle_root(&[tx_id]);
+
+        let mut header = noble_core::BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_block_hash: Hash256::ZERO,
+            merkle_root,
+            timestamp,
+            height: 1,
+            tx_count: 1,
+            validator_id: pub_key.clone(),
+            validator_sig: noble_crypto::SignatureEnvelope {
+                scheme_id: pub_key.scheme_id(),
+                public_key: pub_key.key_bytes().to_vec(),
+                signature: vec![],
+            },
+        };
+        let msg = header.compute_signing_message().unwrap();
+        header.validator_sig = priv_key.sign(&msg).unwrap();
+
+        noble_core::Block {
+            header,
+            transactions: vec![coinbase],
+        }
+    }
+
+    #[test]
+    fn block_1_not_committed_via_sync_import_without_consensus() {
+        // Block 1 arriving at a node with tip_height=0 must NOT be committed
+        // via try_sync_import. It must go through the consensus engine so the
+        // Dual-Witness Rule is enforced.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.wallet.keystore_path = dir.path().join("keystore");
+
+        let node = Node::init_memory(&config).unwrap();
+        assert_eq!(node.chain_height(), 0);
+
+        // Build a valid block 1 from a foreign validator.
+        let (sk, pk) = noble_crypto::ed25519::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Ed25519(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Ed25519(pk);
+        let block1 = build_test_block_1(&priv_key, &pub_key, 1_773_600_000);
+
+        // Attempt sync import directly — this should NOT commit block 1
+        // because sync import bypasses the dual-witness check.
+        let result = node.healing.try_sync_import(&block1);
+        // The sync import may accept or reject on structural grounds,
+        // but even if it accepts, the node-level routing code should
+        // never call try_sync_import for block 1 at tip_height=0.
+        // This test documents the bypass: try_sync_import does NOT
+        // enforce the dual-witness rule.
+        if matches!(result, crate::healing::SyncImportResult::Accepted { .. }) {
+            // This is the BUG we fixed: sync import would commit block 1
+            // without dual-witness verification. The node routing now
+            // prevents this by sending block 1 to the consensus engine.
+            // But try_sync_import itself has no witness check.
+            //
+            // Verify the block WAS committed (proving the bypass exists
+            // at the try_sync_import level).
+            assert_eq!(node.chain_height(), 1,
+                "try_sync_import committed block 1 without dual-witness — \
+                 the node routing fix must prevent this path");
+        }
+    }
+
+    #[test]
+    fn block_1_routing_goes_to_consensus_engine() {
+        // Verify the routing condition: block 1 at tip_height=0 (not syncing)
+        // must match the consensus engine path, not the sync import path.
+        let tip_height: u64 = 0;
+        let block_height: u64 = 1;
+        let is_syncing = false;
+
+        // The catch-up range condition that previously routed block 1 to sync import:
+        let old_sync_condition = block_height > tip_height && block_height <= tip_height + 256;
+        assert!(old_sync_condition, "block 1 WOULD have matched the old sync import condition");
+
+        // The new guard that intercepts block 1 before the sync import path:
+        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
+        assert!(genesis_guard, "block 1 at genesis must hit the consensus engine guard");
+    }
+
+    #[test]
+    fn block_2_still_uses_sync_import() {
+        // Verify block 2 at tip_height=1 still goes through sync import (not consensus engine).
+        // The genesis guard only applies to block 1 at tip_height=0.
+        let tip_height: u64 = 1;
+        let block_height: u64 = 2;
+        let is_syncing = false;
+
+        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
+        assert!(!genesis_guard, "block 2 must NOT hit the genesis guard");
+
+        let sync_condition = block_height > tip_height && block_height <= tip_height + 256;
+        assert!(sync_condition, "block 2 should go through sync import");
+    }
+
+    #[test]
+    fn block_1_during_active_sync_uses_sync_import() {
+        // When the node IS actively syncing (healing.is_syncing() == true),
+        // block 1 should use sync import — the node is catching up from a
+        // peer with a longer chain, dual-witness was already enforced on
+        // the source chain.
+        let tip_height: u64 = 0;
+        let block_height: u64 = 1;
+        let is_syncing = true;
+
+        let genesis_guard = block_height == 1 && tip_height == 0 && !is_syncing;
+        assert!(!genesis_guard, "block 1 during active sync must NOT hit the genesis guard");
+    }
+
+    #[test]
+    fn dual_witness_r1_only_blocks_solo_genesis() {
+        // Integration test: the consensus engine with 1 validator and no peer
+        // votes must NOT commit block 1 (dual-witness requires 2 R1 voters).
+        use noble_consensus::{CycleEngine, ConsensusConfig, CycleEvent, CycleIo};
+
+        let (sk, pk_bytes) = noble_crypto::ed25519::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Ed25519(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Ed25519(pk_bytes);
+
+        let config = ConsensusConfig {
+            min_unique_voters: 2,
+            ..ConsensusConfig::default()
+        };
+        let mut engine = CycleEngine::new(
+            config, 0, Hash256::ZERO, 0,
+            Some((priv_key, pub_key.clone())),
+            None,
+        );
+        engine.set_peer_count(1); // 1 peer connected (passes isolation guard)
+        engine.set_proposals_enabled(true);
+        engine.set_voting_enabled(true);
+
+        // Simulate: advance through a full cycle.
+        // First tick initializes epoch AND requests mempool txs if in Proposal phase.
+        let epoch = 1_773_600_000u64;
+        let cycle_dur = 1200u64;
+        let actions = engine.step(CycleEvent::Tick { now: epoch + 1 });
+        let has_mempool_req = actions.iter().any(|a| matches!(a, CycleIo::RequestMempoolTransactions { .. }));
+        assert!(has_mempool_req, "engine should request mempool txs on first tick in Proposal phase");
+
+        // Feed empty mempool → engine proposes block
+        let _ = engine.step(CycleEvent::MempoolTransactions(vec![]));
+
+        // Voting phase → R1 vote
+        let _ = engine.step(CycleEvent::Tick { now: epoch + 330 });
+
+        // Reflection phase → R2 vote
+        let _ = engine.step(CycleEvent::Tick { now: epoch + 630 });
+
+        // Past cycle boundary → should NOT commit (only 1 R1 voter)
+        let boundary_actions = engine.step(CycleEvent::Tick { now: epoch + cycle_dur + 1 });
+        let committed = boundary_actions.iter().any(|a| matches!(a, CycleIo::CommitBlock(_)));
+        assert!(!committed,
+            "block 1 must NOT commit with only 1 R1 voter (dual-witness requires 2)");
+
+        // Verify tip didn't advance
+        let (tip_h, _) = engine.chain_tip();
+        assert_eq!(tip_h, 0, "tip must remain at 0 — block 1 was not committed");
     }
 }

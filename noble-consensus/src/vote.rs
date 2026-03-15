@@ -510,7 +510,7 @@ impl VoteManager {
     pub fn unique_r1_voter_count_for_candidate(&self, candidate: &Hash256) -> usize {
         self.votes
             .get(candidate)
-            .map(|v| v.iter().collect::<HashSet<_>>().len())
+            .map(|v| v.len())
             .unwrap_or(0)
     }
 
