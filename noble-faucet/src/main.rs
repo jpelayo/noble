@@ -160,35 +160,44 @@ async fn main() {
     let rpc = NodeRpcClient::new(&cli.rpc_url, cli.totp_code)
         .expect("Failed to create RPC client (check URL scheme)");
 
-    // Resolve passphrase: --passphrase > NOBLE_FAUCET_PASSPHRASE env > --auto-unlock (first boot)
+    // Resolve passphrase via RPC or CLI fallback.
     let keystore_is_empty = !keystore_dir.exists()
         || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
 
+    // Priority: --passphrase CLI > env var > RPC getFaucetSecret > generate new (first boot)
     let (passphrase, is_first_boot) = if let Some(p) = cli.passphrase.clone() {
         (p, false)
     } else if let Ok(p) = std::env::var("NOBLE_FAUCET_PASSPHRASE") {
         (p, false)
     } else if cli.auto_unlock && keystore_is_empty {
-        // First boot: generate a real random passphrase (not the hardcoded one).
-        let rng_bytes = noble_crypto::sha256(
-            &std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_le_bytes(),
-        );
-        (hex::encode(rng_bytes.as_bytes()), true)
-    } else if cli.auto_unlock {
-        // Keystore exists but no passphrase provided — this shouldn't happen
-        // after the first boot (the node should pass --passphrase).
-        // Fall back to legacy hardcoded passphrase for backward compat.
-        ("noble-faucet-auto".to_string(), false)
     } else {
-        (String::new(), false)
+        // Try to retrieve passphrase from node via RPC (subsequent boots).
+        match rpc.get_faucet_secret().await {
+            Ok(Some(p)) => {
+                tracing::info!("Faucet passphrase retrieved from node keystore via RPC");
+                (p, false)
+            }
+            _ => {
+                if keystore_is_empty {
+                    // First boot: generate random passphrase.
+                    let rng_bytes = noble_crypto::sha256(
+                        &std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .to_le_bytes(),
+                    );
+                    (hex::encode(rng_bytes.as_bytes()), true)
+                } else {
+                    // Keystore exists but RPC returned nothing — legacy fallback.
+                    ("noble-faucet-auto".to_string(), false)
+                }
+            }
+        }
     };
 
     // Initialize independent faucet wallet (local signing).
-    let faucet_wallet = if !passphrase.is_empty() || cli.auto_unlock {
+    let faucet_wallet = if !passphrase.is_empty() {
         match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, 0) {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
