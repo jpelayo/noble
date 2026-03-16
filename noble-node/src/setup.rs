@@ -1011,8 +1011,8 @@ fn read_validator_pubkey(key_path: &Path) -> Option<String> {
         return None;
     }
     let private_key = match raw[0] {
-        SCHEME_ED25519 => NoblePrivateKey::Ed25519(raw[1..].to_vec()),
-        SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
+        0x01 => NoblePrivateKey::Ed25519(raw[1..].to_vec()),
+        0x02 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
         _ => return None,
     };
     Some(private_key.public_key().to_address())

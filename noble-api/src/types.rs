@@ -279,12 +279,18 @@ pub struct RegistrationRecord {
     pub block_height: u64,
     pub tx_id: String,
     pub timestamp: u64,
+    /// Transaction type name (e.g., "Notarization", "Unlocking").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_type: Option<String>,
     /// `doc:version` metadata value, if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// `doc:prev_checksum` metadata value (hex), if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_checksum: Option<String>,
+    /// For unlocking txs: the locked tx_id they reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_tx_id: Option<String>,
 }
 
 /// Response for `noble_lookupChecksum`.

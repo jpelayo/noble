@@ -129,6 +129,8 @@ enum Commands {
     /// Checks that this binary produces byte-identical output for known
     /// inputs. A failure means the binary's wire format is inconsistent
     /// with the protocol spec — blocks and transactions will be rejected.
+    VerifyWire,
+
     /// Remove all noble-generated local files (data, config, keys, identity).
     ///
     /// Does NOT remove brew-installed binaries or packaged files.
@@ -138,8 +140,6 @@ enum Commands {
         #[arg(long, default_value_os_t = default_data_dir())]
         data_dir: PathBuf,
     },
-
-    VerifyWire,
 
     /// Verify CBOR codec round-trip consistency.
     ///

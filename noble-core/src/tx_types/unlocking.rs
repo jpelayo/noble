@@ -20,6 +20,6 @@ pub struct Unlocking;
 impl TxTypeHandler for Unlocking {
     fn type_id(&self) -> u8 { TX_TYPE_UNLOCKING }
     fn name(&self) -> &'static str { "Unlocking" }
-    fn requires_zero_checksum(&self) -> bool { true }
-    fn triggers_unlock_reindex(&self) -> bool { true }
+    fn requires_checksum(&self) -> bool { true }
+    fn needs_notarization_indexing(&self) -> bool { true }
 }

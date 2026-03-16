@@ -70,7 +70,7 @@ fn build_registration_records<S: StorageEngine>(
             .get_transaction_location(tx_id)
             .map(|(h, _)| h)
             .unwrap_or(0);
-        let (timestamp, version, prev_checksum) = storage
+        let (timestamp, version, prev_checksum, tx_type_name, locked_ref) = storage
             .get_transaction(tx_id)
             .map(|tx| {
                 let ver = tx
@@ -85,15 +85,24 @@ fn build_registration_records<S: StorageEngine>(
                     .find(|m| m.key == META_KEY_PREV_CHECKSUM)
                     .and_then(|m| std::str::from_utf8(&m.value).ok())
                     .map(|s| s.to_string());
-                (tx.timestamp, ver, prev)
+                let type_name = noble_core::tx_types::type_name(tx.tx_type).to_string();
+                let locked = tx
+                    .metadata
+                    .iter()
+                    .find(|m| m.key == noble_core::locked_tx::META_UNLOCK_TXID)
+                    .and_then(|m| std::str::from_utf8(&m.value).ok())
+                    .map(|s| s.to_string());
+                (tx.timestamp, ver, prev, Some(type_name), locked)
             })
-            .unwrap_or((0, None, None));
+            .unwrap_or((0, None, None, None, None));
         records.push(RegistrationRecord {
             block_height,
             tx_id: hash_to_hex(tx_id),
             timestamp,
+            tx_type: tx_type_name,
             version,
             prev_checksum,
+            locked_tx_id: locked_ref,
         });
     }
     records
