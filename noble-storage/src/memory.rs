@@ -11,7 +11,6 @@ use std::sync::{Arc, RwLock};
 
 use noble_core::constants::{
     subsidy_at_height, COINBASE_MATURITY, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM,
-    TX_TYPE_COINBASE, TX_TYPE_NOTARIZATION,
 };
 use noble_core::{Block, BlockHeader, NobleAddress, OutPoint, PeerRecord, Transaction, UtxoEntry};
 use noble_crypto::{Hash256, NoblePublicKey};
@@ -110,7 +109,7 @@ impl StorageEngine for MemoryStorage {
             inner.tx_locations.insert(*tx_id, (height, offset as u32));
 
             // Only index checksums for notarization transactions (defense-in-depth)
-            if tx.tx_type == noble_core::TX_TYPE_NOTARIZATION {
+            if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                 let entry = inner.checksum_index.entry(tx.checksum).or_default();
                 if entry.len() >= MAX_CHECKSUM_REGISTRATIONS {
                     return Err(StorageError::ChecksumIndexFull {
@@ -125,7 +124,7 @@ impl StorageEngine for MemoryStorage {
 
         // --- Version chain indexing + publisher index ---
         for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
-            if tx.tx_type == TX_TYPE_NOTARIZATION {
+            if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                 if let Some(prev_hex) = tx
                     .metadata
                     .iter()
@@ -160,7 +159,7 @@ impl StorageEngine for MemoryStorage {
         let mut total_fees: u64 = 0;
 
         for (offset, (tx, tx_id)) in block.transactions.iter().zip(tx_ids.iter()).enumerate() {
-            let is_coinbase = tx.tx_type == TX_TYPE_COINBASE;
+            let is_coinbase = tx.is_coinbase();
 
             // --- Process inputs (skip for coinbase) ---
             let mut input_sum: u64 = 0;
@@ -567,7 +566,7 @@ impl StorageEngine for MemoryStorage {
                 }
 
                 // Version chain + publisher index
-                if tx.tx_type == TX_TYPE_NOTARIZATION {
+                if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                     if let Some(prev_hex) = tx
                         .metadata
                         .iter()
@@ -669,7 +668,7 @@ impl StorageEngine for MemoryStorage {
                     let tx_id = tx
                         .compute_tx_id(chain_id)
                         .map_err(|e| StorageError::Codec(e.to_string()))?;
-                    let is_coinbase = tx.tx_type == TX_TYPE_COINBASE;
+                    let is_coinbase = tx.is_coinbase();
                     for (vout, txout) in tx.outputs.iter().enumerate() {
                         let outpoint = OutPoint {
                             txid: tx_id,

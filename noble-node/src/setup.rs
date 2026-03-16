@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use dialoguer::{Confirm, Input, Select};
 use noble_crypto::{
     bitcoin_addr::{pubkey_to_p2pkh, pubkey_to_p2wpkh, pubkey_to_p2tr},
-    secp256k1, NoblePrivateKey, SCHEME_SECP256K1,
+    NoblePrivateKey, SCHEME_SECP256K1,
 };
 use zeroize::Zeroize;
 

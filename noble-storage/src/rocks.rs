@@ -49,7 +49,6 @@ use rocksdb::{
 use noble_codec::NobleCbor;
 use noble_core::constants::{
     subsidy_at_height, COINBASE_MATURITY, MAX_REORG_DEPTH, MAX_SUPPLY, META_KEY_PREV_CHECKSUM,
-    TX_TYPE_COINBASE, TX_TYPE_NOTARIZATION,
 };
 use noble_core::{Block, BlockHeader, NobleAddress, OutPoint, PeerRecord, Transaction, UtxoEntry};
 use noble_crypto::{Hash256, NoblePublicKey};
@@ -534,7 +533,8 @@ impl StorageEngine for RocksDbStorage {
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
         let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
         for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
-            if tx.tx_type == TX_TYPE_NOTARIZATION {
+            let handler = noble_core::tx_types::handler_for(tx.tx_type);
+            if handler.map_or(false, |h| h.needs_notarization_indexing()) {
                 batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
 
                 // version_chain CF: prev_checksum → merge-append successor tx_id
@@ -689,7 +689,7 @@ impl StorageEngine for RocksDbStorage {
         // Verify coinbase output value matches subsidy + collected fees
         let subsidy = subsidy_at_height(height);
         if let Some(coinbase_tx) = block.transactions.first() {
-            if coinbase_tx.tx_type == TX_TYPE_COINBASE {
+            if coinbase_tx.is_coinbase() {
                 let coinbase_total: u64 = coinbase_tx.outputs.iter().map(|o| o.value).sum();
                 let expected = subsidy + total_fees;
                 if coinbase_total != expected {
@@ -1206,7 +1206,7 @@ impl StorageEngine for RocksDbStorage {
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
 
                 // Rebuild checksum_index for notarizations
-                if tx.tx_type == TX_TYPE_NOTARIZATION {
+                if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                     replay_batch.merge_cf(cf_checksum, tx.checksum.as_bytes(), tx_id.as_bytes());
 
                     if let Some(prev_hex) = tx

@@ -8,7 +8,7 @@
 
 use noble_core::{
     validate_block, validate_transaction, Block, BlockHeader, BlockValidationContext,
-    TxValidationContext, TX_TYPE_BADGE_PROPOSAL, TX_TYPE_BADGE_VOTE,
+    TxValidationContext,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use tracing::{debug, info, warn};
@@ -1281,12 +1281,12 @@ impl CycleEngine {
 
     /// Process badge-related transactions from a committed block.
     ///
-    /// Scans for TX_TYPE_BADGE_PROPOSAL (0x03) and TX_TYPE_BADGE_VOTE (0x04),
+    /// Scans for Badge Proposal (0x03) and Badge Vote (0x04) via tx_types registry,
     /// updates the badge store and proposal tracking accordingly.
     fn process_badge_transactions(&mut self, block: &Block, current_cycle: u64) {
         for tx in &block.transactions {
             match tx.tx_type {
-                TX_TYPE_BADGE_PROPOSAL => {
+                noble_core::TX_TYPE_BADGE_PROPOSAL => {
                     // Decode metadata from the transaction's metadata entries.
                     let target = tx.metadata.iter().find(|m| m.key == "target_pubkey");
                     let ptype = tx.metadata.iter().find(|m| m.key == "proposal_type");
@@ -1359,7 +1359,7 @@ impl CycleEngine {
                     );
                     self.badge_proposals.insert(tx_hash, proposal);
                 }
-                TX_TYPE_BADGE_VOTE => {
+                noble_core::TX_TYPE_BADGE_VOTE => {
                     let phash = tx.metadata.iter().find(|m| m.key == "proposal_hash");
                     let vote = tx.metadata.iter().find(|m| m.key == "vote");
 

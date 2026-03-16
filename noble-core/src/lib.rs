@@ -17,6 +17,7 @@ pub mod node_announce;
 pub mod peer_record;
 pub mod pst;
 pub mod transaction;
+pub mod tx_types;
 pub mod utxo;
 pub mod validation;
 pub mod wire;

@@ -274,18 +274,22 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/** Transaction type registry — single source of truth for display labels.
+ *  Must match noble-core/src/tx_types/ handlers. */
+const TX_TYPE_NAMES = {
+  0x00: 'Notarization',
+  0x01: 'Transfer',
+  0x02: 'Key Rotation',
+  0x03: 'Badge Proposal',
+  0x04: 'Badge Vote',
+  0x05: 'Badge Revocation',
+  0x10: 'Coinbase',
+};
+
 /** Format a tx_type byte into a human-readable label */
 function formatTxType(txType) {
-  switch (txType) {
-    case 0x00: return 'Notarization';
-    case 0x01: return 'Transfer';
-    case 0x02: return 'Key Rotation';
-    case 0x03: return 'Badge Proposal';
-    case 0x04: return 'Badge Vote';
-    case 0x05: return 'Badge Revocation';
-    case 0x10: return '<span class="badge coinbase">Coinbase</span>';
-    default: return `Type 0x${txType.toString(16).padStart(2, '0')}`;
-  }
+  if (txType === 0x10) return '<span class="badge coinbase">Coinbase</span>';
+  return TX_TYPE_NAMES[txType] || `Type 0x${txType.toString(16).padStart(2, '0')}`;
 }
 
 /** Decode a metadata value that may be hex-encoded UTF-8 or an array of byte values */

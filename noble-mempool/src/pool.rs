@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use noble_codec::NobleCbor;
 use noble_core::{
     OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
-    TX_TYPE_NOTARIZATION,
 };
 use noble_crypto::{is_recognized_scheme, Hash256};
 
@@ -334,7 +333,7 @@ impl Mempool {
         }
 
         // Step 2.6: Version chain — if doc:prev_checksum is present, verify it exists on-chain
-        if tx.tx_type == TX_TYPE_NOTARIZATION {
+        if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.validates_version_chain()) {
             if let Some(prev_hex) = tx
                 .metadata
                 .iter()

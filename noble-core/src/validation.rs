@@ -74,7 +74,9 @@ fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), Val
     // Reconstruct the canonical message from tx fields (UTXO model).
     // For BIP-137, we use output[0] as recipient and total_output_value as amount.
     // Fee is implicit (not in the BIP-137 message — the signature commits via SigningPayload).
-    let message = if tx.tx_type == TX_TYPE_TRANSFER {
+    let is_transfer_msg = crate::tx_types::handler_for(tx.tx_type)
+        .map_or(false, |h| h.uses_transfer_bip137_message());
+    let message = if is_transfer_msg {
         let recipient_hex = tx.outputs.first()
             .map(|o| hex::encode(o.address.to_wire_bytes()))
             .unwrap_or_default();
@@ -232,29 +234,24 @@ fn validate_tx_signatures(
 }
 
 /// Validate transaction type constraints and advanced fields (T13-T25).
+///
+/// Uses the [`tx_types`] registry to look up per-type rules instead of
+/// hardcoded if-chains. See `noble-core/src/tx_types/` for each handler.
 fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError> {
     // T13: tx_type must be recognized
-    if tx.tx_type != TX_TYPE_NOTARIZATION
-        && tx.tx_type != TX_TYPE_TRANSFER
-        && tx.tx_type != TX_TYPE_KEY_ROTATION
-        && tx.tx_type != TX_TYPE_COINBASE
-        && tx.tx_type != TX_TYPE_BADGE_PROPOSAL
-        && tx.tx_type != TX_TYPE_BADGE_VOTE
-        && tx.tx_type != TX_TYPE_BADGE_REVOCATION
-    {
-        return Err(ValidationError::UnknownTxType(tx.tx_type));
-    }
-    tracing::trace!(tx_type = tx.tx_type, "T13: tx_type recognized");
+    let handler = crate::tx_types::handler_for(tx.tx_type)
+        .ok_or(ValidationError::UnknownTxType(tx.tx_type))?;
+    tracing::trace!(tx_type = tx.tx_type, name = handler.name(), "T13: tx_type recognized");
 
     // U4: Coinbase must have exactly one null input
-    if tx.tx_type == TX_TYPE_COINBASE {
+    if handler.is_coinbase() {
         if tx.inputs.len() != 1 || !tx.inputs[0].prev_output.is_coinbase() {
             return Err(ValidationError::Internal("U4: coinbase must have exactly one null input".into()));
         }
     }
 
     // U10: Non-coinbase must NOT have null inputs
-    if tx.tx_type != TX_TYPE_COINBASE {
+    if !handler.is_coinbase() {
         for input in &tx.inputs {
             if input.prev_output.is_coinbase() {
                 return Err(ValidationError::Internal("U10: non-coinbase tx has null input".into()));
@@ -282,59 +279,36 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
         }
     }
 
-    // U-transfer: Transfer must have at least one output (recipient)
-    if tx.tx_type == TX_TYPE_TRANSFER && tx.outputs.is_empty() {
+    // Type-driven output requirement
+    if handler.requires_outputs() && tx.outputs.is_empty() {
         return Err(ValidationError::TransferMissingRecipient);
     }
 
     // Non-coinbase must have at least one input
-    if tx.tx_type != TX_TYPE_COINBASE && tx.inputs.is_empty() {
+    if !handler.is_coinbase() && tx.inputs.is_empty() {
         return Err(ValidationError::Internal("non-coinbase tx has no inputs".into()));
     }
 
-    // T27: Transfer must have zero checksum
-    if tx.tx_type == TX_TYPE_TRANSFER && tx.checksum != Hash256::ZERO {
-        return Err(ValidationError::TransferWithNonZeroChecksum);
+    // Type-driven checksum rules
+    if handler.requires_zero_checksum() && tx.checksum != Hash256::ZERO {
+        return Err(ValidationError::NonDocumentWithChecksum(tx.tx_type));
     }
-    tracing::trace!("T27: transfer checksum check passed");
-
-    // T28: Notarization must have non-zero checksum (the whole point of a notarization)
-    if tx.tx_type == TX_TYPE_NOTARIZATION && tx.checksum == Hash256::ZERO {
+    if handler.requires_checksum() && tx.checksum == Hash256::ZERO {
         return Err(ValidationError::NotarizationWithZeroChecksum);
     }
-    tracing::trace!("T28: notarization checksum check passed");
+    tracing::trace!("T27/T28: checksum rules passed");
 
-    // T22: encrypted_locator only allowed on notarization
-    if tx.tx_type != TX_TYPE_NOTARIZATION && tx.encrypted_locator.is_some() {
+    // T22: encrypted_locator only allowed when handler permits
+    if !handler.allows_encrypted_locator() && tx.encrypted_locator.is_some() {
         return Err(ValidationError::LocatorOnNonNotarization);
     }
     tracing::trace!("T22: encrypted_locator check passed");
 
-    // T23: external_attestations only allowed on notarization
-    if tx.tx_type != TX_TYPE_NOTARIZATION && !tx.external_attestations.is_empty() {
+    // T23: external_attestations only allowed when handler permits
+    if !handler.allows_external_attestations() && !tx.external_attestations.is_empty() {
         return Err(ValidationError::AttestationsOnNonNotarization);
     }
     tracing::trace!("T23: external_attestations check passed");
-
-    // T21: Key rotation: the new key is now conveyed in outputs[0].address
-    // (previously via the `recipient` field)
-    if tx.tx_type == TX_TYPE_KEY_ROTATION && tx.outputs.is_empty() {
-        return Err(ValidationError::KeyRotationMissingNewKey);
-    }
-    tracing::trace!("T21: key rotation check passed");
-
-    // T27b: Non-document types (key rotation, badge proposal/vote/revocation) must have zero checksum
-    if matches!(
-        tx.tx_type,
-        TX_TYPE_KEY_ROTATION
-            | TX_TYPE_BADGE_PROPOSAL
-            | TX_TYPE_BADGE_VOTE
-            | TX_TYPE_BADGE_REVOCATION
-    ) && tx.checksum != Hash256::ZERO
-    {
-        return Err(ValidationError::NonDocumentWithChecksum(tx.tx_type));
-    }
-    tracing::trace!("T27b: non-document checksum check passed");
 
     // T25: Gateway address wire bytes validation
     // Use NobleAddress (not NoblePublicKey) to accept Bitcoin prefixes 0x80/0x81
@@ -366,8 +340,8 @@ pub fn validate_transaction(
     validate_metadata(&tx.metadata)?;
     tracing::trace!("T8/T9: metadata validation passed");
 
-    // T29/T30: Version metadata validation (only for notarizations)
-    if tx.tx_type == TX_TYPE_NOTARIZATION {
+    // T29/T30: Version metadata validation (only for types with version chains)
+    if crate::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.validates_version_chain()) {
         validate_version_metadata(&tx.metadata)?;
         tracing::trace!("T29/T30: version metadata validation passed");
     }
