@@ -1938,17 +1938,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     candidate.exists().then_some(candidate)
                 });
             if let Some(bin) = faucet_bin {
-                let rpc_url = format!("https://127.0.0.1:{}", config.api.rpc_addr.split(':').last().unwrap_or("8783"));
-                let data_dir = config.storage.data_dir.display().to_string();
+                let rpc_port = config.api.rpc_addr.split(':').last().unwrap_or("8783");
+                let rpc_url = format!("https://127.0.0.1:{rpc_port}");
+                let db_path = config.storage.data_dir.join("faucet.db").display().to_string();
+                let ks_dir = config.storage.data_dir.join("faucet-keystore").display().to_string();
+                let log_path = config.storage.data_dir.join("faucet.log");
+                let log_file = std::fs::File::create(&log_path)
+                    .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+                let log_err = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
                 match tokio::process::Command::new(&bin)
                     .arg("--listen")
                     .arg(format!("0.0.0.0:{faucet_port}"))
                     .arg("--rpc-url")
                     .arg(&rpc_url)
-                    .arg("--data-dir")
-                    .arg(&data_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .arg("--db-path")
+                    .arg(&db_path)
+                    .arg("--keystore-dir")
+                    .arg(&ks_dir)
+                    .arg("--auto-unlock")
+                    .stdout(log_file)
+                    .stderr(log_err)
                     .kill_on_drop(true)
                     .spawn()
                 {

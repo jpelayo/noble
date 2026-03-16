@@ -1593,36 +1593,9 @@ fn format_bytes(bytes: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Resolve the effective data directory.
-/// Priority: noble.toml [storage] data_dir > CLI --data-dir > platform default.
-///
-/// noble.toml is always consulted first because the platform default compiled
-/// into the binary may differ from the Homebrew-configured data directory
-/// (e.g. Linuxbrew uses /home/linuxbrew/.linuxbrew/var/noble/data).
+/// Delegates to the canonical resolver in `noble_core::paths::resolve_data_dir`.
 fn resolve_data_dir(cli_data_dir: &std::path::Path) -> PathBuf {
-    // Always try noble.toml first — it is the canonical source of truth.
-    let config_path = noble_core::paths::platform_config_path();
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if let Ok(table) = content.parse::<toml::Table>() {
-                if let Some(dir) = table
-                    .get("storage")
-                    .and_then(|s| s.as_table())
-                    .and_then(|s| s.get("data_dir"))
-                    .and_then(|d| d.as_str())
-                {
-                    let path = PathBuf::from(dir);
-                    eprintln!(
-                        "Data dir from {}: {}",
-                        config_path.display(),
-                        path.display()
-                    );
-                    return path;
-                }
-            }
-        }
-    }
-
-    cli_data_dir.to_path_buf()
+    noble_core::paths::resolve_data_dir(cli_data_dir)
 }
 
 // ---------------------------------------------------------------------------

@@ -109,6 +109,15 @@ public struct MockAPIService: NobleAPIService {
         )
     }
 
+    public func getFullWalletInfo() async throws -> WalletBalance {
+        await simulateDelay()
+        return WalletBalance(
+            balance: NobleAmount(atomic: 50_000_000),
+            available: NobleAmount(atomic: 50_000_000),
+            pending: .zero
+        )
+    }
+
     public func getBalance(address: String) async throws -> AddressBalance {
         await simulateDelay()
         let addr = NobleAddress(wireHex: address) ?? Self.sampleSender

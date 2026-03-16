@@ -172,10 +172,9 @@ export function init(root, ctx) {
               <tr>
                 <th>Peer</th>
                 <th>Node Name</th>
-                <th>Org Type</th>
+                <th>IP</th>
                 <th>Gov. Class</th>
                 <th>Role</th>
-                <th>PKI</th>
                 <th>Last Seen</th>
               </tr>
             </thead>
@@ -346,7 +345,7 @@ export function init(root, ctx) {
     try {
       const peers = await rpc.call('noble_getPeerMemory');
       if (!peers || peers.length === 0) {
-        peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">No peer identity data available</td></tr>';
+        peersBody.innerHTML = '<tr><td colspan="6" class="empty-state">No peer identity data available</td></tr>';
         return;
       }
       peersBody.innerHTML = peers.map((p, i) => {
@@ -359,13 +358,13 @@ export function init(root, ctx) {
         );
         const roleDisplay = compositeRole ? compositeRole.label.split(' — ')[0] : (p.node_role || '').replace(/([A-Z])/g, ' $1').trim();
         const peerKey = p.identity_key || p.peer_id || '';
+        const ip = (p.host_address || p.last_addr || '').replace(/^\/ip[46]\//, '').replace(/\/.*/, '') || '—';
         return `<tr class="clickable-row" data-idx="${i}">
-          <td class="mono">${truncatePeerId(peerKey)} <button class="btn-copy" data-copy="${esc(peerKey)}" title="Copy identity key">&#128203;</button></td>
+          <td class="mono">${truncatePeerId(peerKey)} <button class="btn-copy" data-copy="${esc(peerKey)}" title="Copy address">&#128203;</button></td>
           <td>${esc(p.node_name)}</td>
-          <td>${orgDisplay}</td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${esc(ip)}</td>
           <td>${govBadge(cls)}</td>
           <td>${roleDisplay}</td>
-          <td><span class="badge-pki-none">N/A</span></td>
           <td>${agoStr}</td>
         </tr>`;
       }).join('');
@@ -397,7 +396,7 @@ export function init(root, ctx) {
       });
     } catch (e) {
       console.error('[identity] peers:', e);
-      peersBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load peer data</td></tr>';
+      peersBody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load peer data</td></tr>';
     }
   }
 

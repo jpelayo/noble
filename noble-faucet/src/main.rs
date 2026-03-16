@@ -102,8 +102,9 @@ struct Cli {
     faucet_address: Option<String>,
 
     /// Path to faucet keystore directory (enables local signing).
-    #[arg(long, default_value = "faucet-keystore")]
-    keystore_dir: PathBuf,
+    /// If omitted, uses `<platform_data_dir>/faucet-keystore`.
+    #[arg(long)]
+    keystore_dir: Option<PathBuf>,
 
     /// Keystore passphrase (overrides NOBLE_FAUCET_PASSPHRASE env).
     #[arg(long)]
@@ -130,8 +131,9 @@ struct Cli {
     daily_cap: u64,
 
     /// Path to SQLite database file.
-    #[arg(long, default_value = "faucet.db")]
-    db_path: PathBuf,
+    /// If omitted, uses `<platform_data_dir>/faucet.db`.
+    #[arg(long)]
+    db_path: Option<PathBuf>,
 
     /// TOTP code for authenticated node RPC access (optional).
     /// The 6-digit code is SHA-256 hashed before sending as a Bearer token.
@@ -149,7 +151,12 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let db = FaucetDb::open(&cli.db_path).expect("Failed to open faucet database");
+    // Resolve paths using the canonical directory resolver (noble.toml → platform default).
+    let base_dir = noble_core::paths::resolve_data_dir(std::path::Path::new(""));
+    let db_path = cli.db_path.unwrap_or_else(|| base_dir.join("faucet.db"));
+    let keystore_dir = cli.keystore_dir.unwrap_or_else(|| base_dir.join("faucet-keystore"));
+
+    let db = FaucetDb::open(&db_path).expect("Failed to open faucet database");
     let rpc = NodeRpcClient::new(&cli.rpc_url, cli.totp_code)
         .expect("Failed to create RPC client (check URL scheme)");
 
@@ -167,7 +174,7 @@ async fn main() {
 
     // Initialize independent faucet wallet (local signing).
     let faucet_wallet = if !passphrase.is_empty() || cli.auto_unlock {
-        match wallet::FaucetWallet::open_or_create(&cli.keystore_dir, &passphrase, 0) {
+        match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, 0) {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
                 Some(w)

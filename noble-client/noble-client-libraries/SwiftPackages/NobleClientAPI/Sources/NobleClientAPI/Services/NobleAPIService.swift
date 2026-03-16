@@ -36,6 +36,9 @@ public protocol NobleAPIService: Sendable {
     /// Fetch wallet state from the node.
     func getWalletInfo() async throws -> WalletInfo
 
+    /// Fetch total wallet balance across all keys (wallet + validator).
+    func getFullWalletInfo() async throws -> WalletBalance
+
     /// Fetch balance for a specific address.
     func getBalance(address: String) async throws -> AddressBalance
 
