@@ -138,15 +138,13 @@ impl KeyStore {
         }
 
         let (secret_key, priv_key) = match scheme_id {
-            SCHEME_ED25519 => {
-                let (sk, _pk) = noble_crypto::ed25519::generate_keypair();
-                let priv_key = NoblePrivateKey::Ed25519(sk.clone());
-                (sk, priv_key)
-            }
             SCHEME_SECP256K1 => {
                 let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
                 let priv_key = NoblePrivateKey::Secp256k1(sk.clone());
                 (sk, priv_key)
+            }
+            SCHEME_ED25519 => {
+                return Err(WalletError::UnsupportedScheme(scheme_id));
             }
             other => return Err(WalletError::UnsupportedScheme(other)),
         };

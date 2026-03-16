@@ -3632,15 +3632,15 @@ impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoVa
 
 /// Try to load a validator key from the unified keystore.
 ///
-/// Checks for SCHEME_VALIDATOR_SECP256K1 first (default for mnemonic-derived keys),
-/// then falls back to SCHEME_VALIDATOR_ED25519 (legacy).
+/// Only loads SCHEME_VALIDATOR_SECP256K1 (mnemonic-derived).
+/// Legacy Ed25519 keys are rejected with a warning.
 fn load_validator_from_keystore(
     keystore: &KeyStore,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
     if !keystore.is_unlocked() {
         return None;
     }
-    // Try secp256k1 first (mnemonic-derived)
+    // secp256k1 — the only supported validator key type
     if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_SECP256K1) {
         let sk = noble_crypto::NoblePrivateKey::Secp256k1(raw);
         let pk = sk.public_key();
@@ -3651,16 +3651,14 @@ fn load_validator_from_keystore(
         );
         return Some((sk, pk));
     }
-    // Then Ed25519 (legacy)
-    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519) {
-        let sk = noble_crypto::NoblePrivateKey::Ed25519(raw);
-        let pk = sk.public_key();
-        tracing::info!(
+    // Reject legacy Ed25519
+    if keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519).is_ok() {
+        tracing::error!(
             task = "config_load",
-            "Validator mode enabled (from unified keystore, legacy Ed25519): {}",
-            pk.to_address()
+            "DEPRECATED: Legacy Ed25519 validator key found in keystore. \
+             This key type is no longer supported. Re-run setup with your \
+             mnemonic to generate a secp256k1 validator key."
         );
-        return Some((sk, pk));
     }
     None
 }
@@ -3784,9 +3782,16 @@ fn load_validator_key(
     let scheme_id = raw[0];
     let key_bytes = &raw[1..33];
     let private_key = match scheme_id {
-        noble_crypto::SCHEME_ED25519 => noble_crypto::NoblePrivateKey::Ed25519(key_bytes.to_vec()),
         noble_crypto::SCHEME_SECP256K1 => {
             noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec())
+        }
+        noble_crypto::SCHEME_ED25519 => {
+            tracing::error!(
+                task = "config_load",
+                "DEPRECATED: validator.key contains an Ed25519 key (scheme 0x01). \
+                 Only secp256k1 is supported. Re-run setup with your mnemonic."
+            );
+            return None;
         }
         _ => {
             tracing::error!(

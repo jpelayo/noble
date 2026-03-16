@@ -945,8 +945,8 @@ fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Er
 
     // Build 33-byte key file: [scheme_id || private_key_bytes].
     let key_bytes = match &private_key {
-        NoblePrivateKey::Ed25519(b) | NoblePrivateKey::Secp256k1(b) => b.clone(),
-        _ => unreachable!("generate_validator_key only produces Ed25519 or Secp256k1"),
+        NoblePrivateKey::Secp256k1(b) => b.clone(),
+        _ => unreachable!("generate_validator_key only produces Secp256k1"),
     };
     let mut raw = Vec::with_capacity(33);
     raw.push(scheme_id);
@@ -1009,8 +1009,11 @@ fn read_validator_pubkey(key_path: &Path) -> Option<String> {
         return None;
     }
     let private_key = match raw[0] {
-        0x01 => NoblePrivateKey::Ed25519(raw[1..].to_vec()),
         0x02 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
+        0x01 => {
+            eprintln!("  WARNING: Legacy Ed25519 validator key found. Re-run setup with your mnemonic.");
+            return None;
+        }
         _ => return None,
     };
     Some(private_key.public_key().to_address())
