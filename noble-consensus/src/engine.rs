@@ -2298,6 +2298,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
         // Sign the coinbase
         let chain_id = test_chain_id();

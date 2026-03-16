@@ -303,6 +303,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
 
         (tx, priv_key, pub_key)

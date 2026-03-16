@@ -692,6 +692,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
+            contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.publisher_sig = priv_key.sign(&msg).unwrap();

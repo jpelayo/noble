@@ -62,6 +62,11 @@ pub struct Transaction {
     /// Gateway node address (wire bytes). If present, the gateway receives 50% of the fee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_address: Option<Vec<u8>>,
+    /// Optional contract/script data (bytecode, parameters, or execution proof).
+    /// Not subject to MAX_METADATA_VALUE_LEN — allows arbitrarily large payloads
+    /// for contract deployment and invocation. Only valid for contract tx types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_data: Option<Vec<u8>>,
 }
 
 // NOTE: The old `SigningPayload` struct was removed — signing now uses
@@ -166,6 +171,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(0x4E4F424C).unwrap();
@@ -330,6 +336,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
         assert!(coinbase.is_coinbase());
 
@@ -360,6 +367,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
         assert_eq!(tx.total_output_value(), 80_000);
     }

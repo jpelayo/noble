@@ -348,6 +348,7 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
         encrypted_locator: None,
         external_attestations: Vec::new(),
         gateway_address: None,
+            contract_data: None,
     };
 
     // Sign the transaction.

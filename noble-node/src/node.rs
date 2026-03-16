@@ -5002,6 +5002,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
         let cb_msg = coinbase.compute_signing_message_for_chain(chain_id).unwrap();
         coinbase.publisher_sig = priv_key.sign(&cb_msg).unwrap();

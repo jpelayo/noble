@@ -76,6 +76,9 @@ pub trait TxTypeHandler: Send + Sync {
     /// Whether BIP-137 signing uses the transfer message format
     /// (recipient + amount) vs the notarization format (checksum).
     fn uses_transfer_bip137_message(&self) -> bool { false }
+
+    /// Whether `contract_data` is allowed on this transaction type.
+    fn allows_contract_data(&self) -> bool { false }
 }
 
 /// Look up the handler for a given `tx_type` byte.

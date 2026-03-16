@@ -169,6 +169,7 @@ impl WireFormat for Transaction {
     /// CBOR map with 9-12 entries (depending on optional fields).
     fn encode_wire(&self, buf: &mut Vec<u8>) {
         let mut field_count: usize = 9;
+        if self.contract_data.is_some() { field_count += 1; }
         if self.encrypted_locator.is_some() { field_count += 1; }
         if !self.external_attestations.is_empty() { field_count += 1; }
         if self.gateway_address.is_some() { field_count += 1; }
@@ -183,6 +184,12 @@ impl WireFormat for Transaction {
         // "checksum"
         cbor::write_text(buf, "checksum");
         self.checksum.encode_wire(buf);
+
+        // "contract_data" — omitted when None
+        if let Some(ref data) = self.contract_data {
+            cbor::write_text(buf, "contract_data");
+            cbor::write_bytes(buf, data);
+        }
 
         // "encrypted_locator" — omitted when None
         if let Some(ref loc) = self.encrypted_locator {
@@ -274,6 +281,7 @@ impl WireFormat for BlockHeader {
 /// Encode a transaction signing payload to frozen wire bytes.
 pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     let mut field_count: usize = 8;
+    if tx.contract_data.is_some() { field_count += 1; }
     if tx.encrypted_locator.is_some() { field_count += 1; }
     if !tx.external_attestations.is_empty() { field_count += 1; }
     if tx.gateway_address.is_some() { field_count += 1; }
@@ -286,6 +294,11 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
 
     cbor::write_text(&mut buf, "checksum");
     tx.checksum.encode_wire(&mut buf);
+
+    if let Some(ref data) = tx.contract_data {
+        cbor::write_text(&mut buf, "contract_data");
+        cbor::write_bytes(&mut buf, data);
+    }
 
     if let Some(ref loc) = tx.encrypted_locator {
         cbor::write_text(&mut buf, "encrypted_locator");
@@ -613,6 +626,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
+            contract_data: None,
         };
         let bytes = coinbase.wire_bytes();
         assert_eq!(bytes[0], 0xA9); // map, 9 pairs
