@@ -45,24 +45,12 @@ export function init(root, ctx) {
     return k.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  // ── Validator name lookup map (pubkey hex → friendly name) ──
-  const validatorNameMap = new Map();
-  function getValidatorDisplayName(pubkeyHex, maxLen) {
-    if (!pubkeyHex) return '—';
-    const name = validatorNameMap.get(pubkeyHex);
+  // ── Name display helpers (names pre-resolved by backend) ──
+  // No client-side name maps — all names come from RPC/WS `node_name`/`validator`/`name` fields.
+  function displayName(name, key, maxLen) {
     if (name) return escapeHtml(name);
-    return truncateHash(pubkeyHex, maxLen || 6);
-  }
-
-  // ── Peer ID → friendly name cache (populated from announce events) ──
-  const peerIdToName = new Map();
-  // ── Deferred peer_connected events: hold until name is known (max 3s) ──
-  const deferredPeerEvents = new Map(); // peer_id → { data, timer }
-  function getPeerDisplayName(peerId) {
-    if (!peerId) return '—';
-    const name = peerIdToName.get(peerId);
-    if (name) return name;
-    return truncateHash(peerId, 6);
+    if (!key) return '—';
+    return truncateHash(key, maxLen || 6);
   }
 
   root.innerHTML = `
@@ -212,6 +200,7 @@ export function init(root, ctx) {
         <span>Accepted Validator Registry</span>
         <div style="display:flex;align-items:center;gap:var(--gap-sm)">
           <span id="cs-policy" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+          <button class="btn btn-secondary btn-sm" id="cs-refresh-validators" style="padding:2px 10px;font-size:var(--font-size-xs)">Refresh</button>
           <button class="btn btn-sm" id="cs-add-validator">+ Add Validator</button>
         </div>
       </div>
@@ -241,6 +230,7 @@ export function init(root, ctx) {
         <span>Network Candidates &mdash; Discovered Peers</span>
         <div style="display:flex;align-items:center;gap:var(--gap-sm)">
           <span id="cs-candidate-count" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+          <button class="btn btn-secondary btn-sm" id="cs-refresh-candidates" style="padding:2px 10px;font-size:var(--font-size-xs)">Refresh</button>
           <button class="btn btn-secondary btn-sm" id="cs-prune-stale">Prune Stale</button>
         </div>
       </div>
@@ -300,8 +290,8 @@ export function init(root, ctx) {
         <!-- Tab: Propose -->
         <div id="badge-tab-propose" class="badge-tab-content" style="display:none">
           <div style="max-width:500px">
-            <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Target Pubkey (hex)</label>
-            <input id="badge-propose-target" type="text" placeholder="33-byte wire pubkey hex" style="width:100%;margin-bottom:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-xs)" spellcheck="false">
+            <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Target Validator</label>
+            <input id="badge-propose-target" type="text" placeholder="nbl1p... address or hex wire bytes" style="width:100%;margin-bottom:var(--gap-sm);font-family:var(--font-mono);font-size:var(--font-size-xs)" spellcheck="false">
 
             <label style="display:block;margin-bottom:var(--gap-xs);font-weight:600;font-size:var(--font-size-sm)">Proposal Type</label>
             <select id="badge-propose-type" class="form-select" style="width:100%;margin-bottom:var(--gap-sm)">
@@ -538,42 +528,42 @@ export function init(root, ctx) {
   function formatActivityMessage(data) {
     // Enriched events carry a pre-formatted message.
     if (data.message && (data.event === 'block_proposed' || data.event === 'vote_broadcast')) return data.message;
-    const vName = (id) => getValidatorDisplayName(id, 8);
+    const vName = (name, id) => displayName(name, id, 8);
     const pName = (id) => truncateHash(id || '', 6);
     switch (data.event) {
       case 'block_committed': {
-        const who = data.proposer_name || vName(data.proposer) || '';
+        const who = data.proposer_name || truncateHash(data.proposer, 8) || '';
         return `Block #${data.height} committed${who ? ` by ${who}` : ''} {${truncateHash(data.hash || '')}} (${data.tx_count} tx)`;
       }
       case 'block_proposed':
         return `Proposed block #${data.height}`;
       case 'block_received': {
-        const from = data.proposer_name || vName(data.proposer) || hashLabel(data.peer_id);
+        const from = data.proposer_name || truncateHash(data.proposer, 8) || hashLabel(data.peer_id);
         return `Block #${data.height} received from ${from}`;
       }
       case 'block_announced':
-        return `Block #${data.height} announced by ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
+        return `Block #${data.height} announced by ${data.node_name || hashLabel(data.peer_id)}`;
       case 'block_requested':
         return `Requested block {${truncateHash(data.hash || '')}}`;
       case 'vote_broadcast':
         return `Vote broadcast R${data.round} \u2192 ${data.candidate_name || hashLabel(data.block_hash)}`;
       case 'vote_received': {
-        const voter = data.voter_name || vName(data.voter_id) || hashLabel(data.voter_id);
+        const voter = data.voter_name || truncateHash(data.voter_id, 8) || hashLabel(data.voter_id);
         const candidate = data.candidate_name || hashLabel(data.candidate_hash);
         return `Vote R${data.round} received from ${voter} \u2192 ${candidate}`;
       }
       case 'peer_connected':
-        return `Peer connected: ${data.node_name || peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} (${data.direction || ''})`;
+        return `Peer connected: ${data.node_name || data.node_name || hashLabel(data.peer_id)} (${data.direction || ''})`;
       case 'peer_disconnected':
-        return `Peer disconnected: ${data.node_name || peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
+        return `Peer disconnected: ${data.node_name || data.node_name || hashLabel(data.peer_id)}`;
       case 'peer_banned':
-        return `Peer banned: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
+        return `Peer banned: ${data.node_name || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
       case 'peer_status':
         return null; // Suppressed — only sync_started/sync_complete are meaningful
       case 'announce_received':
         return `${data.node_name || hashLabel(data.identity)} v${data.software_version || '?'}${data.wants_to_validate ? ' \u2022 validator' : ''}${data.wants_to_vote ? ' \u2022 voter' : ''} \u2014 ${data.connected ? 'connected' : 'via gossip'}`;
       case 'tx_announced':
-        return `Tx {${truncateHash(data.tx_id || '')}} from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
+        return `Tx {${truncateHash(data.tx_id || '')}} from ${data.node_name || hashLabel(data.peer_id)}`;
       case 'sync_started':
         return `Behind by ${data.blocks_behind} block${data.blocks_behind > 1 ? 's' : ''} (height ${data.our_height} \u2192 ${data.peer_height}) \u2014 syncing`;
       case 'sync_progress':
@@ -585,7 +575,7 @@ export function init(root, ctx) {
       case 'evidence_received': {
         const etypes = { vote_equivocation: 'Vote equivocation', double_proposal: 'Double-proposal', invalid_block: 'Invalid block', announce_equivocation: 'Announce equivocation' };
         const etype = etypes[data.type] || data.type;
-        return `${etype} evidence from ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)}`;
+        return `${etype} evidence from ${data.node_name || hashLabel(data.peer_id)}`;
       }
       case 'evidence_published': {
         const etypes = { vote_equivocation: 'Vote equivocation', double_proposal: 'Double-proposal', invalid_block: 'Invalid block', announce_equivocation: 'Announce equivocation' };
@@ -611,7 +601,7 @@ export function init(root, ctx) {
       case 'heartbeat':
         return data.message;
       case 'chain_tip_updated':
-        return `Peer ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} at height ${data.height}`;
+        return `Peer ${data.node_name || hashLabel(data.peer_id)} at height ${data.height}`;
       case 'healing_clue':
         return `Healing clue: ${data.clue} [${data.phase}]`;
       case 'healing_action':
@@ -635,9 +625,9 @@ export function init(root, ctx) {
       case 'checkpoints_activated':
         return `Checkpoints activated at heights ${(data.heights || []).join(', ')}`;
       case 'rejected':
-        return `Connection rejected: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
+        return `Connection rejected: ${data.node_name || hashLabel(data.peer_id)} \u2014 ${data.reason}`;
       case 'score_updated':
-        return `Ban score: ${peerIdToName.get(data.peer_id) || hashLabel(data.peer_id)} \u2192 ${data.ban_score}`;
+        return `Ban score: ${data.node_name || hashLabel(data.peer_id)} \u2192 ${data.ban_score}`;
       default:
         return JSON.stringify(data);
     }
@@ -712,7 +702,7 @@ export function init(root, ctx) {
   // If timeout, emit with whatever is available (hash as last resort).
   function pushPeerEvent(data) {
     const pid = data.peer_id;
-    const name = data.node_name || peerIdToName.get(pid);
+    const name = data.node_name || data.node_name;
     if (name) {
       data.node_name = name;
       pushActivity(data);
@@ -721,7 +711,7 @@ export function init(root, ctx) {
     // No name yet — defer up to 3 s.
     const timer = setTimeout(() => {
       deferredPeerEvents.delete(pid);
-      data.node_name = peerIdToName.get(pid) || '';
+      data.node_name = data.node_name || '';
       pushActivity(data);
     }, 3000);
     deferredPeerEvents.set(pid, { data, timer });
@@ -745,13 +735,13 @@ export function init(root, ctx) {
       // Cache peer names from announce events for display resolution.
       if (data.event === 'announce_received' && data.node_name) {
         if (data.peer_id) {
-          peerIdToName.set(data.peer_id, data.node_name);
+          // Name already in data.node_name from backend — no client-side map needed.
           // Flush any deferred peer_connected event now that we have the name.
           flushDeferredPeer(data.peer_id, data.node_name);
         }
-        // Also populate validatorNameMap (identity_key → name) so vote/block
+        // Name already in data.node_name from backend.
         // events can resolve names immediately without waiting for refreshList().
-        if (data.identity) validatorNameMap.set(data.identity, data.node_name);
+        // (identity → name mapping handled by backend)
       }
       // Events with enriched follow-up messages: push the enriched version only
       // (skip the raw event to avoid duplicate log lines).
@@ -775,11 +765,11 @@ export function init(root, ctx) {
       // Push follow-up context for enriched phase transitions.
       if (data.event === 'phase_change') {
         if (data.phase === 'Reflection' && data.total_votes != null) {
-          const leader = data.leader_name || (data.leader_key ? getValidatorDisplayName(data.leader_key, 8) : hashLabel(data.leader_hash));
+          const leader = data.leader_name || (data.leader_key ? truncateHash(data.leader_key, 8) : hashLabel(data.leader_hash));
           pushActivity({ event: 'consensus_log', message: `Voting results favor ${leader} with ${data.leader_pct ?? 0}% of votes (${data.total_votes} total)` });
         }
         if (data.phase === 'Propagation' && (data.winner_name || data.winner_hash)) {
-          const winner = data.winner_name || (data.winner_key ? getValidatorDisplayName(data.winner_key, 8) : hashLabel(data.winner_hash));
+          const winner = data.winner_name || (data.winner_key ? truncateHash(data.winner_key, 8) : hashLabel(data.winner_hash));
           pushActivity({ event: 'consensus_log', message: `Winning proposer: ${winner}` });
         }
       }
@@ -848,11 +838,11 @@ export function init(root, ctx) {
 
   function seedPeers() {
     // Pre-populate peer names from peer memory BEFORE seeding connections.
-    // Must chain: getPeerInfo needs peerIdToName populated by getPeerMemory.
+    // Must chain: getPeerInfo needs peer memory loaded first for name display.
     rpc.call('noble_getPeerMemory').then(records => {
       if (Array.isArray(records)) {
         for (const r of records) {
-          if (r.peer_id && r.node_name) peerIdToName.set(r.peer_id, r.node_name);
+          // Names from peer memory are now resolved by the backend — no client map.
         }
       }
       // Now that names are populated, seed peer connections.
@@ -862,7 +852,7 @@ export function init(root, ctx) {
         for (const p of peers) {
           if (p.status === 'connected' && !seededPeerIds.has(p.peer_id)) {
             seededPeerIds.add(p.peer_id);
-            pushPeerEvent({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '', node_name: peerIdToName.get(p.peer_id) || '' });
+            pushPeerEvent({ event: 'peer_connected', peer_id: p.peer_id || '', addr: p.addr || '', direction: p.direction || '', node_name: p.node_name || '' });
           }
         }
       }
@@ -990,7 +980,7 @@ export function init(root, ctx) {
       const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';
       talliesBody.innerHTML = result.tallies.map(t => {
         const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
-        const name = t.validator || (t.validator_key && getValidatorDisplayName(t.validator_key, 8)) || truncateHash(t.block_hash, 8);
+        const name = t.validator || truncateHash(t.validator_key || t.block_hash, 8);
         const r2 = t.r2_vote_count ? ` <span style="color:var(--text-muted);font-size:10px">R2: ${t.r2_vote_count}</span>` : '';
         const voteBtn = isManual
           ? `<button class="btn btn-sm cs-inline-vote-btn" data-hash="${t.block_hash}" style="flex-shrink:0;padding:2px 8px;font-size:11px">Vote</button>`
@@ -1372,7 +1362,7 @@ export function init(root, ctx) {
         <span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span>
         <span style="font-size:var(--font-size-xs);color:${statusColor};font-weight:600">${statusLabel}</span>
         ${disambigBadge}
-        ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong title="${cycle.winner}">${getValidatorDisplayName(cycle.winner, 10)}</strong></span>` : ''}
+        ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong title="${cycle.winner}">${escapeHtml(cycle.winner)}</strong></span>` : ''}
         ${timeLabel ? `<span style="${cycle.winner ? '' : 'margin-left:auto;'}font-size:var(--font-size-xs);color:var(--text-muted)">${timeLabel}</span>` : ''}
       `;
       row.appendChild(header);
@@ -1432,7 +1422,7 @@ export function init(root, ctx) {
           // Reflection (R2 / winner)
           if (phase.winner) {
             const icon = phase.disambiguation ? '&#9878;' : '&#10003;';
-            label += `<div style="font-size:0.55rem;opacity:0.85">${icon} ${getValidatorDisplayName(phase.winner, 5)}</div>`;
+            label += `<div style="font-size:0.55rem;opacity:0.85">${icon} ${escapeHtml(phase.winner || '')}</div>`;
 
             if (!participantMap.has(phase.winner)) participantMap.set(phase.winner, { roles: [], cycles: [] });
             participantMap.get(phase.winner).roles.push('won');
@@ -1500,7 +1490,7 @@ export function init(root, ctx) {
 
           const card = document.createElement('div');
           card.style.cssText = `flex:1;min-width:180px;padding:var(--gap-sm);border:1px solid ${borderColor};border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)`;
-          const vName = getValidatorDisplayName(p.validator, 6);
+          const vName = escapeHtml(p.validator || truncateHash(p.block_hash, 6));
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
               <strong>${vName}</strong>
@@ -1547,11 +1537,11 @@ export function init(root, ctx) {
           const witnessDiv = document.createElement('div');
           witnessDiv.style.cssText = 'margin-top:var(--gap-xs);padding:var(--gap-sm);border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)';
           const allVoters = new Map();
-          for (const v of bv.r1_voters || []) allVoters.set(v.validator_key, { name: v.name || getValidatorDisplayName(v.validator_key, 8), r1: true, r2: false });
+          for (const v of bv.r1_voters || []) allVoters.set(v.validator_key, { name: v.name || truncateHash(v.validator_key, 8), r1: true, r2: false });
           for (const v of bv.r2_voters || []) {
             const existing = allVoters.get(v.validator_key);
             if (existing) { existing.r2 = true; }
-            else allVoters.set(v.validator_key, { name: v.name || getValidatorDisplayName(v.validator_key, 8), r1: false, r2: true });
+            else allVoters.set(v.validator_key, { name: v.name || truncateHash(v.validator_key, 8), r1: false, r2: true });
           }
           const voterList = [...allVoters.values()].map(v => {
             const rounds = [v.r1 ? 'R1' : '', v.r2 ? 'R2' : ''].filter(Boolean).join('+');
@@ -1588,10 +1578,10 @@ export function init(root, ctx) {
             const proposed = data.roles.filter(r => r === 'proposed').length;
             const lost = proposed - won;
             const dotColor = won > 0 ? 'var(--success)' : 'var(--warning)';
-            const displayName = getValidatorDisplayName(pubkey, 8);
+            const dn = escapeHtml(pubkey);
             return `<div style="display:flex;align-items:center;gap:var(--gap-xs);padding:3px 8px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)" title="${pubkey}">
               <span style="width:6px;height:6px;border-radius:50%;background:${dotColor}"></span>
-              <strong>${displayName}</strong>
+              <strong>${dn}</strong>
               <span style="color:var(--text-muted)">${proposed}P</span>
               ${won > 0 ? `<span style="color:var(--success)">${won}W</span>` : ''}
               ${lost > 0 ? `<span style="color:var(--error)">${lost}L</span>` : ''}
@@ -1768,31 +1758,8 @@ export function init(root, ctx) {
       // - Cycle history proposals/votes store hex keys
       // Both must resolve to the same friendly name.
 
-      // Layer 1: peer memory (identity_key → node_name from NodeAnnounce).
-      if (Array.isArray(peerMemory)) {
-        for (const r of peerMemory) {
-          if (r.identity_key && r.node_name) {
-            validatorNameMap.set(r.identity_key, r.node_name);
-            // Also store hex form if key is bech32.
-            if (r.identity_key_hex) validatorNameMap.set(r.identity_key_hex, r.node_name);
-          }
-        }
-      }
-      // Layer 2: self identity (overrides peer memory for own key).
-      if (selfKey && identity.node_name) {
-        validatorNameMap.set(selfKey, identity.node_name);
-        if (nodeInfo.validator_pubkey) validatorNameMap.set(nodeInfo.validator_pubkey, identity.node_name);
-      }
-      // Layer 3: validator list names (highest priority — operator-set).
-      for (const v of validators) {
-        const keyHex = valKey(v.public_key);
-        const name = v.name || (selfKey && keyHex === selfKey ? (identity.node_name || 'This Node') : null);
-        if (name) {
-          validatorNameMap.set(keyHex, name);
-          // Also store the hex wire bytes form from public_key_hex.
-          if (v.public_key_hex) validatorNameMap.set(v.public_key_hex, name);
-        }
-      }
+      // Name resolution is now handled entirely by the backend.
+      // No client-side name maps needed.
 
       // Display chain identity in timeline header (only when blockchain exists)
       const chainBadge = root.querySelector('#cs-chain-badge');
@@ -2774,6 +2741,27 @@ export function init(root, ctx) {
   loadVotingStrategy().then(() => loadValidators()).then(() => { loadTimeline(); loadVoteTallies(); });
   loadCycle();
   loadCandidates();
+
+  // Refresh buttons + 30s auto-refresh for validator registry and candidates.
+  const refreshValBtn = root.querySelector('#cs-refresh-validators');
+  if (refreshValBtn) {
+    refreshValBtn.addEventListener('click', () => {
+      refreshValBtn.textContent = 'Refreshing...';
+      refreshValBtn.disabled = true;
+      loadValidators().finally(() => { refreshValBtn.textContent = 'Refresh'; refreshValBtn.disabled = false; });
+    });
+  }
+  const refreshCandBtn = root.querySelector('#cs-refresh-candidates');
+  if (refreshCandBtn) {
+    refreshCandBtn.addEventListener('click', () => {
+      refreshCandBtn.textContent = 'Refreshing...';
+      refreshCandBtn.disabled = true;
+      loadCandidates().finally(() => { refreshCandBtn.textContent = 'Refresh'; refreshCandBtn.disabled = false; });
+    });
+  }
+  const valInterval = setInterval(loadValidators, 30_000);
+  const candInterval = setInterval(loadCandidates, 30_000);
+  unsubs.push(() => { clearInterval(valInterval); clearInterval(candInterval); });
 
   return {
     destroy() {

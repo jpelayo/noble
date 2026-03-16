@@ -141,7 +141,10 @@ export function init(root, ctx) {
     <div class="panel">
       <div class="panel-header">
         <span>Faucet</span>
-        <span id="s-faucet-badge" class="badge" style="background:var(--text-muted)">Checking...</span>
+        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+          <span id="s-faucet-badge" class="badge" style="background:var(--text-muted)">Checking...</span>
+          <button id="s-faucet-toggle" class="btn btn-sm" style="padding:2px 10px;font-size:var(--font-size-xs)">Toggle</button>
+        </div>
       </div>
       <div class="panel-body">
         <dl class="detail-grid" id="s-faucet-info">
@@ -739,22 +742,31 @@ export function init(root, ctx) {
     vkeyBadge.style.background = '';
 
     const pk = info.pubkey_hex || '';
-    const pkDisplay = pk.length > 16 ? pk.slice(0, 8) + '…' + pk.slice(-8) : pk;
+    const pkBech32 = info.pubkey_display || '';
+    const pkHexShort = pk.length > 16 ? pk.slice(0, 8) + '…' + pk.slice(-8) : pk;
+    const pkBech32Short = pkBech32.length > 24 ? pkBech32.slice(0, 12) + '…' + pkBech32.slice(-8) : pkBech32;
 
     vkeyDetails.innerHTML = `
-      <dt>Public Key</dt>
+      <dt>Public Key (hex wire bytes)</dt>
       <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
-        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${pkDisplay}</code>
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${pkHexShort}</code>
         ${pk ? `<button class="btn-copy-vkey btn-sm" data-pk="${pk}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
+      </dd>
+      <dt>Public Key (bech32m)</dt>
+      <dd style="display:flex;align-items:center;gap:var(--gap-sm)">
+        <code style="font-family:var(--font-mono);font-size:var(--font-size-xs)">${pkBech32Short}</code>
+        ${pkBech32 ? `<button class="btn-copy-vkey btn-sm" data-pk="${pkBech32}" style="padding:2px 8px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Copy</button>` : ''}
       </dd>
       <dt>Scheme</dt><dd>${info.scheme || '--'}</dd>
       <dt>Key Path</dt><dd style="font-size:var(--font-size-xs);word-break:break-all">${info.key_path || '--'}</dd>
     `;
-    vkeyDetails.querySelector('.btn-copy-vkey')?.addEventListener('click', (e) => {
-      const full = e.currentTarget.dataset.pk;
-      navigator.clipboard?.writeText(full).catch(() => {});
-      e.currentTarget.textContent = 'Copied!';
-      setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+    vkeyDetails.querySelectorAll('.btn-copy-vkey').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const full = e.currentTarget.dataset.pk;
+        navigator.clipboard?.writeText(full).catch(() => {});
+        e.currentTarget.textContent = 'Copied!';
+        setTimeout(() => { e.currentTarget.textContent = 'Copy'; }, 2000);
+      });
     });
   }
 
@@ -1251,12 +1263,35 @@ export function init(root, ctx) {
           setTimeout(() => { btn.textContent = '\u{1F4CB}'; }, 1200);
         });
       });
+      faucetToggle.textContent = 'Disable';
+      faucetToggle.className = 'btn btn-secondary btn-sm';
     } catch (_) {
-      faucetBadge.textContent = 'Not detected';
+      faucetBadge.textContent = 'Off';
       faucetBadge.style.background = 'var(--text-muted)';
-      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">No faucet running on port 8786. Start noble-faucet to enable token distribution.</dt>`;
+      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">Faucet is not running. Click "Enable" to start distributing tokens.</dt>`;
+      faucetToggle.textContent = 'Enable';
+      faucetToggle.className = 'btn btn-primary btn-sm';
     }
   }
+
+  // Faucet toggle handler
+  const faucetToggle = root.querySelector('#s-faucet-toggle');
+  faucetToggle.addEventListener('click', async () => {
+    const isRunning = faucetBadge.textContent === 'Running';
+    const newValue = isRunning ? 'false' : 'true';
+    faucetToggle.disabled = true;
+    faucetToggle.textContent = isRunning ? 'Stopping...' : 'Starting...';
+    try {
+      await rpc.call('noble_setConfigValue', { section: 'faucet', key: 'server_enabled', value: newValue });
+      // Give the node a moment to start/stop the faucet process.
+      await new Promise(r => setTimeout(r, 2000));
+      await loadFaucet();
+    } catch (e) {
+      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--error)">${e.message || e}</dt>`;
+    } finally {
+      faucetToggle.disabled = false;
+    }
+  });
 
   async function loadSettings() {
     // Load TLS cert, encryption status, seeds, wallet keys, reward address, and faucet in parallel.

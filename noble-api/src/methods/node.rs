@@ -197,6 +197,16 @@ pub trait NodeApi {
         path: String,
     ) -> Result<CheckDataDirResponse, ErrorObjectOwned>;
 
+    /// List directory contents for the folder browser.
+    ///
+    /// Returns directories and basic info for a given path.
+    /// If path is empty, returns the filesystem root(s).
+    #[method(name = "listDirectory")]
+    async fn list_directory(
+        &self,
+        path: String,
+    ) -> Result<ListDirectoryResponse, ErrorObjectOwned>;
+
     /// Get the current at-rest encryption status.
     ///
     /// Returns the encryption mode ("automatic" or "manual"), whether the
@@ -321,8 +331,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_capacity_bytes,
             data_dir: data_dir_str,
             config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
-            validator_pubkey: self.validator_pubkey.clone(),
-            validator_pubkey_display: self.validator_pubkey.as_ref().and_then(|hex_str| {
+            validator_pubkey: self.validator_pubkey.read().clone(),
+            validator_pubkey_display: self.validator_pubkey.read().as_ref().and_then(|hex_str| {
                 let bytes = hex::decode(hex_str).ok()?;
                 noble_crypto::noble_addr::encode_wire_bytes(&bytes)
             }),
@@ -726,6 +736,24 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             None
         };
 
+        // Hot-reload ApiState.validator_pubkey so resolve_node_name can match
+        // self-votes immediately (without requiring a node restart).
+        if let Some(ref pubkey_addr) = validator_pubkey {
+            if let Ok(pk) = noble_crypto::noble_addr::decode(pubkey_addr) {
+                let wire_hex = hex::encode(pk.to_wire_bytes());
+                *self.validator_pubkey.write() = Some(wire_hex);
+                *self.validator_scheme.write() = Some("secp256k1".to_string());
+                if let Some(ref identity_path) = self.identity_path {
+                    if let Some(data_dir) = identity_path.parent() {
+                        *self.validator_key_path.write() = Some(
+                            data_dir.join("validator.key").display().to_string()
+                        );
+                    }
+                }
+                tracing::info!(task = "setup", "Hot-reloaded validator_pubkey in ApiState");
+            }
+        }
+
         // Self-register in the validator registry so the node can propose/vote
         // immediately without requiring a restart.
         if wants_to_validate {
@@ -857,11 +885,17 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     }
 
     async fn get_validator_key_info(&self) -> Result<ValidatorKeyInfoResponse, ErrorObjectOwned> {
+        let vk = self.validator_pubkey.read().clone();
+        let pubkey_display = vk.as_ref().and_then(|hex_str| {
+            let bytes = hex::decode(hex_str).ok()?;
+            noble_crypto::noble_addr::encode_wire_bytes(&bytes)
+        });
         Ok(ValidatorKeyInfoResponse {
-            enabled: self.validator_pubkey.is_some(),
-            pubkey_hex: self.validator_pubkey.clone(),
-            scheme: self.validator_scheme.clone(),
-            key_path: self.validator_key_path.clone(),
+            enabled: vk.is_some(),
+            pubkey_hex: vk,
+            pubkey_display,
+            scheme: self.validator_scheme.read().clone(),
+            key_path: self.validator_key_path.read().clone(),
         })
     }
 
@@ -990,6 +1024,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("consensus", "confirmation_strategy"),
             ("consensus", "voting_preferred_validator"),
             ("consensus", "voting_subset"),
+            ("faucet", "server_enabled"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {
@@ -1131,6 +1166,74 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             writable,
             available_bytes,
             error,
+        })
+    }
+
+    async fn list_directory(
+        &self,
+        path: String,
+    ) -> Result<ListDirectoryResponse, ErrorObjectOwned> {
+        let effective: String = if path.trim().is_empty() { "/".to_string() } else { path };
+        let p = std::path::PathBuf::from(&effective);
+
+        if !p.exists() {
+            return Ok(ListDirectoryResponse {
+                current: effective,
+                parent: p.parent().map(|pp| pp.display().to_string()).unwrap_or_default(),
+                entries: vec![],
+                error: Some("Path does not exist".into()),
+            });
+        }
+        if !p.is_dir() {
+            return Ok(ListDirectoryResponse {
+                current: effective,
+                parent: p.parent().map(|pp| pp.display().to_string()).unwrap_or_default(),
+                entries: vec![],
+                error: Some("Path is not a directory".into()),
+            });
+        }
+
+        let parent = p.parent().map(|pp| pp.display().to_string()).unwrap_or_default();
+        let mut entries = Vec::new();
+
+        match std::fs::read_dir(p) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    let ft = entry.file_type();
+                    let is_dir = ft.as_ref().map(|f| f.is_dir()).unwrap_or(false);
+                    if !is_dir { continue; } // Only show directories.
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') { continue; } // Skip hidden dirs.
+                    let full_path = entry.path().display().to_string();
+                    // Quick writability test.
+                    let writable = {
+                        let test = entry.path().join(".noble_write_test");
+                        if std::fs::write(&test, b"t").is_ok() {
+                            let _ = std::fs::remove_file(&test);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    entries.push(DirectoryEntry { name, path: full_path, is_dir, writable });
+                }
+                entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            }
+            Err(e) => {
+                return Ok(ListDirectoryResponse {
+                    current: effective,
+                    parent,
+                    entries: vec![],
+                    error: Some(format!("Cannot read directory: {e}")),
+                });
+            }
+        }
+
+        Ok(ListDirectoryResponse {
+            current: effective,
+            parent,
+            entries,
+            error: None,
         })
     }
 

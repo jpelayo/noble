@@ -90,6 +90,8 @@ pub struct PeerInfoEntry {
     pub proposed_height: Option<u64>,
     /// Noble identity key wire bytes (from NodeAnnounce). Links PeerId to validator key.
     pub identity_key: Option<Vec<u8>>,
+    /// Node name from the most recent NodeAnnounce.
+    pub node_name: Option<String>,
     /// Round-trip latency in milliseconds (from libp2p ping). `None` if not yet measured.
     pub latency_ms: Option<u64>,
     /// Last ban reason category + subject (from most recent misbehavior).
@@ -245,13 +247,14 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub peer_id: String,
 
     /// Hex-encoded wire pubkey of the validator key (if the node is in validator mode).
-    pub validator_pubkey: Option<String>,
+    /// Wrapped in RwLock so `setNodeIdentity` can hot-reload after setup.
+    pub validator_pubkey: parking_lot::RwLock<Option<String>>,
 
     /// Signature scheme of the validator key: `"ed25519"` or `"secp256k1"` (if enabled).
-    pub validator_scheme: Option<String>,
+    pub validator_scheme: parking_lot::RwLock<Option<String>>,
 
     /// File path used to load the validator key (if enabled).
-    pub validator_key_path: Option<String>,
+    pub validator_key_path: parking_lot::RwLock<Option<String>>,
 
     /// Path to the data directory (for storage_bytes calculation).
     pub data_dir: Option<std::path::PathBuf>,
@@ -395,7 +398,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
             wire,
             &registry,
             &*storage,
-            self.validator_pubkey.as_deref(),
+            self.validator_pubkey.read().as_deref(),
             &self_name,
         ).0
     }
@@ -411,7 +414,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
             wire,
             &registry,
             &*storage,
-            self.validator_pubkey.as_deref(),
+            self.validator_pubkey.read().as_deref(),
             &self_name,
         );
         if resolved { Some(name) } else { None }

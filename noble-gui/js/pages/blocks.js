@@ -117,7 +117,7 @@ export function init(root, ctx) {
           <td>${formatNumber(b.height)}</td>
           <td class="mono">${truncateHash(b.hash)}</td>
           <td>${b.tx_count}</td>
-          <td class="mono">${truncateHash(b.validator_id, 12)}</td>
+          <td>${b.validator_name || `<span class="mono">${truncateHash(b.validator_id, 12)}</span>`}</td>
           <td>${timeAgo(b.timestamp)}</td>
         `;
         tr.addEventListener('click', () => { location.hash = `#/block/${b.height}`; });

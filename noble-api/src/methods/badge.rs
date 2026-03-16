@@ -90,15 +90,21 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
     }
 
     async fn get_active_proposals(&self) -> Result<Vec<BadgeProposalResponse>, ErrorObjectOwned> {
-        let engine = self.consensus.read();
-        let proposals = engine.badge_proposals();
-        let total_eligible = engine.badge_store().count_active() as u32;
+        let raw: Vec<(String, noble_consensus::BadgeProposal, u32)> = {
+            let engine = self.consensus.read();
+            let proposals = engine.badge_proposals();
+            let total_eligible = engine.badge_store().count_active() as u32;
+            proposals.iter()
+                .filter(|(_, p)| p.status == "active")
+                .map(|(hash, p)| (hash.clone(), p.clone(), total_eligible))
+                .collect()
+        };
 
-        let mut result: Vec<BadgeProposalResponse> = proposals
-            .iter()
-            .filter(|(_, p)| p.status == "active")
-            .map(|(hash, p)| proposal_to_response(hash, p, total_eligible))
-            .collect();
+        let mut result: Vec<BadgeProposalResponse> = raw.iter().map(|(hash, p, te)| {
+            let tn = self.resolve_friendly_name(&p.target_pubkey);
+            let pn = self.resolve_friendly_name(&p.proposer_pubkey);
+            proposal_to_response(hash, p, *te, tn, pn)
+        }).collect();
 
         result.sort_by(|a, b| a.created_at_cycle.cmp(&b.created_at_cycle));
         Ok(result)
@@ -108,15 +114,22 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
         &self,
         limit: Option<u32>,
     ) -> Result<Vec<BadgeProposalResponse>, ErrorObjectOwned> {
-        let engine = self.consensus.read();
-        let proposals = engine.badge_proposals();
-        let total_eligible = engine.badge_store().count_active() as u32;
         let max = limit.unwrap_or(50) as usize;
+        let raw: Vec<(String, noble_consensus::BadgeProposal, u32)> = {
+            let engine = self.consensus.read();
+            let proposals = engine.badge_proposals();
+            let total_eligible = engine.badge_store().count_active() as u32;
+            proposals.iter()
+                .filter(|(_, p)| p.status != "active")
+                .map(|(hash, p)| (hash.clone(), p.clone(), total_eligible))
+                .collect()
+        };
 
-        let mut result: Vec<BadgeProposalResponse> = proposals
-            .iter()
-            .filter(|(_, p)| p.status != "active")
-            .map(|(hash, p)| proposal_to_response(hash, p, total_eligible))
+        let mut result: Vec<BadgeProposalResponse> = raw.iter().map(|(hash, p, te)| {
+            let tn = self.resolve_friendly_name(&p.target_pubkey);
+            let pn = self.resolve_friendly_name(&p.proposer_pubkey);
+            proposal_to_response(hash, p, *te, tn, pn)
+        })
             .collect();
 
         result.sort_by(|a, b| b.created_at_cycle.cmp(&a.created_at_cycle));
@@ -128,7 +141,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
         let engine = self.consensus.read();
         let store = engine.badge_store();
 
-        if let Some(ref pubkey_hex) = self.validator_pubkey {
+        if let Some(ref pubkey_hex) = *self.validator_pubkey.read() {
             let wire =
                 hex::decode(pubkey_hex).map_err(|_| ApiError::Internal("bad pubkey".into()))?;
             if let Some(badge) = store.get_badge(&wire) {
@@ -399,13 +412,18 @@ fn proposal_to_response(
     hash: &str,
     p: &noble_consensus::BadgeProposal,
     total_eligible: u32,
+    target_name: Option<String>,
+    proposer_name: Option<String>,
 ) -> BadgeProposalResponse {
     BadgeProposalResponse {
         proposal_hash: hash.to_string(),
         proposal_type: format!("{:?}", p.proposal_type).to_lowercase(),
-        target_pubkey: hex::encode(&p.target_pubkey),
-        target_name: None,
-        proposer_pubkey: hex::encode(&p.proposer_pubkey),
+        target_pubkey: noble_crypto::noble_addr::encode_wire_bytes(&p.target_pubkey)
+            .unwrap_or_else(|| hex::encode(&p.target_pubkey)),
+        target_name,
+        proposer_pubkey: noble_crypto::noble_addr::encode_wire_bytes(&p.proposer_pubkey)
+            .unwrap_or_else(|| hex::encode(&p.proposer_pubkey)),
+        proposer_name,
         reason: p.reason.as_ref().map(|r| format!("{:?}", r)),
         created_at_cycle: p.created_at_cycle,
         expires_at_cycle: p.expires_at_cycle,

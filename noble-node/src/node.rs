@@ -1673,9 +1673,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             gui_port,
             tls_plaintext_mode,
             peer_id: peer_id_str,
-            validator_pubkey: validator_pubkey_str,
-            validator_scheme: validator_scheme_str,
-            validator_key_path: validator_key_path_str,
+            validator_pubkey: parking_lot::RwLock::new(validator_pubkey_str),
+            validator_scheme: parking_lot::RwLock::new(validator_scheme_str),
+            validator_key_path: parking_lot::RwLock::new(validator_key_path_str),
             data_dir: Some(config.storage.data_dir.clone()),
             pruning_mode: config.storage.pruning_mode.clone(),
             keep_blocks: config.storage.keep_blocks,
@@ -1924,6 +1924,50 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cycle_phase_tx.clone(),
             metrics.clone(),
         );
+
+        // --- Start embedded faucet process if enabled ---
+        let mut _faucet_child: Option<tokio::process::Child> = None;
+        if self.faucet_config.server_enabled {
+            let faucet_port = self.faucet_config.server_port;
+            // Find noble-faucet binary next to noble-node.
+            let faucet_bin = std::env::current_exe()
+                .ok()
+                .and_then(|p| {
+                    let dir = p.parent()?;
+                    let candidate = dir.join("noble-faucet");
+                    candidate.exists().then_some(candidate)
+                });
+            if let Some(bin) = faucet_bin {
+                let rpc_url = format!("https://127.0.0.1:{}", config.api.rpc_addr.split(':').last().unwrap_or("8783"));
+                let data_dir = config.storage.data_dir.display().to_string();
+                match tokio::process::Command::new(&bin)
+                    .arg("--listen")
+                    .arg(format!("0.0.0.0:{faucet_port}"))
+                    .arg("--rpc-url")
+                    .arg(&rpc_url)
+                    .arg("--data-dir")
+                    .arg(&data_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(child) => {
+                        tracing::info!(
+                            task = "faucet",
+                            "Faucet server started on port {faucet_port} (PID {})",
+                            child.id().unwrap_or(0)
+                        );
+                        _faucet_child = Some(child);
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "faucet", "Failed to start faucet: {e}");
+                    }
+                }
+            } else {
+                tracing::info!(task = "faucet", "noble-faucet binary not found — faucet disabled");
+            }
+        }
 
         tracing::info!(
             task = "node_startup",
@@ -2277,6 +2321,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             chain_tip_hash: cthash,
                             proposed_height: None,
                             identity_key: None, // set when NodeAnnounce received
+                            node_name: None, // set when NodeAnnounce received
                             latency_ms: None,
                             last_ban_reason: None,
                             chain_id: None, // set when NodeAnnounce received
@@ -2431,9 +2476,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         entry.last_ban_reason = Some((cat_name, last_reason.clone()));
                     }
                 }
+                let su_name = self.peer_info.read().get(&hex_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
                 let _ = peer_update_tx.send(serde_json::json!({
                     "event": "score_updated",
                     "peer_id": hex_pid,
+                    "node_name": su_name,
                     "ban_score": ban_score,
                     "categories": categories,
                 }));
@@ -2492,18 +2539,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut engine = self.consensus.write();
                     engine.set_peer_count(new_count);
                 }
-                {
+                let ban_name = {
                     let mut info = self.peer_info.write();
+                    let name = info.get(&hex_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
                     info.remove(&hex_pid);
-                }
+                    name
+                };
                 let _ = peer_update_tx.send(serde_json::json!({
                     "event": "banned",
                     "peer_id": hex_pid,
+                    "node_name": ban_name,
                     "reason": reason,
                 }));
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "peer_banned",
                     "peer_id": hex_pid,
+                    "node_name": ban_name,
                     "reason": reason,
                 }));
                 // Notify healing manager — PeerBanned removes the peer from
@@ -2515,10 +2566,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
             }
             NetworkEvent::TransactionAnnounced { tx_id, peer_id } => {
+                let hex_pid = hex::encode(&peer_id);
+                let tx_peer_name = self.peer_info.read().get(&hex_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "tx_announced",
                     "tx_id": hex::encode(tx_id),
-                    "peer_id": hex::encode(peer_id),
+                    "peer_id": hex_pid,
+                    "node_name": tx_peer_name,
                 }));
                 let _ = new_tx_tx.send(serde_json::json!({
                     "tx_id": hex::encode(tx_id),
@@ -2578,6 +2632,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
                         entry.identity_key = Some(identity_wire.clone());
+                        if !announce.node_name.is_empty() {
+                            entry.node_name = Some(announce.node_name.clone());
+                        }
                         // chain_id already set at the top of NodeAnnounceReceived handler.
                         if announce.proposed_height.is_some() {
                             entry.proposed_height = announce.proposed_height;
@@ -2636,7 +2693,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let _ = cycle_phase_tx.send(serde_json::json!({
                     "event": "announce_received",
                     "node_name": announce.node_name,
-                    "identity": hex::encode(&identity_wire),
+                    "identity": noble_crypto::noble_addr::encode_wire_bytes(&identity_wire)
+                        .unwrap_or_else(|| hex::encode(&identity_wire)),
                     "peer_id": hex::encode(&peer_id),
                     "wants_to_validate": announce.wants_to_validate,
                     "wants_to_vote": announce.wants_to_vote,
@@ -2707,10 +2765,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 };
                 self.consensus.write().reputation_mut().record_misbehavior(&misbehaver_wire);
                 // GUI event.
+                let ev_pid = hex::encode(&peer_id);
+                let ev_name = self.peer_info.read().get(&ev_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
                 if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "evidence_received",
                     "type": evidence_type,
-                    "peer_id": hex::encode(&peer_id),
+                    "peer_id": ev_pid,
+                    "node_name": ev_name,
                     "evidence_hash": hex::encode(evidence_hash.as_bytes()),
                 })) {
                     tracing::debug!(task = "broadcast", "evidence_received event dropped (no subscribers): {e}");
@@ -2721,9 +2782,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 height,
                 hash,
             } => {
+                let ba_pid = hex::encode(&peer_id);
+                let ba_name = self.peer_info.read().get(&ba_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
                 if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "block_announced",
-                    "peer_id": hex::encode(peer_id),
+                    "peer_id": ba_pid,
+                    "node_name": ba_name,
                     "height": height,
                     "hash": hex::encode(hash),
                 })) {
@@ -2785,6 +2849,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 if let Err(e) = peer_update_tx.send(serde_json::json!({
                     "event": "chain_tip_updated",
                     "peer_id": hex_pid,
+                    "node_name": self.peer_info.read().get(&hex_pid).and_then(|e| e.node_name.clone()).unwrap_or_default(),
                     "height": height,
                     "tip_hash": hex::encode(tip_hash),
                 })) {

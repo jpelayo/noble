@@ -29,36 +29,8 @@ export function init(root, ctx) {
 
       root.querySelector('#block-loading')?.remove();
 
-      // Build validator name lookup (same pattern as consensus.js validatorNameMap)
-      const nameMap = new Map();
-      if (Array.isArray(peerMemory)) {
-        for (const r of peerMemory) {
-          if (r.identity_key && r.node_name) nameMap.set(r.identity_key, r.node_name);
-        }
-      }
-      const selfDisplay = nodeInfo.validator_pubkey_display || nodeInfo.validator_pubkey;
-      if (selfDisplay && identity.node_name) {
-        nameMap.set(selfDisplay, identity.node_name);
-      }
-
-      // Also index vote witnesses by hex key (votes use hex, nameMap uses bech32).
-      if (votes) {
-        for (const v of [...(votes.r1_voters || []), ...(votes.r2_voters || [])]) {
-          if (v.validator_key && v.name && !nameMap.has(v.validator_key)) {
-            nameMap.set(v.validator_key, v.name);
-          }
-        }
-      }
-
-      /** Resolve a validator key to a friendly name. */
-      function resolveName(key, voteEntry) {
-        if (voteEntry?.name) return voteEntry.name;
-        if (nameMap.has(key)) return nameMap.get(key);
-        return null;
-      }
-
-      // Resolve validator friendly name
-      const validatorName = resolveName(block.validator_id, resolveVoterEntry(block.validator_id, votes));
+      // Names pre-resolved by backend — no client-side name maps.
+      const validatorName = block.validator_name;
       const validatorDisplay = validatorName
         ? `<strong>${esc(validatorName)}</strong> <span class="mono" style="opacity:0.5">${truncateHash(block.validator_id, 12)}</span>`
         : `<span class="mono">${truncateHash(block.validator_id, 16)}</span>`;
@@ -116,7 +88,7 @@ export function init(root, ctx) {
           const roundLabel = inR2
             ? '<span class="badge consensus-r1">R1</span> <span class="badge consensus-r2">R2</span>'
             : '<span class="badge consensus-r1">R1</span>';
-          const name = resolveName(v.validator_key, v) || truncateHash(v.validator_key, 6);
+          const name = v.name || truncateHash(v.validator_key, 6);
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${roundLabel}</td>
@@ -130,7 +102,7 @@ export function init(root, ctx) {
         votes.r2_voters
           .filter(v => !r1Keys.has(v.validator_key))
           .forEach(v => {
-            const name = resolveName(v.validator_key, v) || truncateHash(v.validator_key, 6);
+            const name = v.name || truncateHash(v.validator_key, 6);
             const tr = document.createElement('tr');
             tr.innerHTML = `
               <td><span class="badge consensus-r2">R2</span></td>
@@ -202,13 +174,6 @@ export function init(root, ctx) {
 
   load();
   return { destroy() {} };
-}
-
-/** Find the voter entry matching a validator key from votes data. */
-function resolveVoterEntry(validatorId, votes) {
-  if (!votes) return null;
-  const all = [...votes.r1_voters, ...votes.r2_voters];
-  return all.find(v => v.validator_key === validatorId) || null;
 }
 
 /** Escape HTML special characters to prevent XSS. */

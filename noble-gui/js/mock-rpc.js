@@ -205,6 +205,7 @@ function makeTransaction(seed, timestamp) {
     inputs,
     outputs,
     signer: signerHex,
+    signer_name: null, // populated by backend name resolver in production
     publisher_sig: sigEnv, // kept for backward compat with legacy GUI paths
     additional_sigs: seed % 4 === 0 ? [makeSignatureEnvelope(seed + 1000)] : [],
     metadata,
@@ -225,6 +226,7 @@ function makeBlockHeader(height, prevHash, txCount, timestamp, validatorSeed) {
     height,
     tx_count: txCount,
     validator_id: makePublicKey(validatorSeed),
+    validator_name: 'Mock Validator',
     validator_sig: makeSignatureEnvelope(validatorSeed + height),
   };
 }
@@ -581,6 +583,7 @@ export class MockRpcClient {
           timestamp: b.header.timestamp,
           tx_count: b.header.tx_count,
           validator_id: b.header.validator_id,
+          validator_name: 'Mock Validator',
           cycle: epoch ? Math.floor((b.header.timestamp - epoch) / 1200) : null,
         }));
       }

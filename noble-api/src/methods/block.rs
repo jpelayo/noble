@@ -60,14 +60,18 @@ pub trait BlockApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S>> {
     async fn get_latest_block(&self) -> Result<BlockResponse, ErrorObjectOwned> {
-        let storage = self.storage.read();
-        let tip = storage
-            .get_chain_tip()
-            .map_err(ApiError::from)?
-            .ok_or_else(|| ApiError::BlockNotFound("chain is empty".into()))?;
-
-        let block = storage.get_block(&tip.block_hash).map_err(ApiError::from)?;
-        Ok(block_to_response(&block, &tip.block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed)))
+        let (block, block_hash, chain_id) = {
+            let storage = self.storage.read();
+            let tip = storage
+                .get_chain_tip()
+                .map_err(ApiError::from)?
+                .ok_or_else(|| ApiError::BlockNotFound("chain is empty".into()))?;
+            let block = storage.get_block(&tip.block_hash).map_err(ApiError::from)?;
+            (block, tip.block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed))
+        }; // storage lock dropped
+        let mut resp = block_to_response(&block, &block_hash, chain_id);
+        resp.validator_name = self.resolve_friendly_name(&block.header.validator_id.to_wire_bytes());
+        Ok(resp)
     }
 
     async fn get_block_count(&self) -> Result<BlockCountResponse, ErrorObjectOwned> {
@@ -108,7 +112,10 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             .into());
         };
 
-        Ok(block_to_response(&block, &block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed)))
+        drop(storage);
+        let mut resp = block_to_response(&block, &block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed));
+        resp.validator_name = self.resolve_friendly_name(&block.header.validator_id.to_wire_bytes());
+        Ok(resp)
     }
 
     async fn get_block_header(
@@ -134,7 +141,9 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             .into());
         };
 
+        let validator_wire = header.validator_id.to_wire_bytes();
         let cycle = self.consensus.read().cycle_for_timestamp(header.timestamp);
+        drop(storage);
 
         Ok(BlockHeaderResponse {
             height: header.height,
@@ -144,6 +153,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             timestamp: header.timestamp,
             tx_count: header.tx_count,
             validator_id: header.validator_id.to_address(),
+            validator_name: self.resolve_friendly_name(&validator_wire),
             cycle,
         })
     }
@@ -154,31 +164,42 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
         count: u64,
     ) -> Result<Vec<BlockHeaderResponse>, ErrorObjectOwned> {
         let count = count.min(MAX_BLOCK_RANGE);
-        let storage = self.storage.read();
-        let consensus = self.consensus.read();
-        let mut headers = Vec::with_capacity(count as usize);
-
-        for h in start_height..start_height.saturating_add(count) {
-            match storage.get_block_hash_by_height(h) {
-                Ok(bh) => match storage.get_block_header(&bh) {
-                    Ok(header) => {
-                        let cycle = consensus.cycle_for_timestamp(header.timestamp);
-                        headers.push(BlockHeaderResponse {
-                            height: header.height,
-                            hash: hash_to_hex(&bh),
-                            prev_hash: hash_to_hex(&header.prev_block_hash),
-                            merkle_root: hash_to_hex(&header.merkle_root),
-                            timestamp: header.timestamp,
-                            tx_count: header.tx_count,
-                            validator_id: header.validator_id.to_address(),
-                            cycle,
-                        });
-                    }
+        // Collect headers + wire bytes under lock.
+        let raw: Vec<(BlockHeaderResponse, Vec<u8>)> = {
+            let storage = self.storage.read();
+            let consensus = self.consensus.read();
+            let mut out = Vec::with_capacity(count as usize);
+            for h in start_height..start_height.saturating_add(count) {
+                match storage.get_block_hash_by_height(h) {
+                    Ok(bh) => match storage.get_block_header(&bh) {
+                        Ok(header) => {
+                            let cycle = consensus.cycle_for_timestamp(header.timestamp);
+                            let wire = header.validator_id.to_wire_bytes();
+                            out.push((BlockHeaderResponse {
+                                height: header.height,
+                                hash: hash_to_hex(&bh),
+                                prev_hash: hash_to_hex(&header.prev_block_hash),
+                                merkle_root: hash_to_hex(&header.merkle_root),
+                                timestamp: header.timestamp,
+                                tx_count: header.tx_count,
+                                validator_id: header.validator_id.to_address(),
+                                validator_name: None,
+                                cycle,
+                            }, wire));
+                        }
+                        Err(_) => continue,
+                    },
                     Err(_) => continue,
-                },
-                Err(_) => continue,
+                }
             }
-        }
+            out
+        }; // locks dropped
+
+        // Resolve names outside lock.
+        let headers = raw.into_iter().map(|(mut resp, wire)| {
+            resp.validator_name = self.resolve_friendly_name(&wire);
+            resp
+        }).collect();
 
         Ok(headers)
     }

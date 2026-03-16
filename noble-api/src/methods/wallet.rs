@@ -213,7 +213,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Collect all keys to query: wallet keystore keys + validator key (if not already included).
         let mut all_keys: Vec<noble_crypto::NoblePublicKey> = keys.clone();
-        if let Some(ref vk_hex) = self.validator_pubkey {
+        if let Some(ref vk_hex) = *self.validator_pubkey.read() {
             match hex::decode(vk_hex) {
                 Ok(vk_bytes) => match noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
                     Ok(vk) => {

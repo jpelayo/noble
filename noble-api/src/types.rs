@@ -124,6 +124,7 @@ pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> 
         timestamp: block.header.timestamp,
         tx_count: block.header.tx_count,
         validator_id: block.header.validator_id.to_address(),
+        validator_name: None, // Populated by caller via resolve_friendly_name
         transactions: txs,
     }
 }
@@ -152,6 +153,7 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         }).collect(),
         signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.publisher_sig.public_key)
             .unwrap_or_else(|| hex::encode(&tx.publisher_sig.public_key)),
+        signer_name: None, // Populated by caller via resolve_friendly_name
         metadata: tx
             .metadata
             .iter()
@@ -197,6 +199,8 @@ pub struct BlockResponse {
     pub timestamp: u64,
     pub tx_count: u32,
     pub validator_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_name: Option<String>,
     pub transactions: Vec<TransactionResponse>,
 }
 
@@ -210,6 +214,8 @@ pub struct BlockHeaderResponse {
     pub timestamp: u64,
     pub tx_count: u32,
     pub validator_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_name: Option<String>,
     /// Cycle number this block was committed in (computed from genesis epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle: Option<u64>,
@@ -229,6 +235,8 @@ pub struct TransactionResponse {
     /// Outputs: new UTXOs created.
     pub outputs: Vec<TxOutputResponse>,
     pub signer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_name: Option<String>,
     pub metadata: Vec<MetadataResponse>,
     pub has_encrypted_locator: bool,
     pub locator_recipient_count: usize,
@@ -1089,6 +1097,9 @@ pub struct ValidatorKeyInfoResponse {
     /// Hex-encoded wire pubkey (scheme_id + 32 bytes), if enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey_hex: Option<String>,
+    /// Bech32m display address (`nbl1p…`), if enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey_display: Option<String>,
     /// Signature scheme string, if enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
@@ -1182,6 +1193,28 @@ pub struct CheckDataDirResponse {
     pub error: Option<String>,
 }
 
+/// A single directory entry for the folder browser.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub writable: bool,
+}
+
+/// Response for `noble_listDirectory`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListDirectoryResponse {
+    /// Current directory path.
+    pub current: String,
+    /// Parent directory path (empty for root).
+    pub parent: String,
+    /// Directory entries (directories only, sorted).
+    pub entries: Vec<DirectoryEntry>,
+    /// Error message if the path cannot be read.
+    pub error: Option<String>,
+}
+
 /// Response for `noble_getEncryptionStatus`.
 #[derive(Debug, Clone, Serialize)]
 pub struct EncryptionStatusResponse {
@@ -1262,6 +1295,7 @@ pub struct BadgeProposalResponse {
     pub target_pubkey: String,
     pub target_name: Option<String>,
     pub proposer_pubkey: String,
+    pub proposer_name: Option<String>,
     pub reason: Option<String>,
     pub created_at_cycle: u64,
     pub expires_at_cycle: u64,

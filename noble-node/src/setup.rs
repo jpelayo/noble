@@ -846,6 +846,9 @@ fn print_wallet_info(mnemonic: &bip39::Mnemonic, passphrase: &str) -> String {
     println!("  Private Key:     {}", hex::encode(&sk_bytes));
     println!("  Public Key:      {}", hex::encode(pk_bytes));
     println!("  Wire Hex:        {}", hex::encode(&wire_bytes));
+    let noble_addr = noble_crypto::noble_addr::encode_wire_bytes(&wire_bytes)
+        .unwrap_or_else(|| "(encoding failed)".to_string());
+    println!("  Noble Address:   {noble_addr}");
     println!();
     println!("  Bitcoin Addresses:");
     println!("    P2PKH  (1...):   {p2pkh}");

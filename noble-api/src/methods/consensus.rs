@@ -273,7 +273,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
 
             // 3. SELF is never in its own peer_records — inject current timestamp
             //    so the local validator doesn't show as "unreachable".
-            if let Some(ref self_pk_hex) = self.validator_pubkey {
+            if let Some(ref self_pk_hex) = *self.validator_pubkey.read() {
                 if let Ok(self_pk) = NoblePublicKey::from_wire_bytes(
                     &hex::decode(self_pk_hex).unwrap_or_default(),
                 ) {
@@ -351,7 +351,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     .unwrap_or_else(|| hex::encode(&wire));
                 let key_hex = hex::encode(&wire);
                 if host_addr.is_none() && country.is_none() {
-                    if let Some(ref self_pk) = self.validator_pubkey {
+                    if let Some(ref self_pk) = *self.validator_pubkey.read() {
                         if key_hex == *self_pk {
                             let id = self.node_identity.read();
                             if !id.host_address.is_empty() {
@@ -368,8 +368,9 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 // known_peers map is keyed by hex wire bytes (internal format).
                 let is_self = self
                     .validator_pubkey
+                    .read()
                     .as_deref()
-                    .map_or(false, |s| key_hex == *s);
+                    .map_or(false, |s| key_hex == s);
                 let wants_validate = if is_self {
                     // Self always wants to validate (we're in the list).
                     true

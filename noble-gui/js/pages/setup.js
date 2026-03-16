@@ -797,6 +797,114 @@ export function init(root, ctx) {
     return lines.join('\n');
   }
 
+  // ── Folder browser modal ──
+  function openFolderBrowser(startPath, onSelect) {
+    // Remove existing modal if any.
+    const existing = document.querySelector('#folder-browser-modal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'folder-browser-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius);width:min(600px,90vw);max-height:70vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.4)';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'padding:var(--gap) var(--gap);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center';
+    header.innerHTML = `<strong>Choose Directory</strong>`;
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '\u2715';
+    closeBtn.style.cssText = 'background:none;border:none;color:var(--text-secondary);font-size:1.2rem;cursor:pointer;padding:0 4px';
+    closeBtn.addEventListener('click', () => overlay.remove());
+    header.appendChild(closeBtn);
+
+    const pathBar = document.createElement('div');
+    pathBar.style.cssText = 'padding:var(--gap-sm) var(--gap);border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-muted);display:flex;align-items:center;gap:var(--gap-sm)';
+
+    const listing = document.createElement('div');
+    listing.style.cssText = 'flex:1;overflow-y:auto;min-height:200px;max-height:50vh';
+
+    const footer = document.createElement('div');
+    footer.style.cssText = 'padding:var(--gap-sm) var(--gap);border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:var(--gap-sm)';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary btn-sm';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => overlay.remove());
+    const selectBtn = document.createElement('button');
+    selectBtn.className = 'btn btn-primary btn-sm';
+    selectBtn.textContent = 'Select This Folder';
+    footer.appendChild(cancelBtn);
+    footer.appendChild(selectBtn);
+
+    modal.appendChild(header);
+    modal.appendChild(pathBar);
+    modal.appendChild(listing);
+    modal.appendChild(footer);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // Close on overlay click (not modal click).
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    let currentPath = startPath;
+
+    async function navigate(dirPath) {
+      currentPath = dirPath;
+      listing.innerHTML = '<div style="padding:var(--gap);color:var(--text-muted);text-align:center">Loading...</div>';
+      pathBar.textContent = dirPath;
+
+      try {
+        const result = await rpc.call('noble_listDirectory', { path: dirPath });
+        if (result.error) {
+          listing.innerHTML = `<div style="padding:var(--gap);color:var(--error);text-align:center">${esc(result.error)}</div>`;
+          return;
+        }
+
+        listing.innerHTML = '';
+
+        // Parent directory entry.
+        if (result.parent) {
+          const upRow = document.createElement('div');
+          upRow.style.cssText = 'padding:8px var(--gap);cursor:pointer;display:flex;align-items:center;gap:var(--gap-sm);border-bottom:1px solid var(--border)';
+          upRow.innerHTML = '<span style="font-size:1.1rem">&#128193;</span> <span style="font-size:var(--font-size-sm);color:var(--accent);font-weight:600">..</span>';
+          upRow.addEventListener('click', () => navigate(result.parent));
+          upRow.addEventListener('mouseenter', () => { upRow.style.background = 'var(--bg-secondary)'; });
+          upRow.addEventListener('mouseleave', () => { upRow.style.background = ''; });
+          listing.appendChild(upRow);
+        }
+
+        if (result.entries.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.cssText = 'padding:var(--gap);color:var(--text-muted);text-align:center;font-size:var(--font-size-sm)';
+          empty.textContent = 'No subdirectories';
+          listing.appendChild(empty);
+        }
+
+        for (const entry of result.entries) {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:8px var(--gap);cursor:pointer;display:flex;align-items:center;gap:var(--gap-sm);border-bottom:1px solid var(--border)';
+          const icon = entry.writable ? '&#128193;' : '&#128274;';
+          const color = entry.writable ? 'var(--text-primary)' : 'var(--text-muted)';
+          row.innerHTML = `<span style="font-size:1.1rem">${icon}</span> <span style="font-size:var(--font-size-sm);color:${color}">${esc(entry.name)}</span>`;
+          row.addEventListener('click', () => navigate(entry.path));
+          row.addEventListener('mouseenter', () => { row.style.background = 'var(--bg-secondary)'; });
+          row.addEventListener('mouseleave', () => { row.style.background = ''; });
+          listing.appendChild(row);
+        }
+      } catch (e) {
+        listing.innerHTML = `<div style="padding:var(--gap);color:var(--error);text-align:center">${e.message || e}</div>`;
+      }
+    }
+
+    selectBtn.addEventListener('click', () => {
+      onSelect(currentPath);
+      overlay.remove();
+    });
+
+    navigate(startPath);
+  }
+
   // ── Step 5: Storage ──
   function renderStorage() {
     const pruningModes = [
@@ -842,6 +950,7 @@ export function init(root, ctx) {
             placeholder="Data directory path"
             value="${esc(state.dataDir)}"
             style="flex:1;font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
+          <button id="setup-browse-dir" class="btn btn-secondary btn-sm" style="white-space:nowrap;padding:4px 10px">Browse</button>
           <button id="setup-check-dir" class="btn btn-secondary btn-sm" style="white-space:nowrap;padding:4px 10px">Check</button>
         </div>
         <div id="setup-dir-status" style="font-size:var(--font-size-xs);margin-top:var(--gap-xs);color:var(--text-muted)">
@@ -990,6 +1099,17 @@ export function init(root, ctx) {
         checkBtn.disabled = false;
         checkBtn.textContent = 'Check';
       }
+    });
+
+    // Browse button — opens a modal folder browser.
+    const browseBtn = body.querySelector('#setup-browse-dir');
+    browseBtn.addEventListener('click', () => {
+      const startPath = dirInput.value.trim() || '/';
+      openFolderBrowser(startPath, (selectedPath) => {
+        dirInput.value = selectedPath;
+        state.dataDirValid = null;
+        checkBtn.click(); // auto-validate the chosen path
+      });
     });
 
     // Sync range slider ↔ number input for allocation

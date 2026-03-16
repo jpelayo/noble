@@ -781,10 +781,16 @@ fn cmd_wallet(action: WalletCommand) {
                 let passphrase = derive_wallet_passphrase(&data_dir);
                 let mut ks = noble_wallet::KeyStore::new(&ks_path)
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
-                let wire = hex::decode(&pubkey_hex)
-                    .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
-                let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
-                    .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); });
+                // Accept bech32m (nbl1...) or hex wire bytes.
+                let pk = if pubkey_hex.starts_with("nbl1") {
+                    noble_crypto::noble_addr::decode(&pubkey_hex)
+                        .unwrap_or_else(|e| { eprintln!("Invalid address: {e}"); std::process::exit(1); })
+                } else {
+                    let wire = hex::decode(&pubkey_hex)
+                        .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
+                    noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
+                        .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); })
+                };
                 ks.delete_key(&pk, &passphrase)
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                 let short_start = &pubkey_hex[..pubkey_hex.len().min(8)];
@@ -815,10 +821,15 @@ fn cmd_wallet(action: WalletCommand) {
                             let passphrase = derive_wallet_passphrase(&data_dir);
                             let mut ks = noble_wallet::KeyStore::new(&ks_path)
                                 .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
-                            let wire = hex::decode(&pubkey_hex)
-                                .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
-                            let pk = noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
-                                .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); });
+                            let pk = if pubkey_hex.starts_with("nbl1") {
+                                noble_crypto::noble_addr::decode(&pubkey_hex)
+                                    .unwrap_or_else(|e| { eprintln!("Invalid address: {e}"); std::process::exit(1); })
+                            } else {
+                                let wire = hex::decode(&pubkey_hex)
+                                    .unwrap_or_else(|e| { eprintln!("Invalid hex: {e}"); std::process::exit(1); });
+                                noble_crypto::NoblePublicKey::from_wire_bytes(&wire)
+                                    .unwrap_or_else(|e| { eprintln!("Invalid key: {e}"); std::process::exit(1); })
+                            };
                             ks.delete_key(&pk, &passphrase)
                                 .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                             let short_start = &pubkey_hex[..pubkey_hex.len().min(8)];
@@ -925,7 +936,7 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
             }
             println!();
         }
-        println!("To delete: noble-tool wallet delete <pubkey_hex>");
+        println!("To delete: noble-tool wallet delete <address>");
     }
 }
 
@@ -960,7 +971,7 @@ fn print_key_list_online(result: &serde_json::Value, json: bool) {
                     }
                     println!();
                 }
-                println!("To delete: noble-tool wallet delete <pubkey_hex>");
+                println!("To delete: noble-tool wallet delete <address>");
             }
             _ => {
                 println!("No keys found.");

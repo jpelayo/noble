@@ -232,9 +232,20 @@ pub async fn handle_status(
         .map(|b| b.available)
         .unwrap_or(0);
 
+    // Ensure address is in bech32m format (nbl1...).
+    let display_address = if state.config.faucet_address.starts_with("nbl1") {
+        state.config.faucet_address.clone()
+    } else {
+        // Try hex wire bytes → bech32m conversion.
+        hex::decode(&state.config.faucet_address)
+            .ok()
+            .and_then(|bytes| noble_crypto::noble_addr::encode_wire_bytes(&bytes))
+            .unwrap_or_else(|| state.config.faucet_address.clone())
+    };
+
     Ok(Json(FaucetStatusResponse {
         network: state.network.clone(),
-        faucet_address: state.config.faucet_address.clone(),
+        faucet_address: display_address,
         faucet_balance: balance,
         total_distributed: total,
         today_distributed: today,

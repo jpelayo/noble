@@ -428,8 +428,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         &self,
         identity_key: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let key_bytes = hex::decode(&identity_key)
-            .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
+        // Accept both bech32m (nbl1...) and hex wire bytes.
+        let key_bytes = if identity_key.starts_with("nbl1") {
+            noble_crypto::noble_addr::decode(&identity_key)
+                .map(|pk| pk.to_wire_bytes())
+                .map_err(|e| ApiError::InvalidAddress(format!("invalid address: {e}")))?
+        } else {
+            hex::decode(&identity_key)
+                .map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?
+        };
         // Lock order: Storage(2) before ValidatorRegistry(3).
         let storage = self.storage.read();
         storage
@@ -439,7 +446,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         // Also remove from CBOR known_peers so it doesn't reappear after chain reset.
         {
             let mut registry = self.validator_registry.write();
-            registry.remove_known_peer(&identity_key);
+            let key_hex = hex::encode(&key_bytes);
+            registry.remove_known_peer(&key_hex);
             if let Err(e) = registry.persist_if_dirty() {
                 tracing::warn!("Failed to persist validator registry after peer removal: {e}");
             }

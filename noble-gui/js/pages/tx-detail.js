@@ -197,7 +197,7 @@ export function init(root, ctx) {
         <div class="panel-header">Publisher Signature</div>
         <div class="panel-body">
           <dl class="detail-grid">
-            <dt>Signer</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${tx.signer}" title="View all documents by this publisher">${tx.signer}</a></dd>
+            <dt>Signer</dt><dd>${tx.signer_name ? `<strong>${tx.signer_name}</strong> ` : ''}<span class="mono"><a href="#/verify?tab=publisher&publisher=${tx.signer}" title="View all documents by this publisher">${tx.signer}</a></span></dd>
           </dl>
         </div>
       `;

@@ -162,7 +162,10 @@ export function init(root, ctx) {
       </div>
 
       <div class="panel">
-        <div class="panel-header">Network Peers Identity</div>
+        <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Network Peers Identity</span>
+          <button id="id-refresh-peers" class="btn btn-secondary btn-sm" style="padding:2px 10px;font-size:var(--font-size-xs)">Refresh</button>
+        </div>
         <div class="panel-body" style="padding:0">
           <table class="data-table">
             <thead>
@@ -435,7 +438,7 @@ export function init(root, ctx) {
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span class="mono" style="font-size:12px;word-break:break-all">${esc(k.pubkey_hex)}</span>
-            <button class="btn-copy" data-copy="${esc(k.pubkey_hex)}" title="Copy public key hex">&#128203;</button>
+            <button class="btn-copy" data-copy="${esc(k.pubkey_hex)}" title="Copy address">&#128203;</button>
           </div>
           ${btcHtml}
         </div>`;
@@ -676,6 +679,19 @@ export function init(root, ctx) {
   loadMyKeys();
   loadPeers();
   loadPkiStatus();
+
+  // Refresh button + 30s auto-refresh for peer identity table.
+  const refreshPeersBtn = root.querySelector('#id-refresh-peers');
+  refreshPeersBtn.addEventListener('click', () => {
+    refreshPeersBtn.textContent = 'Refreshing...';
+    refreshPeersBtn.disabled = true;
+    loadPeers().finally(() => {
+      refreshPeersBtn.textContent = 'Refresh';
+      refreshPeersBtn.disabled = false;
+    });
+  });
+  const peersInterval = setInterval(loadPeers, 30_000);
+  unsubs.push(() => clearInterval(peersInterval));
 
   // ── Copy-to-clipboard delegation ──
   root.addEventListener('click', (e) => {
