@@ -147,6 +147,7 @@ enum Commands {
     /// byte-identical round-trips for all protocol types. A failure means
     /// the binary cannot correctly encode/decode network messages.
     VerifyCodec,
+
 }
 
 #[derive(Subcommand)]

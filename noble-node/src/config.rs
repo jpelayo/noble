@@ -15,13 +15,21 @@ pub struct NodeConfig {
     /// Node operational mode and network selection.
     #[serde(default)]
     pub node: NodeSectionConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
     pub consensus: ConsensusConfig,
+    #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
     pub wallet: WalletConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
     pub identity: IdentityConfig,
     /// Runtime tracing configuration.
     #[serde(default)]
