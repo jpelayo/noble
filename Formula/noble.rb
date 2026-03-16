@@ -143,12 +143,13 @@ class Noble < Formula
       end
     end
 
-    # Warn if Noble ports are already occupied (avoids confusion with mock servers, etc.)
+    # Warn if Noble ports are already occupied by a non-Noble process.
     blocked = []
     {8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket", 8785 => "Dashboard GUI"}.each do |port, label|
       pid = `lsof -ti :#{port} 2>/dev/null`.strip
       unless pid.empty?
         proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
+        next if proc_name =~ /noble-node|noble-faucet/
         blocked << {port: port, label: label, pid: pid, proc: proc_name}
       end
     end
