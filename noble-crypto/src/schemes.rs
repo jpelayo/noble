@@ -30,6 +30,9 @@ pub const SCHEME_TLS_KEY: u8 = 0x83;
 /// TOTP shared secret (raw bytes, base32-encoded when displayed).
 pub const SCHEME_TOTP_SECRET: u8 = 0x84;
 
+/// Faucet keystore passphrase (random 32 bytes, hex-encoded when passed via CLI).
+pub const SCHEME_FAUCET_PASSPHRASE: u8 = 0x85;
+
 /// Check whether a scheme ID is recognized by the protocol (on-chain or internal).
 pub fn is_recognized_scheme(scheme_id: u8) -> bool {
     matches!(
@@ -42,6 +45,7 @@ pub fn is_recognized_scheme(scheme_id: u8) -> bool {
             | SCHEME_P2P_IDENTITY
             | SCHEME_TLS_KEY
             | SCHEME_TOTP_SECRET
+            | SCHEME_FAUCET_PASSPHRASE
     )
 }
 
@@ -64,13 +68,14 @@ mod tests {
         assert!(is_recognized_scheme(SCHEME_P2P_IDENTITY));
         assert!(is_recognized_scheme(SCHEME_TLS_KEY));
         assert!(is_recognized_scheme(SCHEME_TOTP_SECRET));
+        assert!(is_recognized_scheme(SCHEME_FAUCET_PASSPHRASE));
     }
 
     #[test]
     fn unrecognized_scheme() {
         assert!(!is_recognized_scheme(0x00));
         assert!(!is_recognized_scheme(0x04));
-        assert!(!is_recognized_scheme(0x85));
+        assert!(!is_recognized_scheme(0x86));
         assert!(!is_recognized_scheme(0xFF));
     }
 

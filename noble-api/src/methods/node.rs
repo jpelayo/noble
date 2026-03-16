@@ -183,6 +183,17 @@ pub trait NodeApi {
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
+    /// Store the faucet keystore passphrase in the node's unified keystore.
+    ///
+    /// Called by the faucet child process after generating its keypair on first boot.
+    /// The passphrase is stored as `SCHEME_FAUCET_PASSPHRASE (0x85)` so the node
+    /// can pass it back on subsequent boots.
+    #[method(name = "storeFaucetSecret")]
+    async fn store_faucet_secret(
+        &self,
+        passphrase: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Detect the node's external (public) IP address by querying public services.
     ///
     /// Tries multiple IP-detection services in order; returns the first successful result.
@@ -1057,6 +1068,26 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             success: true,
             restart_required,
         })
+    }
+
+    async fn store_faucet_secret(
+        &self,
+        passphrase: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if passphrase.is_empty() {
+            return Err(ApiError::InvalidParam("passphrase must not be empty".into()).into());
+        }
+        let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
+        let mut ks = self.wallet_keystore.lock();
+        // Remove existing faucet passphrase if any (idempotent).
+        if ks.has_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE).unwrap_or(false) {
+            tracing::info!(task = "faucet", "Replacing existing faucet passphrase in keystore");
+            // store_raw overwrites — no explicit delete needed for raw scheme entries.
+        }
+        ks.store_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE, passphrase.as_bytes(), &wallet_pass)
+            .map_err(|e| ApiError::Internal(format!("store faucet passphrase: {e}")))?;
+        tracing::info!(task = "faucet", "Faucet passphrase stored in unified keystore");
+        Ok(serde_json::json!({ "success": true }))
     }
 
     async fn detect_external_ip(&self) -> Result<DetectIpResponse, ErrorObjectOwned> {

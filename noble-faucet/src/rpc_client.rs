@@ -270,6 +270,19 @@ impl NodeRpcClient {
         .await
     }
 
+    /// Store the faucet passphrase in the node's unified keystore.
+    pub async fn store_faucet_secret(&self, passphrase: &str) -> Result<(), FaucetError> {
+        #[derive(Serialize)]
+        struct Params<'a> {
+            passphrase: &'a str,
+        }
+        let _: serde_json::Value = self.call(
+            "noble_storeFaucetSecret",
+            &Params { passphrase },
+        ).await?;
+        Ok(())
+    }
+
     async fn call<P: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         method: &str,

@@ -1946,16 +1946,36 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let log_file = std::fs::File::create(&log_path)
                     .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
                 let log_err = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-                match tokio::process::Command::new(&bin)
-                    .arg("--listen")
-                    .arg(format!("0.0.0.0:{faucet_port}"))
-                    .arg("--rpc-url")
-                    .arg(&rpc_url)
-                    .arg("--db-path")
-                    .arg(&db_path)
-                    .arg("--keystore-dir")
-                    .arg(&ks_dir)
-                    .arg("--auto-unlock")
+
+                // Check if we have a stored faucet passphrase from a previous run.
+                let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
+                let stored_passphrase = {
+                    let mut ks = self.wallet_keystore.lock();
+                    if !ks.is_unlocked() {
+                        let _ = ks.unlock(&wallet_pass);
+                    }
+                    ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE)
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                };
+
+                let mut cmd = tokio::process::Command::new(&bin);
+                cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
+                    .arg("--rpc-url").arg(&rpc_url)
+                    .arg("--db-path").arg(&db_path)
+                    .arg("--keystore-dir").arg(&ks_dir);
+
+                if let Some(ref pass) = stored_passphrase {
+                    // Subsequent boot: pass stored passphrase to unlock faucet keystore.
+                    cmd.arg("--passphrase").arg(pass);
+                    tracing::info!(task = "faucet", "Using stored faucet passphrase from keystore");
+                } else {
+                    // First boot: faucet will generate keypair, then call storeFaucetSecret RPC.
+                    cmd.arg("--auto-unlock");
+                    tracing::info!(task = "faucet", "First boot — faucet will generate keypair and store passphrase via RPC");
+                }
+
+                match cmd
                     .stdout(log_file)
                     .stderr(log_err)
                     .kill_on_drop(true)

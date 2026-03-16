@@ -160,23 +160,46 @@ async fn main() {
     let rpc = NodeRpcClient::new(&cli.rpc_url, cli.totp_code)
         .expect("Failed to create RPC client (check URL scheme)");
 
-    // Resolve passphrase: --passphrase > NOBLE_FAUCET_PASSPHRASE env > --auto-unlock
-    let passphrase = cli
-        .passphrase
-        .or_else(|| std::env::var("NOBLE_FAUCET_PASSPHRASE").ok())
-        .unwrap_or_else(|| {
-            if cli.auto_unlock {
-                "noble-faucet-auto".to_string()
-            } else {
-                String::new()
-            }
-        });
+    // Resolve passphrase: --passphrase > NOBLE_FAUCET_PASSPHRASE env > --auto-unlock (first boot)
+    let keystore_is_empty = !keystore_dir.exists()
+        || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+
+    let (passphrase, is_first_boot) = if let Some(p) = cli.passphrase.clone() {
+        (p, false)
+    } else if let Ok(p) = std::env::var("NOBLE_FAUCET_PASSPHRASE") {
+        (p, false)
+    } else if cli.auto_unlock && keystore_is_empty {
+        // First boot: generate a real random passphrase (not the hardcoded one).
+        let mut rng_bytes = [0u8; 32];
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut rng_bytes);
+        }
+        (hex::encode(rng_bytes), true)
+    } else if cli.auto_unlock {
+        // Keystore exists but no passphrase provided — this shouldn't happen
+        // after the first boot (the node should pass --passphrase).
+        // Fall back to legacy hardcoded passphrase for backward compat.
+        ("noble-faucet-auto".to_string(), false)
+    } else {
+        (String::new(), false)
+    };
 
     // Initialize independent faucet wallet (local signing).
     let faucet_wallet = if !passphrase.is_empty() || cli.auto_unlock {
         match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, 0) {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
+
+                // First boot: store the passphrase in the node's keystore via RPC.
+                if is_first_boot {
+                    tracing::info!("First boot — storing faucet passphrase in node keystore via RPC");
+                    match rpc.store_faucet_secret(&passphrase).await {
+                        Ok(()) => tracing::info!("Faucet passphrase stored in node keystore"),
+                        Err(e) => tracing::warn!("Failed to store faucet passphrase: {e}"),
+                    }
+                }
+
                 Some(w)
             }
             Err(e) => {

@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "noble-api"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "bytes",
  "hex",
@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "noble-codec"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "hex",
  "serde",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "noble-consensus"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "hex",
  "noble-codec",
@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "noble-core"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "noble-crypto"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "noble-faucet"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "axum",
  "clap",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "noble-mempool"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "noble-codec",
  "noble-core",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "noble-network"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "hex",
  "libp2p",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "noble-node"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "axum",
  "bip32",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "noble-storage"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "noble-codec",
  "noble-core",
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "noble-test-utils"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "noble-codec",
  "noble-core",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "noble-tool"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "bip32",
  "bip39",
@@ -3230,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "noble-wallet"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "noble-wire"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "hex",
  "noble-core",
