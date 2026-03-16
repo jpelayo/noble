@@ -707,33 +707,14 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                         // Already exists — just read the pubkey.
                         read_validator_pubkey(&vkey_path, &self.chain_meta)
                     } else {
-                        // Try to use the wallet key (secp256k1) as the validator key.
-                        let wallet_key = {
-                            let ks = self.wallet_keystore.lock();
-                            ks.get_raw(noble_crypto::SCHEME_SECP256K1).ok()
-                        };
-                        if let Some(secret_bytes) = wallet_key {
-                            match write_validator_key_from_secret(&vkey_path, &secret_bytes, &self.chain_meta) {
-                                Ok(pubkey) => {
-                                    tracing::info!(
-                                        task = "setup",
-                                        "Validator key set from wallet key: {pubkey}"
-                                    );
-                                    Some(pubkey)
-                                }
-                                Err(e) => {
-                                    tracing::warn!(task = "setup", "Failed to write validator key from wallet: {e}");
-                                    None
-                                }
-                            }
-                        } else {
-                            // No wallet key — cannot create validator key without mnemonic.
-                            tracing::warn!(
-                                task = "setup",
-                                "Cannot create validator key: no wallet key in keystore. Create a wallet first."
-                            );
-                            None
-                        }
+                        // validator.key should have been written by generateMnemonic/importMnemonic.
+                        // If we reach here, the wallet was created without a validator key (bug or
+                        // legacy flow). Log and skip — operator must re-run setup.
+                        tracing::warn!(
+                            task = "setup",
+                            "No validator.key found. Generate or import a wallet to create one."
+                        );
+                        None
                     }
                 } else {
                     None
@@ -1593,38 +1574,6 @@ fn unix_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 // ---------------------------------------------------------------------------
 // Private helpers for validator key management
 // ---------------------------------------------------------------------------
-
-/// Write an existing secp256k1 secret (from the wallet keystore) as the validator key.
-/// This ensures validator key = wallet key (secp256k1-everywhere).
-fn write_validator_key_from_secret(
-    path: &std::path::Path,
-    secret_bytes: &[u8],
-    chain_meta: &[u8; 32],
-) -> Result<String, ErrorObjectOwned> {
-    if secret_bytes.len() != 32 {
-        return Err(ApiError::Internal(format!(
-            "wallet key has {} bytes, expected 32",
-            secret_bytes.len()
-        ))
-        .into());
-    }
-    let mut raw = vec![SCHEME_SECP256K1];
-    raw.extend_from_slice(secret_bytes);
-    let file_bytes = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta)
-        .map_err(|e| ApiError::Internal(format!("encrypt validator.key: {e}")))?;
-    std::fs::write(path, &file_bytes)
-        .map_err(|e| ApiError::Internal(format!("write validator.key: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(0o600),
-        );
-    }
-    let private_key = noble_crypto::NoblePrivateKey::Secp256k1(secret_bytes.to_vec());
-    Ok(private_key.public_key().to_address())
-}
 
 /// Calculate the total size of a directory recursively.
 pub(crate) fn dir_size(path: &std::path::Path) -> u64 {

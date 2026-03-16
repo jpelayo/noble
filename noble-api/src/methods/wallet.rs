@@ -328,9 +328,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             ).into());
         }
 
-        let (mnemonic, pubkey) = keystore
-            .create_key_from_mnemonic(wc, &passphrase)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // Write validator.key alongside the wallet key (same secret, one derivation).
+        let vkey_path = self.data_dir.as_ref().map(|d| d.join("validator.key"));
+        let (mnemonic, pubkey) = if let Some(ref vkp) = vkey_path {
+            keystore
+                .create_key_from_mnemonic_with_validator(wc, &passphrase, vkp, &self.chain_meta)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        } else {
+            keystore
+                .create_key_from_mnemonic(wc, &passphrase)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        };
 
         let key_bytes = pubkey.key_bytes();
         let (private_key_hex, public_key_hex, wire_hex_str, btc_addrs) =
@@ -457,9 +465,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Check if key already exists by trying to recover
         let existing_keys: Vec<_> = keystore.list_keys().unwrap_or_default();
-        let pubkey = keystore
-            .recover_from_mnemonic(&mnemonic, &passphrase)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // Write validator.key alongside the wallet key.
+        let vkey_path = self.data_dir.as_ref().map(|d| d.join("validator.key"));
+        let pubkey = if let Some(ref vkp) = vkey_path {
+            keystore
+                .recover_from_mnemonic_with_validator(&mnemonic, &passphrase, vkp, &self.chain_meta)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        } else {
+            keystore
+                .recover_from_mnemonic(&mnemonic, &passphrase)
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        };
 
         let already_exists = existing_keys
             .iter()

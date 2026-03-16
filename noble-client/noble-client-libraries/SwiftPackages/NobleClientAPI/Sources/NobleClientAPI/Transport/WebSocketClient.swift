@@ -58,6 +58,7 @@ public actor WebSocketClient {
     /// Connect to the WebSocket endpoint.
     public func connect() async throws {
         var request = URLRequest(url: url)
+        request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
         if let token = bearerToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

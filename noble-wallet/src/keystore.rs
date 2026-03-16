@@ -255,6 +255,30 @@ impl KeyStore {
         word_count: usize,
         encryption_passphrase: &str,
     ) -> Result<(String, NoblePublicKey), WalletError> {
+        self.create_key_from_mnemonic_inner(word_count, encryption_passphrase, None, &[0u8; 32])
+    }
+
+    /// Generate a mnemonic-derived secp256k1 key and optionally write
+    /// the same secret to `validator_key_path` (encrypted with `chain_meta`).
+    /// This ensures validator key = wallet key in a single atomic operation
+    /// while the secret is still in memory.
+    pub fn create_key_from_mnemonic_with_validator(
+        &mut self,
+        word_count: usize,
+        encryption_passphrase: &str,
+        validator_key_path: &std::path::Path,
+        chain_meta: &[u8; 32],
+    ) -> Result<(String, NoblePublicKey), WalletError> {
+        self.create_key_from_mnemonic_inner(word_count, encryption_passphrase, Some(validator_key_path), chain_meta)
+    }
+
+    fn create_key_from_mnemonic_inner(
+        &mut self,
+        word_count: usize,
+        encryption_passphrase: &str,
+        validator_key_path: Option<&std::path::Path>,
+        chain_meta: &[u8; 32],
+    ) -> Result<(String, NoblePublicKey), WalletError> {
 
         if word_count != 12 && word_count != 24 {
             return Err(WalletError::Crypto(format!(
@@ -304,6 +328,27 @@ impl KeyStore {
             )));
         }
 
+        // Write validator.key with the same secret (before zeroize) if requested.
+        if let Some(vk_path) = validator_key_path {
+            let mut raw = vec![SCHEME_SECP256K1];
+            raw.extend_from_slice(&sk_bytes);
+            let result = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta);
+            raw.zeroize();
+            let file_bytes = result
+                .map_err(|e| WalletError::Crypto(format!("encrypt validator.key: {e}")))?;
+            if let Some(parent) = vk_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            fs::write(vk_path, &file_bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(vk_path, fs::Permissions::from_mode(0o600));
+            }
+        }
+
         let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
         sk_bytes.zeroize();
         let json = serde_json::to_string_pretty(&encrypted)?;
@@ -334,6 +379,28 @@ impl KeyStore {
         &mut self,
         mnemonic_words: &str,
         encryption_passphrase: &str,
+    ) -> Result<NoblePublicKey, WalletError> {
+        self.recover_from_mnemonic_inner(mnemonic_words, encryption_passphrase, None, &[0u8; 32])
+    }
+
+    /// Recover a wallet key from mnemonic and optionally write the same
+    /// secret to `validator_key_path`.
+    pub fn recover_from_mnemonic_with_validator(
+        &mut self,
+        mnemonic_words: &str,
+        encryption_passphrase: &str,
+        validator_key_path: &std::path::Path,
+        chain_meta: &[u8; 32],
+    ) -> Result<NoblePublicKey, WalletError> {
+        self.recover_from_mnemonic_inner(mnemonic_words, encryption_passphrase, Some(validator_key_path), chain_meta)
+    }
+
+    fn recover_from_mnemonic_inner(
+        &mut self,
+        mnemonic_words: &str,
+        encryption_passphrase: &str,
+        validator_key_path: Option<&std::path::Path>,
+        chain_meta: &[u8; 32],
     ) -> Result<NoblePublicKey, WalletError> {
 
         if self.has_scheme(SCHEME_SECP256K1)? {
@@ -368,8 +435,44 @@ impl KeyStore {
 
         let file_path = self.key_file_path(&pub_key);
         if file_path.exists() {
+            // Key already on disk — still write validator.key if requested and missing.
+            if let Some(vk_path) = validator_key_path {
+                if !vk_path.exists() {
+                    let mut raw = vec![SCHEME_SECP256K1];
+                    raw.extend_from_slice(&sk_bytes);
+                    if let Ok(file_bytes) = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta) {
+                        let _ = fs::write(vk_path, &file_bytes);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(vk_path, fs::Permissions::from_mode(0o600));
+                        }
+                    }
+                }
+            }
             sk_bytes.zeroize();
             return Ok(pub_key);
+        }
+
+        // Write validator.key with the same secret (before zeroize) if requested.
+        if let Some(vk_path) = validator_key_path {
+            let mut raw = vec![SCHEME_SECP256K1];
+            raw.extend_from_slice(&sk_bytes);
+            let result = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta);
+            raw.zeroize();
+            let file_bytes = result
+                .map_err(|e| WalletError::Crypto(format!("encrypt validator.key: {e}")))?;
+            if let Some(parent) = vk_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            fs::write(vk_path, &file_bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(vk_path, fs::Permissions::from_mode(0o600));
+            }
         }
 
         let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
