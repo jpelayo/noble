@@ -163,11 +163,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let w = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
         let addr = w.address();
-        // Ed25519: nbl1q… bech32 address (63 chars: nbl1q + 52 data + 6 checksum)
-        assert!(addr.starts_with("nbl1q"), "should be Noble Ed25519 address (nbl1q…), got: {addr}");
+        // secp256k1: nbl1p… bech32m address
+        assert!(addr.starts_with("nbl1p"), "should be Noble secp256k1 address (nbl1p…), got: {addr}");
         // Verify roundtrip
         let decoded = noble_crypto::noble_addr::decode(&addr).unwrap();
-        assert_eq!(decoded.scheme_id(), noble_crypto::SCHEME_ED25519);
+        assert_eq!(decoded.scheme_id(), noble_crypto::SCHEME_SECP256K1);
     }
 
     #[test]

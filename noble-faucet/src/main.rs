@@ -93,7 +93,7 @@ struct Cli {
     listen: String,
 
     /// NOBLE node JSON-RPC URL.
-    #[arg(long, default_value = "http://127.0.0.1:8783")]
+    #[arg(long, default_value = "https://127.0.0.1:8783")]
     rpc_url: String,
 
     /// Faucet wallet address (hex public key on the node).
@@ -143,6 +143,14 @@ struct Cli {
     /// Path to static web directory to serve (optional).
     #[arg(long)]
     web_dir: Option<PathBuf>,
+
+    /// Path to TLS certificate PEM file (required for HTTPS).
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key PEM file (required for HTTPS).
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -319,14 +327,62 @@ async fn main() {
         .await
         .expect("Failed to bind listener");
 
-    tracing::info!("Faucet server listening on {}", cli.listen);
+    if let (Some(cert_path), Some(key_path)) = (&cli.tls_cert, &cli.tls_key) {
+        // Serve HTTPS using the provided TLS certificate and key.
+        let cert_pem = std::fs::read(cert_path).expect("Failed to read TLS cert");
+        let key_pem = std::fs::read(key_path).expect("Failed to read TLS key");
+        let certs: Vec<rustls_pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut &cert_pem[..])
+                .filter_map(|r| r.ok())
+                .collect();
+        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+            .expect("Failed to parse TLS key PEM")
+            .expect("No private key found in PEM");
+        let tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("Failed to build TLS ServerConfig");
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
-    .expect("Server error");
+        tracing::info!("Faucet server listening on {} (HTTPS)", cli.listen);
+
+        loop {
+            let (stream, addr) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => { tracing::debug!("accept error: {e}"); continue; }
+            };
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => {
+                        let io = hyper_util::rt::TokioIo::new(tls_stream);
+                        // Inject ConnectInfo as an Extension so handlers can extract the client IP.
+                        let app_with_ci = app.layer(axum::Extension(axum::extract::ConnectInfo(addr)));
+                        let svc = hyper_util::service::TowerToHyperService::new(app_with_ci);
+                        if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                            hyper_util::rt::TokioExecutor::new(),
+                        )
+                        .serve_connection(io, svc)
+                        .await
+                        {
+                            tracing::debug!("faucet connection error: {e}");
+                        }
+                    }
+                    Err(e) => tracing::debug!("TLS handshake failed: {e}"),
+                }
+            });
+        }
+    } else {
+        // No TLS cert provided — serve plain HTTP (development/localhost only).
+        tracing::warn!("Faucet server listening on {} (HTTP — no TLS cert)", cli.listen);
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("Server error");
+    }
 }
 
 #[cfg(test)]

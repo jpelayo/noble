@@ -34,7 +34,10 @@ noble-core = { path = "../noble-core" }
 noble-codec = { path = "../noble-codec" }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

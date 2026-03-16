@@ -13,6 +13,25 @@
 use noble_api::types::{FaucetCache, FaucetEntry};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// TLS certificate verifier that accepts any certificate (for probing self-signed faucets).
+#[derive(Debug)]
+struct NoVerify;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(&self, _: &rustls_pki_types::CertificateDer<'_>, _: &[rustls_pki_types::CertificateDer<'_>], _: &rustls_pki_types::ServerName<'_>, _: &[u8], _: rustls_pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(&self, _: &[u8], _: &rustls_pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(&self, _: &[u8], _: &rustls_pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+    }
+}
+
 /// Create an empty faucet cache.
 pub fn new_cache() -> FaucetCache {
     std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()))
@@ -23,9 +42,18 @@ pub fn new_cache() -> FaucetCache {
 /// Returns `Some(entry)` if the faucet is reachable and responds with valid JSON.
 /// Returns `None` on any error (timeout, connection refused, bad JSON).
 pub fn probe_faucet(ip: &str, port: u16) -> Option<FaucetEntry> {
-    let url = format!("http://{}:{}/api/faucet/status", ip, port);
+    let url = format!("https://{}:{}/api/faucet/status", ip, port);
 
-    let response = match ureq::get(&url)
+    // Build a ureq agent that accepts self-signed certs (faucets use the node's TLS cert).
+    let tls_config = std::sync::Arc::new(
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerify))
+            .with_no_client_auth(),
+    );
+    let agent = ureq::AgentBuilder::new().tls_config(tls_config).build();
+
+    let response = match agent.get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .call()
     {
@@ -57,7 +85,7 @@ pub fn probe_faucet(ip: &str, port: u16) -> Option<FaucetEntry> {
         .unwrap_or(0);
 
     Some(FaucetEntry {
-        url: format!("http://{}:{}", ip, port),
+        url: format!("https://{}:{}", ip, port),
         faucet_address: json.get("faucet_address")
             .and_then(|v| v.as_str())
             .unwrap_or("")

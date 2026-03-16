@@ -1232,8 +1232,7 @@ export function init(root, ctx) {
   // ── Faucet status ──
   async function loadFaucet() {
     const host = window.location.hostname || '127.0.0.1';
-    const proto = window.location.protocol === 'https:' ? 'https' : 'http';
-    const faucetUrl = `${proto}://${host}:8786/api/faucet/status`;
+    const faucetUrl = `https://${host}:8786/api/faucet/status`;
     try {
       const resp = await fetch(faucetUrl, { signal: AbortSignal.timeout(3000) });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

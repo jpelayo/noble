@@ -1564,11 +1564,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         ];
         // Build RPC origins list for CSP (http(s):// + ws(s)://).
         let ws_scheme = if tls_config.is_some() { "wss" } else { "ws" };
+        let faucet_port = self.faucet_config.server_port;
         let mut rpc_origins_vec: Vec<String> = vec![
             format!("{rpc_scheme}://127.0.0.1:{rpc_port}"),
             format!("{rpc_scheme}://localhost:{rpc_port}"),
             format!("{ws_scheme}://127.0.0.1:{ws_port}"),
             format!("{ws_scheme}://localhost:{ws_port}"),
+            format!("{rpc_scheme}://127.0.0.1:{faucet_port}"),
+            format!("{rpc_scheme}://localhost:{faucet_port}"),
         ];
         // Add LAN IPs (from setup-mode detection or tls_san config).
         for san in &extra_sans {
@@ -1584,6 +1587,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 if !rpc_origins_vec.contains(&rpc_ws) {
                     rpc_origins_vec.push(rpc_ws);
+                }
+                let faucet_origin = format!("{rpc_scheme}://{san}:{faucet_port}");
+                if !rpc_origins_vec.contains(&faucet_origin) {
+                    rpc_origins_vec.push(faucet_origin);
                 }
             }
         }
@@ -1957,11 +1964,20 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Faucet retrieves its own passphrase from the node via RPC
                 // (getFaucetSecret on subsequent boots, storeFaucetSecret on first boot).
                 // No passphrase passed via CLI args or env vars.
+                let tls_cert_path = config.storage.data_dir.join("tls-cert.pem");
+                let tls_key_path = config.storage.data_dir.join("tls-key.pem");
+
                 let mut cmd = tokio::process::Command::new(&bin);
                 cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
                     .arg("--rpc-url").arg(&rpc_url)
                     .arg("--db-path").arg(&db_path)
                     .arg("--keystore-dir").arg(&ks_dir);
+
+                // Pass the node's TLS cert so the faucet serves HTTPS.
+                if tls_cert_path.exists() && tls_key_path.exists() {
+                    cmd.arg("--tls-cert").arg(&tls_cert_path)
+                        .arg("--tls-key").arg(&tls_key_path);
+                }
 
                 match cmd
                     .stdout(log_file)
