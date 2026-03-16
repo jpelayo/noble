@@ -169,7 +169,6 @@ async fn main() {
         (p, false)
     } else if let Ok(p) = std::env::var("NOBLE_FAUCET_PASSPHRASE") {
         (p, false)
-    } else if cli.auto_unlock && keystore_is_empty {
     } else {
         // Try to retrieve passphrase from node via RPC (subsequent boots).
         match rpc.get_faucet_secret().await {
