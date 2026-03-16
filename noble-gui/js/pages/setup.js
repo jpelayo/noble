@@ -214,6 +214,14 @@ export function init(root, ctx) {
         return true;
       }
 
+      // If wallet was just generated, require backup confirmation before proceeding.
+      if (walletWasGenerated && !mnemonicBackupConfirmed) {
+        showRewardError('Please confirm you have backed up your mnemonic words before continuing.');
+        const cb = body.querySelector('#setup-mnemonic-backup-confirm');
+        if (cb) { cb.focus(); cb.parentElement.style.borderColor = 'var(--error)'; setTimeout(() => { cb.parentElement.style.borderColor = 'var(--warning)'; }, 2000); }
+        return false;
+      }
+
       if (!addr) {
         showRewardError('Please enter a Bitcoin address, or check "Skip" to configure later.');
         return false;
@@ -426,6 +434,8 @@ export function init(root, ctx) {
   // ── Step 4: Rewards + Wallet ──
 
   let walletResult = null; // stores the last generate/import result for Review
+  let walletWasGenerated = false; // true when words were generated (not imported)
+  let mnemonicBackupConfirmed = false; // checkbox confirmation of backup
 
   function renderRewards() {
     body.innerHTML = `
@@ -544,6 +554,8 @@ export function init(root, ctx) {
       generateArea.innerHTML = '';
       importArea.innerHTML = '';
       terminalArea.innerHTML = '';
+      walletWasGenerated = false;
+      mnemonicBackupConfirmed = false;
     }
 
     generateBtn.addEventListener('click', async () => {
@@ -570,6 +582,22 @@ export function init(root, ctx) {
         warning.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:var(--gap-sm)';
         warning.textContent = 'Write these words down and store them securely. They cannot be recovered from the node.';
         generateArea.appendChild(warning);
+
+        // Backup confirmation checkbox
+        walletWasGenerated = true;
+        mnemonicBackupConfirmed = false;
+        const confirmLabel = document.createElement('label');
+        confirmLabel.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer;margin-top:var(--gap);padding:var(--gap-sm) var(--gap);background:color-mix(in srgb, var(--warning) 8%, transparent);border:1px solid var(--warning);border-radius:var(--radius-sm)';
+        const confirmCb = document.createElement('input');
+        confirmCb.type = 'checkbox';
+        confirmCb.id = 'setup-mnemonic-backup-confirm';
+        const confirmText = document.createElement('span');
+        confirmText.style.cssText = 'font-size:var(--font-size-sm);font-weight:600;color:var(--text-primary)';
+        confirmText.textContent = 'I have written down these words and stored them securely';
+        confirmLabel.appendChild(confirmCb);
+        confirmLabel.appendChild(confirmText);
+        generateArea.appendChild(confirmLabel);
+        confirmCb.addEventListener('change', () => { mnemonicBackupConfirmed = confirmCb.checked; });
 
         autoClear = startAutoClearTimer(generateArea, gridEl, 300_000);
 
