@@ -123,11 +123,30 @@ pub fn start_polling(
                 )
             };
 
+            let client = ApiClient::new(&node_url);
+
+            // If disconnected, attempt silent reconnection.
             if !is_connected {
+                if let Ok(info) = client.call_rpc("noble_getNodeInfo", json!([])).await {
+                    let chain_id = info.get("chain_id").or(info.get("chainId"))
+                        .and_then(|v| v.as_u64()).map(|c| format!("{c:08X}")).unwrap_or_default();
+                    let block_height = info.get("block_height").or(info.get("blockHeight"))
+                        .and_then(|v| v.as_u64()).unwrap_or(0);
+                    {
+                        let mut st = state.lock().unwrap();
+                        st.is_connected = true;
+                        st.chain_id = chain_id.clone();
+                        st.block_height = block_height;
+                        st.poll_failure_count = 0;
+                    }
+                    let _ = proxy.send_event(UserEvent::PollTick(json!({
+                        "isConnected": true,
+                        "blockHeight": block_height,
+                        "chainId": chain_id,
+                    })));
+                }
                 continue;
             }
-
-            let client = ApiClient::new(&node_url);
 
             // Fetch node info
             let node_info = client
@@ -233,10 +252,7 @@ pub fn start_polling(
                         {
                             let mut st = state.lock().unwrap();
                             st.is_connected = false;
-                            st.chain_id = String::new();
-                            st.block_height = 0;
-                            st.api_client = None;
-                            st.poll_failure_count = 0;
+                            // Keep node_url and api_client alive for reconnection.
                         }
                         let _ = proxy.send_event(UserEvent::PollTick(json!({
                             "isConnected": false,
