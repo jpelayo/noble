@@ -78,6 +78,7 @@ fn ignore_any_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<(), D::Err
 
 /// P2P networking configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct NetworkConfig {
     pub listen_addr: String,
     pub seeds: Vec<String>,
@@ -87,6 +88,7 @@ pub struct NetworkConfig {
 
 /// RocksDB storage configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub cache_size_mb: u32,
@@ -116,6 +118,7 @@ fn default_keep_blocks() -> u64 {
 /// hardcoded in `noble_consensus::ConsensusConfig::default()` and cannot be
 /// changed by operators.  Only voting/fork-resolution strategies belong here.
 #[derive(Deserialize, Serialize)]
+#[serde(default)]
 pub struct ConsensusConfig {
     pub validator_key_path: String,
     pub validator_list_path: PathBuf,
@@ -182,6 +185,7 @@ fn default_ws_addr() -> String {
 
 /// JSON-RPC and WebSocket API configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct ApiConfig {
     /// JSON-RPC HTTP-only server bind address (default 127.0.0.1:8783).
     pub rpc_addr: String,
@@ -254,12 +258,14 @@ fn default_gui_addr() -> String {
 
 /// Wallet keystore configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct WalletConfig {
     pub keystore_path: PathBuf,
 }
 
 /// Logging configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub file: String,
@@ -268,6 +274,7 @@ pub struct LoggingConfig {
 
 /// Prometheus metrics configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct MetricsConfig {
     pub prometheus_addr: String,
     pub enabled: bool,
@@ -275,6 +282,7 @@ pub struct MetricsConfig {
 
 /// Runtime tracing configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct TraceConfig {
     /// Maximum number of entries in the RAM ring buffer.
     #[serde(default = "default_buffer_capacity")]
@@ -306,6 +314,7 @@ impl Default for TraceConfig {
 
 /// Node identity configuration for PoR self-identification broadcasts.
 #[derive(Deserialize, Serialize)]
+#[serde(default)]
 pub struct IdentityConfig {
     pub node_name: String,
     pub org_type: String,
@@ -367,6 +376,7 @@ impl std::fmt::Debug for IdentityConfig {
 
 /// `[gateway]` section — fee-split gateway key configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct GatewayConfig {
     /// Path to a file containing the gateway public key (hex-encoded wire bytes).
     /// If set, the key is loaded from this file instead of being auto-derived
@@ -395,6 +405,7 @@ impl Default for GatewayConfig {
 
 /// `[rewards]` section — reward address for fee splits.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct RewardsConfig {
     /// Bitcoin address (bc1q..., 1..., bc1p...) or NOBLE public key (hex).
     /// Receives gateway fee splits. Block subsidy goes to the validator key.
@@ -412,6 +423,7 @@ impl Default for RewardsConfig {
 
 /// `[security]` section — at-rest encryption configuration.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SecurityConfig {
     /// Encryption mode: "automatic" (default, uses random .chain_meta)
     /// or "manual" (operator password required on every startup).
@@ -437,6 +449,7 @@ impl Default for SecurityConfig {
 /// Set `discovery_enabled = false` and `server_enabled = false` to
 /// completely disable the faucet subsystem (e.g. for production chains).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FaucetConfig {
     /// Enable faucet peer discovery. When false, `noble_getAvailableFaucets` returns empty.
     #[serde(default = "default_true")]
