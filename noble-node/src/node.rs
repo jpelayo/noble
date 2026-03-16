@@ -1966,8 +1966,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .arg("--keystore-dir").arg(&ks_dir);
 
                 if let Some(ref pass) = stored_passphrase {
-                    // Subsequent boot: pass stored passphrase to unlock faucet keystore.
-                    cmd.arg("--passphrase").arg(pass);
+                    // Subsequent boot: pass stored passphrase via env (not CLI — visible in ps).
+                    cmd.env("NOBLE_FAUCET_PASSPHRASE", pass);
                     tracing::info!(task = "faucet", "Using stored faucet passphrase from keystore");
                 } else {
                     // First boot: faucet will generate keypair, then call storeFaucetSecret RPC.

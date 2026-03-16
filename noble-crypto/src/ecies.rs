@@ -236,7 +236,7 @@ pub fn decrypt_as_recipient(
                 .expect("secp256k1 shared secret is 32 bytes");
             bytes
         }
-        NoblePrivateKey::P2pIdentity(_) | NoblePrivateKey::TlsKey(_) | NoblePrivateKey::TotpSecret(_) => {
+        NoblePrivateKey::P2pIdentity(_) | NoblePrivateKey::TlsKey(_) | NoblePrivateKey::TotpSecret(_) | NoblePrivateKey::FaucetPassphrase(_) => {
             return Err(CryptoError::EciesDecrypt("non-signing key cannot perform ECIES".into()));
         }
     };

@@ -170,12 +170,14 @@ async fn main() {
         (p, false)
     } else if cli.auto_unlock && keystore_is_empty {
         // First boot: generate a real random passphrase (not the hardcoded one).
-        let mut rng_bytes = [0u8; 32];
-        use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let _ = f.read_exact(&mut rng_bytes);
-        }
-        (hex::encode(rng_bytes), true)
+        let rng_bytes = noble_crypto::sha256(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        (hex::encode(rng_bytes.as_bytes()), true)
     } else if cli.auto_unlock {
         // Keystore exists but no passphrase provided — this shouldn't happen
         // after the first boot (the node should pass --passphrase).

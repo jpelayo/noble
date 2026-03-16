@@ -1079,10 +1079,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         }
         let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut ks = self.wallet_keystore.lock();
-        // Remove existing faucet passphrase if any (idempotent).
+        // Delete existing faucet passphrase if any (store_raw rejects duplicates).
         if ks.has_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE).unwrap_or(false) {
             tracing::info!(task = "faucet", "Replacing existing faucet passphrase in keystore");
-            // store_raw overwrites — no explicit delete needed for raw scheme entries.
+            ks.delete_by_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE);
         }
         ks.store_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE, passphrase.as_bytes(), &wallet_pass)
             .map_err(|e| ApiError::Internal(format!("store faucet passphrase: {e}")))?;

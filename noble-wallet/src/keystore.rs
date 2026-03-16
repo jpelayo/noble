@@ -24,8 +24,8 @@ use zeroize::Zeroize;
 
 use noble_crypto::keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
 use noble_crypto::{
-    SCHEME_ED25519, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1, SCHEME_TLS_KEY, SCHEME_TOTP_SECRET,
-    SCHEME_VALIDATOR_ED25519, SCHEME_VALIDATOR_SECP256K1,
+    SCHEME_ED25519, SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
+    SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_ED25519, SCHEME_VALIDATOR_SECP256K1,
 };
 
 use crate::error::WalletError;
@@ -235,6 +235,31 @@ impl KeyStore {
         }
 
         Ok(())
+    }
+
+    /// Delete all keystore files for a given internal scheme ID (0x80+).
+    ///
+    /// Used to remove raw entries (e.g., faucet passphrase) before re-storing.
+    pub fn delete_by_scheme(&mut self, scheme_id: u8) {
+        if let Ok(entries) = fs::read_dir(&self.path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".json") {
+                    if let Ok(content) = fs::read_to_string(entry.path()) {
+                        if let Ok(enc) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if enc.get("scheme_id").and_then(|v| v.as_u64()) == Some(scheme_id as u64) {
+                                let _ = fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Also remove from unlocked keys if present.
+        if let Some(ref mut keys) = self.unlocked_keys {
+            keys.retain(|_, v| v.scheme_id() != scheme_id);
+        }
     }
 
     /// Generate a new key from a BIP-39 mnemonic phrase.
@@ -535,6 +560,7 @@ impl KeyStore {
                 SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(secret.clone()),
                 SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(secret.clone()),
                 SCHEME_TOTP_SECRET => NoblePrivateKey::TotpSecret(secret.clone()),
+                SCHEME_FAUCET_PASSPHRASE => NoblePrivateKey::FaucetPassphrase(secret.clone()),
                 other => {
                     secret.zeroize();
                     return Err(WalletError::UnsupportedScheme(other));
@@ -658,6 +684,7 @@ impl KeyStore {
             SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(raw_bytes.to_vec()),
             SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(raw_bytes.to_vec()),
             SCHEME_TOTP_SECRET => NoblePrivateKey::TotpSecret(raw_bytes.to_vec()),
+            SCHEME_FAUCET_PASSPHRASE => NoblePrivateKey::FaucetPassphrase(raw_bytes.to_vec()),
             other => return Err(WalletError::UnsupportedScheme(other)),
         };
 
