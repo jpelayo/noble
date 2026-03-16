@@ -320,22 +320,32 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         drop(consensus); // Release lock before acquiring peer_info (lock order).
 
         // Compute highest_known from connected peers' chain tips.
-        let highest_known = {
+        let (highest_known, has_peers) = {
             let info = self.peer_info.read();
-            info.values()
+            let max_peer_height = info.values()
                 .filter_map(|entry| entry.chain_tip_height)
-                .max()
-                .unwrap_or(height)
-                .max(height)
+                .max();
+            let h = max_peer_height.unwrap_or(height).max(height);
+            (h, !info.is_empty())
         };
 
         let progress = if highest_known == 0 {
-            1.0
+            0.0
         } else {
             height as f64 / highest_known as f64
         };
-        let synced = height >= highest_known;
-        let state = if synced { "Complete" } else { "Syncing" };
+        let synced = height >= highest_known && height > 0;
+        let state = if !has_peers && height == 0 {
+            "Isolated"
+        } else if height == 0 {
+            "Bootstrapping"
+        } else if !has_peers {
+            "Isolated"
+        } else if synced {
+            "Aligned"
+        } else {
+            "Syncing"
+        };
 
         Ok(SyncStatusResponse {
             synced,

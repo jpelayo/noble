@@ -924,6 +924,46 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 "Publishing NodeAnnounce for '{}'",
                 id.node_name,
             );
+
+            // Store self in the validator registry so the node appears in its own
+            // peer identity table and validator list (gossipsub does not echo
+            // messages back to sender — self must be registered locally).
+            if let Some((_, ref pk)) = self.announce_keypair {
+                let identity_wire: Vec<u8> = pk.to_wire_bytes();
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut registry = self.validator_registry.write();
+                // Add to known peers (identity table).
+                registry.update_known_peer(
+                    &hex::encode(&identity_wire),
+                    Some(announce.node_name.clone()),
+                    announce.host_address.clone(),
+                    announce.country_code.clone(),
+                    announce.wants_to_validate,
+                    announce.wants_to_vote,
+                    Some(format!("{:?}", announce.org_type)),
+                    Some(format!("{:?}", announce.node_role)),
+                    None, // no peer_id for self (we are the local node)
+                    now_ts,
+                );
+                // Add to validator list if this node validates.
+                if announce.wants_to_validate && !registry.is_validator(pk) {
+                    registry.add_validator(pk.clone(), 1, now_ts);
+                    tracing::info!(
+                        task = "announce",
+                        "Self-registered in validator list: {}",
+                        pk.to_address()
+                    );
+                }
+                // Set friendly name.
+                if !announce.node_name.is_empty() {
+                    registry.set_friendly_name(pk, announce.node_name.clone());
+                }
+                let _ = registry.persist_if_dirty();
+            }
+
             if let Err(e) = cmd.try_send(NetworkCommand::PublishNodeAnnounce(announce)) {
                 tracing::warn!(task = "announce", "Failed to send PublishNodeAnnounce: {e}");
             } else {

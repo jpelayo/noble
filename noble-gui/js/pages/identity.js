@@ -338,7 +338,7 @@ export function init(root, ctx) {
     }
   }
 
-  // Load peer identity data from peer memory
+  // Load peer identity data from peer memory (includes self via NodeAnnounce self-storage)
   async function loadPeers() {
     try {
       const peers = await rpc.call('noble_getPeerMemory');

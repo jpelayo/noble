@@ -659,6 +659,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             tracing::info!(task = "identity", "Node identity persisted to {}", path.display());
         }
 
+        // Capture values before move.
+        let saved_node_name = new_identity.node_name.clone();
+
         // Update in-memory state.
         {
             let mut id = self.node_identity.write();
@@ -741,6 +744,31 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         } else {
             None
         };
+
+        // Self-register in the validator registry so the node can propose/vote
+        // immediately without requiring a restart.
+        if wants_to_validate {
+            if let Some(ref pubkey_addr) = validator_pubkey {
+                // Decode the nbl1... address back to a NoblePublicKey for registry.
+                if let Ok(pk) = noble_crypto::noble_addr::decode(pubkey_addr) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut reg = self.validator_registry.write();
+                    if !reg.is_validator(&pk) {
+                        reg.add_validator(pk.clone(), 1, now);
+                        tracing::info!(
+                            task = "setup",
+                            "Self-registered as validator: {pubkey_addr}"
+                        );
+                    }
+                    if !saved_node_name.is_empty() {
+                        reg.set_friendly_name(&pk, saved_node_name.clone());
+                    }
+                }
+            }
+        }
 
         Ok(SetNodeIdentityResponse { success: true, validator_pubkey })
     }
