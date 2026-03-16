@@ -389,9 +389,26 @@ final class AppState {
 
         } catch {
             pollFailureCount += 1
-            if pollFailureCount >= 3 {
-                disconnect()
+            if pollFailureCount >= 3 && isConnected {
+                isConnected = false
                 pushStateToWebView(["isConnected": false])
+            }
+            // Auto-reconnect: retry every 3 ticks while disconnected.
+            if !isConnected, pollFailureCount % 3 == 0 {
+                do {
+                    let nodeInfo = try await service.getNodeInfo()
+                    isConnected = true
+                    pollFailureCount = 0
+                    chainId = nodeInfo.chainId
+                    blockHeight = nodeInfo.blockHeight
+                    pushStateToWebView([
+                        "isConnected": true,
+                        "blockHeight": nodeInfo.blockHeight,
+                        "chainId": nodeInfo.chainId,
+                    ])
+                } catch {
+                    // Still down — will retry on next poll tick.
+                }
             }
         }
     }
