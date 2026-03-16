@@ -734,14 +734,41 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         count: Option<usize>,
     ) -> Result<CycleHistoryResponse, ErrorObjectOwned> {
         let limit = count.unwrap_or(10).min(100);
-        let storage = self.storage.read();
-        let raw_entries = storage
-            .get_recent_cycle_history(limit)
-            .map_err(|e| ApiError::Internal(format!("read cycle history: {e}")))?;
+        // Collect raw entries under storage lock, then drop before resolving names.
+        let parsed: Vec<noble_consensus::CycleHistoryEntry> = {
+            let storage = self.storage.read();
+            let raw_entries = storage
+                .get_recent_cycle_history(limit)
+                .map_err(|e| ApiError::Internal(format!("read cycle history: {e}")))?;
+            raw_entries
+                .into_iter()
+                .filter_map(|bytes| noble_consensus::CycleHistoryEntry::from_cbor(&bytes).ok())
+                .collect()
+        }; // storage lock dropped
 
-        let entries: Vec<CycleHistoryEntryResponse> = raw_entries
+        // Re-resolve names from the canonical resolver (the stored names may be
+        // raw hex from cycles committed before the node knew peer names).
+        let re_resolve = |stored_name: &str| -> String {
+            // If the stored name looks like hex wire bytes, try to resolve it.
+            if let Ok(wire) = hex::decode(stored_name) {
+                if let Some(name) = self.resolve_friendly_name(&wire) {
+                    return name;
+                }
+            }
+            // If it looks like a bech32m address, try to decode and resolve.
+            if stored_name.starts_with("nbl1") {
+                if let Ok(pk) = noble_crypto::noble_addr::decode(stored_name) {
+                    if let Some(name) = self.resolve_friendly_name(&pk.to_wire_bytes()) {
+                        return name;
+                    }
+                }
+            }
+            // Otherwise keep the stored value (it may already be a friendly name).
+            stored_name.to_string()
+        };
+
+        let entries: Vec<CycleHistoryEntryResponse> = parsed
             .into_iter()
-            .filter_map(|bytes| noble_consensus::CycleHistoryEntry::from_cbor(&bytes).ok())
             .map(|entry| CycleHistoryEntryResponse {
                 cycle_number: entry.cycle_number,
                 status: entry.status,
@@ -749,7 +776,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     .proposals
                     .into_iter()
                     .map(|p| CycleHistoryProposal {
-                        validator: p.validator,
+                        validator: re_resolve(&p.validator),
                         block_hash: hash_to_hex(&p.block_hash),
                         tx_count: p.tx_count,
                     })
@@ -759,12 +786,12 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     .into_iter()
                     .map(|v| CycleHistoryVote {
                         block_hash: hash_to_hex(&v.block_hash),
-                        validator: v.validator,
+                        validator: re_resolve(&v.validator),
                         vote_count: v.vote_count,
                         r2_vote_count: v.r2_vote_count,
                     })
                     .collect(),
-                winner: entry.winner,
+                winner: entry.winner.map(|w| re_resolve(&w)),
                 winning_hash: entry.winning_hash.map(|h| hash_to_hex(&h)),
                 disambiguation: entry.disambiguation,
                 finalized_at: entry.finalized_at,
