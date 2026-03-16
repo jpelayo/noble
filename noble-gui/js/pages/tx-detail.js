@@ -283,6 +283,8 @@ const TX_TYPE_NAMES = {
   0x03: 'Badge Proposal',
   0x04: 'Badge Vote',
   0x05: 'Badge Revocation',
+  0x06: 'Locked',
+  0x07: 'Unlocking',
   0x10: 'Coinbase',
 };
 

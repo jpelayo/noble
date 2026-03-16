@@ -16,6 +16,7 @@ pub mod metadata;
 pub mod node_announce;
 pub mod peer_record;
 pub mod pst;
+pub mod locked_tx;
 pub mod transaction;
 pub mod tx_types;
 pub mod utxo;

@@ -67,6 +67,16 @@ pub const TX_TYPE_BADGE_VOTE: u8 = 0x04;
 /// Transaction type: badge revocation (propose revoking an existing badge).
 pub const TX_TYPE_BADGE_REVOCATION: u8 = 0x05;
 
+/// Transaction type: locked notarization — metadata values and checksum are
+/// AES-256-GCM encrypted with a password. Decrypted on-chain when the owner
+/// submits an unlocking transaction (0x07).
+pub const TX_TYPE_LOCKED: u8 = 0x06;
+
+/// Transaction type: unlocking — references a locked tx (0x06) by tx_id and
+/// publishes the decryption password. The node decrypts the locked tx's fields
+/// and re-indexes them (checksum, version chain, publisher).
+pub const TX_TYPE_UNLOCKING: u8 = 0x07;
+
 /// Transaction type: coinbase (block reward + collected fees).
 /// Always the first transaction (index 0) in every block.
 /// Has a single null input (`OutPoint::COINBASE_PREVOUT`) and outputs carrying

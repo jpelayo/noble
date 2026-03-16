@@ -153,6 +153,58 @@ impl StorageEngine for MemoryStorage {
             }
         }
 
+        // --- Unlock re-indexing ---
+        for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
+            if !noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.triggers_unlock_reindex()) {
+                continue;
+            }
+            let locked_txid_hex = match tx.metadata.iter().find(|m| m.key == noble_core::locked_tx::META_UNLOCK_TXID) {
+                Some(e) => std::str::from_utf8(&e.value).unwrap_or("").to_string(),
+                None => continue,
+            };
+            let password = match tx.metadata.iter().find(|m| m.key == noble_core::locked_tx::META_UNLOCK_PASSWORD) {
+                Some(e) => e.value.clone(),
+                None => continue,
+            };
+            let locked_tx_id = match Hash256::from_hex(&locked_txid_hex) {
+                Ok(h) => h,
+                Err(_) => {
+                    tracing::warn!("unlock re-index: invalid locked tx_id hex");
+                    continue;
+                }
+            };
+            // Look up locked tx from the transaction index (chain_id-independent)
+            let locked_tx = match inner.transactions.get(&locked_tx_id) {
+                Some(t) => t.clone(),
+                None => {
+                    tracing::warn!("unlock re-index: locked tx not found in storage");
+                    continue;
+                }
+            };
+
+            // Signer check
+            if tx.publisher_sig.public_key != locked_tx.publisher_sig.public_key {
+                tracing::warn!("unlock re-index: signer mismatch");
+                continue;
+            }
+
+            if let Ok(decrypted) = noble_core::locked_tx::decrypt_locked_tx(&locked_tx, &password) {
+                inner.checksum_index.entry(decrypted.checksum).or_default().push(locked_tx_id);
+                for (key, value) in &decrypted.metadata {
+                    if key == noble_core::constants::META_KEY_PREV_CHECKSUM {
+                        if let Ok(prev_hex) = std::str::from_utf8(value) {
+                            if let Ok(prev_hash) = Hash256::from_hex(prev_hex) {
+                                inner.version_chain.entry(prev_hash).or_default().push(locked_tx_id);
+                            }
+                        }
+                    }
+                }
+                if let Ok(pk) = locked_tx.publisher_sig.to_noble_public_key() {
+                    inner.publisher_index.entry(pk.to_wire_bytes()).or_default().push(locked_tx_id);
+                }
+            }
+        }
+
         // --- UTXO processing ---
         let mut spent_utxos: Vec<(OutPoint, UtxoEntry)> = Vec::new();
         let mut created_outputs: Vec<(OutPoint, NobleAddress)> = Vec::new();

@@ -13,6 +13,7 @@ authors.workspace = true
 [dependencies]
 noble-codec.workspace = true
 noble-crypto.workspace = true
+aes-gcm.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true
 thiserror.workspace = true

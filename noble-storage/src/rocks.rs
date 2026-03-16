@@ -559,6 +559,80 @@ impl StorageEngine for RocksDbStorage {
             }
         }
 
+        // --- Unlock re-indexing: if an unlocking tx (0x07) references a locked tx,
+        // decrypt the locked tx's fields and index them. ---
+        for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
+            if !noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.triggers_unlock_reindex()) {
+                continue;
+            }
+            // Extract unlock metadata
+            let locked_txid_hex = match tx.metadata.iter().find(|m| m.key == noble_core::locked_tx::META_UNLOCK_TXID) {
+                Some(e) => std::str::from_utf8(&e.value).unwrap_or("").to_string(),
+                None => continue,
+            };
+            let password = match tx.metadata.iter().find(|m| m.key == noble_core::locked_tx::META_UNLOCK_PASSWORD) {
+                Some(e) => e.value.clone(),
+                None => continue,
+            };
+
+            // Fetch the locked transaction from storage
+            let locked_tx_id = match noble_crypto::Hash256::from_hex(&locked_txid_hex) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("unlock re-index: invalid locked tx_id: {e}");
+                    continue;
+                }
+            };
+            let locked_tx = match self.get_transaction(&locked_tx_id) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("unlock re-index: locked tx not found: {e}");
+                    continue;
+                }
+            };
+
+            // Verify signer matches
+            if tx.publisher_sig.public_key != locked_tx.publisher_sig.public_key {
+                tracing::warn!("unlock re-index: signer mismatch — unlocking tx signer differs from locked tx");
+                continue;
+            }
+
+            // Decrypt the locked fields
+            let decrypted = match noble_core::locked_tx::decrypt_locked_tx(&locked_tx, &password) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("unlock re-index: decryption failed: {e}");
+                    continue;
+                }
+            };
+
+            // Index the real checksum
+            batch.merge_cf(cf_checksum, decrypted.checksum.as_bytes(), locked_tx_id.as_bytes());
+
+            // Check decrypted metadata for version chain
+            for (key, value) in &decrypted.metadata {
+                if key == noble_core::constants::META_KEY_PREV_CHECKSUM {
+                    if let Ok(prev_hex) = std::str::from_utf8(value) {
+                        if let Ok(prev_hash) = noble_crypto::Hash256::from_hex(prev_hex) {
+                            batch.merge_cf(cf_version, prev_hash.as_bytes(), locked_tx_id.as_bytes());
+                        }
+                    }
+                }
+            }
+
+            // Index publisher
+            if let Ok(pk) = locked_tx.publisher_sig.to_noble_public_key() {
+                let publisher_wire = pk.to_wire_bytes();
+                batch.merge_cf(cf_publisher, &publisher_wire, locked_tx_id.as_bytes());
+            }
+
+            tracing::info!(
+                locked_tx = %locked_txid_hex,
+                checksum = %decrypted.checksum,
+                "unlock re-index: decrypted and indexed locked transaction"
+            );
+        }
+
         // chain_state CF: tip_hash and tip_height
         let cf_state = self.cf(CF_CHAIN_STATE)?;
         batch.put_cf(cf_state, KEY_TIP_HASH, block_hash.as_bytes());

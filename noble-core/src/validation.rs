@@ -346,6 +346,37 @@ pub fn validate_transaction(
         tracing::trace!("T29/T30: version metadata validation passed");
     }
 
+    // T31: Locked transaction must have required metadata keys
+    if tx.tx_type == crate::constants::TX_TYPE_LOCKED {
+        let has = |key: &str| tx.metadata.iter().any(|m| m.key == key);
+        if !has(crate::locked_tx::META_LOCKED_CHECKSUM) {
+            return Err(ValidationError::Internal("locked tx missing locked:checksum".into()));
+        }
+        if !has(crate::locked_tx::META_LOCKED_SALT) {
+            return Err(ValidationError::Internal("locked tx missing locked:salt".into()));
+        }
+        if !has(crate::locked_tx::META_LOCKED_NONCE) {
+            return Err(ValidationError::Internal("locked tx missing locked:nonce".into()));
+        }
+        tracing::trace!("T31: locked tx metadata check passed");
+    }
+
+    // T32: Unlocking transaction must have required metadata keys
+    if tx.tx_type == crate::constants::TX_TYPE_UNLOCKING {
+        let find = |key: &str| tx.metadata.iter().find(|m| m.key == key);
+        let txid_entry = find(crate::locked_tx::META_UNLOCK_TXID)
+            .ok_or_else(|| ValidationError::Internal("unlocking tx missing unlock:txid".into()))?;
+        // Must be 64 hex chars (32-byte tx_id)
+        let txid_str = std::str::from_utf8(&txid_entry.value).unwrap_or("");
+        if txid_str.len() != 64 || hex::decode(txid_str).is_err() {
+            return Err(ValidationError::Internal("unlock:txid must be 64 hex chars".into()));
+        }
+        if find(crate::locked_tx::META_UNLOCK_PASSWORD).is_none() {
+            return Err(ValidationError::Internal("unlocking tx missing unlock:password".into()));
+        }
+        tracing::trace!("T32: unlocking tx metadata check passed");
+    }
+
     // T10: tx_id verification
     let computed_id = tx.compute_tx_id(ctx.chain_id).map_err(|e| {
         tracing::debug!("tx_id computation failed: {e}");

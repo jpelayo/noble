@@ -21,6 +21,8 @@ mod badge_proposal;
 mod badge_vote;
 mod badge_revocation;
 mod coinbase;
+mod locked;
+mod unlocking;
 
 pub use notarization::Notarization;
 pub use transfer::Transfer;
@@ -29,6 +31,8 @@ pub use badge_proposal::BadgeProposal;
 pub use badge_vote::BadgeVote;
 pub use badge_revocation::BadgeRevocation;
 pub use coinbase::Coinbase;
+pub use locked::Locked;
+pub use unlocking::Unlocking;
 
 use crate::constants::*;
 
@@ -72,6 +76,10 @@ pub trait TxTypeHandler: Send + Sync {
     /// Whether BIP-137 signing uses the transfer message format
     /// (recipient + amount) vs the notarization format (checksum).
     fn uses_transfer_bip137_message(&self) -> bool { false }
+
+    /// Whether committing this tx triggers decryption + re-indexing
+    /// of a referenced locked transaction.
+    fn triggers_unlock_reindex(&self) -> bool { false }
 }
 
 /// Look up the handler for a given `tx_type` byte.
@@ -86,6 +94,8 @@ pub fn handler_for(tx_type: u8) -> Option<&'static dyn TxTypeHandler> {
         TX_TYPE_BADGE_VOTE => Some(&BadgeVote),
         TX_TYPE_BADGE_REVOCATION => Some(&BadgeRevocation),
         TX_TYPE_COINBASE => Some(&Coinbase),
+        TX_TYPE_LOCKED => Some(&Locked),
+        TX_TYPE_UNLOCKING => Some(&Unlocking),
         _ => None,
     }
 }

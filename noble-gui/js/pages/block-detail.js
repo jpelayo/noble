@@ -158,7 +158,7 @@ export function init(root, ctx) {
 
         const tbody = panel.querySelector('#block-txs');
         block.transactions.forEach((tx, i) => {
-          const TX_NAMES = {0:'Notarization',1:'Transfer',2:'Key Rotation',3:'Badge Proposal',4:'Badge Vote',5:'Badge Revocation',16:'Coinbase'};
+          const TX_NAMES = {0:'Notarization',1:'Transfer',2:'Key Rotation',3:'Badge Proposal',4:'Badge Vote',5:'Badge Revocation',6:'Locked',7:'Unlocking',16:'Coinbase'};
           const isCoinbase = tx.tx_type === 0x10 || (tx.inputs && tx.inputs.length === 1 && tx.inputs[0].txid === '0'.repeat(64));
           const typeLabel = isCoinbase ? '<span class="badge coinbase">Coinbase</span>' : (TX_NAMES[tx.tx_type] || `Type ${tx.tx_type}`);
           const tr = document.createElement('tr');

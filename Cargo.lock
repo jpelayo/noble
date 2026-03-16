@@ -3020,6 +3020,7 @@ dependencies = [
 name = "noble-core"
 version = "0.48.0"
 dependencies = [
+ "aes-gcm",
  "dirs",
  "ed25519-dalek",
  "hex",
