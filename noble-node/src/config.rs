@@ -35,6 +35,9 @@ pub struct NodeConfig {
     /// Security configuration (at-rest encryption).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Faucet subsystem configuration.
+    #[serde(default)]
+    pub faucet: FaucetConfig,
 }
 
 /// Operational role of the node binary.
@@ -416,6 +419,46 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             encryption_mode: default_encryption_mode(),
+        }
+    }
+}
+
+/// Faucet subsystem configuration.
+///
+/// Controls both the local faucet server and peer faucet discovery.
+/// Set `discovery_enabled = false` and `server_enabled = false` to
+/// completely disable the faucet subsystem (e.g. for production chains).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaucetConfig {
+    /// Enable faucet peer discovery. When false, `noble_getAvailableFaucets` returns empty.
+    #[serde(default = "default_true")]
+    pub discovery_enabled: bool,
+    /// Probe interval in consensus cycles. 72 cycles ≈ 24h at 20min/cycle.
+    #[serde(default = "default_faucet_probe_interval")]
+    pub probe_interval_cycles: u64,
+    /// Port to probe on peers.
+    #[serde(default = "default_faucet_port")]
+    pub probe_port: u16,
+    /// Enable the local faucet server.
+    #[serde(default = "default_true")]
+    pub server_enabled: bool,
+    /// Local faucet server port.
+    #[serde(default = "default_faucet_port")]
+    pub server_port: u16,
+}
+
+fn default_true() -> bool { true }
+fn default_faucet_probe_interval() -> u64 { 72 }
+fn default_faucet_port() -> u16 { 8786 }
+
+impl Default for FaucetConfig {
+    fn default() -> Self {
+        Self {
+            discovery_enabled: true,
+            probe_interval_cycles: 72,
+            probe_port: 8786,
+            server_enabled: true,
+            server_port: 8786,
         }
     }
 }

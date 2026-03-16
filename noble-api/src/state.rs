@@ -321,6 +321,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Overall sync target height (shared with HealingManager for real-time reads).
     pub sync_progress_total: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Cached faucet discovery results. Updated by the node on cycle boundaries.
+    pub faucet_cache: crate::types::FaucetCache,
 }
 
 /// Canonical node name resolution from validator wire bytes.

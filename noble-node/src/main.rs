@@ -6,6 +6,7 @@
 mod bridge;
 pub mod ca_store;
 mod config;
+pub mod faucet_probe;
 mod gui_server;
 pub mod healing;
 mod tls_cert;
@@ -282,17 +283,60 @@ async fn main() {
 }
 
 // ---------------------------------------------------------------------------
+// Bootstrap config for headless (no-TTY) first start
+// ---------------------------------------------------------------------------
+
+/// Generate a minimal `noble.toml` so the node can boot into GUI setup mode.
+///
+/// Called when no config file exists and the process has no terminal (e.g.
+/// launched by launchd / systemd / `brew services`). The config uses all
+/// defaults with `remote_setup = true` so the operator can complete setup
+/// via the web GUI at https://<host>:8785.
+fn generate_bootstrap_config(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = config::NodeConfig::default();
+    // Allow remote access to the setup wizard (operator may not be on localhost).
+    cfg.api.remote_setup = true;
+
+    let toml_str = toml::to_string_pretty(&cfg)?;
+
+    // Ensure parent directory exists.
+    if let Some(parent) = std::path::Path::new(config_path).parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    std::fs::write(config_path, toml_str)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Run command implementation
 // ---------------------------------------------------------------------------
 
 async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: bool) {
     // --- Setup gate ---------------------------------------------------------
-    // If no config file exists, offer the setup wizard before doing anything.
+    // If no config file exists, decide how to handle based on terminal availability.
     if !std::path::Path::new(config_path).exists() {
-        if !setup::prompt_missing_config(config_path) {
-            return; // User chose Exit, or setup failed.
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            // Interactive terminal — offer the CLI setup wizard.
+            if !setup::prompt_missing_config(config_path) {
+                return; // User chose Exit, or setup failed.
+            }
+            // Setup completed — config file now exists; fall through to load it.
+        } else {
+            // No terminal (launched by launchd/systemd/brew services).
+            // Generate a minimal bootstrap config and start in GUI setup mode.
+            eprintln!("No configuration found at {config_path}");
+            eprintln!("No terminal detected — generating bootstrap config for GUI setup...");
+            if let Err(e) = generate_bootstrap_config(config_path) {
+                eprintln!("Failed to generate bootstrap config: {e}");
+                std::process::exit(1);
+            }
+            eprintln!("Bootstrap config written to {config_path}");
+            eprintln!("Complete setup at https://127.0.0.1:8785 (or https://<this-host>:8785 if remote)");
         }
-        // Setup completed — config file now exists; fall through to load it.
     }
 
     // Load config first (before tracing init, so we can read [trace] config).

@@ -182,6 +182,13 @@ pub trait NetworkApi {
     /// Unban a peer by peer ID (hex-encoded).
     #[method(name = "unbanPeer")]
     async fn unban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get the list of discovered faucets on the network.
+    ///
+    /// The node probes peers' faucet endpoints periodically (configurable
+    /// via `[faucet]` in noble.toml). Returns cached results.
+    #[method(name = "getAvailableFaucets")]
+    async fn get_available_faucets(&self) -> Result<AvailableFaucetsResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -625,6 +632,11 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
         }
 
         Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn get_available_faucets(&self) -> Result<AvailableFaucetsResponse, ErrorObjectOwned> {
+        let faucets = self.faucet_cache.lock().clone();
+        Ok(AvailableFaucetsResponse { faucets })
     }
 }
 

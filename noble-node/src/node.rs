@@ -128,6 +128,12 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub last_redial_at: std::sync::atomic::AtomicU64,
     /// Chain healing, sync, fork resolution, and cross-chain adoption manager.
     pub healing: crate::healing::HealingManager<S>,
+    /// Cached faucet discovery results. Shared with ApiState.
+    pub faucet_cache: noble_api::types::FaucetCache,
+    /// Cycle counter for faucet probe interval.
+    pub faucet_probe_counter: u64,
+    /// Faucet discovery config.
+    pub faucet_config: crate::config::FaucetConfig,
 }
 
 impl Node<MemoryStorage> {
@@ -565,6 +571,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
             last_proposed,
             healing,
+            faucet_cache: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            faucet_probe_counter: 0,
+            faucet_config: config.faucet.clone(),
         })
     }
 
@@ -1673,6 +1682,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height: self.healing.sync_target_height_shared().clone(),
             sync_progress_current: self.healing.sync_progress_current().clone(),
             sync_progress_total: self.healing.sync_progress_total().clone(),
+            faucet_cache: self.faucet_cache.clone(),
         });
 
         // --- Determine bind addresses ---
@@ -1932,6 +1942,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         engine.step(CycleEvent::Tick { now })
                     };
                     self.process_cycle_actions(actions, &network_cmd, &new_block_tx, &cycle_phase_tx, &metrics, &shared_identity);
+
+                    // ── Faucet probe (every N cycles, piggyback on tick) ──
+                    if self.faucet_config.discovery_enabled {
+                        self.faucet_probe_counter += 1;
+                        // 120 ticks per cycle (10s tick, 1200s cycle). Probe every N cycles.
+                        let ticks_per_probe = self.faucet_config.probe_interval_cycles * 120;
+                        if self.faucet_probe_counter >= ticks_per_probe {
+                            self.faucet_probe_counter = 0;
+                            let peer_addrs: Vec<String> = self.peer_info.read()
+                                .values()
+                                .map(|p| p.addr.clone())
+                                .collect();
+                            let ips = crate::faucet_probe::extract_peer_ips(&peer_addrs);
+                            let port = self.faucet_config.probe_port;
+                            let cache = self.faucet_cache.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::faucet_probe::probe_all(&ips, port, true, &cache);
+                            });
+                        }
+                    }
 
                     // ── Sync advancement (manifest-based) ──
                     self.healing.advance_sync(now);

@@ -681,6 +681,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         rewards: crate::config::RewardsConfig {
             reward_address: reward_address.clone(),
         },
+        faucet: crate::config::FaucetConfig::default(),
     };
 
     // Display summary table.

@@ -398,6 +398,26 @@ pub struct PeerRecordResponse {
     pub wants_to_vote: bool,
 }
 
+/// A discovered faucet on the network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaucetEntry {
+    pub url: String,
+    pub faucet_address: String,
+    pub faucet_balance: u64,
+    pub drip_amount: u64,
+    pub network: String,
+    pub last_probed: u64,
+}
+
+/// Thread-safe faucet cache shared between the node (writer) and API (reader).
+pub type FaucetCache = std::sync::Arc<parking_lot::Mutex<Vec<FaucetEntry>>>;
+
+/// Response for `noble_getAvailableFaucets`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AvailableFaucetsResponse {
+    pub faucets: Vec<FaucetEntry>,
+}
+
 /// Reputation score breakdown for a validator (S15-A).
 #[derive(Debug, Clone, Serialize)]
 pub struct ReputationBreakdown {
