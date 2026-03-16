@@ -249,7 +249,9 @@ impl KeyStore {
                     if let Ok(content) = fs::read_to_string(entry.path()) {
                         if let Ok(enc) = serde_json::from_str::<serde_json::Value>(&content) {
                             if enc.get("scheme_id").and_then(|v| v.as_u64()) == Some(scheme_id as u64) {
-                                let _ = fs::remove_file(entry.path());
+                                if let Err(e) = fs::remove_file(entry.path()) {
+                                    tracing::warn!("Failed to delete keystore file {:?}: {e}", entry.path());
+                                }
                             }
                         }
                     }

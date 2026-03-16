@@ -1943,9 +1943,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let db_path = config.storage.data_dir.join("faucet.db").display().to_string();
                 let ks_dir = config.storage.data_dir.join("faucet-keystore").display().to_string();
                 let log_path = config.storage.data_dir.join("faucet.log");
-                let log_file = std::fs::File::create(&log_path)
-                    .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-                let log_err = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+                let (log_file, log_err) = match std::fs::File::create(&log_path) {
+                    Ok(f) => {
+                        let err = f.try_clone().ok();
+                        (std::process::Stdio::from(f), err.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null))
+                    }
+                    Err(e) => {
+                        tracing::warn!(task = "faucet", "Cannot create faucet log at {}: {e}", log_path.display());
+                        (std::process::Stdio::null(), std::process::Stdio::null())
+                    }
+                };
 
                 // Faucet retrieves its own passphrase from the node via RPC
                 // (getFaucetSecret on subsequent boots, storeFaucetSecret on first boot).
@@ -1954,8 +1961,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
                     .arg("--rpc-url").arg(&rpc_url)
                     .arg("--db-path").arg(&db_path)
-                    .arg("--keystore-dir").arg(&ks_dir)
-                    .arg("--auto-unlock");
+                    .arg("--keystore-dir").arg(&ks_dir);
 
                 match cmd
                     .stdout(log_file)

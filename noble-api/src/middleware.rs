@@ -100,7 +100,7 @@ pub fn is_read_method(method: &str) -> bool {
     }
     // Public protocol operations: transactions carry their own signature-based
     // authorization.  Client apps submit these without TOTP.
-    if name == "submitTransaction" || name == "submitDocumentBatch" {
+    if name == "submitTransaction" || name == "submitDocumentBatch" || name == "storeFaucetSecret" {
         return true;
     }
     name.starts_with("get")

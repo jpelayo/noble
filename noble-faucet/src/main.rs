@@ -147,6 +147,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    // Install rustls crypto provider before any TLS usage.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -176,20 +179,35 @@ async fn main() {
                 tracing::info!("Faucet passphrase retrieved from node keystore via RPC");
                 (p, false)
             }
-            _ => {
+            Ok(None) => {
+                // Node has no stored passphrase — first boot.
                 if keystore_is_empty {
-                    // First boot: generate random passphrase.
-                    let rng_bytes = noble_crypto::sha256(
-                        &std::time::SystemTime::now()
+                    // Generate entropy from pid + nanos + exe path.
+                    let entropy = format!(
+                        "{}:{}:{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
-                            .as_nanos()
-                            .to_le_bytes(),
+                            .as_nanos(),
+                        std::env::current_exe().unwrap_or_default().display(),
                     );
+                    let rng_bytes = noble_crypto::sha256(entropy.as_bytes());
                     (hex::encode(rng_bytes.as_bytes()), true)
                 } else {
-                    // Keystore exists but RPC returned nothing — legacy fallback.
-                    ("noble-faucet-auto".to_string(), false)
+                    // Keystore exists but no passphrase on node — unrecoverable.
+                    tracing::error!("Faucet keystore exists but node has no stored passphrase. Delete faucet-keystore to re-generate.");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                // RPC error — could be transient. Don't generate a new passphrase.
+                if keystore_is_empty {
+                    tracing::error!("Cannot reach node RPC to get faucet passphrase: {e}");
+                    std::process::exit(1);
+                } else {
+                    tracing::error!("Cannot reach node RPC to get faucet passphrase: {e}. Keystore exists but passphrase unknown.");
+                    std::process::exit(1);
                 }
             }
         }
@@ -202,11 +220,26 @@ async fn main() {
                 tracing::info!("Faucet wallet address: {}", w.address());
 
                 // First boot: store the passphrase in the node's keystore via RPC.
+                // This MUST succeed — if it fails, the passphrase is lost on restart.
                 if is_first_boot {
                     tracing::info!("First boot — storing faucet passphrase in node keystore via RPC");
-                    match rpc.store_faucet_secret(&passphrase).await {
-                        Ok(()) => tracing::info!("Faucet passphrase stored in node keystore"),
-                        Err(e) => tracing::warn!("Failed to store faucet passphrase: {e}"),
+                    let mut stored = false;
+                    for attempt in 1..=3 {
+                        match rpc.store_faucet_secret(&passphrase).await {
+                            Ok(()) => {
+                                tracing::info!("Faucet passphrase stored in node keystore");
+                                stored = true;
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Attempt {attempt}/3 — failed to store faucet passphrase: {e}");
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                    if !stored {
+                        tracing::error!("FATAL: Could not store faucet passphrase after 3 attempts. Exiting to prevent orphaned keystore.");
+                        std::process::exit(1);
                     }
                 }
 

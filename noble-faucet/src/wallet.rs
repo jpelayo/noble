@@ -8,7 +8,7 @@
 
 use noble_codec::NobleCbor;
 use noble_crypto::keys::NoblePublicKey;
-use noble_crypto::SCHEME_ED25519;
+use noble_crypto::SCHEME_SECP256K1;
 use noble_wallet::builder::{SelectedUtxo, TransactionBuilder};
 use noble_wallet::KeyStore;
 
@@ -46,9 +46,9 @@ impl FaucetWallet {
         let signer = if let Some(pk) = keys.into_iter().next() {
             pk
         } else {
-            // Generate new Ed25519 key
+            // Generate new secp256k1 key
             keystore
-                .create_key(SCHEME_ED25519, passphrase)
+                .create_key(SCHEME_SECP256K1, passphrase)
                 .map_err(|e| format!("create key: {e}"))?
         };
 
