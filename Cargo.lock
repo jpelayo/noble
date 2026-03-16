@@ -3206,6 +3206,7 @@ dependencies = [
  "bip32",
  "bip39",
  "clap",
+ "dirs",
  "hex",
  "libc",
  "noble-codec",

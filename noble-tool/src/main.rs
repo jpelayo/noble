@@ -2354,48 +2354,123 @@ fn cmd_verify_codec() {
 // reset — remove noble-generated local files
 // ---------------------------------------------------------------------------
 
-fn cmd_reset(data_dir: &std::path::Path) {
+fn cmd_reset(_cli_data_dir: &std::path::Path) {
     use std::io::{self, Write};
+    use std::collections::BTreeSet;
 
     println!();
-    println!("  This will PERMANENTLY DELETE all noble-generated local files:");
+    println!("  Scanning for noble-generated files...");
     println!();
-    println!("    Data directory:  {}", data_dir.display());
 
-    // Collect files/dirs that exist
-    let mut targets: Vec<PathBuf> = Vec::new();
+    // ── Discover all noble directories and files ──
+    // 1. Find noble.toml via platform_config_path (same logic the node uses)
+    // 2. Parse data_dir from noble.toml if found
+    // 3. Scan well-known locations for any noble files
 
-    if data_dir.exists() {
-        targets.push(data_dir.to_path_buf());
+    let config_path = noble_core::paths::platform_config_path();
+    let mut targets: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // The noble.toml and its sibling files
+    let mut noble_roots: Vec<PathBuf> = Vec::new();
+
+    if config_path.exists() {
+        println!("    Config found:    {}", config_path.display());
+        targets.insert(config_path.clone());
+
+        // The config file's directory is a noble root (e.g., /opt/homebrew/etc/noble/)
+        if let Some(config_dir) = config_path.parent() {
+            noble_roots.push(config_dir.to_path_buf());
+        }
+
+        // Parse data_dir from noble.toml
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(table) = content.parse::<toml::Table>() {
+                if let Some(dir) = table
+                    .get("storage")
+                    .and_then(|s| s.as_table())
+                    .and_then(|s| s.get("data_dir"))
+                    .and_then(|d| d.as_str())
+                {
+                    let data_path = PathBuf::from(dir);
+                    if data_path.exists() {
+                        noble_roots.push(data_path.parent().unwrap_or(&data_path).to_path_buf());
+                        targets.insert(data_path);
+                    }
+                }
+            }
+        }
     }
 
-    // Config and identity files in the parent directory
-    let parent = data_dir.parent().unwrap_or(data_dir);
-    let config_files = [
+    // Well-known locations where noble files may live
+    let well_known_dirs: Vec<PathBuf> = vec![
+        // Homebrew (macOS ARM)
+        PathBuf::from("/opt/homebrew/var/noble"),
+        PathBuf::from("/opt/homebrew/etc/noble"),
+        // Homebrew (macOS Intel)
+        PathBuf::from("/usr/local/var/noble"),
+        PathBuf::from("/usr/local/etc/noble"),
+        // Linuxbrew
+        PathBuf::from("/home/linuxbrew/.linuxbrew/var/noble"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/etc/noble"),
+        // User-local
+        dirs::home_dir().map(|h| h.join(".noble")).unwrap_or_default(),
+        dirs::data_dir().map(|d| d.join("NOBLE")).unwrap_or_default(),
+    ];
+
+    for dir in &well_known_dirs {
+        if dir.as_os_str().is_empty() { continue; }
+        if dir.exists() {
+            noble_roots.push(dir.clone());
+        }
+    }
+
+    // Scan each noble root for known files
+    let file_names = [
         "noble.toml",
         "identity.json",
         "validator.key",
         "genesis.cbor",
         "validators.txt",
     ];
-    for name in &config_files {
-        let p = parent.join(name);
-        if p.exists() {
-            println!("    Config file:     {}", p.display());
-            targets.push(p);
+    let dir_names = [
+        "data",
+        "tls",
+        "keystore",
+    ];
+
+    for root in &noble_roots {
+        for name in &file_names {
+            let p = root.join(name);
+            if p.exists() { targets.insert(p); }
+        }
+        for name in &dir_names {
+            let p = root.join(name);
+            if p.exists() { targets.insert(p); }
+        }
+        // If the root itself is a "noble" directory and exists, include it
+        if root.file_name().map(|n| n == "noble" || n == "NOBLE" || n == ".noble").unwrap_or(false) {
+            if root.exists() { targets.insert(root.clone()); }
         }
     }
 
-    let tls_dir = parent.join("tls");
-    if tls_dir.exists() {
-        println!("    TLS directory:   {}", tls_dir.display());
-        targets.push(tls_dir);
+    if targets.is_empty() {
+        println!("  Nothing to remove — no noble files found.");
+        println!();
+        println!("  Searched:");
+        for dir in &well_known_dirs {
+            if !dir.as_os_str().is_empty() {
+                println!("    {}", dir.display());
+            }
+        }
+        return;
     }
 
-    if targets.is_empty() {
-        println!();
-        println!("  Nothing to remove — no noble files found.");
-        return;
+    // Display what will be removed
+    println!("  The following will be PERMANENTLY DELETED:");
+    println!();
+    for target in &targets {
+        let kind = if target.is_dir() { "directory" } else { "file     " };
+        println!("    [{kind}]  {}", target.display());
     }
 
     println!();
@@ -2415,21 +2490,22 @@ fn cmd_reset(data_dir: &std::path::Path) {
     }
 
     println!();
-    for target in &targets {
+    // Remove in reverse order (deepest paths first) so child dirs are
+    // removed before parent dirs
+    for target in targets.iter().rev() {
         if target.is_dir() {
             match fs::remove_dir_all(target) {
-                Ok(()) => println!("  Removed directory: {}", target.display()),
-                Err(e) => eprintln!("  Failed to remove {}: {e}", target.display()),
+                Ok(()) => println!("  Removed: {}", target.display()),
+                Err(e) => eprintln!("  Failed:  {} — {e}", target.display()),
             }
         } else {
             match fs::remove_file(target) {
-                Ok(()) => println!("  Removed file:      {}", target.display()),
-                Err(e) => eprintln!("  Failed to remove {}: {e}", target.display()),
+                Ok(()) => println!("  Removed: {}", target.display()),
+                Err(e) => eprintln!("  Failed:  {} — {e}", target.display()),
             }
         }
     }
 
     println!();
-    println!("  Reset complete. All noble-generated files have been removed.");
-    println!("  Run `noble setup` to configure a fresh node.");
+    println!("  Reset complete. Run `noble setup` to configure a fresh node.");
 }

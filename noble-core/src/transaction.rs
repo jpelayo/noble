@@ -171,7 +171,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(0x4E4F424C).unwrap();
@@ -336,7 +336,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
         assert!(coinbase.is_coinbase());
 
@@ -367,7 +367,7 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
         assert_eq!(tx.total_output_value(), 80_000);
     }

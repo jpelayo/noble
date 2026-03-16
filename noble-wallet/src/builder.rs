@@ -139,7 +139,7 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
 
         let msg = tx
@@ -220,7 +220,7 @@ impl TransactionBuilder {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
 
         let msg = tx
@@ -322,7 +322,7 @@ impl TransactionBuilder {
             encrypted_locator,
             external_attestations: attestations,
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
 
         let msg = tx

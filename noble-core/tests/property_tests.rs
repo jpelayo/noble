@@ -78,7 +78,7 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 encrypted_locator: None,
                 external_attestations: vec![],
                 gateway_address: None,
-            contract_data: None,
+        contract_data: None,
             },
         )
 }
@@ -243,7 +243,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     encrypted_locator: None,
                     external_attestations: vec![],
                     gateway_address: None,
-            contract_data: None,
+        contract_data: None,
                 }
             },
         )
@@ -304,7 +304,7 @@ fn signed_transaction_roundtrip_100() {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -357,7 +357,7 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
     let msg0 = tx0.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
@@ -383,7 +383,7 @@ fn signing_message_includes_tx_type() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
@@ -423,7 +423,7 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
 
     let tx2 = Transaction {
@@ -446,7 +446,7 @@ fn signing_message_includes_recipient() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -489,7 +489,7 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
 
     let tx2 = Transaction {
@@ -512,7 +512,7 @@ fn signing_message_includes_amount() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();

@@ -91,7 +91,7 @@ fn storage_only_indexes_notarization_checksums() {
             },
             additional_sigs: vec![], metadata: vec![], encrypted_locator: None,
             external_attestations: vec![], gateway_address: None,
-            contract_data: None,
+        contract_data: None,
         };
         let msg = cb.compute_signing_message_for_chain(test_chain_id()).unwrap();
         cb.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -140,7 +140,7 @@ fn storage_only_indexes_notarization_checksums() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
     let msg = notarization.compute_signing_message_for_chain(test_chain_id()).unwrap();
     notarization.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -169,7 +169,7 @@ fn storage_only_indexes_notarization_checksums() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
     let msg = key_rotation.compute_signing_message_for_chain(test_chain_id()).unwrap();
     key_rotation.publisher_sig = priv_key.sign(&msg).unwrap();
@@ -193,7 +193,7 @@ fn storage_only_indexes_notarization_checksums() {
         encrypted_locator: None,
         external_attestations: vec![],
         gateway_address: None,
-            contract_data: None,
+        contract_data: None,
     };
     let msg = coinbase2.compute_signing_message_for_chain(test_chain_id()).unwrap();
     coinbase2.publisher_sig = priv_key.sign(&msg).unwrap();
