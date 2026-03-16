@@ -89,9 +89,9 @@ class Noble < Formula
     unless (etc/"noble/noble.toml").exist?
       config = (etc/"noble/noble.toml.sample").read
 
-      # Inject absolute Homebrew paths (replace relative defaults).
-      config.gsub!('data_dir = "data"', "data_dir = \"#{var}/noble/data\"")
-      config.gsub!('keystore_path = "keystore"', "keystore_path = \"#{var}/noble/keystore\"")
+      # Inject absolute Homebrew paths (replace platform defaults with brew-managed paths).
+      config.gsub!(/data_dir = ".*?"/, "data_dir = \"#{var}/noble/data\"")
+      config.gsub!(/keystore_path = ".*?"/, "keystore_path = \"#{var}/noble/keystore\"")
 
       # Remote access — CLI flags (--allow192 etc.) or NOBLE_ALLOWED_IPS env var.
       # Never prompts interactively. Default: localhost-only.

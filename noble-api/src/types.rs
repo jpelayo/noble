@@ -570,6 +570,9 @@ pub struct NodeInfoResponse {
     /// Path to the data directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// Path to the noble.toml configuration file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
     /// Hex-encoded validator public key (wire format), if configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_pubkey: Option<String>,

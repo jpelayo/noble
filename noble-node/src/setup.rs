@@ -443,11 +443,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     section_header("7", "Storage");
 
-    let default_data_dir = if defaults.storage.data_dir == Path::new("data") {
-        platform_data_dir().to_string_lossy().to_string()
-    } else {
-        defaults.storage.data_dir.to_string_lossy().to_string()
-    };
+    let default_data_dir = defaults.storage.data_dir.to_string_lossy().to_string();
 
     let data_dir: String = Input::new()
         .with_prompt("Data directory")
@@ -879,6 +875,7 @@ fn load_existing_config(path: &str) -> Option<NodeConfig> {
 }
 
 /// Determine the platform-aware default data directory.
+#[cfg(test)]
 fn platform_data_dir() -> PathBuf {
     noble_core::paths::platform_data_dir()
 }

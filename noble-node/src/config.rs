@@ -530,7 +530,7 @@ impl Default for NetworkConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from("data"),
+            data_dir: noble_core::paths::platform_data_dir(),
             cache_size_mb: 256,
             compression: true,
             pruning_mode: default_pruning_mode(),

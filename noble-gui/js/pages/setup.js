@@ -246,6 +246,65 @@ export function init(root, ctx) {
       return true;
     }
 
+    if (stepKey === 'storage') {
+      const dirInput = body.querySelector('#setup-data-dir');
+      const dir = dirInput?.value?.trim() || '';
+
+      // (1) Path must be non-empty and visible in the field.
+      if (!dir) {
+        showStepError('setup-storage-error', 'Data directory path is required. Enter a path or accept the default.');
+        if (dirInput) { dirInput.focus(); dirInput.style.borderColor = 'var(--error)'; setTimeout(() => { dirInput.style.borderColor = ''; }, 2000); }
+        return false;
+      }
+
+      // (2) Path must have been checked and verified writable with available space.
+      if (state.dataDirValid !== true) {
+        // Auto-check if not yet validated.
+        nextBtn.disabled = true;
+        nextBtn.textContent = 'Checking...';
+        try {
+          const result = await rpc.call('noble_checkDataDir', { path: dir });
+          if (result.error) {
+            state.dataDirValid = false;
+            state.dataDirError = result.error;
+            showStepError('setup-storage-error', 'Directory check failed: ' + result.error);
+            nextBtn.disabled = false;
+            nextBtn.textContent = 'Next';
+            return false;
+          }
+          state.dataDirValid = true;
+          state.diskAvailable = result.available_bytes || 0;
+        } catch (e) {
+          state.dataDirValid = false;
+          showStepError('setup-storage-error', 'Directory check failed: ' + (e.message || e));
+          nextBtn.disabled = false;
+          nextBtn.textContent = 'Next';
+          return false;
+        }
+        nextBtn.disabled = false;
+        nextBtn.textContent = 'Next';
+      }
+
+      // (3) Validate all additional volumes — each must have a path and pass check.
+      const filledVolumes = state.volumes.filter(v => v.path);
+      for (const vol of filledVolumes) {
+        try {
+          const vResult = await rpc.call('noble_checkDataDir', { path: vol.path });
+          if (vResult.error) {
+            showStepError('setup-storage-error', `Volume "${vol.path}" failed: ${vResult.error}`);
+            return false;
+          }
+        } catch (e) {
+          showStepError('setup-storage-error', `Volume "${vol.path}" check failed: ${e.message || e}`);
+          return false;
+        }
+      }
+
+      // Clear any previous errors.
+      const errEl = body.querySelector('#setup-storage-error');
+      if (errEl) errEl.style.display = 'none';
+    }
+
     if (stepKey === 'encryption') {
       if (state.encryptionMode === 'manual') {
         const pw = body.querySelector('#setup-enc-password')?.value || '';
@@ -746,6 +805,28 @@ export function init(root, ctx) {
       { value: 'aggressive', label: 'Aggressive', desc: 'Minimal storage, headers + recent blocks only' },
     ];
 
+    // Fetch the node's actual data_dir to pre-populate the field, then auto-check it.
+    if (!state.dataDir) {
+      rpc.call('noble_getNodeInfo', {}).then(info => {
+        if (info && info.data_dir && !state.dataDir) {
+          state.dataDir = info.data_dir;
+          const input = body.querySelector('#setup-data-dir');
+          if (input && !input.value) {
+            input.value = info.data_dir;
+            // Auto-trigger directory check so the user sees the green status.
+            const checkBtn = body.querySelector('#setup-check-dir');
+            if (checkBtn) checkBtn.click();
+          }
+        }
+      }).catch(() => { /* best effort */ });
+    } else if (state.dataDirValid !== true) {
+      // Path was set from a previous visit but not yet checked — auto-check.
+      setTimeout(() => {
+        const checkBtn = body.querySelector('#setup-check-dir');
+        if (checkBtn) checkBtn.click();
+      }, 100);
+    }
+
     body.innerHTML = `
       <div style="text-align:center;margin-bottom:var(--gap-lg)">
         <h3 style="margin-bottom:var(--gap-xs)">Storage</h3>
@@ -758,7 +839,7 @@ export function init(root, ctx) {
         <label for="setup-data-dir" style="font-weight:600">Data Directory</label>
         <div style="display:flex;gap:var(--gap-sm);align-items:center">
           <input type="text" id="setup-data-dir" autocomplete="off" spellcheck="false"
-            placeholder="Leave empty for default (~/.noble)"
+            placeholder="Data directory path"
             value="${esc(state.dataDir)}"
             style="flex:1;font-family:var(--font-mono,monospace);font-size:var(--font-size-sm)">
           <button id="setup-check-dir" class="btn btn-secondary btn-sm" style="white-space:nowrap;padding:4px 10px">Check</button>
@@ -858,6 +939,17 @@ export function init(root, ctx) {
         if (keepGroup) keepGroup.style.display = e.target.value !== 'archive' ? 'block' : 'none';
       });
       pruningContainer.appendChild(card);
+    });
+
+    // Invalidate directory check when user edits the path.
+    const dirInput = body.querySelector('#setup-data-dir');
+    dirInput.addEventListener('input', () => {
+      state.dataDirValid = null;
+      state.dataDirError = '';
+      const statusEl = body.querySelector('#setup-dir-status');
+      if (statusEl) statusEl.innerHTML = '<span style="color:var(--text-muted)">Path changed — click "Check" to validate.</span>';
+      const diskBar = body.querySelector('#setup-disk-bar');
+      if (diskBar) diskBar.style.display = 'none';
     });
 
     // Check directory button
@@ -1148,30 +1240,60 @@ export function init(root, ctx) {
     nextBtn.textContent = 'Completing...';
 
     try {
-      // Apply storage + encryption config values (backend expects section + key separately)
-      const configCalls = [];
-      if (state.dataDir) configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'data_dir', value: state.dataDir }));
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'cache_size_mb', value: String(state.cacheSizeMb) }));
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'compression', value: String(state.compression) }));
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'pruning_mode', value: state.pruningMode }));
+      // Apply config values sequentially to avoid TOML read-modify-write races.
+      // Each setConfigValue reads, modifies, and writes noble.toml — parallel
+      // calls would clobber each other (last writer wins).
+      const configEntries = [];
+      if (state.dataDir) configEntries.push({ section: 'storage', key: 'data_dir', value: state.dataDir });
+      configEntries.push({ section: 'storage', key: 'cache_size_mb', value: String(state.cacheSizeMb) });
+      configEntries.push({ section: 'storage', key: 'compression', value: String(state.compression) });
+      configEntries.push({ section: 'storage', key: 'pruning_mode', value: state.pruningMode });
       if (state.pruningMode !== 'archive') {
-        configCalls.push(rpc.call('noble_setConfigValue', { section: 'storage', key: 'keep_blocks', value: String(state.keepBlocks) }));
+        configEntries.push({ section: 'storage', key: 'keep_blocks', value: String(state.keepBlocks) });
       }
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'security', key: 'encryption_mode', value: state.encryptionMode }));
-      // Networking config
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${state.p2pPort}` }));
-      configCalls.push(rpc.call('noble_setConfigValue', { section: 'network', key: 'max_peers', value: String(state.maxPeers) }));
-      await Promise.allSettled(configCalls);
+      configEntries.push({ section: 'security', key: 'encryption_mode', value: state.encryptionMode });
+      configEntries.push({ section: 'network', key: 'listen_addr', value: `/ip4/0.0.0.0/tcp/${state.p2pPort}` });
+      configEntries.push({ section: 'network', key: 'max_peers', value: String(state.maxPeers) });
 
-      // Persist seed nodes via addSeed RPC (also dials each immediately).
+      // Persist seed nodes to TOML (comma-separated multiaddrs).
+      if (state.seeds) {
+        const seedAddrs = state.seeds.split(',').map(s => s.trim()).filter(Boolean).map(addr =>
+          addr.startsWith('/') ? addr : /[a-zA-Z]/.test(addr) ? `/dns4/${addr}/tcp/8780` : `/ip4/${addr}/tcp/8780`
+        );
+        if (seedAddrs.length) {
+          configEntries.push({ section: 'network', key: 'seeds', value: seedAddrs.join(',') });
+        }
+      }
+
+      const configErrors = [];
+      for (const entry of configEntries) {
+        try {
+          await rpc.call('noble_setConfigValue', entry);
+        } catch (e) {
+          configErrors.push(`${entry.section}.${entry.key}: ${e.message || e}`);
+        }
+      }
+
+      // Dial seeds (best effort, separate from persistence).
       if (state.seeds) {
         const seedAddrs = state.seeds.split(',').map(s => s.trim()).filter(Boolean);
         for (const addr of seedAddrs) {
-          // Convert bare IP/hostname to multiaddr if needed.
           const multiaddr = addr.startsWith('/') ? addr
             : /[a-zA-Z]/.test(addr) ? `/dns4/${addr}/tcp/8780`
             : `/ip4/${addr}/tcp/8780`;
-          try { await rpc.call('noble_addSeed', { multiaddr }); } catch { /* best effort */ }
+          try { await rpc.call('noble_addSeed', { multiaddr }); } catch { /* dial is best effort */ }
+        }
+      }
+
+      // If manual encryption was selected, set the password via dedicated RPC.
+      if (state.encryptionMode === 'manual' && state.encryptionPassword) {
+        try {
+          await rpc.call('noble_setEncryptionMode', {
+            mode: 'manual',
+            new_password: state.encryptionPassword,
+          });
+        } catch (e) {
+          configErrors.push(`encryption password: ${e.message || e}`);
         }
       }
 
@@ -1190,6 +1312,33 @@ export function init(root, ctx) {
         p2p_port: state.p2pPort,
       });
 
+      // (4) Verification: re-read persisted config and compare key values.
+      let verifyInfo = null;
+      try { verifyInfo = await rpc.call('noble_getNodeInfo', {}); } catch { /* best effort */ }
+      const verifyMismatches = [];
+      if (verifyInfo) {
+        if (state.dataDir && verifyInfo.data_dir && verifyInfo.data_dir !== state.dataDir) {
+          verifyMismatches.push(`data_dir: expected "${state.dataDir}", on disk "${verifyInfo.data_dir}"`);
+        }
+      }
+      // Check setup_complete via getSetupStatus.
+      let setupStatus = null;
+      try { setupStatus = await rpc.call('noble_getSetupStatus', {}); } catch { /* best effort */ }
+      if (setupStatus && !setupStatus.setup_complete) {
+        verifyMismatches.push('identity.json not persisted — setup_complete is false');
+      }
+
+      // Show config write errors if any.
+      const allWarnings = [...configErrors, ...verifyMismatches];
+      const configWarnSection = allWarnings.length ? `
+        <div style="margin-top:var(--gap);padding:var(--gap-sm);background:color-mix(in srgb, var(--warning) 10%, transparent);border:1px solid var(--warning);border-radius:var(--radius-sm)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;color:var(--warning);margin:0 0 var(--gap-xs)">Warnings</p>
+          <ul style="font-size:var(--font-size-xs);color:var(--text-secondary);margin:0;padding-left:1.2em">
+            ${allWarnings.map(e => `<li>${esc(e)}</li>`).join('')}
+          </ul>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:var(--gap-xs) 0 0">Edit <code>noble.toml</code> manually to correct these values.</p>
+        </div>` : '';
+
       // Show validator pubkey if one was auto-generated.
       const validatorPubkey = result && result.validator_pubkey;
       const validatorSection = validatorPubkey ? `
@@ -1204,12 +1353,23 @@ export function init(root, ctx) {
           </div>
         </div>` : '';
 
+      // (5) Show config file path and data directory.
+      const configPath = verifyInfo && verifyInfo.config_path ? verifyInfo.config_path : '';
+      const dataDir = verifyInfo && verifyInfo.data_dir ? verifyInfo.data_dir : (state.dataDir || '');
+      const pathsSection = (configPath || dataDir) ? `
+        <div style="margin-top:var(--gap);text-align:left;font-size:var(--font-size-xs);color:var(--text-muted)">
+          ${configPath ? `<div><strong>Config:</strong> <code>${esc(configPath)}</code></div>` : ''}
+          ${dataDir ? `<div><strong>Data:</strong> <code>${esc(dataDir)}</code></div>` : ''}
+        </div>` : '';
+
       body.innerHTML = `
         <div style="text-align:center;padding:var(--gap-xl)">
           <div style="font-size:3rem;color:var(--success);margin-bottom:var(--gap)">&#10004;</div>
           <h2 style="color:var(--success);margin-bottom:var(--gap-sm)">Setup Complete!</h2>
           <p style="color:var(--text-secondary)">Your node identity has been saved.</p>
+          ${configWarnSection}
           ${validatorSection}
+          ${pathsSection}
           <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:var(--gap);margin-top:var(--gap);text-align:left;font-size:var(--font-size-sm)">
             <p style="margin-bottom:var(--gap-sm)"><strong>Next steps:</strong></p>
             <ol style="margin:0;padding-left:1.5em;color:var(--text-secondary)">

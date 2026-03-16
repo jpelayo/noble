@@ -296,6 +296,8 @@ fn generate_bootstrap_config(config_path: &str) -> Result<(), Box<dyn std::error
     let mut cfg = config::NodeConfig::default();
     // Allow remote access to the setup wizard (operator may not be on localhost).
     cfg.api.remote_setup = true;
+    // Use platform-aware absolute data directory (not the relative "data" default).
+    cfg.storage.data_dir = noble_core::paths::platform_data_dir();
 
     let toml_str = toml::to_string_pretty(&cfg)?;
 
@@ -442,6 +444,14 @@ async fn run_with_memory(config: &config::NodeConfig, trace_handle: Arc<TraceHan
 }
 
 async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHandle>, config_path: Option<std::path::PathBuf>, encryption_password: Option<&str>) -> i32 {
+    // Ensure data directory exists before opening storage.
+    if !config.storage.data_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&config.storage.data_dir) {
+            tracing::error!("Failed to create data directory {}: {e}", config.storage.data_dir.display());
+            eprintln!("FATAL: Failed to create data directory {}: {e}", config.storage.data_dir.display());
+            return 1;
+        }
+    }
     match noble_storage::RocksDbStorage::open_with_repair(&config.storage.data_dir) {
         Ok(storage) => match node::Node::init_with_storage(config, storage, encryption_password) {
             Ok(n) => {

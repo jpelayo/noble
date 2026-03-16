@@ -320,6 +320,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_bytes,
             storage_capacity_bytes,
             data_dir: data_dir_str,
+            config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
             validator_pubkey: self.validator_pubkey.clone(),
             validator_pubkey_display: self.validator_pubkey.as_ref().and_then(|hex_str| {
                 let bytes = hex::decode(hex_str).ok()?;
@@ -641,6 +642,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Persist to identity.json atomically.
         if let Some(path) = &self.identity_path {
+            // Ensure parent directory exists (may not exist on first setup).
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| ApiError::Internal(format!("create data dir: {e}")))?;
+                }
+            }
             let json = serde_json::to_string_pretty(&new_identity)
                 .map_err(|e| ApiError::Internal(format!("serialize identity: {e}")))?;
             let tmp = path.with_extension("tmp");
@@ -657,8 +665,18 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             *id = new_identity;
         }
 
+        // Disable remote_setup now that setup is complete (security: prevent
+        // re-exposure of the wizard if identity.json is later deleted).
+        if let Some(ref set_fn) = self.set_config_value {
+            if let Err(e) = set_fn("api", "remote_setup", "false") {
+                tracing::warn!(task = "identity", "failed to disable remote_setup: {e}");
+            }
+        }
+
         // Trigger NodeAnnounce re-broadcast so peers see updated identity.
-        let _ = self.announce_trigger.try_send(());
+        if let Err(e) = self.announce_trigger.try_send(()) {
+            tracing::debug!(task = "identity", "announce trigger send: {e}");
+        }
 
         // Hot-reload engine flags so changes take effect without restart.
         // The setup wizard calls this RPC — without this, the engine would
