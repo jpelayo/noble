@@ -20,6 +20,8 @@ public enum NobleProtocol {
     public static let primaryChainId: UInt32 = 0x4E4F_424C
     /// Test chain ID ("TSTN" in ASCII).
     public static let testChainId: UInt32 = 0x5453_544E
+    /// Ed25519 scheme ID.
+    public static let schemeEd25519: UInt8 = 0x01
     /// secp256k1 scheme ID.
     public static let schemeSecp256k1: UInt8 = 0x02
     /// Maximum metadata entries per transaction.

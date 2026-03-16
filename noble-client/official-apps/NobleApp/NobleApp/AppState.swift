@@ -82,7 +82,7 @@ final class AppState {
     /// Whether a wallet is stored in the Keychain.
     var hasWallet = false
 
-    /// The wallet's NOBLE address (nbl1 bech32 display format, or hex wire for non-Noble).
+    /// The wallet's secp256k1 address (nbl1p… bech32m).
     var walletAddress: String?
 
     /// Display-formatted wallet balance.
@@ -195,14 +195,12 @@ final class AppState {
     // MARK: - Wallet Operations
 
     /// Create a new wallet from a mnemonic and store in Keychain.
+    /// Derives the secp256k1 key at m/44'/9999'/0'/0/0 — same key for wallet AND validator.
     func createWallet(mnemonic: [String]) throws {
         let privateKey = try mnemonicProvider.derivePrivateKey(mnemonic: mnemonic)
         let address = try mnemonicProvider.deriveAddress(privateKey: privateKey)
 
-        // Store private key
         try keychainService.storeKey(privateKey, label: Self.privateKeyLabel)
-
-        // Store mnemonic for backup recovery
         let mnemonicData = Data(mnemonic.joined(separator: " ").utf8)
         try keychainService.storeKey(mnemonicData, label: Self.mnemonicLabel)
 

@@ -279,7 +279,7 @@ impl KeyStore {
         // Derive seed (empty BIP-39 passphrase by default)
         let mut seed = mnemonic.to_seed("");
 
-        // Derive child key at m/44'/9999'/0'/0/0
+        // Derive secp256k1 key at m/44'/9999'/0'/0/0
         let child = bip32::XPrv::derive_from_path(
             seed,
             &"m/44'/9999'/0'/0/0"
@@ -292,7 +292,6 @@ impl KeyStore {
         })?;
         seed.zeroize();
 
-        // Extract 32-byte secret key
         let secret_key = child.to_bytes();
         let mut sk_bytes: Vec<u8> = secret_key.to_vec();
 
@@ -339,22 +338,18 @@ impl KeyStore {
         encryption_passphrase: &str,
     ) -> Result<NoblePublicKey, WalletError> {
 
-        // Guard: reject if a secp256k1 key already exists (one key per scheme)
         if self.has_scheme(SCHEME_SECP256K1)? {
             return Err(WalletError::DuplicateKey(
                 "a secp256k1 key already exists; delete it first to import a different mnemonic".into(),
             ));
         }
 
-        // Parse and validate mnemonic
         let mnemonic: bip39::Mnemonic = mnemonic_words
             .parse()
             .map_err(|e: bip39::Error| WalletError::Crypto(format!("invalid mnemonic: {e}")))?;
 
-        // Derive seed (empty BIP-39 passphrase)
         let mut seed = mnemonic.to_seed("");
 
-        // Derive child key at m/44'/9999'/0'/0/0
         let child = bip32::XPrv::derive_from_path(
             seed,
             &"m/44'/9999'/0'/0/0"
@@ -375,12 +370,10 @@ impl KeyStore {
 
         let file_path = self.key_file_path(&pub_key);
         if file_path.exists() {
-            // Key already exists — zeroize and return the public key
             sk_bytes.zeroize();
             return Ok(pub_key);
         }
 
-        // Encrypt and store
         let encrypted = encrypt_key(&sk_bytes, SCHEME_SECP256K1, encryption_passphrase)?;
         sk_bytes.zeroize();
         let json = serde_json::to_string_pretty(&encrypted)?;

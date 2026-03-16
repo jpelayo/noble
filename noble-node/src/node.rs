@@ -3602,16 +3602,17 @@ impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoVa
 
 /// Try to load a validator key from the unified keystore.
 ///
-/// Checks for SCHEME_VALIDATOR_ED25519 first, then SCHEME_VALIDATOR_SECP256K1.
+/// Checks for SCHEME_VALIDATOR_SECP256K1 first (default for mnemonic-derived keys),
+/// then falls back to SCHEME_VALIDATOR_ED25519 (legacy).
 fn load_validator_from_keystore(
     keystore: &KeyStore,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
     if !keystore.is_unlocked() {
         return None;
     }
-    // Try Ed25519 first
-    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519) {
-        let sk = noble_crypto::NoblePrivateKey::Ed25519(raw);
+    // Try secp256k1 first (mnemonic-derived)
+    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_SECP256K1) {
+        let sk = noble_crypto::NoblePrivateKey::Secp256k1(raw);
         let pk = sk.public_key();
         tracing::info!(
             task = "config_load",
@@ -3620,13 +3621,13 @@ fn load_validator_from_keystore(
         );
         return Some((sk, pk));
     }
-    // Then secp256k1
-    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_SECP256K1) {
-        let sk = noble_crypto::NoblePrivateKey::Secp256k1(raw);
+    // Then Ed25519 (legacy)
+    if let Ok(raw) = keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519) {
+        let sk = noble_crypto::NoblePrivateKey::Ed25519(raw);
         let pk = sk.public_key();
         tracing::info!(
             task = "config_load",
-            "Validator mode enabled (from unified keystore): {}",
+            "Validator mode enabled (from unified keystore, legacy Ed25519): {}",
             pk.to_address()
         );
         return Some((sk, pk));

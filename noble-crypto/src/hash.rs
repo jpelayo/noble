@@ -140,6 +140,7 @@ pub fn tagged_hash(tag: &str, msg: &[u8]) -> Hash256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_codec::NobleCbor;
 
     // --- SHA-256 test vectors (NIST CAVP / well-known) ---
 

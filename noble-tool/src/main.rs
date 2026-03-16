@@ -129,6 +129,16 @@ enum Commands {
     /// Checks that this binary produces byte-identical output for known
     /// inputs. A failure means the binary's wire format is inconsistent
     /// with the protocol spec — blocks and transactions will be rejected.
+    /// Remove all noble-generated local files (data, config, keys, identity).
+    ///
+    /// Does NOT remove brew-installed binaries or packaged files.
+    /// Requires typing REMOVE to confirm.
+    Reset {
+        /// Path to the data directory to remove.
+        #[arg(long, default_value_os_t = default_data_dir())]
+        data_dir: PathBuf,
+    },
+
     VerifyWire,
 
     /// Verify CBOR codec round-trip consistency.
@@ -354,6 +364,7 @@ fn main() {
             delete_peers,
         } => cmd_reset_chain(data_dir, confirm, delete_peers),
         Commands::ChainInfo { data_dir } => cmd_chain_info(data_dir),
+        Commands::Reset { data_dir } => cmd_reset(&data_dir),
         Commands::VerifyWire => cmd_verify_wire(),
         Commands::VerifyCodec => cmd_verify_codec(),
     }
@@ -2337,4 +2348,88 @@ fn cmd_verify_codec() {
         );
         std::process::exit(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// reset — remove noble-generated local files
+// ---------------------------------------------------------------------------
+
+fn cmd_reset(data_dir: &std::path::Path) {
+    use std::io::{self, Write};
+
+    println!();
+    println!("  This will PERMANENTLY DELETE all noble-generated local files:");
+    println!();
+    println!("    Data directory:  {}", data_dir.display());
+
+    // Collect files/dirs that exist
+    let mut targets: Vec<PathBuf> = Vec::new();
+
+    if data_dir.exists() {
+        targets.push(data_dir.to_path_buf());
+    }
+
+    // Config and identity files in the parent directory
+    let parent = data_dir.parent().unwrap_or(data_dir);
+    let config_files = [
+        "noble.toml",
+        "identity.json",
+        "validator.key",
+        "genesis.cbor",
+        "validators.txt",
+    ];
+    for name in &config_files {
+        let p = parent.join(name);
+        if p.exists() {
+            println!("    Config file:     {}", p.display());
+            targets.push(p);
+        }
+    }
+
+    let tls_dir = parent.join("tls");
+    if tls_dir.exists() {
+        println!("    TLS directory:   {}", tls_dir.display());
+        targets.push(tls_dir);
+    }
+
+    if targets.is_empty() {
+        println!();
+        println!("  Nothing to remove — no noble files found.");
+        return;
+    }
+
+    println!();
+    println!("  This does NOT remove brew-installed binaries or packaged files.");
+    println!();
+    print!("  Type REMOVE to confirm: ");
+    io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    let input = input.trim();
+
+    if input != "REMOVE" {
+        println!();
+        println!("  Cancelled. Nothing was removed.");
+        return;
+    }
+
+    println!();
+    for target in &targets {
+        if target.is_dir() {
+            match fs::remove_dir_all(target) {
+                Ok(()) => println!("  Removed directory: {}", target.display()),
+                Err(e) => eprintln!("  Failed to remove {}: {e}", target.display()),
+            }
+        } else {
+            match fs::remove_file(target) {
+                Ok(()) => println!("  Removed file:      {}", target.display()),
+                Err(e) => eprintln!("  Failed to remove {}: {e}", target.display()),
+            }
+        }
+    }
+
+    println!();
+    println!("  Reset complete. All noble-generated files have been removed.");
+    println!("  Run `noble setup` to configure a fresh node.");
 }

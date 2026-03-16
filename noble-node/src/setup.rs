@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use dialoguer::{Confirm, Input, Select};
 use noble_crypto::{
     bitcoin_addr::{pubkey_to_p2pkh, pubkey_to_p2wpkh, pubkey_to_p2tr},
-    ed25519, secp256k1, NoblePrivateKey, SCHEME_ED25519, SCHEME_SECP256K1,
+    secp256k1, NoblePrivateKey, SCHEME_SECP256K1,
 };
 use zeroize::Zeroize;
 
@@ -85,10 +85,8 @@ const REWARD_ADDR_HELP: &str = "\
   This address receives 50% of transaction fees processed by your node.\n\
   Leave empty to skip (you can configure this later in Settings).";
 
-const KEY_SCHEME_CHOICES: &[&str] = &[
-    "Ed25519   (recommended — fast, compact)",
-    "secp256k1 (Bitcoin-compatible)",
-];
+// Validator keys are always derived from a BIP-39 mnemonic via SLIP-0010.
+// No random generation option — all keys must be recoverable from 24 words.
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -925,22 +923,27 @@ fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Er
         return Ok(());
     }
 
-    let scheme_sel = Select::new()
-        .with_prompt("Key scheme")
-        .items(KEY_SCHEME_CHOICES)
-        .default(0)
-        .interact()?;
-
-    let (scheme_id, private_key) = match scheme_sel {
-        0 => {
-            let (sk, _) = ed25519::generate_keypair();
-            (SCHEME_ED25519, NoblePrivateKey::Ed25519(sk))
-        }
-        _ => {
-            let (sk, _) = secp256k1::generate_keypair();
-            (SCHEME_SECP256K1, NoblePrivateKey::Secp256k1(sk))
-        }
-    };
+    // BIP-39 mnemonic → BIP-32 secp256k1 key at m/44'/9999'/0'/0/0
+    // Same key for wallet transactions AND block validation.
+    let mnemonic = bip39::Mnemonic::generate(24)
+        .map_err(|e| format!("mnemonic generation failed: {e}"))?;
+    let mnemonic_words = mnemonic.words().collect::<Vec<_>>().join(" ");
+    let mut seed = mnemonic.to_seed("");
+    let child = bip32::XPrv::derive_from_path(
+        seed,
+        &"m/44'/9999'/0'/0/0"
+            .parse()
+            .map_err(|e: bip32::Error| format!("derivation path: {e}"))?,
+    )
+    .map_err(|e| {
+        seed.zeroize();
+        format!("BIP-32 derivation failed: {e}")
+    })?;
+    seed.zeroize();
+    let mut sk_bytes = child.to_bytes().to_vec();
+    let private_key = NoblePrivateKey::Secp256k1(sk_bytes.clone());
+    sk_bytes.zeroize();
+    let scheme_id = SCHEME_SECP256K1;
 
     // Build 33-byte key file: [scheme_id || private_key_bytes].
     let key_bytes = match &private_key {
@@ -982,6 +985,19 @@ fn maybe_generate_validator_key(path: &str) -> Result<(), Box<dyn std::error::Er
     println!("  Public key — add this line to validators.txt on every node:");
     println!();
     println!("    {pubkey_hex}");
+    println!();
+
+    println!("  ┌─────────────────────────────────────────────────────────────┐");
+    println!("  │  RECOVERY PHRASE — write these 24 words down and store      │");
+    println!("  │  them safely. This is the ONLY way to recover your key.     │");
+    println!("  └─────────────────────────────────────────────────────────────┘");
+    println!();
+    for (i, word) in mnemonic_words.split_whitespace().enumerate() {
+        print!("  {:>2}. {:<12}", i + 1, word);
+        if (i + 1) % 4 == 0 { println!(); }
+    }
+    println!();
+    println!("  Derivation path: m/44'/9999'/0'/0/0 (BIP-32 secp256k1)");
     println!();
 
     Ok(())

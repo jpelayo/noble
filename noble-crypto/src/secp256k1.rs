@@ -34,6 +34,19 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// Derive a secp256k1 keypair from a 32-byte secret key.
+///
+/// Returns `(secret_key_bytes, compressed_public_key_bytes)`.
+pub fn keypair_from_secret(secret: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let signing_key = SigningKey::from_slice(secret)
+        .map_err(|e| CryptoError::InvalidKey(format!("secp256k1 secret: {e}")))?;
+    let verifying_key = signing_key.verifying_key();
+    Ok((
+        signing_key.to_bytes().to_vec(),
+        verifying_key.to_sec1_bytes().to_vec(),
+    ))
+}
+
 /// Sign an arbitrary-length message with a secp256k1 secret key.
 ///
 /// The message is internally hashed (SHA-256) before signing, per standard ECDSA.

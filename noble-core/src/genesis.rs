@@ -7,7 +7,7 @@
 //! - `prev_block_hash`: Hash256::ZERO
 //! - `height`: 0
 //! - No transactions (empty Merkle root)
-//! - A deterministic Ed25519 keypair derived from a domain-separated seed
+//! - A deterministic secp256k1 keypair derived from a domain-separated seed
 //! - A real cryptographic signature (not a placeholder)
 //!
 //! Chain identity is fully dynamic — no hardcoded networks. The binary is
@@ -16,7 +16,7 @@
 
 use noble_crypto::{
     sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-    SCHEME_ED25519,
+    SCHEME_SECP256K1,
 };
 
 use crate::block::{Block, BlockHeader};
@@ -26,18 +26,14 @@ use crate::merkle::compute_merkle_root;
 /// Genesis block timestamp: 2026-03-01T00:00:00Z (Unix epoch).
 pub const GENESIS_TIMESTAMP: u64 = 1_772_524_800;
 
-/// Derive a deterministic Ed25519 keypair from a seed phrase.
+/// Derive a deterministic secp256k1 keypair from a seed phrase.
 ///
-/// The secret key is `sha256(seed)`, and the public key is derived from it.
-/// This is deterministic: the same seed always produces the same keypair.
+/// The secret key is `sha256(seed)` (32 bytes), and the compressed public key
+/// is derived from it. Deterministic: same seed → same keypair.
 fn deterministic_keypair(seed: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let sk_bytes = sha256(seed);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes.0);
-    let verifying_key = signing_key.verifying_key();
-    (
-        signing_key.to_bytes().to_vec(),
-        verifying_key.to_bytes().to_vec(),
-    )
+    let sk_hash = sha256(seed);
+    noble_crypto::secp256k1::keypair_from_secret(&sk_hash.0)
+        .expect("sha256 output exceeds curve order with probability ~2^-224")
 }
 
 /// Derive a chain identifier from a genesis block hash.
@@ -52,7 +48,7 @@ pub fn derive_chain_id(hash: &Hash256) -> u32 {
 pub fn build_genesis(timestamp: u64, seed: &[u8]) -> Block {
     tracing::info!(timestamp, "generating genesis block");
     let (sk, pk) = deterministic_keypair(seed);
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
     let merkle_root = compute_merkle_root(&[]); // Empty tree
 
     let mut header = BlockHeader {
@@ -62,9 +58,9 @@ pub fn build_genesis(timestamp: u64, seed: &[u8]) -> Block {
         timestamp,
         height: 0,
         tx_count: 0,
-        validator_id: NoblePublicKey::Ed25519(pk.clone()),
+        validator_id: NoblePublicKey::Secp256k1(pk.clone()),
         validator_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk,
             signature: vec![],
         },
@@ -88,7 +84,7 @@ pub fn build_genesis(timestamp: u64, seed: &[u8]) -> Block {
 mod tests {
     use super::*;
     use noble_codec::NobleCbor;
-    use noble_crypto::ed25519;
+    use noble_crypto::secp256k1;
 
     const TEST_SEED: &[u8] = b"noble-test-genesis";
 
@@ -144,7 +140,7 @@ mod tests {
     fn genesis_signature_is_cryptographically_valid() {
         let block = test_block();
         let signing_msg = block.header.compute_signing_message().unwrap();
-        let result = ed25519::verify(
+        let result = secp256k1::verify(
             &block.header.validator_sig.public_key,
             &signing_msg,
             &block.header.validator_sig.signature,
@@ -168,13 +164,13 @@ mod tests {
     #[test]
     fn genesis_validator_id_matches_sig_pubkey() {
         let block = test_block();
-        if let NoblePublicKey::Ed25519(ref id_bytes) = block.header.validator_id {
+        if let NoblePublicKey::Secp256k1(ref id_bytes) = block.header.validator_id {
             assert_eq!(
                 id_bytes, &block.header.validator_sig.public_key,
                 "validator_id and validator_sig.public_key must match"
             );
         } else {
-            panic!("genesis validator must be Ed25519");
+            panic!("genesis validator must be secp256k1");
         }
     }
 

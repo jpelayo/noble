@@ -1532,14 +1532,14 @@ fn unix_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 // Private helpers for validator key management
 // ---------------------------------------------------------------------------
 
-/// Generate a new Ed25519 validator key, write it to `path` (33 bytes: scheme_id + 32-byte secret),
+/// Generate a new secp256k1 validator key, write it to `path` (33 bytes: scheme_id + 32-byte secret),
 /// set permissions to 0o600 on Unix, and return the hex-encoded wire pubkey.
 fn generate_validator_key(
     path: &std::path::Path,
     chain_meta: &[u8; 32],
 ) -> Result<String, ErrorObjectOwned> {
-    let (secret_bytes, _) = noble_crypto::ed25519::generate_keypair();
-    let mut raw = vec![SCHEME_ED25519];
+    let (secret_bytes, _) = noble_crypto::secp256k1::generate_keypair();
+    let mut raw = vec![SCHEME_SECP256K1];
     raw.extend_from_slice(&secret_bytes);
     // Encrypt with Noble envelope.
     let file_bytes = noble_crypto::file_encrypt::encrypt_file_data(&raw, chain_meta)
@@ -1554,7 +1554,7 @@ fn generate_validator_key(
             std::fs::Permissions::from_mode(0o600),
         );
     }
-    let private_key = noble_crypto::NoblePrivateKey::Ed25519(secret_bytes);
+    let private_key = noble_crypto::NoblePrivateKey::Secp256k1(secret_bytes);
     Ok(private_key.public_key().to_address())
 }
 
