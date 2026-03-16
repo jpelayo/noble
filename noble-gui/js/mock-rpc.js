@@ -1027,6 +1027,7 @@ export class MockRpcClient {
           ws_port: 8784,
           p2p_port: 8780,
           data_dir: '/var/noble/data',
+          config_path: '/etc/noble/noble.toml',
           totp_enabled: this.#authEnabled,
           validator_pubkey: selfKeyHex,
           validator_pubkey_display: selfKeyHex, // mock: same as hex (real API returns bech32)
