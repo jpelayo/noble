@@ -1947,33 +1947,15 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
                 let log_err = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-                // Check if we have a stored faucet passphrase from a previous run.
-                let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
-                let stored_passphrase = {
-                    let mut ks = self.wallet_keystore.lock();
-                    if !ks.is_unlocked() {
-                        let _ = ks.unlock(&wallet_pass);
-                    }
-                    ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE)
-                        .ok()
-                        .and_then(|bytes| String::from_utf8(bytes).ok())
-                };
-
+                // Faucet retrieves its own passphrase from the node via RPC
+                // (getFaucetSecret on subsequent boots, storeFaucetSecret on first boot).
+                // No passphrase passed via CLI args or env vars.
                 let mut cmd = tokio::process::Command::new(&bin);
                 cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
                     .arg("--rpc-url").arg(&rpc_url)
                     .arg("--db-path").arg(&db_path)
-                    .arg("--keystore-dir").arg(&ks_dir);
-
-                if let Some(ref pass) = stored_passphrase {
-                    // Subsequent boot: pass stored passphrase via env (not CLI — visible in ps).
-                    cmd.env("NOBLE_FAUCET_PASSPHRASE", pass);
-                    tracing::info!(task = "faucet", "Using stored faucet passphrase from keystore");
-                } else {
-                    // First boot: faucet will generate keypair, then call storeFaucetSecret RPC.
-                    cmd.arg("--auto-unlock");
-                    tracing::info!(task = "faucet", "First boot — faucet will generate keypair and store passphrase via RPC");
-                }
+                    .arg("--keystore-dir").arg(&ks_dir)
+                    .arg("--auto-unlock");
 
                 match cmd
                     .stdout(log_file)

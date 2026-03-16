@@ -183,6 +183,13 @@ pub trait NodeApi {
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
+    /// Retrieve the faucet keystore passphrase from the node's unified keystore.
+    ///
+    /// Called by the faucet child process on subsequent boots to unlock its keystore.
+    /// Returns the passphrase stored by `storeFaucetSecret`, or null if not yet stored.
+    #[method(name = "getFaucetSecret")]
+    async fn get_faucet_secret(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Store the faucet keystore passphrase in the node's unified keystore.
     ///
     /// Called by the faucet child process after generating its keypair on first boot.
@@ -1068,6 +1075,23 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             success: true,
             restart_required,
         })
+    }
+
+    async fn get_faucet_secret(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
+        let mut ks = self.wallet_keystore.lock();
+        if !ks.is_unlocked() {
+            ks.unlock(&wallet_pass)
+                .map_err(|e| ApiError::Internal(format!("unlock keystore: {e}")))?;
+        }
+        match ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE) {
+            Ok(bytes) => {
+                let pass = String::from_utf8(bytes)
+                    .map_err(|e| ApiError::Internal(format!("faucet passphrase not UTF-8: {e}")))?;
+                Ok(serde_json::json!({ "passphrase": pass }))
+            }
+            Err(_) => Ok(serde_json::json!({ "passphrase": null })),
+        }
     }
 
     async fn store_faucet_secret(
