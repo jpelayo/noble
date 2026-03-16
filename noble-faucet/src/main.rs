@@ -148,9 +148,13 @@ struct Cli {
     #[arg(long)]
     tls_cert: Option<PathBuf>,
 
-    /// Path to TLS private key PEM file (required for HTTPS).
+    /// Path to TLS private key file (PEM or Noble-encrypted envelope).
     #[arg(long)]
     tls_key: Option<PathBuf>,
+
+    /// Hex-encoded 32-byte chain_meta for decrypting Noble-envelope TLS key files.
+    #[arg(long)]
+    chain_meta: Option<String>,
 }
 
 #[tokio::main]
@@ -176,21 +180,23 @@ async fn main() {
         || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
 
     // Priority: --passphrase CLI > env var > RPC getFaucetSecret > generate new (first boot)
+    // Also capture chain_meta from RPC for TLS key decryption.
+    let mut rpc_chain_meta: Option<String> = None;
+
     let (passphrase, is_first_boot) = if let Some(p) = cli.passphrase.clone() {
         (p, false)
     } else if let Ok(p) = std::env::var("NOBLE_FAUCET_PASSPHRASE") {
         (p, false)
     } else {
-        // Try to retrieve passphrase from node via RPC (subsequent boots).
+        // Try to retrieve passphrase + chain_meta from node via RPC.
         match rpc.get_faucet_secret().await {
-            Ok(Some(p)) => {
-                tracing::info!("Faucet passphrase retrieved from node keystore via RPC");
-                (p, false)
-            }
-            Ok(None) => {
-                // Node has no stored passphrase — first boot.
-                if keystore_is_empty {
-                    // Generate entropy from pid + nanos + exe path.
+            Ok(resp) => {
+                rpc_chain_meta = Some(resp.chain_meta);
+                if let Some(p) = resp.passphrase {
+                    tracing::info!("Faucet passphrase retrieved from node keystore via RPC");
+                    (p, false)
+                } else if keystore_is_empty {
+                    // Node has no stored passphrase — first boot, generate one.
                     let entropy = format!(
                         "{}:{}:{}",
                         std::process::id(),
@@ -203,20 +209,13 @@ async fn main() {
                     let rng_bytes = noble_crypto::sha256(entropy.as_bytes());
                     (hex::encode(rng_bytes.as_bytes()), true)
                 } else {
-                    // Keystore exists but no passphrase on node — unrecoverable.
                     tracing::error!("Faucet keystore exists but node has no stored passphrase. Delete faucet-keystore to re-generate.");
                     std::process::exit(1);
                 }
             }
             Err(e) => {
-                // RPC error — could be transient. Don't generate a new passphrase.
-                if keystore_is_empty {
-                    tracing::error!("Cannot reach node RPC to get faucet passphrase: {e}");
-                    std::process::exit(1);
-                } else {
-                    tracing::error!("Cannot reach node RPC to get faucet passphrase: {e}. Keystore exists but passphrase unknown.");
-                    std::process::exit(1);
-                }
+                tracing::error!("Cannot reach node RPC to get faucet secret: {e}");
+                std::process::exit(1);
             }
         }
     };
@@ -330,7 +329,24 @@ async fn main() {
     if let (Some(cert_path), Some(key_path)) = (&cli.tls_cert, &cli.tls_key) {
         // Serve HTTPS using the provided TLS certificate and key.
         let cert_pem = std::fs::read(cert_path).expect("Failed to read TLS cert");
-        let key_pem = std::fs::read(key_path).expect("Failed to read TLS key");
+        let key_raw = std::fs::read(key_path).expect("Failed to read TLS key");
+
+        // Decrypt the key if it's a Noble-encrypted envelope (never write plaintext to disk).
+        let key_pem = if noble_crypto::file_encrypt::is_noble_envelope(&key_raw) {
+            let cm_hex = rpc_chain_meta.as_deref()
+                .or(cli.chain_meta.as_deref())
+                .expect("chain_meta required to decrypt Noble-envelope TLS key (from RPC or --chain-meta)");
+            let cm_bytes: [u8; 32] = hex::decode(cm_hex)
+                .expect("chain_meta must be 64 hex chars")
+                .try_into()
+                .expect("chain_meta must be exactly 32 bytes");
+            let (decrypted, _) = noble_crypto::file_encrypt::decrypt_file_data_with_migration(&key_raw, &cm_bytes)
+                .expect("Failed to decrypt TLS key envelope");
+            decrypted
+        } else {
+            key_raw
+        };
+
         let certs: Vec<rustls_pki_types::CertificateDer<'static>> =
             rustls_pemfile::certs(&mut &cert_pem[..])
                 .filter_map(|r| r.ok())

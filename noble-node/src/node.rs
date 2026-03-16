@@ -1973,7 +1973,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .arg("--db-path").arg(&db_path)
                     .arg("--keystore-dir").arg(&ks_dir);
 
-                // Pass the node's TLS cert so the faucet serves HTTPS.
+                // Pass TLS cert + encrypted key path. The faucet gets chain_meta
+                // via the getFaucetSecret RPC to decrypt the key in memory.
                 if tls_cert_path.exists() && tls_key_path.exists() {
                     cmd.arg("--tls-cert").arg(&tls_cert_path)
                         .arg("--tls-key").arg(&tls_key_path);

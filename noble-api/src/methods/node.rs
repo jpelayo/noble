@@ -1084,14 +1084,14 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ks.unlock(&wallet_pass)
                 .map_err(|e| ApiError::Internal(format!("unlock keystore: {e}")))?;
         }
-        match ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE) {
-            Ok(bytes) => {
-                let pass = String::from_utf8(bytes)
-                    .map_err(|e| ApiError::Internal(format!("faucet passphrase not UTF-8: {e}")))?;
-                Ok(serde_json::json!({ "passphrase": pass }))
-            }
-            Err(_) => Ok(serde_json::json!({ "passphrase": null })),
-        }
+        let passphrase = match ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE) {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(_) => None,
+        };
+        Ok(serde_json::json!({
+            "passphrase": passphrase,
+            "chain_meta": hex::encode(&self.chain_meta),
+        }))
     }
 
     async fn store_faucet_secret(

@@ -270,16 +270,10 @@ impl NodeRpcClient {
         .await
     }
 
-    /// Retrieve the faucet passphrase from the node's unified keystore.
-    pub async fn get_faucet_secret(&self) -> Result<Option<String>, FaucetError> {
-        #[derive(Deserialize)]
-        struct Resp {
-            passphrase: Option<String>,
-        }
-        let resp: Resp = self.call("noble_getFaucetSecret", &()).await?;
-        Ok(resp.passphrase)
+    /// Retrieve the faucet passphrase and chain_meta from the node's unified keystore.
+    pub async fn get_faucet_secret(&self) -> Result<FaucetSecretResponse, FaucetError> {
+        self.call("noble_getFaucetSecret", &()).await
     }
-
     /// Store the faucet passphrase in the node's unified keystore.
     pub async fn store_faucet_secret(&self, passphrase: &str) -> Result<(), FaucetError> {
         #[derive(Serialize)]
@@ -471,4 +465,11 @@ impl NodeRpcClient {
         .map_err(|_| FaucetError::Rpc(format!("read timeout ({RPC_TIMEOUT:?})")))?
         .map_err(|e| FaucetError::Rpc(format!("read: {e}")))
     }
+}
+
+/// Response from `noble_getFaucetSecret`.
+#[derive(serde::Deserialize)]
+pub struct FaucetSecretResponse {
+    pub passphrase: Option<String>,
+    pub chain_meta: String,
 }
