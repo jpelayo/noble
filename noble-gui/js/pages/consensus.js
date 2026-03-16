@@ -1193,7 +1193,7 @@ export function init(root, ctx) {
           const hist = historyMap.get(c);
           if (hist) {
             if (!hist.winner && block) {
-              hist.winner = block.validator_id || '';
+              hist.winner = block.validator_name || block.validator_id || '';
               hist.winning_hash = block.hash || '';
               hist.status = 'finalized';
               hist.finalized_at = hist.finalized_at || block.timestamp || null;
@@ -1205,12 +1205,12 @@ export function init(root, ctx) {
               cycle_number: c,
               status: 'finalized',
               proposals: [{
-                validator: block.validator_id || '',
+                validator: block.validator_name || block.validator_id || '',
                 block_hash: block.hash || '',
                 tx_count: block.tx_count || 0,
               }],
               votes: [],
-              winner: block.validator_id || '',
+              winner: block.validator_name || block.validator_id || '',
               winning_hash: block.hash || '',
               disambiguation: null,
               finalized_at: block.timestamp || null,
