@@ -121,6 +121,8 @@ struct WebContentView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.bounces = false
 
         #if DEBUG
         if #available(iOS 16.4, *) {

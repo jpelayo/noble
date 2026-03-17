@@ -624,6 +624,15 @@ final class WebBridgeHandler {
                 "blockHeight": info.blockHeight,
             ] as [String: Any]
 
+        case "connectToNode":
+            guard let url = params["url"] as? String, !url.isEmpty else {
+                throw BridgeError.missingParam("url")
+            }
+            appState.nodeURL = url
+            appState.saveNodeURL(url)
+            await appState.connectToNode()
+            return ["connected": appState.isConnected]
+
         case "disconnectNode":
             appState.disconnect()
             return ["ok": true]

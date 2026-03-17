@@ -18,7 +18,7 @@ struct NobleAppApp: App {
                 }
             }
             .task {
-                appState.checkExistingWallet()
+                await appState.autoConnectIfNeeded()
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {

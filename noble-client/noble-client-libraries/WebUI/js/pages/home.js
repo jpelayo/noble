@@ -13,6 +13,12 @@ export function init(root, ctx) {
 
     if (!state.isConnected) {
         root.classList.add('page-content');
+        const defaultSeed = 'https://node.infinitecontext.com:8783';
+
+        // Build the welcome screen but keep it hidden initially.
+        // The native app may push isConnected=true within milliseconds of page load
+        // (auto-reconnect). Showing the welcome screen immediately causes a flash.
+        // Instead, show nothing for a brief moment, then render if still disconnected.
         const welcome = document.createElement('div');
         welcome.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:var(--gap)';
         welcome.innerHTML = `
@@ -21,12 +27,12 @@ export function init(root, ctx) {
             <p style="color:var(--text-secondary);margin:0 0 var(--gap-lg);max-width:400px">
                 Document notarization on the blockchain. Connect to a node to get started, or configure your settings.
             </p>
-            <div style="display:flex;gap:var(--gap);flex-wrap:wrap;justify-content:center">
-                <button id="welcome-settings" style="padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-size:var(--font-size-sm);font-weight:600">
-                    Settings
-                </button>
-                <button id="welcome-connect" style="padding:10px 24px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;font-size:var(--font-size-sm)">
+            <div id="welcome-buttons" style="display:flex;flex-direction:column;gap:var(--gap-sm);align-items:center;width:100%;max-width:340px">
+                <button id="welcome-connect" class="btn btn-primary" style="width:100%;padding:12px 24px;font-weight:600">
                     Connect to node.infinitecontext.com
+                </button>
+                <button id="welcome-settings" class="btn btn-secondary" style="width:100%;padding:10px 24px;font-size:var(--font-size-sm)">
+                    Settings
                 </button>
             </div>
             <p style="color:var(--text-muted);font-size:var(--font-size-xs);margin-top:var(--gap)">
@@ -34,20 +40,52 @@ export function init(root, ctx) {
             </p>
         `;
         root.appendChild(welcome);
-        welcome.querySelector('#welcome-settings')?.addEventListener('click', () => {
-            if (window.App) window.App.navigateTo('settings');
-        });
-        welcome.querySelector('#welcome-connect')?.addEventListener('click', async () => {
+
+
+        // Connect to default seed.
+        welcome.querySelector('#welcome-connect').addEventListener('click', async () => {
             const btn = welcome.querySelector('#welcome-connect');
             btn.disabled = true;
             btn.textContent = 'Connecting...';
-            try {
-                await Bridge.call('noble_app', 'connectToNode', { url: 'https://node.infinitecontext.com:8783' });
-            } catch (e) {
-                btn.textContent = 'Connection failed — try Settings';
-                btn.disabled = false;
+            try { await Bridge.call('noble_app', 'connectToNode', { url: defaultSeed }); }
+            catch {
+                btn.textContent = 'Connection failed';
+                setTimeout(() => { btn.textContent = 'Connect to node.infinitecontext.com'; btn.disabled = false; }, 2000);
             }
         });
+
+        // Settings.
+        welcome.querySelector('#welcome-settings').addEventListener('click', () => {
+            if (window.App) window.App.navigateTo('settings');
+        });
+
+        // Async: fetch saved settings to show reconnect button for previously configured node.
+        Bridge.call('noble_app', 'getSettings').then(appSettings => {
+            if (!alive || state.isConnected) return;
+            const url = appSettings && appSettings.nodeURL;
+            if (url && url !== defaultSeed) {
+                const label = url.replace(/^https?:\/\//, '').replace(/:8783$/, '');
+                const btns = welcome.querySelector('#welcome-buttons');
+                const reconnectBtn = document.createElement('button');
+                reconnectBtn.className = 'btn btn-primary';
+                reconnectBtn.style.cssText = 'width:100%;padding:12px 24px;font-weight:600';
+                reconnectBtn.textContent = 'Reconnect to ' + label;
+                reconnectBtn.addEventListener('click', async () => {
+                    reconnectBtn.disabled = true;
+                    reconnectBtn.textContent = 'Connecting...';
+                    try { await Bridge.call('noble_app', 'connectToNode', { url }); }
+                    catch {
+                        reconnectBtn.textContent = 'Connection failed';
+                        setTimeout(() => { reconnectBtn.textContent = 'Reconnect to ' + label; reconnectBtn.disabled = false; }, 2000);
+                    }
+                });
+                btns.insertBefore(reconnectBtn, btns.firstChild);
+                // Demote default seed button to secondary.
+                const seedBtn = welcome.querySelector('#welcome-connect');
+                if (seedBtn) { seedBtn.className = 'btn'; seedBtn.style.cssText = 'width:100%;padding:12px 24px'; }
+            }
+        }).catch(() => {});
+
         return { destroy() { alive = false; }, refresh() {} };
     }
 

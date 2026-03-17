@@ -130,6 +130,9 @@ public actor JSONRPCClient {
             tlsOptions.securityProtocolOptions,
             { metadata, trust, completion in
                 let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                // Disable network fetch (OCSP/CRL) — self-signed certs have no revocation server.
+                // Without this, iOS waits ~15s for the OCSP timeout on every connection.
+                SecTrustSetNetworkFetchAllowed(secTrust, false)
                 if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
                    let cert = chain.first {
                     let der = SecCertificateCopyData(cert) as Data

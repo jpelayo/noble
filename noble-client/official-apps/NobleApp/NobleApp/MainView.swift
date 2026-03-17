@@ -49,34 +49,25 @@ struct MainView: View {
     // MARK: - iPhone Layout (TabView)
 
     private var iPhoneLayout: some View {
-        TabView(selection: $selectedTab) {
-            Tab("Home", systemImage: "house.fill", value: "home") {
-                webContent
-            }
+        VStack(spacing: 0) {
+            // Single WebView — always mounted, never detached by tab switches.
+            webContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Tab("Documents", systemImage: "doc.text.fill", value: "documents") {
-                webContent
-            }
+            Divider()
 
-            Tab("Verify", systemImage: "checkmark.seal.fill", value: "verify") {
-                webContent
+            // Bottom tab bar — pure route selector, no content of its own.
+            HStack {
+                tabButton("Home", icon: "house.fill", route: "home")
+                tabButton("Documents", icon: "doc.text.fill", route: "documents")
+                tabButton("Verify", icon: "checkmark.seal.fill", route: "verify")
+                tabButton("Payments", icon: "creditcard.fill", route: "payments")
+                tabButton("Contacts", icon: "person.2.fill", route: "contacts")
             }
-
-            Tab("Payments", systemImage: "creditcard.fill", value: "payments") {
-                webContent
-            }
-
-            Tab("Contacts", systemImage: "person.2.fill", value: "contacts") {
-                webContent
-            }
-        }
-        .onChange(of: selectedTab) { _, newTab in
-            if let section = SidebarSection(rawValue: newTab) {
-                appState.selectedSection = section
-                appState.webViewCoordinator?.evaluateJS(
-                    "App.navigateTo('\(section.webRoute)')"
-                )
-            }
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
+            .background(Color(.systemBackground))
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -98,6 +89,28 @@ struct MainView: View {
                 }
             }
         }
+    }
+
+    private func tabButton(_ title: String, icon: String, route: String) -> some View {
+        Button {
+            selectedTab = route
+            if let section = SidebarSection(rawValue: route) {
+                appState.selectedSection = section
+                appState.webViewCoordinator?.evaluateJS(
+                    "App.navigateTo('\(section.webRoute)')"
+                )
+            }
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: icon)
+                    .font(.system(size: 18))
+                Text(title)
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(selectedTab == route ? Color.accentColor : Color(.secondaryLabel))
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - iPad Layout (NavigationSplitView)
@@ -143,12 +156,18 @@ struct MainView: View {
 
     // MARK: - Web Content
 
+    @ViewBuilder
     private var webContent: some View {
-        WebContentView(appState: appState)
-            .refreshable {
-                await appState.pollTick()
-                HapticManager.shared.success()
-            }
+        if appState.isReady {
+            WebContentView(appState: appState)
+                .refreshable {
+                    await appState.pollTick()
+                    HapticManager.shared.success()
+                }
+        } else {
+            ProgressView("Connecting...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 
     // MARK: - Toolbar Status

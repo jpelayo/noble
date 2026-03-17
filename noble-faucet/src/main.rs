@@ -226,20 +226,20 @@ async fn main() {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
 
-                // First boot: store the passphrase in the node's keystore via RPC.
-                // This MUST succeed — if it fails, the passphrase is lost on restart.
+                // Always report the faucet address to the node so the GUI can display it.
+                // On first boot, also store the passphrase (MUST succeed or the keystore is orphaned).
                 if is_first_boot {
-                    tracing::info!("First boot — storing faucet passphrase in node keystore via RPC");
+                    tracing::info!("First boot — storing faucet passphrase + address in node keystore via RPC");
                     let mut stored = false;
                     for attempt in 1..=3 {
                         match rpc.store_faucet_secret(&passphrase, Some(&w.address())).await {
                             Ok(()) => {
-                                tracing::info!("Faucet passphrase stored in node keystore");
+                                tracing::info!("Faucet passphrase + address stored in node keystore");
                                 stored = true;
                                 break;
                             }
                             Err(e) => {
-                                tracing::warn!("Attempt {attempt}/3 — failed to store faucet passphrase: {e}");
+                                tracing::warn!("Attempt {attempt}/3 — failed to store faucet secret: {e}");
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }
                         }
@@ -247,6 +247,11 @@ async fn main() {
                     if !stored {
                         tracing::error!("FATAL: Could not store faucet passphrase after 3 attempts. Exiting to prevent orphaned keystore.");
                         std::process::exit(1);
+                    }
+                } else {
+                    // Subsequent boot: passphrase already stored, just update the address.
+                    if let Err(e) = rpc.store_faucet_secret(&passphrase, Some(&w.address())).await {
+                        tracing::warn!("Failed to update faucet address on node: {e}");
                     }
                 }
 

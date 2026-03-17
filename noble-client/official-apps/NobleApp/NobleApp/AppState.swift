@@ -54,6 +54,10 @@ final class AppState {
 
     // MARK: - Connection
 
+    /// Whether the app has completed startup (wallet check + auto-connect attempt).
+    /// The WebView is not shown until this is true.
+    var isReady = false
+
     /// Whether the app is connected to a NOBLE node.
     var isConnected = false
 
@@ -123,6 +127,33 @@ final class AppState {
     /// Keychain service for secure key storage.
     let keychainService: any KeychainService = LiveKeychainService(service: "com.infinitecontext.nobleapp")
 
+    // MARK: - Init (synchronous state from UserDefaults + Keychain)
+
+    init() {
+        // Read all synchronous state at construction time so the first SwiftUI
+        // frame renders the correct view — no flash between onboarding/main/loading.
+        hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey)
+        autoConnect = UserDefaults.standard.object(forKey: Self.autoConnectKey) != nil
+            ? UserDefaults.standard.bool(forKey: Self.autoConnectKey)
+            : true
+        loadContactsFromDefaults()
+        loadSecuritySettings()
+
+        do {
+            hasWallet = try keychainService.hasKey(label: Self.privateKeyLabel)
+            if hasWallet {
+                loadWalletAddress()
+                loadSavedNodeURL()
+            }
+        } catch {
+            hasWallet = false
+        }
+
+        // Ready immediately unless auto-connect will happen (set by checkExistingWallet).
+        let willAutoConnect = autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding
+        isReady = !willAutoConnect
+    }
+
     /// Mnemonic provider for wallet creation/import.
     let mnemonicProvider: any MnemonicProviding = LiveMnemonicProvider()
 
@@ -168,28 +199,13 @@ final class AppState {
     // MARK: - Lifecycle
 
     /// Check if a wallet already exists on launch.
-    func checkExistingWallet() {
-        // Onboarding flag persists in UserDefaults — only set by completeOnboarding()
-        hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey)
-
-        do {
-            hasWallet = try keychainService.hasKey(label: Self.privateKeyLabel)
-            if hasWallet {
-                loadWalletAddress()
-                loadSavedNodeURL()
-            }
-        } catch {
-            hasWallet = false
-        }
-        loadContactsFromDefaults()
-        loadSecuritySettings()
-
-        // Auto-connect if enabled and node URL is saved
+    /// Attempt auto-connect if conditions are met.
+    /// All synchronous state (wallet, onboarding, settings) is already loaded in init().
+    func autoConnectIfNeeded() async {
         if autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding {
-            Task {
-                await connectToNode()
-            }
+            await connectToNode()
         }
+        isReady = true
     }
 
     // MARK: - Wallet Operations

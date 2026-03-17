@@ -50,7 +50,14 @@ export function init(root, ctx) {
         // Page header
         const header = document.createElement('div');
         header.className = 'page-header';
-        header.innerHTML = '<h1>Settings</h1><p>Node, wallet, and app configuration</p>';
+        header.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div><h1>Settings</h1><p>Node, wallet, and app configuration</p></div>
+                <button id="settings-close" class="btn btn-secondary" style="padding:6px 14px;font-size:var(--font-size-sm);flex-shrink:0">Done</button>
+            </div>`;
+        header.querySelector('#settings-close').addEventListener('click', () => {
+            window.history.back();
+        });
         root.appendChild(header);
 
         renderNodeSection();
