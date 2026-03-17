@@ -56,10 +56,10 @@ impl Default for FaucetConfig {
     fn default() -> Self {
         Self {
             faucet_address: String::new(),
-            drip_amount: 10_000_000, // 10 NOBLE
-            ip_cooldown_secs: 86400,
-            address_cooldown_secs: 604800,
-            daily_cap: 100_000_000, // 100 NOBLE
+            drip_amount: 1_000_000, // 1 NOBLE per request
+            ip_cooldown_secs: 86400, // 24h per IP
+            address_cooldown_secs: 86400, // 24h per address (1 NOBLE/day/address)
+            daily_cap: 50_000_000, // 50 NOBLE total daily faucet budget
         }
     }
 }
@@ -114,20 +114,20 @@ struct Cli {
     #[arg(long)]
     auto_unlock: bool,
 
-    /// Amount per drip in atomic units (default: 10,000,000 = 10 NOBLE).
-    #[arg(long, default_value = "10000000")]
+    /// Amount per drip in atomic units (default: 1,000,000 = 1 NOBLE).
+    #[arg(long, default_value = "1000000")]
     drip_amount: u64,
 
     /// Per-IP cooldown in seconds (default: 86400 = 24h).
     #[arg(long, default_value = "86400")]
     ip_cooldown: u64,
 
-    /// Per-address cooldown in seconds (default: 604800 = 7d).
-    #[arg(long, default_value = "604800")]
+    /// Per-address cooldown in seconds (default: 86400 = 24h, 1 NOBLE/day/address).
+    #[arg(long, default_value = "86400")]
     address_cooldown: u64,
 
-    /// Daily distribution cap in atomic units (default: 100,000,000 = 100 NOBLE).
-    #[arg(long, default_value = "100000000")]
+    /// Daily distribution cap in atomic units (default: 50,000,000 = 50 NOBLE).
+    #[arg(long, default_value = "50000000")]
     daily_cap: u64,
 
     /// Path to SQLite database file.
@@ -426,10 +426,10 @@ mod tests {
     #[test]
     fn faucet_config_defaults() {
         let cfg = FaucetConfig::default();
-        assert_eq!(cfg.drip_amount, 10_000_000);
+        assert_eq!(cfg.drip_amount, 1_000_000);
         assert_eq!(cfg.ip_cooldown_secs, 86400);
-        assert_eq!(cfg.address_cooldown_secs, 604800);
-        assert_eq!(cfg.daily_cap, 100_000_000);
+        assert_eq!(cfg.address_cooldown_secs, 86400);
+        assert_eq!(cfg.daily_cap, 50_000_000);
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(cli.listen, "127.0.0.1:8786");
         assert_eq!(cli.rpc_url, "http://127.0.0.1:8783");
         assert_eq!(cli.faucet_address, Some("abcd1234".to_string()));
-        assert_eq!(cli.drip_amount, 10_000_000);
+        assert_eq!(cli.drip_amount, 1_000_000);
         assert!(cli.totp_code.is_none());
         assert!(!cli.auto_unlock);
     }

@@ -284,7 +284,7 @@ export function init(root, ctx) {
                 { label: 'Recipient', render: renderRecipientStep, canAdvance: () => recipientValid, onNext: null },
                 { label: 'Amount', render: renderAmountStep, canAdvance: () => isValidAmount(), onNext: null },
                 { label: 'Fee', render: renderFeeStep, canAdvance: () => feeData !== null, onNext: null },
-                { label: 'Review', render: renderReviewStep, canAdvance: () => true, submitLabel: 'Sign & Send', onNext: submitTransaction },
+                { label: 'Review', render: renderReviewStep, canAdvance: () => true, submitLabel: 'Slide to Send', slideConfirm: true, onNext: submitTransaction },
                 { label: 'Result', render: renderResultStep, canAdvance: () => true, submitLabel: 'Done' },
             ],
             onComplete: () => { closeModal(); render(); },
@@ -504,8 +504,8 @@ export function init(root, ctx) {
                 submitError = submit.accepted ? null : 'Transaction rejected';
             } catch (err) {
                 submitResult = null;
-                submitError = err.message;
-                return false;
+                submitError = err.message || String(err);
+                // Don't return false — let wizard advance to Result step which shows the error.
             }
         }
 

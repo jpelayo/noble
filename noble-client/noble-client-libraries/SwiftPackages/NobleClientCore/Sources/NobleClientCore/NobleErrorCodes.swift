@@ -113,6 +113,27 @@ public enum NE {
     public static let transactionRejected   = "NE-603"
     /// Transaction submission failed (network or encoding).
     public static let transactionFailed     = "NE-604"
+    /// Insufficient funds — wallet balance cannot cover amount + fee.
+    public static let insufficientFunds     = "NE-605"
+    /// UTXO fetch failed — could not retrieve unspent outputs for the wallet.
+    public static let utxoFetchFailed       = "NE-606"
+    /// Coin selection failed — no valid UTXO combination found.
+    public static let coinSelectionFailed   = "NE-607"
+    /// Address validation failed — recipient address is invalid.
+    public static let invalidAddress        = "NE-608"
+    /// Fee estimation failed.
+    public static let feeEstimationFailed   = "NE-609"
+
+    // MARK: - 7xx JSON-RPC Server Errors
+
+    /// JSON-RPC server returned an application error.
+    public static let rpcServerError        = "NE-701"
+    /// JSON-RPC invalid params (server rejected the request parameters).
+    public static let rpcInvalidParams      = "NE-702"
+    /// JSON-RPC method not found on the server.
+    public static let rpcMethodNotFound     = "NE-703"
+    /// JSON-RPC server internal error.
+    public static let rpcInternalError      = "NE-704"
 
     /// Format a user-facing error message with the error code appended.
     ///

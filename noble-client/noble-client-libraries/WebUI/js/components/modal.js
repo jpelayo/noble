@@ -21,6 +21,90 @@ function _trapFocus(container, closeFn) {
     return () => container.removeEventListener('keydown', handler);
 }
 
+/** Create a slide-to-confirm element. User must drag thumb to the right to trigger onConfirm. */
+function _createSlideConfirm(label, onConfirm) {
+    const el = document.createElement('div');
+    el.className = 'slide-confirm';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'slide-confirm-label';
+    labelEl.textContent = label;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'slide-confirm-thumb';
+    thumb.textContent = '\u276F'; // right-pointing angle bracket
+
+    el.appendChild(labelEl);
+    el.appendChild(thumb);
+
+    const THUMB_SIZE = 42;
+    const PAD = 3;
+    let startX = 0;
+    let thumbLeft = PAD;
+    let confirmed = false;
+
+    function getMaxLeft() { return el.offsetWidth - THUMB_SIZE - PAD; }
+
+    function onPointerDown(e) {
+        if (confirmed) return;
+        e.preventDefault();
+        startX = (e.touches ? e.touches[0].clientX : e.clientX) - thumbLeft;
+        el.classList.add('dragging');
+        document.addEventListener('pointermove', onPointerMove, { passive: false });
+        document.addEventListener('pointerup', onPointerUp);
+        document.addEventListener('touchmove', onTouchMove, { passive: false });
+        document.addEventListener('touchend', onPointerUp);
+    }
+
+    function onPointerMove(e) {
+        e.preventDefault();
+        const x = (e.touches ? e.touches[0].clientX : e.clientX) - startX;
+        const max = getMaxLeft();
+        thumbLeft = Math.max(PAD, Math.min(x, max));
+        thumb.style.left = thumbLeft + 'px';
+        const pct = (thumbLeft - PAD) / (max - PAD);
+        labelEl.style.opacity = String(1 - pct * 0.8);
+    }
+
+    function onTouchMove(e) {
+        e.preventDefault();
+        const x = e.touches[0].clientX - startX;
+        const max = getMaxLeft();
+        thumbLeft = Math.max(PAD, Math.min(x, max));
+        thumb.style.left = thumbLeft + 'px';
+        const pct = (thumbLeft - PAD) / (max - PAD);
+        labelEl.style.opacity = String(1 - pct * 0.8);
+    }
+
+    function onPointerUp() {
+        el.classList.remove('dragging');
+        document.removeEventListener('pointermove', onPointerMove);
+        document.removeEventListener('pointerup', onPointerUp);
+        document.removeEventListener('touchmove', onTouchMove);
+        document.removeEventListener('touchend', onPointerUp);
+
+        const max = getMaxLeft();
+        if (thumbLeft >= max * 0.85) {
+            // Confirmed
+            confirmed = true;
+            thumbLeft = max;
+            thumb.style.left = max + 'px';
+            el.classList.add('confirmed');
+            onConfirm();
+        } else {
+            // Snap back
+            thumbLeft = PAD;
+            thumb.style.left = PAD + 'px';
+            labelEl.style.opacity = '1';
+        }
+    }
+
+    thumb.addEventListener('pointerdown', onPointerDown);
+    thumb.addEventListener('touchstart', onPointerDown, { passive: false });
+
+    return el;
+}
+
 /** Open a simple modal. Returns { el, close }. */
 export function openModal({ title, body, onClose, stack = false }) {
     if (!stack) closeModal();
@@ -163,29 +247,24 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
 
         // Nav
         nav.innerHTML = '';
+
         const backBtn = document.createElement('button');
-        backBtn.className = 'btn btn-secondary';
-        backBtn.textContent = current === 0 ? 'Cancel' : 'Back';
+        backBtn.className = 'btn btn-secondary btn-sm';
+        backBtn.textContent = current === 0 ? 'Cancel' : '\u2190 Back';
         backBtn.addEventListener('click', () => {
             if (current === 0) { close(); return; }
             current--;
             renderStep();
         });
 
-        const nextBtn = document.createElement('button');
-        nextBtn.className = 'btn btn-primary';
         const isLast = current === steps.length - 1;
-        nextBtn.textContent = isLast ? (stepObj.submitLabel || 'Submit') : 'Next';
-        if (stepObj.canAdvance) nextBtn.disabled = !stepObj.canAdvance();
 
-        nextBtn.addEventListener('click', async () => {
+        async function advanceStep() {
             if (stepObj.onNext) {
-                nextBtn.disabled = true;
-                nextBtn.textContent = 'Processing...';
                 try {
                     const ok = await stepObj.onNext();
-                    if (ok === false) { nextBtn.disabled = false; nextBtn.textContent = isLast ? 'Submit' : 'Next'; return; }
-                } catch { nextBtn.disabled = false; nextBtn.textContent = isLast ? 'Submit' : 'Next'; return; }
+                    if (ok === false) return false;
+                } catch { return false; }
             }
             if (isLast) {
                 if (onComplete) onComplete();
@@ -193,10 +272,54 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
                 current++;
                 renderStep();
             }
-        });
+            return true;
+        }
 
-        nav.appendChild(backBtn);
-        nav.appendChild(nextBtn);
+        if (stepObj.slideConfirm) {
+            // Slide-to-confirm button
+            nav.style.flexDirection = 'column';
+            nav.style.gap = 'var(--gap-sm)';
+
+            const slider = _createSlideConfirm(
+                stepObj.submitLabel || 'Slide to Confirm',
+                async () => {
+                    slider.classList.add('processing');
+                    slider.querySelector('.slide-confirm-label').textContent = 'Processing...';
+                    await advanceStep();
+                }
+            );
+            if (stepObj.canAdvance && !stepObj.canAdvance()) {
+                slider.style.opacity = '0.4';
+                slider.style.pointerEvents = 'none';
+            }
+
+            const bottomRow = document.createElement('div');
+            bottomRow.style.cssText = 'display:flex;justify-content:center';
+            bottomRow.appendChild(backBtn);
+
+            nav.appendChild(slider);
+            nav.appendChild(bottomRow);
+        } else {
+            // Regular button
+            nav.style.flexDirection = '';
+            nav.style.gap = '';
+
+            const nextBtn = document.createElement('button');
+            nextBtn.className = 'btn btn-primary';
+            nextBtn.textContent = stepObj.submitLabel || (isLast ? 'Submit' : 'Next');
+            if (stepObj.canAdvance) nextBtn.disabled = !stepObj.canAdvance();
+
+            nextBtn.addEventListener('click', async () => {
+                nextBtn.disabled = true;
+                const label = nextBtn.textContent;
+                nextBtn.textContent = 'Processing...';
+                const ok = await advanceStep();
+                if (!ok) { nextBtn.disabled = false; nextBtn.textContent = label; }
+            });
+
+            nav.appendChild(backBtn);
+            nav.appendChild(nextBtn);
+        }
 
         // Re-apply focus trap
         if (removeTrap) removeTrap();
@@ -205,9 +328,17 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
 
     function updateNav() {
         const stepObj = steps[current];
+        // Regular button
         const nextBtn = nav.querySelector('.btn-primary');
         if (nextBtn && stepObj.canAdvance) {
             nextBtn.disabled = !stepObj.canAdvance();
+        }
+        // Slide confirm
+        const slider = nav.querySelector('.slide-confirm');
+        if (slider && stepObj.canAdvance) {
+            const enabled = stepObj.canAdvance();
+            slider.style.opacity = enabled ? '1' : '0.4';
+            slider.style.pointerEvents = enabled ? '' : 'none';
         }
     }
 

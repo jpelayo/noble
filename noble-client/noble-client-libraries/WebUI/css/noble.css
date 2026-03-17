@@ -633,16 +633,16 @@ input, textarea, select, button {
 
 .form-input {
   width: 100%;
-  padding: 8px 12px;
+  height: 44px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: 1rem;
-  font-family: var(--font-mono);
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 16px;
+  line-height: 42px;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .form-input:focus {
@@ -954,6 +954,58 @@ input, textarea, select, button {
   color: var(--text-muted);
 }
 
+/* ── Slide-to-Confirm Button ── */
+.slide-confirm {
+  position: relative;
+  width: 100%;
+  height: 48px;
+  border-radius: 24px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  touch-action: pan-x;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.slide-confirm-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.slide-confirm-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  cursor: grab;
+  transition: left 0.15s ease;
+  z-index: 1;
+}
+.slide-confirm-thumb:active { cursor: grabbing; }
+.slide-confirm.dragging .slide-confirm-thumb { transition: none; }
+.slide-confirm.confirmed { background: var(--accent); }
+.slide-confirm.confirmed .slide-confirm-label { color: #fff; opacity: 1; }
+.slide-confirm.confirmed .slide-confirm-thumb { background: #fff; color: var(--accent); }
+.slide-confirm.processing .slide-confirm-thumb { animation: slide-pulse 1s ease-in-out infinite; }
+@keyframes slide-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
 /* ── Warning Box ── */
 .warning-box {
   background: rgba(245, 158, 11, 0.08);
@@ -1088,11 +1140,20 @@ input, textarea, select, button {
 }
 
 .modal-close-btn {
-  background: none;
-  border: none;
-  font-size: var(--font-size-base);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-size: var(--font-size-sm);
   color: var(--text-muted);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+  padding: 0;
   padding: 4px;
   line-height: 1;
 }
@@ -1202,8 +1263,10 @@ input, textarea, select, button {
 
 /* ── Textarea ── */
 textarea.form-input {
+  height: auto;
+  line-height: 1.5;
+  padding: 8px 12px;
   resize: vertical;
-  font-family: var(--font-sans);
 }
 
 /* ── Table Scroll Wrapper (horizontal scroll on narrow viewports) ── */
@@ -1303,11 +1366,10 @@ body {
   }
 
   .modal-close-btn {
-    min-width: 44px;
-    min-height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
   }
 
   .contact-row {

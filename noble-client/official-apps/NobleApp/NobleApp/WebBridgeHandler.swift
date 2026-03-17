@@ -811,13 +811,13 @@ enum BridgeError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unknownHandler(let h): "Unknown bridge handler: \(h)"
-        case .unknownAction(let a): "Unknown action: \(a)"
-        case .missingParam(let p): "Missing parameter: \(p)"
-        case .notConnected: "Not connected to a NOBLE node"
-        case .noPrivateKey: "No private key available"
-        case .faucetUnavailable: "Faucet service is not available"
-        case .faucetError(let msg): msg
+        case .unknownHandler(let h): "Unknown bridge handler: \(h) [\(NE.unknownHandler)]"
+        case .unknownAction(let a): "Unknown action: \(a) [\(NE.unknownAction)]"
+        case .missingParam(let p): "Missing parameter: \(p) [\(NE.missingParam)]"
+        case .notConnected: "Not connected to a NOBLE node [\(NE.notConnected)]"
+        case .noPrivateKey: "No private key available [\(NE.noPrivateKey)]"
+        case .faucetUnavailable: "Faucet service is not available [\(NE.faucetUnavailable)]"
+        case .faucetError(let msg): "\(msg) [\(NE.faucetError)]"
         }
     }
 }

@@ -325,10 +325,11 @@ public struct TransactionBuilder: Sendable {
         entries[.utf8String("inputs")] = .array(inputArr)
 
         // outputs: array of TxOut maps
+        // address must be serde-encoded enum: {"Noble": {"Secp256k1": <bytes>}}
         let outputArr = outputs.map { out -> CBOR in
             .map([
                 .utf8String("value"): .unsignedInt(out.value),
-                .utf8String("address"): .byteString(out.addressWire),
+                .utf8String("address"): Self.encodeAddressSerde(out.addressWire),
             ])
         }
         entries[.utf8String("outputs")] = .array(outputArr)
@@ -365,6 +366,28 @@ public struct TransactionBuilder: Sendable {
     }
 
     // MARK: - Utilities
+
+    /// Encode a NobleAddress wire bytes as serde-compatible CBOR enum.
+    /// Wire format: [prefix(1) || key_bytes]
+    /// Serde CBOR: {"Noble": {"Secp256k1": <bytes>}} or {"Noble": {"Ed25519": <bytes>}}
+    ///             or {"BitcoinHash160": <20_bytes>} or {"BitcoinTaproot": <32_bytes>}
+    static func encodeAddressSerde(_ wire: [UInt8]) -> CBOR {
+        guard !wire.isEmpty else { return .byteString(wire) }
+        let prefix = wire[0]
+        let keyBytes = Array(wire.dropFirst())
+        switch prefix {
+        case 0x01: // Ed25519
+            return .map([.utf8String("Noble"): .map([.utf8String("Ed25519"): .byteString(keyBytes)])])
+        case 0x02: // Secp256k1
+            return .map([.utf8String("Noble"): .map([.utf8String("Secp256k1"): .byteString(keyBytes)])])
+        case 0x80: // BitcoinHash160
+            return .map([.utf8String("BitcoinHash160"): .byteString(keyBytes)])
+        case 0x81: // BitcoinTaproot
+            return .map([.utf8String("BitcoinTaproot"): .byteString(keyBytes)])
+        default:
+            return .byteString(wire)
+        }
+    }
 
     static func hexToBytes(_ hex: String) -> [UInt8] {
         var bytes = [UInt8]()
@@ -525,7 +548,7 @@ public enum CoinSelectionError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .insufficientFunds(let available, let required):
-            return "Insufficient funds: have \(available) atomic, need \(required)"
+            return "Insufficient funds: have \(available) atomic, need \(required) [NE-605]"
         }
     }
 }

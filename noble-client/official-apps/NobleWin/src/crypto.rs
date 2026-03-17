@@ -519,19 +519,20 @@ fn build_transaction_cbor(
     for out in outputs {
         cbor::write_map(&mut buf, 2);
         cbor::write_text(&mut buf, "address");
-        cbor::write_bytes(&mut buf, &out.address_wire);
+        encode_address_serde(&mut buf, &out.address_wire);
         cbor::write_text(&mut buf, "value");
         cbor::write_uint(&mut buf, out.value);
     }
 
-    // issuer_sig as wire bytes: [scheme_id(1) || pubkey_len(1) || pubkey || sig]
+    // issuer_sig: serde map {"scheme_id": N, "public_key": <bytes>, "signature": <bytes>}
     cbor::write_text(&mut buf, "issuer_sig");
-    let mut sig_wire = Vec::with_capacity(2 + public_key.len() + signature.len());
-    sig_wire.push(NobleProtocol::SCHEME_SECP256K1);
-    sig_wire.push(public_key.len() as u8);
-    sig_wire.extend_from_slice(public_key);
-    sig_wire.extend_from_slice(signature);
-    cbor::write_bytes(&mut buf, &sig_wire);
+    cbor::write_map(&mut buf, 3);
+    cbor::write_text(&mut buf, "public_key");
+    cbor::write_bytes(&mut buf, public_key);
+    cbor::write_text(&mut buf, "scheme_id");
+    cbor::write_uint(&mut buf, NobleProtocol::SCHEME_SECP256K1 as u64);
+    cbor::write_text(&mut buf, "signature");
+    cbor::write_bytes(&mut buf, signature);
 
     cbor::write_text(&mut buf, "timestamp");
     cbor::write_uint(&mut buf, timestamp);
@@ -796,6 +797,46 @@ fn accumulate(sorted: &[&UtxoOutpoint], target: u64) -> Option<Vec<UtxoOutpoint>
         }
     }
     None
+}
+
+/// Encode a NobleAddress wire bytes as serde-compatible CBOR enum.
+/// Wire: [prefix(1) || key_bytes]. Serde: {"Noble": {"Secp256k1": <bytes>}} etc.
+fn encode_address_serde(buf: &mut Vec<u8>, wire: &[u8]) {
+    if wire.is_empty() {
+        cbor::write_bytes(buf, wire);
+        return;
+    }
+    match wire[0] {
+        0x01 => {
+            // Ed25519: {"Noble": {"Ed25519": <bytes>}}
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "Noble");
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "Ed25519");
+            cbor::write_bytes(buf, &wire[1..]);
+        }
+        0x02 => {
+            // Secp256k1: {"Noble": {"Secp256k1": <bytes>}}
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "Noble");
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "Secp256k1");
+            cbor::write_bytes(buf, &wire[1..]);
+        }
+        0x80 => {
+            // BitcoinHash160: {"BitcoinHash160": <20_bytes>}
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "BitcoinHash160");
+            cbor::write_bytes(buf, &wire[1..]);
+        }
+        0x81 => {
+            // BitcoinTaproot: {"BitcoinTaproot": <32_bytes>}
+            cbor::write_map(buf, 1);
+            cbor::write_text(buf, "BitcoinTaproot");
+            cbor::write_bytes(buf, &wire[1..]);
+        }
+        _ => cbor::write_bytes(buf, wire),
+    }
 }
 
 /// Convert wallet address (hex wire format) to raw bytes.

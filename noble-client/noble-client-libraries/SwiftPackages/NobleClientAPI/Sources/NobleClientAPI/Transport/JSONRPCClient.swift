@@ -22,10 +22,31 @@ struct JSONRPCResponse<R: Decodable>: Decodable {
 }
 
 /// JSON-RPC 2.0 error object.
-public struct JSONRPCError: Decodable, Error, Sendable {
+public struct JSONRPCError: Decodable, Sendable, LocalizedError {
     public let code: Int
     public let message: String
     public let data: String?
+
+    /// Maps JSON-RPC error code to an NE error code for user display.
+    public var neCode: String {
+        switch code {
+        case -32700:          return "NE-105" // Parse error → invalidResponse
+        case -32600:          return "NE-105" // Invalid request
+        case -32601:          return "NE-703" // Method not found
+        case -32602:          return "NE-702" // Invalid params
+        case -32603:          return "NE-704" // Internal error
+        case -32000:          return "NE-603" // TX rejected
+        case -32004:          return "NE-404" // Auth required → notConnected
+        case -32007:          return "NE-306" // Wallet locked → noPrivateKey
+        case -32009:          return "NE-605" // Insufficient balance
+        case -32010:          return "NE-608" // Invalid address
+        default:              return "NE-701" // Generic server error
+        }
+    }
+
+    public var errorDescription: String? {
+        "\(message) [\(neCode)]"
+    }
 }
 
 /// Low-level JSON-RPC 2.0 transport over HTTPS.
@@ -257,12 +278,27 @@ public actor JSONRPCClient {
 }
 
 /// Errors from the JSON-RPC transport layer.
-public enum RPCClientError: Error, Sendable {
+public enum RPCClientError: LocalizedError, Sendable {
     case invalidResponse
     case httpError(statusCode: Int)
     case emptyResult(method: String)
     case connectionFailed(underlying: String)
     case tlsRejected(fingerprint: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            return "Invalid server response [NE-105]"
+        case .httpError(let code):
+            return "HTTP error \(code) [NE-104]"
+        case .emptyResult(let method):
+            return "Empty result from \(method) [NE-106]"
+        case .connectionFailed(let reason):
+            return "Connection failed: \(reason) [NE-103]"
+        case .tlsRejected:
+            return "TLS certificate rejected [NE-107]"
+        }
+    }
 }
 
 /// Empty type for parameterless RPC calls.
