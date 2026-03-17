@@ -415,6 +415,7 @@ pub fn announce_signing_payload_bytes(announce: &crate::node_announce::NodeAnnou
     if announce.proposed_height.is_some() { field_count += 1; }
     if announce.proposed_hash.is_some() { field_count += 1; }
     if announce.chain_vote_weight.is_some() { field_count += 1; }
+    if announce.min_fee_rate.is_some() { field_count += 1; }
 
     let mut buf = Vec::with_capacity(512);
     cbor::write_map(&mut buf, field_count);
@@ -463,6 +464,11 @@ pub fn announce_signing_payload_bytes(announce: &crate::node_announce::NodeAnnou
 
     cbor::write_text(&mut buf, "identity_key");
     announce.identity_key.encode_wire(&mut buf);
+
+    if let Some(rate) = announce.min_fee_rate {
+        cbor::write_text(&mut buf, "min_fee_rate");
+        cbor::write_uint(&mut buf, rate);
+    }
 
     cbor::write_text(&mut buf, "network_name");
     cbor::write_text(&mut buf, &announce.network_name);

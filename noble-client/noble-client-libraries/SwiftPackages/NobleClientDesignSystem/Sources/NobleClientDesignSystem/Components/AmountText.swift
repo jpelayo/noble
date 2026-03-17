@@ -29,15 +29,15 @@ public struct AmountText: View {
     }
 
     private var formatted: String {
-        let whole = atomicUnits / 1_000_000
-        let frac = atomicUnits % 1_000_000
+        let whole = atomicUnits / 100_000_000
+        let frac = atomicUnits % 100_000_000
         let suffix = showUnit ? " NOBLE" : ""
 
         if frac == 0 {
             return "\(whole)\(suffix)"
         }
 
-        let fracStr = String(format: "%06d", frac)
+        let fracStr = String(format: "%08d", frac)
             .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
         return "\(whole).\(fracStr)\(suffix)"
     }

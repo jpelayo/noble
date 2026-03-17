@@ -235,13 +235,20 @@ pub async fn handle_api_action(
             let result = client
                 .call_rpc("noble_estimateFee", json!([]))
                 .await?;
+            // Pass through rate-based fields. Client computes total = rate × tx_size.
+            let est_tx_size: u64 = 300; // typical tx ~300 bytes
+            let low = result.get("low_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1);
+            let med = result.get("recommended_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1);
+            let high = result.get("high_priority_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1);
             Ok(json!({
-                "minFee": result.get("min_fee").or(result.get("minFee"))
-                    .and_then(|v| v.as_u64()).unwrap_or(1000),
-                "recommendedFee": result.get("recommended_fee").or(result.get("recommendedFee"))
-                    .and_then(|v| v.as_u64()).unwrap_or(2000),
-                "highPriorityFee": result.get("high_priority_fee").or(result.get("highPriorityFee"))
-                    .and_then(|v| v.as_u64()).unwrap_or(5000),
+                "minFee": low * est_tx_size,
+                "recommendedFee": med * est_tx_size,
+                "highPriorityFee": high * est_tx_size,
+                "lowFeeRate": low,
+                "recommendedFeeRate": med,
+                "highPriorityFeeRate": high,
+                "networkMinFeeRate": result.get("network_min_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1),
+                "networkMedianFeeRate": result.get("network_median_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1),
             }))
         }
 

@@ -169,9 +169,9 @@ mod tests {
     #[test]
     fn test_record_and_query() {
         let db = FaucetDb::open_memory().unwrap();
-        db.record_distribution("addr1", "1.2.3.4", 1_000_000, Some("tx_abc"))
+        db.record_distribution("addr1", "1.2.3.4", 100_000_000, Some("tx_abc"))
             .unwrap();
-        assert_eq!(db.total_distributed().unwrap(), 1_000_000);
+        assert_eq!(db.total_distributed().unwrap(), 100_000_000);
         assert_eq!(db.distribution_count().unwrap(), 1);
         assert!(db.ip_recent_distribution("1.2.3.4", 86400).unwrap());
         assert!(!db.ip_recent_distribution("5.6.7.8", 86400).unwrap());

@@ -1110,7 +1110,7 @@ export function init(root, ctx) {
             feeData = await Bridge.call('noble_api', 'estimateFee');
             if (alive) render();
         } catch {
-            feeData = { minFee: 1000, recommendedFee: 2000, highPriorityFee: 5000 };
+            feeData = { minFee: 1 * 300, recommendedFee: 2 * 300, highPriorityFee: 5 * 300 };
             if (alive) render();
         }
     }

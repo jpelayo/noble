@@ -201,7 +201,7 @@ pub async fn handle_faucet(
         amount: state.config.drip_amount,
         message: format!(
             "Sent {} NOBLE to {}",
-            state.config.drip_amount as f64 / 1_000_000.0,
+            state.config.drip_amount as f64 / 100_000_000.0,
             &req.address[..16]
         ),
     }))

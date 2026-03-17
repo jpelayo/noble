@@ -436,7 +436,7 @@ public struct SignatureData: Sendable {
 public enum CoinSelector {
 
     /// Minimum value below which a change output is not worth creating.
-    public static let dustThreshold: UInt64 = 5_000 // 0.005 NOBLE
+    public static let dustThreshold: UInt64 = 500_000 // 0.005 NOBLE (10^8 atomic)
 
     /// Select UTXOs to cover `target` (amount + fee).
     /// Returns the selected subset, or throws if insufficient funds.

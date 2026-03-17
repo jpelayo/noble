@@ -1265,7 +1265,7 @@ export function init(root, ctx) {
         balance = bal.available || bal.balance || 0;
       } catch { /* not funded yet */ }
 
-      const balFmt = (balance / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const balFmt = (balance / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
       faucetBadge.textContent = balance > 0 ? 'Running' : 'Empty';
       faucetBadge.style.background = balance > 0 ? 'var(--success)' : 'var(--warning)';

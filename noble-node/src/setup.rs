@@ -624,6 +624,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             voting_subset: defaults.consensus.voting_subset.clone(),
             fork_resolution_strategy: defaults.consensus.fork_resolution_strategy.clone(),
             fork_resolution_delay_cycles: defaults.consensus.fork_resolution_delay_cycles,
+            min_fee_rate: defaults.consensus.min_fee_rate,
         },
         api: ApiConfig {
             rpc_addr: defaults.api.rpc_addr.clone(),

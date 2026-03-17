@@ -79,6 +79,8 @@ pub struct MempoolEntry {
     pub size_bytes: usize,
     /// Implicit fee in atomic units: sum(input UTXO values) - sum(output values).
     pub fee: u64,
+    /// Fee rate in atomic units per byte (fee / size_bytes). Used for prioritization.
+    pub fee_rate: u64,
     /// Unix timestamp when the transaction was received.
     pub received_at: u64,
 }
@@ -119,12 +121,12 @@ pub trait UtxoLookup {
 }
 
 /// A no-op UTXO lookup that always returns a fixed-value non-coinbase UTXO.
-/// Returns 1_000_000 atomic units per UTXO, matching test fixture conventions.
+/// Returns 100_000_000 atomic units per UTXO (1 NOBLE), matching test fixture conventions.
 /// For production code, implement `UtxoLookup` against the actual UTXO set.
 pub struct NoUtxoLookup;
 
 /// Default UTXO value returned by `NoUtxoLookup` (matches test fixture `make_signed_tx` input_value).
-pub const NO_UTXO_LOOKUP_VALUE: u64 = 1_000_000;
+pub const NO_UTXO_LOOKUP_VALUE: u64 = 100_000_000;
 
 impl UtxoLookup for NoUtxoLookup {
     fn get_utxo(&self, _outpoint: &OutPoint) -> Option<(u64, bool, u64)> {
@@ -138,7 +140,7 @@ pub struct Mempool {
     /// Primary index: tx_id → entry.
     by_id: HashMap<Hash256, MempoolEntry>,
     /// Fee-rate index: fee → set of tx_ids (for block assembly and eviction).
-    by_fee: BTreeMap<u64, HashSet<Hash256>>,
+    by_fee_rate: BTreeMap<u64, HashSet<Hash256>>,
     /// Checksum index: document checksum → set of tx_ids.
     by_checksum: HashMap<Hash256, HashSet<Hash256>>,
     /// Timestamp index: received_at → set of tx_ids (for expiry).
@@ -160,7 +162,7 @@ impl Mempool {
         Self {
             config,
             by_id: HashMap::new(),
-            by_fee: BTreeMap::new(),
+            by_fee_rate: BTreeMap::new(),
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
             by_sender: HashMap::new(),
@@ -210,18 +212,18 @@ impl Mempool {
             .unwrap_or_default()
     }
 
-    /// Compute fee statistics: (min_fee, max_fee, avg_fee).
+    /// Compute fee rate statistics: (min_fee_rate, max_fee_rate, avg_fee_rate) in groats/byte.
     /// Returns (0, 0, 0) when the mempool is empty.
     pub fn fee_stats(&self) -> (u64, u64, u64) {
-        if self.by_fee.is_empty() {
+        if self.by_fee_rate.is_empty() {
             return (0, 0, 0);
         }
-        let min_fee = self.by_fee.keys().next().copied().unwrap_or(0);
-        let max_fee = self.by_fee.keys().next_back().copied().unwrap_or(0);
+        let min_rate = self.by_fee_rate.keys().next().copied().unwrap_or(0);
+        let max_rate = self.by_fee_rate.keys().next_back().copied().unwrap_or(0);
         let count = self.by_id.len() as u64;
-        let total_fees: u64 = self.by_id.values().map(|e| e.fee).sum();
-        let avg_fee = if count > 0 { total_fees / count } else { 0 };
-        (min_fee, max_fee, avg_fee)
+        let total_rates: u64 = self.by_id.values().map(|e| e.fee_rate).sum();
+        let avg_rate = if count > 0 { total_rates / count } else { 0 };
+        (min_rate, max_rate, avg_rate)
     }
 
     /// Sum of `(total_output_value + fee)` for all pending transactions from the given sender.
@@ -255,8 +257,8 @@ impl Mempool {
 
     /// Iterate transactions in descending fee order (highest fee first).
     /// Used for block assembly.
-    pub fn iter_by_fee_desc(&self) -> impl Iterator<Item = &MempoolEntry> {
-        self.by_fee
+    pub fn iter_by_fee_rate_desc(&self) -> impl Iterator<Item = &MempoolEntry> {
+        self.by_fee_rate
             .iter()
             .rev()
             .flat_map(move |(_, ids)| ids.iter().filter_map(move |id| self.by_id.get(id)))
@@ -424,13 +426,13 @@ impl Mempool {
             ))
         })?;
 
-        // Step 7: Fee check
-        tracing::trace!("mempool step 7: fee check");
-        let min_fee = self.dynamic_min_fee();
-        if fee < min_fee {
+        // Step 7: Fee rate check (Bitcoin-style free market)
+        tracing::trace!("mempool step 7: fee rate check");
+        let fee_rate = if size_bytes > 0 { fee / size_bytes as u64 } else { 0 };
+        if fee_rate < noble_core::MIN_RELAY_FEE_RATE {
             return Err(MempoolError::FeeTooLow {
                 fee,
-                min_fee,
+                min_fee: noble_core::MIN_RELAY_FEE_RATE * size_bytes as u64,
             });
         }
 
@@ -444,6 +446,7 @@ impl Mempool {
             tx_id,
             size_bytes,
             fee,
+            fee_rate,
             received_at: current_time,
         };
 
@@ -460,11 +463,11 @@ impl Mempool {
     pub fn remove(&mut self, tx_id: &Hash256) -> Option<MempoolEntry> {
         let entry = self.by_id.remove(tx_id)?;
 
-        // Remove from fee index
-        if let Some(set) = self.by_fee.get_mut(&entry.fee) {
+        // Remove from fee-rate index
+        if let Some(set) = self.by_fee_rate.get_mut(&entry.fee_rate) {
             set.remove(tx_id);
             if set.is_empty() {
-                self.by_fee.remove(&entry.fee);
+                self.by_fee_rate.remove(&entry.fee_rate);
             }
         }
 
@@ -578,11 +581,8 @@ impl Mempool {
         Ok(())
     }
 
-    fn dynamic_min_fee(&self) -> u64 {
-        // AUD-H4: Dynamic fee based on mempool utilization
-        let pct = self.utilization_pct();
-        noble_core::dynamic_min_fee(pct)
-    }
+    // Fee rate is checked at admission time (step 7) against MIN_RELAY_FEE_RATE.
+    // No dynamic fee scaling — the market decides via fee rate competition.
 
     /// Compute mempool utilization percentage (0-100).
     pub fn utilization_pct(&self) -> u8 {
@@ -595,7 +595,7 @@ impl Mempool {
 
     fn insert_entry(&mut self, entry: MempoolEntry) {
         let tx_id = entry.tx_id;
-        let fee = entry.fee;
+        let fee_rate = entry.fee_rate;
         let checksum = entry.tx.checksum;
         let received_at = entry.received_at;
         let size = entry.size_bytes;
@@ -612,7 +612,7 @@ impl Mempool {
         }
 
         self.by_id.insert(tx_id, entry);
-        self.by_fee.entry(fee).or_default().insert(tx_id);
+        self.by_fee_rate.entry(fee_rate).or_default().insert(tx_id);
         self.by_checksum.entry(checksum).or_default().insert(tx_id);
         self.by_timestamp
             .entry(received_at)
@@ -642,14 +642,14 @@ impl Mempool {
             && !self.by_id.is_empty()
         {
             // Find the lowest fee bucket
-            let lowest_fee = match self.by_fee.keys().next().copied() {
+            let lowest_fee = match self.by_fee_rate.keys().next().copied() {
                 Some(f) => f,
                 None => break,
             };
 
             // Pick one tx_id from the lowest fee bucket
             let tx_id = match self
-                .by_fee
+                .by_fee_rate
                 .get(&lowest_fee)
                 .and_then(|s| s.iter().next().copied())
             {
@@ -676,6 +676,10 @@ mod tests {
     };
     use noble_test_utils::fixtures::test_chain_id;
 
+    /// Test fee that passes the fee_rate floor (MIN_RELAY_FEE_RATE=1 groat/byte).
+    /// A typical test tx is ~250 bytes, so fee=1000 gives fee_rate=4 groats/byte.
+    const TEST_FEE: u64 = 1_000;
+
     /// Counter for generating unique outpoints in tests.
     use std::sync::atomic::{AtomicU32, Ordering};
     static OUTPOINT_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -696,7 +700,7 @@ mod tests {
         let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key.clone());
         let checksum = sha256(doc);
-        let input_value = 1_000_000u64; // Fixed input UTXO value for tests
+        let input_value = 100_000_000u64; // Fixed input UTXO value for tests
         let change = input_value.saturating_sub(fee);
 
         let mut tx = Transaction {
@@ -748,7 +752,7 @@ mod tests {
     fn admit_valid_tx() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
             .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -762,7 +766,7 @@ mod tests {
     fn admit_and_remove() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
             .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -786,7 +790,7 @@ mod tests {
     fn step2_reject_mempool_duplicate() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
@@ -805,7 +809,7 @@ mod tests {
 
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let chain = ConfirmedChain(tx_id);
@@ -819,7 +823,7 @@ mod tests {
     fn step3_reject_bad_version() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.version = 99;
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
@@ -832,7 +836,7 @@ mod tests {
     fn step4_reject_unknown_scheme() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.issuer_sig.scheme_id = 0xFF;
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
@@ -888,7 +892,7 @@ mod tests {
     fn step6_reject_invalid_issuer_sig() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.issuer_sig.signature = vec![0u8; 64]; // Corrupt signature
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
@@ -899,7 +903,7 @@ mod tests {
     fn step6_reject_invalid_additional_sig() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.additional_sigs.push(SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.to_vec(),
@@ -966,8 +970,8 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx1 = make_signed_tx(&sk, &pk, b"same_doc", MIN_TX_FEE);
-        let tx2 = make_signed_tx(&sk, &pk, b"other_doc", MIN_TX_FEE);
+        let tx1 = make_signed_tx(&sk, &pk, b"same_doc", TEST_FEE);
+        let tx2 = make_signed_tx(&sk, &pk, b"other_doc", TEST_FEE);
 
         let id1 = pool
             .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -985,13 +989,13 @@ mod tests {
     // --- Fee ordering ---
 
     #[test]
-    fn iter_by_fee_desc() {
+    fn iter_by_fee_rate_desc() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx_low = make_signed_tx(&sk, &pk, b"low", MIN_TX_FEE);
-        let tx_mid = make_signed_tx(&sk, &pk, b"mid", MIN_TX_FEE * 5);
-        let tx_high = make_signed_tx(&sk, &pk, b"high", MIN_TX_FEE * 10);
+        let tx_low = make_signed_tx(&sk, &pk, b"low", TEST_FEE);
+        let tx_mid = make_signed_tx(&sk, &pk, b"mid", TEST_FEE * 5);
+        let tx_high = make_signed_tx(&sk, &pk, b"high", TEST_FEE * 10);
 
         pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
@@ -1000,8 +1004,8 @@ mod tests {
         pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
-        let fees: Vec<u64> = pool.iter_by_fee_desc().map(|e| e.fee).collect();
-        assert_eq!(fees, vec![MIN_TX_FEE * 10, MIN_TX_FEE * 5, MIN_TX_FEE]);
+        let fees: Vec<u64> = pool.iter_by_fee_rate_desc().map(|e| e.fee).collect();
+        assert_eq!(fees, vec![TEST_FEE * 10, TEST_FEE * 5, TEST_FEE]);
     }
 
     // --- Eviction ---
@@ -1013,10 +1017,10 @@ mod tests {
         let mut pool = Mempool::new(config);
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx1 = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
-        let tx2 = make_signed_tx(&sk, &pk, b"doc2", MIN_TX_FEE * 2);
-        let tx3 = make_signed_tx(&sk, &pk, b"doc3", MIN_TX_FEE * 3);
-        let tx4 = make_signed_tx(&sk, &pk, b"doc4", MIN_TX_FEE * 4);
+        let tx1 = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        let tx2 = make_signed_tx(&sk, &pk, b"doc2", TEST_FEE * 2);
+        let tx3 = make_signed_tx(&sk, &pk, b"doc3", TEST_FEE * 3);
+        let tx4 = make_signed_tx(&sk, &pk, b"doc4", TEST_FEE * 4);
 
         let id1 = pool
             .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -1042,8 +1046,8 @@ mod tests {
         let mut pool = Mempool::new(config);
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx1 = make_signed_tx(&sk, &pk, b"old", MIN_TX_FEE);
-        let tx2 = make_signed_tx(&sk, &pk, b"new", MIN_TX_FEE);
+        let tx1 = make_signed_tx(&sk, &pk, b"old", TEST_FEE);
+        let tx2 = make_signed_tx(&sk, &pk, b"new", TEST_FEE);
 
         let id1 = pool
             .admit(&tx1, 1_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -1068,7 +1072,7 @@ mod tests {
     fn sig_cache_avoids_reverification() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"cached", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"cached", TEST_FEE);
 
         let tx_id = pool
             .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -1090,9 +1094,9 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx1 = make_signed_tx(&sk, &pk, b"c1", MIN_TX_FEE);
-        let tx2 = make_signed_tx(&sk, &pk, b"c2", MIN_TX_FEE);
-        let tx3 = make_signed_tx(&sk, &pk, b"c3", MIN_TX_FEE);
+        let tx1 = make_signed_tx(&sk, &pk, b"c1", TEST_FEE);
+        let tx2 = make_signed_tx(&sk, &pk, b"c2", TEST_FEE);
+        let tx3 = make_signed_tx(&sk, &pk, b"c3", TEST_FEE);
 
         let id1 = pool
             .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -1186,7 +1190,7 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx = make_signed_tx(&sk, &pk, b"utxo_ok", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"utxo_ok", TEST_FEE);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
@@ -1255,13 +1259,13 @@ mod tests {
 
         // Admit 3 txs (at the limit)
         for i in 0..3 {
-            let tx = make_signed_tx(&sk, &pk, format!("rate{i}").as_bytes(), MIN_TX_FEE);
+            let tx = make_signed_tx(&sk, &pk, format!("rate{i}").as_bytes(), TEST_FEE);
             pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .unwrap();
         }
 
         // 4th should be rejected
-        let tx4 = make_signed_tx(&sk, &pk, b"rate3", MIN_TX_FEE);
+        let tx4 = make_signed_tx(&sk, &pk, b"rate3", TEST_FEE);
         let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
             matches!(
@@ -1282,13 +1286,13 @@ mod tests {
 
         // Sender 1: 2 txs (at limit)
         for i in 0..2 {
-            let tx = make_signed_tx(&sk1, &pk1, format!("s1_{i}").as_bytes(), MIN_TX_FEE);
+            let tx = make_signed_tx(&sk1, &pk1, format!("s1_{i}").as_bytes(), TEST_FEE);
             pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .unwrap();
         }
 
         // Sender 2 should still be able to submit
-        let tx = make_signed_tx(&sk2, &pk2, b"s2_0", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk2, &pk2, b"s2_0", TEST_FEE);
         assert!(
             pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
                 .is_ok(),
@@ -1309,18 +1313,20 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
 
-        let tx1 = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
+        let tx1 = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
-        let tx2 = make_signed_tx(&sk, &pk, b"doc2", MIN_TX_FEE * 3);
+        let tx2 = make_signed_tx(&sk, &pk, b"doc2", TEST_FEE * 3);
         pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
             .unwrap();
 
-        let (min_f, max_f, avg_f) = pool.fee_stats();
-        assert_eq!(min_f, MIN_TX_FEE);
-        assert_eq!(max_f, MIN_TX_FEE * 3);
-        assert_eq!(avg_f, MIN_TX_FEE * 2); // (1 + 3) / 2 = 2
+        let (min_r, max_r, avg_r) = pool.fee_stats();
+        // fee_stats now returns fee_rates (groats/byte), not absolute fees.
+        // Exact values depend on tx serialized size, but ordering must hold.
+        assert!(min_r > 0, "min_fee_rate should be > 0");
+        assert!(max_r > min_r, "max_fee_rate should be > min_fee_rate");
+        assert!(avg_r >= min_r && avg_r <= max_r, "avg should be between min and max");
     }
 
     // --- pending_debit ---
@@ -1347,7 +1353,7 @@ mod tests {
         let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(doc);
-        let input_value = 1_000_000u64;
+        let input_value = 100_000_000u64;
         let change = input_value.saturating_sub(fee);
         let mut metadata = vec![];
         if let Some(v) = version {
@@ -1392,7 +1398,7 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let prev_hex = "aa".repeat(32);
         let tx =
-            make_versioned_notarization(&sk, &pk, b"v2doc", MIN_TX_FEE, Some("2"), Some(&prev_hex));
+            make_versioned_notarization(&sk, &pk, b"v2doc", TEST_FEE, Some("2"), Some(&prev_hex));
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
             matches!(result, Err(MempoolError::PrevChecksumNotFound(_))),
@@ -1421,7 +1427,7 @@ mod tests {
             &sk,
             &pk,
             b"v2doc2",
-            MIN_TX_FEE,
+            TEST_FEE,
             Some("2"),
             Some(&prev_hex),
         );
@@ -1434,7 +1440,7 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         // Normal notarization without any version metadata
-        let tx = make_signed_tx(&sk, &pk, b"normal_doc", MIN_TX_FEE);
+        let tx = make_signed_tx(&sk, &pk, b"normal_doc", TEST_FEE);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }

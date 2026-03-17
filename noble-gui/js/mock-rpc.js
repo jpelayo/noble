@@ -746,9 +746,11 @@ export class MockRpcClient {
 
       case 'noble_estimateFee':
         return {
-          min_fee: MIN_TX_FEE,
-          recommended_fee: MIN_TX_FEE * 2,
-          high_priority_fee: MIN_TX_FEE * 5,
+          low_fee_rate: 1,
+          recommended_fee_rate: 2,
+          high_priority_fee_rate: 5,
+          network_min_fee_rate: 1,
+          network_median_fee_rate: 2,
         };
 
       case 'noble_getMempoolInfo': {
@@ -757,9 +759,9 @@ export class MockRpcClient {
         return {
           count: this.#mempool.length,
           total_bytes: totalBytes,
-          min_fee: Math.min(...fees),
-          max_fee: Math.max(...fees),
-          avg_fee: Math.round(fees.reduce((a, b) => a + b, 0) / fees.length),
+          min_fee_rate: Math.min(...fees),
+          max_fee_rate: Math.max(...fees),
+          avg_fee_rate: Math.round(fees.reduce((a, b) => a + b, 0) / fees.length),
           fee_histogram: this.#buildFeeHistogram(),
           entries: this.#mempool.slice(0, 20),
         };
@@ -1139,7 +1141,7 @@ export class MockRpcClient {
             timestamp: block.header.timestamp,
             block_height: h,
             tx_id: deterministicHash(h * 41 + 7777),
-            description: `Block #${h} validation reward (${(subsidyPerBlock / 1_000_000).toFixed(0)} NOBLE)`,
+            description: `Block #${h} validation reward (${(subsidyPerBlock / 100_000_000).toFixed(0)} NOBLE)`,
             confirmations,
             status: confirmations >= 6 ? 'confirmed' : 'pending',
           });

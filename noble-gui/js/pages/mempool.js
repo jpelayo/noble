@@ -57,8 +57,8 @@ export function init(root, ctx) {
       const info = await rpc.call('noble_getMempoolInfo');
       mpCount.textContent = formatNumber(info.count);
       mpSize.textContent = formatBytes(info.total_bytes);
-      mpMinFee.textContent = formatFee(info.min_fee);
-      mpMaxFee.textContent = formatFee(info.max_fee);
+      mpMinFee.textContent = formatFee(info.min_fee_rate);
+      mpMaxFee.textContent = formatFee(info.max_fee_rate);
 
       // Fee histogram chart
       if (typeof echarts !== 'undefined' && info.fee_histogram) {

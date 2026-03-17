@@ -143,6 +143,12 @@ pub struct ConsensusConfig {
     /// Minimum cycles a fork must persist before auto-resolution (default: 3).
     #[serde(default = "default_fork_resolution_delay")]
     pub fork_resolution_delay_cycles: u32,
+    /// Minimum fee rate (groats/byte) for transactions this node includes in proposed blocks.
+    /// The mempool relays everything above the protocol floor (1 groat/byte).
+    /// This setting only affects block proposal — the validator's personal minimum.
+    /// Default: 1 (accept everything the protocol allows).
+    #[serde(default = "default_min_fee_rate")]
+    pub min_fee_rate: u64,
 }
 
 fn default_voting_strategy() -> String {
@@ -152,6 +158,8 @@ fn default_voting_strategy() -> String {
 fn default_confirmation_strategy() -> String {
     "follow_majority".to_string()
 }
+
+fn default_min_fee_rate() -> u64 { 1 }
 
 fn default_fork_resolution_strategy() -> String {
     "longest_most_legitimate".to_string()
@@ -576,6 +584,7 @@ impl Default for ConsensusConfig {
             voting_subset: Vec::new(),
             fork_resolution_strategy: default_fork_resolution_strategy(),
             fork_resolution_delay_cycles: default_fork_resolution_delay(),
+            min_fee_rate: default_min_fee_rate(),
         }
     }
 }
@@ -663,6 +672,7 @@ mod tests {
             voting_subset: Vec::new(),
             fork_resolution_strategy: default_fork_resolution_strategy(),
             fork_resolution_delay_cycles: default_fork_resolution_delay(),
+            min_fee_rate: default_min_fee_rate(),
         };
         let debug_str = format!("{config:?}");
         assert!(

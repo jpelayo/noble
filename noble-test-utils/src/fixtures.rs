@@ -77,7 +77,7 @@ pub fn make_signed_tx(
     timestamp: u64,
 ) -> (Transaction, Hash256) {
     let checksum = sha256(doc);
-    let input_value = 1_000_000 + fee; // Enough to cover fee + change
+    let input_value = 100_000_000 + fee; // Enough to cover fee + change
 
     // Fake previous UTXO outpoint
     let prev_outpoint = OutPoint {
@@ -122,7 +122,7 @@ pub fn make_signed_tx_with_metadata(
     metadata: Vec<MetadataEntry>,
 ) -> (Transaction, Hash256) {
     let checksum = sha256(doc);
-    let input_value = 1_000_000 + fee;
+    let input_value = 100_000_000 + fee;
 
     let prev_outpoint = OutPoint {
         txid: sha256(keypair.pk_bytes.as_slice()),

@@ -436,7 +436,7 @@ export function init(root, ctx) {
                     feeData = f;
                     wizard.renderStep();
                 }).catch(() => {
-                    feeData = { minFee: 1000, recommendedFee: 2000, highPriorityFee: 5000 };
+                    feeData = { minFee: 1 * 300, recommendedFee: 2 * 300, highPriorityFee: 5 * 300 };
                     wizard.renderStep();
                 });
                 return;
@@ -655,5 +655,5 @@ export function init(root, ctx) {
 function parseAmount(str) {
     const n = parseFloat(str);
     if (isNaN(n) || n <= 0) return 0;
-    return Math.round(n * 1_000_000);
+    return Math.round(n * 100_000_000);
 }

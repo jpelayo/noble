@@ -694,7 +694,7 @@ fn parse_utxos(params: &Value) -> Result<Vec<UtxoOutpoint>, String> {
 // Three-pass algorithm: changeless → smallest-first → largest-first.
 
 /// Dust threshold: change below this value is not worth creating.
-const DUST_THRESHOLD: u64 = 5_000; // 0.005 NOBLE
+const DUST_THRESHOLD: u64 = 500_000; // 0.005 NOBLE (10^8 atomic)
 
 /// Select UTXOs to cover `target` (amount + fee).
 pub fn select_utxos(available: &[UtxoOutpoint], target: u64) -> Result<Vec<UtxoOutpoint>, String> {

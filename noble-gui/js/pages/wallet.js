@@ -575,7 +575,7 @@ export function init(root, ctx) {
 // ── Helpers ──
 
 function formatNoble(atomicUnits) {
-  const noble = atomicUnits / 1_000_000;
+  const noble = atomicUnits / 100_000_000;
   if (noble >= 100) return `${noble.toFixed(2)} NOBLE`;
   if (noble >= 1) return `${noble.toFixed(4)} NOBLE`;
   if (noble >= 0.001) return `${noble.toFixed(6)} NOBLE`;

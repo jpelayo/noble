@@ -321,9 +321,16 @@ pub struct ChainStatsResponse {
 /// Response for `noble_estimateFee`.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeeEstimateResponse {
-    pub min_fee: u64,
-    pub recommended_fee: u64,
-    pub high_priority_fee: u64,
+    /// Low fee rate (P25 of mempool) in groats/byte.
+    pub low_fee_rate: u64,
+    /// Recommended fee rate (P50) in groats/byte.
+    pub recommended_fee_rate: u64,
+    /// High priority fee rate (P75) in groats/byte.
+    pub high_priority_fee_rate: u64,
+    /// Lowest min_fee_rate among connected peers (from NodeAnnounce gossip).
+    pub network_min_fee_rate: u64,
+    /// Median min_fee_rate among connected peers (from NodeAnnounce gossip).
+    pub network_median_fee_rate: u64,
 }
 
 /// Response for `noble_getMempoolInfo`.
@@ -331,9 +338,12 @@ pub struct FeeEstimateResponse {
 pub struct MempoolInfoResponse {
     pub count: usize,
     pub total_bytes: usize,
-    pub min_fee: u64,
-    pub max_fee: u64,
-    pub avg_fee: u64,
+    /// Lowest fee rate in mempool (groats/byte).
+    pub min_fee_rate: u64,
+    /// Highest fee rate in mempool (groats/byte).
+    pub max_fee_rate: u64,
+    /// Average fee rate in mempool (groats/byte).
+    pub avg_fee_rate: u64,
 }
 
 /// Individual peer information.
@@ -600,6 +610,8 @@ pub struct NodeInfoResponse {
     pub faucet_address: Option<String>,
     /// Whether the faucet server is enabled in config.
     pub faucet_enabled: bool,
+    /// Validator's personal minimum fee rate (groats/byte) for block proposal.
+    pub min_fee_rate: u64,
 }
 
 /// Response for `noble_getApiVersion`.

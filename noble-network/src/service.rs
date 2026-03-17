@@ -2552,6 +2552,7 @@ fn convert_and_validate_announce(
         proposed_hash,
         chain_id,
         chain_vote_weight,
+        min_fee_rate: None, // Deserialized from peer — not set by parser
         network_name: network_name.to_string(),
         timestamp,
         signature: noble_crypto::SignatureEnvelope {

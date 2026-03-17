@@ -55,7 +55,7 @@ export function formatBytes(bytes) {
 
 // Fee is in atomic units; 1 NOBLE = 1,000,000 atomic units
 export function formatFee(atomicUnits) {
-  const noble = atomicUnits / 1_000_000;
+  const noble = atomicUnits / 100_000_000;
   if (noble >= 1) return `${noble.toFixed(4)} NOBLE`;
   if (noble >= 0.001) return `${noble.toFixed(6)} NOBLE`;
   return `${atomicUnits} atomic`;

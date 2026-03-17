@@ -8,7 +8,7 @@
 //! Enums use external tagging (single-entry map: variant_name → payload).
 
 use crate::CodecError;
-use serde::de::{self, DeserializeSeed, Visitor};
+use serde::de::{self, DeserializeSeed, IntoDeserializer, Visitor};
 
 /// Deserialize a value from CBOR bytes.
 pub fn from_cbor<T: de::DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
@@ -292,8 +292,20 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, CodecError> {
         let (major, len) = self.read_header()?;
-        if major != 4 { return Err(CodecError::Deserialization(format!("expected array, got major {major}"))); }
-        visitor.visit_seq(SeqAccess { de: self, remaining: len as usize })
+        if major == 4 {
+            // CBOR array — standard sequence of elements.
+            visitor.visit_seq(SeqAccess { de: self, remaining: len as usize })
+        } else if major == 2 {
+            // CBOR byte string — accept as a sequence of u8.
+            // This allows Vec<u8> and [u8; N] to deserialize from byte strings
+            // (the natural CBOR representation for binary data), not just from
+            // arrays of integers. Clients encode binary data as byte strings;
+            // serde expects sequences. This bridge makes both representations work.
+            let bytes = self.read_bytes(len as usize)?;
+            visitor.visit_seq(ByteSeqAccess { bytes, pos: 0 })
+        } else {
+            Err(CodecError::Deserialization(format!("expected array or byte string, got major {major}")))
+        }
     }
 
     fn deserialize_tuple<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value, CodecError> {
@@ -361,6 +373,23 @@ impl<'a, 'de> de::SeqAccess<'de> for SeqAccess<'a, 'de> {
         if self.remaining == 0 { return Ok(None); }
         self.remaining -= 1;
         seed.deserialize(&mut *self.de).map(Some)
+    }
+}
+
+/// Sequence access that yields individual bytes from a CBOR byte string.
+/// Allows `Vec<u8>` and `[u8; N]` to deserialize from CBOR byte strings (major 2).
+struct ByteSeqAccess<'de> {
+    bytes: &'de [u8],
+    pos: usize,
+}
+
+impl<'de> de::SeqAccess<'de> for ByteSeqAccess<'de> {
+    type Error = CodecError;
+    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>, CodecError> {
+        if self.pos >= self.bytes.len() { return Ok(None); }
+        let byte = self.bytes[self.pos];
+        self.pos += 1;
+        seed.deserialize(byte.into_deserializer()).map(Some)
     }
 }
 

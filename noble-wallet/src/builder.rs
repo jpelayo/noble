@@ -383,10 +383,6 @@ impl TransactionBuilder {
         Ok(())
     }
 
-    /// Estimate fee based on mempool fullness (placeholder).
-    pub fn estimate_fee() -> (u64, u64, u64) {
-        (MIN_TX_FEE, MIN_TX_FEE * 2, MIN_TX_FEE * 5)
-    }
 }
 
 #[cfg(test)]
@@ -441,7 +437,7 @@ mod tests {
         let recipient = NoblePublicKey::Ed25519(recipient_bytes);
         let recipient_addr = NobleAddress::Noble(recipient.clone());
 
-        let (utxos, change_addr) = make_test_utxos(&sender_pk, 1_000_000);
+        let (utxos, change_addr) = make_test_utxos(&sender_pk, 100_000_000);
         let tx = TransactionBuilder::build_transfer(
             &ks, &sender_pk, recipient_addr, 500_000, MIN_TX_FEE,
             None, test_chain_id(), &utxos, &change_addr,
@@ -461,7 +457,7 @@ mod tests {
         let (ks, sender_pk) = setup_keystore();
         let (_, rb) = noble_crypto::ed25519::generate_keypair();
         let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
-        let (utxos, addr) = make_test_utxos(&sender_pk, 1_000_000);
+        let (utxos, addr) = make_test_utxos(&sender_pk, 100_000_000);
 
         let result = TransactionBuilder::build_transfer(
             &ks, &sender_pk, recipient, 0, MIN_TX_FEE,
@@ -489,7 +485,7 @@ mod tests {
         let (ks, sender_pk) = setup_keystore();
         let (_, rb) = noble_crypto::ed25519::generate_keypair();
         let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
-        let (utxos, addr) = make_test_utxos(&sender_pk, 1_000_000);
+        let (utxos, addr) = make_test_utxos(&sender_pk, 100_000_000);
 
         let tx = TransactionBuilder::build_transfer(
             &ks, &sender_pk, recipient, 100_000, MIN_TX_FEE,

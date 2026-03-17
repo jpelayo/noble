@@ -134,7 +134,7 @@ class MockBridge {
                 total: 42, page: 0, limit: 20
             };
             if (action === 'estimateFee') return {
-                minFee: 1000, recommendedFee: 2000, highPriorityFee: 5000
+                minFee: 300, recommendedFee: 600, highPriorityFee: 1500
             };
             if (action === 'verifyDocument') {
                 const checksum = params.checksum || '';

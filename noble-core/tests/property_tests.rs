@@ -208,7 +208,7 @@ proptest! {
 fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
     (
         1_600_000_000u64..1_800_000_000u64, // timestamp
-        1u64..1_000_000u64,                 // amount (> 0)
+        1u64..100_000_000u64,                 // amount (> 0)
         arb_hash256(),                      // input txid
         arb_signature_envelope(),           // issuer_sig
         prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs

@@ -261,7 +261,7 @@ public struct MockAPIService: NobleAPIService {
             let hexString = String(repeating: hexByte, count: 32)
             guard let txId = Hash256(hex: hexString) else { continue }
 
-            let outputValue = UInt64((i + 1) * 1_000_000)
+            let outputValue = UInt64((i + 1) * 100_000_000)
             let record = TransactionRecord(
                 txId: txId,
                 txType: i % 2 == 0 ? .transfer : .notarization,

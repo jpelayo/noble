@@ -98,6 +98,8 @@ pub struct PeerInfoEntry {
     pub last_ban_reason: Option<(String, String)>,
     /// Peer's chain ID (from NodeAnnounce). `None` if not yet announced.
     pub chain_id: Option<u32>,
+    /// Peer's minimum fee rate preference (groats/byte, from NodeAnnounce).
+    pub min_fee_rate: Option<u64>,
 }
 
 /// Shared state available to all RPC method handlers.
@@ -336,6 +338,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Whether the faucet server is enabled.
     pub faucet_enabled: std::sync::atomic::AtomicBool,
+
+    /// Validator's personal minimum fee rate (groats/byte) for block proposal.
+    pub min_fee_rate: u64,
 }
 
 /// Canonical node name resolution from validator wire bytes.

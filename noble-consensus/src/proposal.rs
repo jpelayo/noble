@@ -211,7 +211,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             tx_type: 0,
             inputs: vec![TxIn { prev_output: prev_outpoint }],
-            outputs: vec![TxOut { value: 1_000_000, address: addr }],
+            outputs: vec![TxOut { value: 100_000_000, address: addr }],
             checksum,
             timestamp: now_secs(),
             issuer_sig: SignatureEnvelope {

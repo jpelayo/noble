@@ -216,6 +216,10 @@ pub struct NodeAnnounce {
     /// Cumulative vote weight across all committed blocks (chain legitimacy indicator).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_vote_weight: Option<u64>,
+    /// Validator's personal minimum fee rate (groats/byte) for block proposal.
+    /// Peers use this to estimate fee landscape across the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_fee_rate: Option<u64>,
     pub timestamp: u64,
     pub signature: SignatureEnvelope,
     /// Optional PKI identity attestation — an external signature (PKCS#7/CMS)
@@ -312,6 +316,7 @@ impl NodeAnnounce {
             chain_id,
             network_name,
             None, // chain_vote_weight
+            None, // min_fee_rate
             timestamp,
             signer,
             None,
@@ -339,6 +344,7 @@ impl NodeAnnounce {
         chain_id: u32,
         network_name: String,
         chain_vote_weight: Option<u64>,
+        min_fee_rate: Option<u64>,
         timestamp: u64,
         signer: &impl NobleSigner,
         identity_attestation: Option<ExternalAttestation>,
@@ -366,6 +372,7 @@ impl NodeAnnounce {
             chain_id,
             network_name,
             chain_vote_weight,
+            min_fee_rate,
             timestamp,
             signature: SignatureEnvelope {
                 scheme_id: 0,
@@ -764,6 +771,7 @@ mod tests {
             0,
             String::new(),
             None, // chain_vote_weight
+            None, // min_fee_rate
             1_700_000_000,
             &sk,
             Some(att.clone()),
@@ -817,6 +825,7 @@ mod tests {
             0,
             String::new(),
             None, // chain_vote_weight
+            None, // min_fee_rate
             1_700_000_000,
             &sk,
             Some(att),
@@ -853,6 +862,7 @@ mod tests {
             0,
             String::new(),
             None, // chain_vote_weight
+            None, // min_fee_rate
             1_700_000_000,
             &sk,
             Some(att),
@@ -886,6 +896,7 @@ mod tests {
             0,
             String::new(),
             None, // chain_vote_weight
+            None, // min_fee_rate
             1_700_000_000,
             &sk,
             Some(att),

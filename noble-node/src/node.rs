@@ -121,6 +121,10 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
     /// Path to the CBOR validator list file (for persisting network metadata).
     pub validator_list_path: Option<std::path::PathBuf>,
+    /// Validator's personal minimum fee rate (groats/byte) for block proposal.
+    /// Transactions below this rate stay in the mempool but won't be included
+    /// in blocks proposed by this node.
+    pub min_fee_rate: u64,
     /// Seed/bootstrap peer addresses from config (for auto-reconnection).
     pub seed_addrs: Vec<String>,
     /// Cooldown: last time redial_known_peers was called (epoch secs). Prevents tight
@@ -567,6 +571,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             validator_list_path: Some(validator_list_path),
+            min_fee_rate: config.consensus.min_fee_rate,
             seed_addrs: config.network.seeds.clone(),
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
             last_proposed,
@@ -764,6 +769,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let w = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
                 if w > 0 { Some(w) } else { None }
             },
+            Some(self.min_fee_rate),
             now,
             sk,
             self.pki_attestation.clone(),
@@ -1733,6 +1739,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_cache: self.faucet_cache.clone(),
             faucet_address: parking_lot::RwLock::new(config.faucet.address.clone()),
             faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
+            min_fee_rate: config.consensus.min_fee_rate,
         });
 
         // --- Determine bind addresses ---
@@ -2349,6 +2356,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             latency_ms: None,
                             last_ban_reason: None,
                             chain_id: None, // set when NodeAnnounce received
+                            min_fee_rate: None, // set when NodeAnnounce received
                         },
                     );
                 }
@@ -2610,6 +2618,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let mut info = self.peer_info.write();
                     if let Some(entry) = info.get_mut(&hex_pid) {
                         entry.chain_id = Some(announce.chain_id);
+                        entry.min_fee_rate = announce.min_fee_rate;
                     }
                 }
                 // --- Chain ID mismatch: blockchain discovery (delegated to healing) ---
@@ -3445,10 +3454,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
+                    let node_min_fee_rate = self.min_fee_rate;
                     let txs: Vec<noble_core::Transaction> = {
                         let mempool = self.mempool.lock();
                         mempool
-                            .iter_by_fee_desc()
+                            .iter_by_fee_rate_desc()
+                            .filter(|entry| entry.fee_rate >= node_min_fee_rate)
                             .take(max_count)
                             .map(|entry| entry.tx.clone())
                             .collect()

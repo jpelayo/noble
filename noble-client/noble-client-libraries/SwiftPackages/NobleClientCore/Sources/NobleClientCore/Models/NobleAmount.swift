@@ -5,13 +5,15 @@ import Foundation
 
 /// Represents an amount on the NOBLE blockchain in atomic units.
 ///
-/// 1 NOBLE = 1,000,000 atomic units. The market decides fees;
-/// the protocol minimum is 1 atomic unit.
+/// 1 NOBLE = 100,000,000 groats (8 decimal places, same as Bitcoin satoshis).
+/// The groat is the smallest indivisible unit of the NOBLE token.
+/// The market decides fees; the protocol minimum is 1 groat.
 public struct NobleAmount: Codable, Equatable, Comparable, Hashable, Sendable {
 
     // MARK: - Constants
 
-    public static let atomicPerNoble: UInt64 = 1_000_000
+    /// Groats per NOBLE (1 NOBLE = 100,000,000 groats).
+    public static let groatsPerNoble: UInt64 = 100_000_000
     public static let zero = NobleAmount(atomic: 0)
 
     // MARK: - Properties
@@ -27,7 +29,7 @@ public struct NobleAmount: Codable, Equatable, Comparable, Hashable, Sendable {
 
     /// Create from a whole-NOBLE decimal (e.g. 1.5 → 1_500_000 atomic).
     public init(noble: Decimal) {
-        let scaled = noble * Decimal(Self.atomicPerNoble)
+        let scaled = noble * Decimal(Self.groatsPerNoble)
         self.atomic = NSDecimalNumber(decimal: scaled).uint64Value
     }
 
@@ -35,14 +37,14 @@ public struct NobleAmount: Codable, Equatable, Comparable, Hashable, Sendable {
 
     /// Decimal value in whole NOBLE units.
     public var displayNoble: Decimal {
-        Decimal(atomic) / Decimal(Self.atomicPerNoble)
+        Decimal(atomic) / Decimal(Self.groatsPerNoble)
     }
 
-    /// Always shows 6 decimal places: "123.456789".
+    /// Always shows 8 decimal places: "123.45678900".
     public var formatted: String {
-        let whole = atomic / Self.atomicPerNoble
-        let frac = atomic % Self.atomicPerNoble
-        return "\(whole).\(String(format: "%06d", frac))"
+        let whole = atomic / Self.groatsPerNoble
+        let frac = atomic % Self.groatsPerNoble
+        return "\(whole).\(String(format: "%08d", frac))"
     }
 
     /// Trims trailing zeros: "123.456" instead of "123.456000".

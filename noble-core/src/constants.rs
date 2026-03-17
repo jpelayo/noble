@@ -24,7 +24,8 @@ pub const MAX_ADDITIONAL_SIGS: usize = 32;
 // Chain identifiers are derived from their genesis block hashes.
 // See `derive_chain_id()` in the `genesis` module.
 
-/// Minimum transaction fee in atomic units (1 atomic unit — the market decides the rest).
+/// Minimum absolute transaction fee (1 groat). Used in test fixtures only.
+/// Production fee validation uses MIN_RELAY_FEE_RATE (groats/byte) instead.
 pub const MIN_TX_FEE: u64 = 1;
 
 /// Current protocol version.
@@ -113,15 +114,19 @@ pub const BADGE_VOTE_WINDOW_CYCLES: u64 = 48;
 /// 48 cycles = 24 hours at 30-min cycles.
 pub const KEY_ROTATION_GRACE_CYCLES: u64 = 48;
 
-/// Initial block subsidy in atomic units (100 NOBLE = 100_000_000 with 6 decimals).
-pub const INITIAL_SUBSIDY: u64 = 100_000_000;
+/// Groats per NOBLE. 1 NOBLE = 100,000,000 groats (8 decimal places, same as Bitcoin satoshis).
+/// The groat is the smallest indivisible unit of the NOBLE token.
+pub const GROATS_PER_NOBLE: u64 = 100_000_000;
+
+/// Initial block subsidy in groats (100 NOBLE = 10,000,000,000 groats).
+pub const INITIAL_SUBSIDY: u64 = 10_000_000_000;
 
 /// Number of blocks between halving events (~3.8 years at 20-min cycles).
 pub const HALVING_INTERVAL: u64 = 100_000;
 
-/// Maximum total supply in atomic units (~20 million NOBLE = 20_000_000_000_000).
-/// Actual emission: 19,999,898,800,000 after 27 halvings.
-pub const MAX_SUPPLY: u64 = 20_000_000_000_000;
+/// Maximum total supply in groats (~20 million NOBLE = 2,000,000,000,000,000 groats).
+/// Actual emission: 1,999,989,880,000,000 groats after 27 halvings.
+pub const MAX_SUPPLY: u64 = 2_000_000_000_000_000;
 
 /// Maximum reorg depth allowed (144 blocks ≈ 3 days at 30-min cycles).
 pub const MAX_REORG_DEPTH: u64 = 144;
@@ -218,20 +223,10 @@ pub fn is_valid_checkpoint(
 /// Maximum mempool size in bytes (default 300 MB).
 pub const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;
 
-/// AUD-H4: Compute the dynamic minimum fee based on mempool utilization.
-///
-/// - `< 50%` → `MIN_TX_FEE` (1)
-/// - `50-75%` → `MIN_TX_FEE * 2`
-/// - `75-90%` → `MIN_TX_FEE * 5`
-/// - `> 90%` → `MIN_TX_FEE * 10`
-pub fn dynamic_min_fee(utilization_pct: u8) -> u64 {
-    match utilization_pct {
-        0..=49 => MIN_TX_FEE,
-        50..=74 => MIN_TX_FEE * 2,
-        75..=89 => MIN_TX_FEE * 5,
-        _ => MIN_TX_FEE * 10,
-    }
-}
+/// Minimum relay fee rate in groats per byte.
+/// Transactions below this rate are not relayed or included in blocks.
+/// The market decides the actual fee rate; this is the floor.
+pub const MIN_RELAY_FEE_RATE: u64 = 1;
 
 /// Compute block subsidy at a given height.
 /// Returns 0 for the genesis block (height 0) because the genesis validator key
@@ -304,7 +299,7 @@ mod tests {
             };
             total += subsidy as u128 * blocks as u128;
         }
-        assert_eq!(total, 19_999_898_800_000u128);
+        assert_eq!(total, 1_999_989_880_000_000u128);
         assert!(total < MAX_SUPPLY as u128);
     }
 
@@ -313,30 +308,6 @@ mod tests {
         assert_eq!(subsidy_at_height(HALVING_INTERVAL), INITIAL_SUBSIDY / 2);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL * 2), INITIAL_SUBSIDY / 4);
         assert_eq!(subsidy_at_height(HALVING_INTERVAL * 3), INITIAL_SUBSIDY / 8);
-    }
-
-    // AUD-H4: Dynamic fee tests
-    #[test]
-    fn dynamic_fee_at_zero_utilization() {
-        assert_eq!(dynamic_min_fee(0), MIN_TX_FEE);
-        assert_eq!(dynamic_min_fee(25), MIN_TX_FEE);
-        assert_eq!(dynamic_min_fee(49), MIN_TX_FEE);
-    }
-
-    #[test]
-    fn dynamic_fee_at_medium_utilization() {
-        assert_eq!(dynamic_min_fee(50), MIN_TX_FEE * 2);
-        assert_eq!(dynamic_min_fee(60), MIN_TX_FEE * 2);
-        assert_eq!(dynamic_min_fee(74), MIN_TX_FEE * 2);
-    }
-
-    #[test]
-    fn dynamic_fee_at_high_utilization() {
-        assert_eq!(dynamic_min_fee(75), MIN_TX_FEE * 5);
-        assert_eq!(dynamic_min_fee(89), MIN_TX_FEE * 5);
-        assert_eq!(dynamic_min_fee(90), MIN_TX_FEE * 10);
-        assert_eq!(dynamic_min_fee(95), MIN_TX_FEE * 10);
-        assert_eq!(dynamic_min_fee(100), MIN_TX_FEE * 10);
     }
 
     // --- Checkpoint tests ---

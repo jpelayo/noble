@@ -364,6 +364,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 if addr.is_empty() { None } else { Some(addr) }
             },
             faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
+            min_fee_rate: self.min_fee_rate,
         })
     }
 
