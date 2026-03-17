@@ -129,6 +129,21 @@ public struct LiveNobleAPIService: NobleAPIService {
         return dto.valid
     }
 
+    public func getAddressUtxos(address: String) async throws -> AddressUtxos {
+        struct Params: Encodable, Sendable { let address: String }
+        let dto = try await client.call(
+            method: "noble_getAddressUtxos",
+            params: Params(address: address),
+            expecting: AddressUtxosDTO.self
+        )
+        return AddressUtxos(
+            address: dto.address ?? address,
+            utxos: dto.utxos.map { u in
+                UtxoEntry(txid: u.txid, vout: u.vout, value: u.value, height: u.height, isCoinbase: u.is_coinbase)
+            }
+        )
+    }
+
     // MARK: - Fees
 
     public func estimateFee() async throws -> FeeEstimate {

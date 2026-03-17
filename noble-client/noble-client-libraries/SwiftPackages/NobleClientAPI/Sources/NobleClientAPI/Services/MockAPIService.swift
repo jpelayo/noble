@@ -135,6 +135,14 @@ public struct MockAPIService: NobleAPIService {
         return address.count >= 4
     }
 
+    public func getAddressUtxos(address: String) async throws -> AddressUtxos {
+        await simulateDelay()
+        return AddressUtxos(address: address, utxos: [
+            UtxoEntry(txid: String(repeating: "a", count: 64), vout: 0, value: 50_000_000, height: 10),
+            UtxoEntry(txid: String(repeating: "b", count: 64), vout: 0, value: 25_000_000, height: 12),
+        ])
+    }
+
     // MARK: - Fees
 
     public func estimateFee() async throws -> FeeEstimate {

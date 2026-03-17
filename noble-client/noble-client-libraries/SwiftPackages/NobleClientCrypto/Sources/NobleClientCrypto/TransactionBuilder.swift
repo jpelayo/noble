@@ -402,3 +402,130 @@ public struct SignatureData: Sendable {
         self.signature = signature
     }
 }
+
+// MARK: - Coin Selection
+
+/// UTXO coin selection — three-pass algorithm.
+///
+/// 1. **Changeless**: Find a subset of 1–3 UTXOs that exactly matches the target (no change output).
+/// 2. **Smallest-first**: Sort ascending, accumulate until target met. Reduces dust.
+/// 3. **Largest-first**: Sort descending, accumulate. Guaranteed success if funds exist.
+public enum CoinSelector {
+
+    /// Minimum value below which a change output is not worth creating.
+    public static let dustThreshold: UInt64 = 5_000 // 0.005 NOBLE
+
+    /// Select UTXOs to cover `target` (amount + fee).
+    /// Returns the selected subset, or throws if insufficient funds.
+    public static func select(
+        from available: [UtxoOutpoint],
+        target: UInt64
+    ) throws -> [UtxoOutpoint] {
+        let total = available.reduce(UInt64(0)) { $0 + $1.value }
+        guard total >= target else {
+            throw CoinSelectionError.insufficientFunds(available: total, required: target)
+        }
+
+        // Pass 1: Changeless — exact match with 1, 2, or 3 UTXOs.
+        if let exact = findExactMatch(available, target: target) {
+            return exact
+        }
+
+        // Pass 1b: Near-changeless — match where change < dust threshold.
+        if let nearExact = findExactMatch(available, target: target, tolerance: dustThreshold) {
+            return nearExact
+        }
+
+        // Pass 2: Single best fit — smallest single UTXO that covers the target.
+        let bestFit = available.filter { $0.value >= target }.min(by: { $0.value < $1.value })
+        if let best = bestFit {
+            return [best]
+        }
+
+        // Pass 3: Smallest-first — spend small UTXOs to reduce dust.
+        let ascending = available.sorted { $0.value < $1.value }
+        if let result = accumulate(ascending, target: target) {
+            return result
+        }
+
+        // Pass 3: Largest-first — guaranteed if total >= target.
+        let descending = available.sorted { $0.value > $1.value }
+        if let result = accumulate(descending, target: target) {
+            return result
+        }
+
+        throw CoinSelectionError.insufficientFunds(available: total, required: target)
+    }
+
+    /// Try to find 1–3 UTXOs whose total equals target exactly (within tolerance).
+    private static func findExactMatch(
+        _ utxos: [UtxoOutpoint],
+        target: UInt64,
+        tolerance: UInt64 = 0
+    ) -> [UtxoOutpoint]? {
+        let n = utxos.count
+
+        // Single UTXO.
+        for i in 0..<n {
+            let sum = utxos[i].value
+            if sum >= target && sum <= target + tolerance {
+                return [utxos[i]]
+            }
+        }
+
+        // Pair of UTXOs.
+        if n >= 2 {
+            for i in 0..<(n - 1) {
+                for j in (i + 1)..<n {
+                    let sum = utxos[i].value + utxos[j].value
+                    if sum >= target && sum <= target + tolerance {
+                        return [utxos[i], utxos[j]]
+                    }
+                }
+            }
+        }
+
+        // Triple.
+        if n >= 3 {
+            for i in 0..<(n - 2) {
+                for j in (i + 1)..<(n - 1) {
+                    for k in (j + 1)..<n {
+                        let sum = utxos[i].value + utxos[j].value + utxos[k].value
+                        if sum >= target && sum <= target + tolerance {
+                            return [utxos[i], utxos[j], utxos[k]]
+                        }
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// Accumulate UTXOs in order until target is met.
+    private static func accumulate(
+        _ sorted: [UtxoOutpoint],
+        target: UInt64
+    ) -> [UtxoOutpoint]? {
+        var selected: [UtxoOutpoint] = []
+        var sum: UInt64 = 0
+        for utxo in sorted {
+            selected.append(utxo)
+            sum += utxo.value
+            if sum >= target { return selected }
+        }
+        return nil
+    }
+}
+
+/// Errors from coin selection.
+public enum CoinSelectionError: Error, LocalizedError {
+    case insufficientFunds(available: UInt64, required: UInt64)
+
+    public var errorDescription: String? {
+        switch self {
+        case .insufficientFunds(let available, let required):
+            return "Insufficient funds: have \(available) atomic, need \(required)"
+        }
+    }
+}

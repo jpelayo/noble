@@ -487,8 +487,17 @@ export function init(root, ctx) {
             try {
                 const fee = getSelectedFee();
                 const amountAtomic = parseAmount(amount);
+
+                // Fetch wallet UTXOs for coin selection.
+                const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
+                const utxos = (utxoResp.utxos || []).map(u => ({
+                    txid: u.txid,
+                    vout: u.vout,
+                    value: u.value,
+                }));
+
                 const signResult = await Bridge.call('noble_crypto', 'signTransfer', {
-                    recipient, amount: amountAtomic, fee
+                    recipient, amount: amountAtomic, fee, utxos
                 });
                 const submit = await Bridge.call('noble_api', 'submitTransaction', { txHex: signResult.txHex });
                 submitResult = submit;

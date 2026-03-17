@@ -45,6 +45,9 @@ public protocol NobleAPIService: Sendable {
     /// Validate a NOBLE or Bitcoin address.
     func validateAddress(_ address: String) async throws -> Bool
 
+    /// Fetch UTXOs for a specific address.
+    func getAddressUtxos(address: String) async throws -> AddressUtxos
+
     // MARK: - Fees
 
     /// Estimate transaction fees.

@@ -581,14 +581,15 @@ pub fn handle_crypto_action(
                 .ok_or("Missing parameter: fee")?;
 
             let metadata = parse_metadata(params);
-            let utxos = parse_utxos(params)?;
+            let all_utxos = parse_utxos(params)?;
+            let selected = select_utxos(&all_utxos, fee)?;
             let change_address = wallet_wire_bytes(wallet_address);
 
             let tx_hex = sign_notarization(
                 &checksum,
                 &metadata,
                 fee,
-                &utxos,
+                &selected,
                 &change_address,
                 private_key,
                 chain_id,
@@ -615,14 +616,16 @@ pub fn handle_crypto_action(
                 .and_then(|v| v.as_u64())
                 .ok_or("Missing parameter: fee")?;
 
-            let utxos = parse_utxos(params)?;
+            let all_utxos = parse_utxos(params)?;
+            let target = amount + fee;
+            let selected = select_utxos(&all_utxos, target)?;
             let change_address = wallet_wire_bytes(wallet_address);
 
             let tx_hex = sign_transfer(
                 &recipient_wire,
                 amount,
                 fee,
-                &utxos,
+                &selected,
                 &change_address,
                 private_key,
                 chain_id,
@@ -684,6 +687,115 @@ fn parse_utxos(params: &Value) -> Result<Vec<UtxoOutpoint>, String> {
     }
 
     Ok(result)
+}
+
+// ── Coin Selection ──
+// Three-pass algorithm: changeless → smallest-first → largest-first.
+
+/// Dust threshold: change below this value is not worth creating.
+const DUST_THRESHOLD: u64 = 5_000; // 0.005 NOBLE
+
+/// Select UTXOs to cover `target` (amount + fee).
+pub fn select_utxos(available: &[UtxoOutpoint], target: u64) -> Result<Vec<UtxoOutpoint>, String> {
+    let total: u64 = available.iter().map(|u| u.value).sum();
+    if total < target {
+        return Err(format!(
+            "Insufficient funds: have {total} atomic, need {target}"
+        ));
+    }
+
+    // Pass 1: Changeless — exact match with 1, 2, or 3 UTXOs.
+    if let Some(exact) = find_exact_match(available, target, 0) {
+        return Ok(exact);
+    }
+
+    // Pass 1b: Near-changeless — change < dust threshold.
+    if let Some(near) = find_exact_match(available, target, DUST_THRESHOLD) {
+        return Ok(near);
+    }
+
+    // Pass 2: Single best fit — smallest single UTXO that covers the target.
+    if let Some(best) = available.iter().filter(|u| u.value >= target).min_by_key(|u| u.value) {
+        return Ok(vec![best.clone()]);
+    }
+
+    // Pass 3: Smallest-first — spend dust to reduce UTXO bloat.
+    let mut ascending: Vec<&UtxoOutpoint> = available.iter().collect();
+    ascending.sort_by_key(|u| u.value);
+    if let Some(result) = accumulate(&ascending, target) {
+        return Ok(result);
+    }
+
+    // Pass 3: Largest-first — guaranteed if total >= target.
+    ascending.reverse();
+    if let Some(result) = accumulate(&ascending, target) {
+        return Ok(result);
+    }
+
+    Err(format!(
+        "Insufficient funds: have {total} atomic, need {target}"
+    ))
+}
+
+fn find_exact_match(
+    utxos: &[UtxoOutpoint],
+    target: u64,
+    tolerance: u64,
+) -> Option<Vec<UtxoOutpoint>> {
+    let n = utxos.len();
+
+    // Single UTXO.
+    for i in 0..n {
+        let sum = utxos[i].value;
+        if sum >= target && sum <= target + tolerance {
+            return Some(vec![utxos[i].clone()]);
+        }
+    }
+
+    // Pair.
+    if n >= 2 {
+        for i in 0..(n - 1) {
+            for j in (i + 1)..n {
+                let sum = utxos[i].value + utxos[j].value;
+                if sum >= target && sum <= target + tolerance {
+                    return Some(vec![utxos[i].clone(), utxos[j].clone()]);
+                }
+            }
+        }
+    }
+
+    // Triple.
+    if n >= 3 {
+        for i in 0..(n - 2) {
+            for j in (i + 1)..(n - 1) {
+                for k in (j + 1)..n {
+                    let sum = utxos[i].value + utxos[j].value + utxos[k].value;
+                    if sum >= target && sum <= target + tolerance {
+                        return Some(vec![
+                            utxos[i].clone(),
+                            utxos[j].clone(),
+                            utxos[k].clone(),
+                        ]);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn accumulate(sorted: &[&UtxoOutpoint], target: u64) -> Option<Vec<UtxoOutpoint>> {
+    let mut selected = Vec::new();
+    let mut sum: u64 = 0;
+    for utxo in sorted {
+        selected.push((*utxo).clone());
+        sum += utxo.value;
+        if sum >= target {
+            return Some(selected);
+        }
+    }
+    None
 }
 
 /// Convert wallet address (hex wire format) to raw bytes.

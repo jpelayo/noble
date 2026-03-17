@@ -440,6 +440,18 @@ pub async fn handle_api_action(
             }))
         }
 
+        "getAddressUtxos" => {
+            let address = params
+                .get("address")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: address")?;
+            let result = client
+                .call_rpc("noble_getAddressUtxos", json!([address]))
+                .await?;
+            // Pass through directly — field names match the bridge contract.
+            Ok(result)
+        }
+
         "faucetStatus" => {
             let faucet_base =
                 faucet_base_url(node_url).ok_or("Faucet service is not available")?;

@@ -27,6 +27,21 @@ struct AddressBalanceDTO: Decodable, Sendable {
     let tx_count: UInt64?
 }
 
+// MARK: - noble_getAddressUtxos
+
+struct AddressUtxosDTO: Decodable, Sendable {
+    let address: String?
+    let utxos: [UtxoDTO]
+}
+
+struct UtxoDTO: Decodable, Sendable {
+    let txid: String
+    let vout: UInt32
+    let value: UInt64
+    let height: UInt64
+    let is_coinbase: Bool
+}
+
 // MARK: - noble_getAddressHistory
 
 struct AddressHistoryDTO: Decodable, Sendable {

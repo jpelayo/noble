@@ -230,6 +230,24 @@ final class WebBridgeHandler {
                 "valid": valid,
             ]
 
+        case "getAddressUtxos":
+            guard let address = params["address"] as? String else {
+                throw BridgeError.missingParam("address")
+            }
+            let result = try await api.getAddressUtxos(address: address)
+            return [
+                "address": result.address,
+                "utxos": result.utxos.map { u in
+                    [
+                        "txid": u.txid,
+                        "vout": u.vout,
+                        "value": u.value,
+                        "height": u.height,
+                        "is_coinbase": u.isCoinbase,
+                    ] as [String: Any]
+                },
+            ] as [String: Any]
+
         case "faucetStatus":
             return try await handleFaucetStatus()
 
@@ -380,7 +398,7 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            guard let feeAtomic = params["fee"] as? UInt64 else {
+            guard let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value else {
                 throw BridgeError.missingParam("fee")
             }
             let metadata = params["metadata"] as? [[String: String]] ?? []
@@ -388,17 +406,18 @@ final class WebBridgeHandler {
                 MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
             }
 
-            // Parse UTXOs from JS params
-            let utxos = try parseUtxoParams(params)
-            let changeAddress = walletChangeAddress()
+            // Parse available UTXOs from JS, then run coin selection.
+            let allUtxos = try parseUtxoParams(params)
+            let selected = try CoinSelector.select(from: allUtxos, target: feeAtomic)
 
+            let changeAddress = walletChangeAddress()
             let chainId = appState.resolvedChainId
 
             let txHex = try appState.transactionSigner.signNotarization(
                 checksum: checksum,
                 metadata: metadataItems,
                 fee: NobleAmount(atomic: feeAtomic),
-                utxos: utxos,
+                utxos: selected,
                 changeAddress: changeAddress,
                 privateKey: privateKey,
                 chainId: chainId
@@ -410,27 +429,29 @@ final class WebBridgeHandler {
                   let to = NobleAddress(wireHex: recipientHex) else {
                 throw BridgeError.missingParam("recipient")
             }
-            guard let amountAtomic = params["amount"] as? UInt64 else {
+            guard let amountAtomic = (params["amount"] as? NSNumber)?.uint64Value else {
                 throw BridgeError.missingParam("amount")
             }
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            guard let feeAtomic = params["fee"] as? UInt64 else {
+            guard let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value else {
                 throw BridgeError.missingParam("fee")
             }
 
-            // Parse UTXOs from JS params
-            let utxos = try parseUtxoParams(params)
-            let changeAddress = walletChangeAddress()
+            // Parse available UTXOs from JS, then run coin selection.
+            let allUtxos = try parseUtxoParams(params)
+            let target = amountAtomic + feeAtomic
+            let selected = try CoinSelector.select(from: allUtxos, target: target)
 
+            let changeAddress = walletChangeAddress()
             let chainId = appState.resolvedChainId
 
             let txHex = try appState.transactionSigner.signTransfer(
                 to: to,
                 amount: NobleAmount(atomic: amountAtomic),
                 fee: NobleAmount(atomic: feeAtomic),
-                utxos: utxos,
+                utxos: selected,
                 changeAddress: changeAddress,
                 privateKey: privateKey,
                 chainId: chainId
@@ -453,8 +474,8 @@ final class WebBridgeHandler {
         var result = [UtxoOutpoint]()
         for (i, dict) in utxoArr.enumerated() {
             guard let txidHex = dict["txid"] as? String,
-                  let vout = dict["vout"] as? UInt32,
-                  let value = dict["value"] as? UInt64 else {
+                  let vout = (dict["vout"] as? NSNumber)?.uint32Value,
+                  let value = (dict["value"] as? NSNumber)?.uint64Value else {
                 print("[Bridge] Skipping malformed UTXO at index \(i): \(dict)")
                 continue
             }
