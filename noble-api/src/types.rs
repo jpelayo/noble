@@ -595,6 +595,11 @@ pub struct NodeInfoResponse {
     pub sync_current_height: u64,
     /// Sync progress percentage (0-100, 0 when not syncing).
     pub sync_progress_pct: u64,
+    /// Faucet wallet address (bech32m), if configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faucet_address: Option<String>,
+    /// Whether the faucet server is enabled in config.
+    pub faucet_enabled: bool,
 }
 
 /// Response for `noble_getApiVersion`.

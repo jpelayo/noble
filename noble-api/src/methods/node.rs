@@ -199,6 +199,7 @@ pub trait NodeApi {
     async fn store_faucet_secret(
         &self,
         passphrase: String,
+        faucet_address: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Detect the node's external (public) IP address by querying public services.
@@ -358,6 +359,11 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             sync_target_height,
             sync_current_height,
             sync_progress_pct,
+            faucet_address: {
+                let addr = self.faucet_address.read().clone();
+                if addr.is_empty() { None } else { Some(addr) }
+            },
+            faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -1065,6 +1071,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 self.max_peers.store(v, std::sync::atomic::Ordering::Relaxed);
             }
         }
+        if section == "faucet" && key == "server_enabled" {
+            self.faucet_enabled.store(value == "true", std::sync::atomic::Ordering::Relaxed);
+        }
 
         tracing::info!(
             task = "config",
@@ -1097,6 +1106,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     async fn store_faucet_secret(
         &self,
         passphrase: String,
+        faucet_address: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         if passphrase.is_empty() {
             return Err(ApiError::InvalidParam("passphrase must not be empty".into()).into());
@@ -1111,6 +1121,17 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         ks.store_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE, passphrase.as_bytes(), &wallet_pass)
             .map_err(|e| ApiError::Internal(format!("store faucet passphrase: {e}")))?;
         tracing::info!(task = "faucet", "Faucet passphrase stored in unified keystore");
+
+        // Store the faucet address in TOML + in-memory for GUI display.
+        if let Some(ref addr) = faucet_address {
+            *self.faucet_address.write() = addr.clone();
+            if let Some(ref set_fn) = self.set_config_value {
+                if let Err(e) = set_fn("faucet", "address", addr) {
+                    tracing::warn!(task = "faucet", "Failed to persist faucet address: {e}");
+                }
+            }
+        }
+
         Ok(serde_json::json!({ "success": true }))
     }
 

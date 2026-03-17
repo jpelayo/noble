@@ -466,6 +466,9 @@ pub struct FaucetConfig {
     /// Local faucet server port.
     #[serde(default = "default_faucet_port")]
     pub server_port: u16,
+    /// Faucet wallet address (bech32m). Auto-populated on first faucet boot.
+    #[serde(default)]
+    pub address: String,
 }
 
 fn default_true() -> bool { true }
@@ -480,6 +483,7 @@ impl Default for FaucetConfig {
             probe_port: 8786,
             server_enabled: true,
             server_port: 8786,
+            address: String::new(),
         }
     }
 }

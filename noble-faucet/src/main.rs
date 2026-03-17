@@ -232,7 +232,7 @@ async fn main() {
                     tracing::info!("First boot — storing faucet passphrase in node keystore via RPC");
                     let mut stored = false;
                     for attempt in 1..=3 {
-                        match rpc.store_faucet_secret(&passphrase).await {
+                        match rpc.store_faucet_secret(&passphrase, Some(&w.address())).await {
                             Ok(()) => {
                                 tracing::info!("Faucet passphrase stored in node keystore");
                                 stored = true;

@@ -275,14 +275,15 @@ impl NodeRpcClient {
         self.call("noble_getFaucetSecret", &()).await
     }
     /// Store the faucet passphrase in the node's unified keystore.
-    pub async fn store_faucet_secret(&self, passphrase: &str) -> Result<(), FaucetError> {
+    pub async fn store_faucet_secret(&self, passphrase: &str, faucet_address: Option<&str>) -> Result<(), FaucetError> {
         #[derive(Serialize)]
         struct Params<'a> {
             passphrase: &'a str,
+            faucet_address: Option<&'a str>,
         }
         let _: serde_json::Value = self.call(
             "noble_storeFaucetSecret",
-            &Params { passphrase },
+            &Params { passphrase, faucet_address },
         ).await?;
         Ok(())
     }

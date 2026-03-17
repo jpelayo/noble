@@ -1730,6 +1730,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_progress_current: self.healing.sync_progress_current().clone(),
             sync_progress_total: self.healing.sync_progress_total().clone(),
             faucet_cache: self.faucet_cache.clone(),
+            faucet_address: parking_lot::RwLock::new(config.faucet.address.clone()),
+            faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
         });
 
         // --- Determine bind addresses ---

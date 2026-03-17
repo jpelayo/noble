@@ -143,6 +143,7 @@ export function init(root, ctx) {
         <span>Faucet</span>
         <div style="display:flex;align-items:center;gap:var(--gap-sm)">
           <span id="s-faucet-badge" class="badge" style="background:var(--text-muted)">Checking...</span>
+          <button id="s-faucet-refresh" class="btn btn-secondary btn-sm" style="padding:2px 10px;font-size:var(--font-size-xs)">Refresh</button>
           <button id="s-faucet-toggle" class="btn btn-sm" style="padding:2px 10px;font-size:var(--font-size-xs)">Toggle</button>
         </div>
       </div>
@@ -1230,30 +1231,49 @@ export function init(root, ctx) {
   });
 
   // ── Faucet status ──
+  const faucetToggle = root.querySelector('#s-faucet-toggle');
+  const faucetRefresh = root.querySelector('#s-faucet-refresh');
+
   async function loadFaucet() {
-    const host = window.location.hostname || '127.0.0.1';
-    const faucetUrl = `https://${host}:8786/api/faucet/status`;
     try {
-      const resp = await fetch(faucetUrl, { signal: AbortSignal.timeout(3000) });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-      faucetBadge.textContent = 'Running';
-      faucetBadge.style.background = 'var(--success)';
-      const bal = (data.faucet_balance / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const drip = (data.drip_amount / 1_000_000).toLocaleString();
-      const cap = (data.daily_cap / 1_000_000).toLocaleString();
-      const todayDist = (data.today_distributed / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const info = await rpc.call('noble_getNodeInfo', {});
+      const enabled = info.faucet_enabled;
+      const addr = info.faucet_address;
+
+      if (!enabled) {
+        faucetBadge.textContent = 'Disabled';
+        faucetBadge.style.background = 'var(--text-muted)';
+        faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">Faucet is disabled. Click "Enable" to start distributing tokens.</dt>`;
+        faucetToggle.textContent = 'Enable';
+        faucetToggle.className = 'btn btn-primary btn-sm';
+        return;
+      }
+
+      if (!addr) {
+        faucetBadge.textContent = 'Starting';
+        faucetBadge.style.background = 'var(--warning)';
+        faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">Faucet enabled but no address yet. It may still be initializing — click Refresh.</dt>`;
+        faucetToggle.textContent = 'Disable';
+        faucetToggle.className = 'btn btn-secondary btn-sm';
+        return;
+      }
+
+      // Faucet is enabled and has an address — check balance.
+      let balance = 0;
+      try {
+        const bal = await rpc.call('noble_getAddressBalance', { public_key: addr });
+        balance = bal.available || bal.balance || 0;
+      } catch { /* not funded yet */ }
+
+      const balFmt = (balance / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      faucetBadge.textContent = balance > 0 ? 'Running' : 'Empty';
+      faucetBadge.style.background = balance > 0 ? 'var(--success)' : 'var(--warning)';
       faucetInfo.innerHTML = `
-        <dt>Address</dt><dd class="mono" style="word-break:break-all">${data.faucet_address} <button class="btn-copy" data-copy="${data.faucet_address}" title="Copy faucet address">&#128203;</button></dd>
-        <dt>Balance</dt><dd>${bal} NOBLE</dd>
-        <dt>Drip Amount</dt><dd>${drip} NOBLE</dd>
-        <dt>Distributed Today</dt><dd>${todayDist} NOBLE</dd>
-        <dt>Distributions</dt><dd>${data.distribution_count.toLocaleString()}</dd>
-        <dt>Daily Cap</dt><dd>${cap} NOBLE</dd>
-        <dt>IP Cooldown</dt><dd>${data.ip_cooldown_hours}h</dd>
-        <dt>Address Cooldown</dt><dd>${data.address_cooldown_hours}h</dd>
+        <dt>Address</dt><dd class="mono" style="word-break:break-all">${addr} <button class="btn-copy" data-copy="${addr}" title="Copy faucet address">&#128203;</button></dd>
+        <dt>Balance</dt><dd>${balFmt} NOBLE</dd>
+        <dt>Status</dt><dd>${balance > 0 ? 'Ready to distribute' : 'Needs funding — send tokens to the address above'}</dd>
       `;
-      // Wire copy button
       faucetInfo.querySelectorAll('.btn-copy').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1265,25 +1285,28 @@ export function init(root, ctx) {
       faucetToggle.textContent = 'Disable';
       faucetToggle.className = 'btn btn-secondary btn-sm';
     } catch (_) {
-      faucetBadge.textContent = 'Off';
-      faucetBadge.style.background = 'var(--text-muted)';
-      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--text-secondary);font-style:italic">Faucet is not running. Click "Enable" to start distributing tokens.</dt>`;
-      faucetToggle.textContent = 'Enable';
-      faucetToggle.className = 'btn btn-primary btn-sm';
+      faucetBadge.textContent = 'Error';
+      faucetBadge.style.background = 'var(--error)';
+      faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--error)">Could not load faucet status.</dt>`;
     }
   }
 
-  // Faucet toggle handler
-  const faucetToggle = root.querySelector('#s-faucet-toggle');
+  // Refresh button.
+  faucetRefresh.addEventListener('click', () => {
+    faucetRefresh.textContent = 'Refreshing...';
+    faucetRefresh.disabled = true;
+    loadFaucet().finally(() => { faucetRefresh.textContent = 'Refresh'; faucetRefresh.disabled = false; });
+  });
+
+  // Toggle button — enable/disable faucet in config (takes effect on next restart).
   faucetToggle.addEventListener('click', async () => {
-    const isRunning = faucetBadge.textContent === 'Running';
-    const newValue = isRunning ? 'false' : 'true';
+    const isEnabled = faucetToggle.textContent === 'Disable';
+    const newValue = isEnabled ? 'false' : 'true';
     faucetToggle.disabled = true;
-    faucetToggle.textContent = isRunning ? 'Stopping...' : 'Starting...';
+    faucetToggle.textContent = isEnabled ? 'Disabling...' : 'Enabling...';
     try {
       await rpc.call('noble_setConfigValue', { section: 'faucet', key: 'server_enabled', value: newValue });
-      // Give the node a moment to start/stop the faucet process.
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1000));
       await loadFaucet();
     } catch (e) {
       faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--error)">${e.message || e}</dt>`;
@@ -1291,6 +1314,9 @@ export function init(root, ctx) {
       faucetToggle.disabled = false;
     }
   });
+
+  // Auto-poll faucet balance every 30s.
+  const faucetPollInterval = setInterval(loadFaucet, 30_000);
 
   async function loadSettings() {
     // Load TLS cert, encryption status, seeds, wallet keys, reward address, and faucet in parallel.
@@ -1685,6 +1711,7 @@ export function init(root, ctx) {
 
   return {
     destroy() {
+      clearInterval(faucetPollInterval);
       clearInterval(forkTimer);
       clearInterval(forkResTimer);
       clearInterval(cpTimer);

@@ -327,6 +327,12 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Cached faucet discovery results. Updated by the node on cycle boundaries.
     pub faucet_cache: crate::types::FaucetCache,
+
+    /// Faucet wallet address (bech32m). Read from config, updated by storeFaucetSecret.
+    pub faucet_address: parking_lot::RwLock<String>,
+
+    /// Whether the faucet server is enabled.
+    pub faucet_enabled: std::sync::atomic::AtomicBool,
 }
 
 /// Canonical node name resolution from validator wire bytes.

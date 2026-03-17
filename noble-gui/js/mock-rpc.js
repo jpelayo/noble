@@ -1041,6 +1041,8 @@ export class MockRpcClient {
           sync_target_height: 0,
           sync_current_height: 0,
           sync_progress_pct: 0,
+          faucet_address: 'nbl1pqduas3vtyxcajqs3sg2vuwj7x62lkdvsh2dry23zn37844mu7v4yvz9376a',
+          faucet_enabled: true,
         };
       }
 
