@@ -151,8 +151,8 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
             value: o.value,
             address: o.address.to_display_address(),
         }).collect(),
-        signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.publisher_sig.public_key)
-            .unwrap_or_else(|| hex::encode(&tx.publisher_sig.public_key)),
+        signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.issuer_sig.public_key)
+            .unwrap_or_else(|| hex::encode(&tx.issuer_sig.public_key)),
         signer_name: None, // Populated by caller via resolve_friendly_name
         metadata: tx
             .metadata
@@ -758,9 +758,9 @@ pub struct DocumentVersionsResponse {
     pub count: usize,
 }
 
-/// A single document record returned by publisher search.
+/// A single document record returned by issuer search.
 #[derive(Debug, Clone, Serialize)]
-pub struct PublisherDocumentRecord {
+pub struct IssuerDocumentRecord {
     pub tx_id: String,
     pub checksum: String,
     pub block_height: u64,
@@ -769,11 +769,20 @@ pub struct PublisherDocumentRecord {
     pub version: Option<u32>,
 }
 
-/// Response for `noble_getDocumentsByPublisher`.
+/// Response for `noble_getDocumentsByIssuer`.
 #[derive(Debug, Clone, Serialize)]
-pub struct DocumentsByPublisherResponse {
-    pub publisher: String,
-    pub documents: Vec<PublisherDocumentRecord>,
+pub struct DocumentsByIssuerResponse {
+    pub issuer: String,
+    pub documents: Vec<IssuerDocumentRecord>,
+    pub count: usize,
+}
+
+/// Response for `noble_searchDocumentsByMetadata`.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetadataSearchResponse {
+    pub key: String,
+    pub value: String,
+    pub documents: Vec<IssuerDocumentRecord>,
     pub count: usize,
 }
 

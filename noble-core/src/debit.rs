@@ -54,7 +54,7 @@ pub enum DebitError {
 /// # Parameters
 ///
 /// - `source_address_wire`: the transaction's `source_address` field (raw wire bytes)
-/// - `sender_pk`: the publisher's public key (extracted from signature envelope)
+/// - `sender_pk`: the issuer's public key (extracted from signature envelope)
 /// - `need`: total amount to debit (amount + fee)
 /// - `balance_of`: closure that returns the current balance of any `NobleAddress`
 ///

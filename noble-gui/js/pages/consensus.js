@@ -429,6 +429,7 @@ export function init(root, ctx) {
       return e;
     if (e === 'chain_tip_updated') return `${e}:${data.peer_id || ''}`;
     if (e === 'score_updated') return `${e}:${data.peer_id || ''}`;
+    if (e === 'alignment_changed') return e;
     if (e === 'fork_alignment_pending') return e;
     if (e === 'fork_detected') return e;
     if (e === 'fork_divergence') return e;
@@ -470,6 +471,7 @@ export function init(root, ctx) {
     fork_auto_resolved:     '\u21c4',  // right-left arrows
     fork_alignment_pending: '\u21c4',  // right-left arrows
     fork_alignment_clear:   '\u2713',  // checkmark
+    alignment_changed:      '\u25c9',  // fisheye (alignment state)
     chain_adoption_started: '\u21c4',  // right-left arrows
     healing_clue:           '\u2764',  // heart (healing)
     healing_action:         '\u2764',  // heart (healing)
@@ -511,6 +513,7 @@ export function init(root, ctx) {
       case 'fork_auto_resolved': return 'var(--danger, #ef4444)';
       case 'fork_alignment_pending': return '#f59e0b';
       case 'fork_alignment_clear': return 'var(--success, #22c55e)';
+      case 'alignment_changed': return '#60a5fa';
       case 'chain_adoption_started': return 'var(--danger, #ef4444)';
       case 'checkpoints_activated': return 'var(--success, #22c55e)';
       case 'rejected': return '#f87171';
@@ -614,6 +617,8 @@ export function init(root, ctx) {
         // Transient fork detection — suppress from activity log.
         // Only healing manager decisions (alignment_pending, auto_resolved) are actionable.
         return null;
+      case 'alignment_changed':
+        return `${data.state}${data.previous_state ? ` (was ${data.previous_state})` : ''}`;
       case 'fork_alignment_pending':
         return `Fork alignment: ${data.cycles_remaining} cycle(s) to resolution`;
       case 'fork_alignment_clear':

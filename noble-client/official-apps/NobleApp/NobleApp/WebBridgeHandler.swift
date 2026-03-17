@@ -348,7 +348,7 @@ final class WebBridgeHandler {
         [
             "txId": r.txId.hex,
             "checksum": r.checksum.hex,
-            "publisher": r.publisher.nobleBech32,
+            "issuer": r.issuer.nobleBech32,
             "blockHeight": r.blockHeight,
             "timestamp": r.timestamp.timeIntervalSince1970,
             "fee": r.fee.atomic,
@@ -360,7 +360,7 @@ final class WebBridgeHandler {
         var dict: [String: Any] = [
             "checksum": v.checksum.hex,
             "txId": v.txId.hex,
-            "publisher": v.publisher.nobleBech32,
+            "issuer": v.issuer.nobleBech32,
             "blockHeight": v.blockHeight,
             "timestamp": v.timestamp.timeIntervalSince1970,
         ]

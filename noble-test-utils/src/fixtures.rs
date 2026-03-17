@@ -95,7 +95,7 @@ pub fn make_signed_tx(
         }],
         checksum,
         timestamp,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
@@ -108,7 +108,7 @@ pub fn make_signed_tx(
         contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
+    tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
     let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
@@ -139,7 +139,7 @@ pub fn make_signed_tx_with_metadata(
         }],
         checksum,
         timestamp,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
@@ -152,7 +152,7 @@ pub fn make_signed_tx_with_metadata(
         contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
+    tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
     let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
@@ -196,7 +196,7 @@ pub fn make_signed_transfer_tx(
         outputs,
         checksum: Hash256::ZERO,
         timestamp,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
@@ -209,7 +209,7 @@ pub fn make_signed_transfer_tx(
         contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx.publisher_sig = keypair.private_key.sign(&msg).unwrap();
+    tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
     let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
@@ -235,7 +235,7 @@ pub fn make_coinbase_tx(
         }],
         checksum: Hash256::ZERO,
         timestamp,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: validator.pk_bytes.clone(),
             signature: vec![],
@@ -248,7 +248,7 @@ pub fn make_coinbase_tx(
         contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx.publisher_sig = validator.private_key.sign(&msg).unwrap();
+    tx.issuer_sig = validator.private_key.sign(&msg).unwrap();
     let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
     (tx, tx_id)
 }
@@ -352,7 +352,7 @@ mod tests {
 
         // Verify signature
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
+        assert!(tx.issuer_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
         let recomputed = tx.compute_tx_id(test_chain_id()).unwrap();
@@ -385,7 +385,7 @@ mod tests {
 
         // Verify signature
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
+        assert!(tx.issuer_sig.verify_standalone(&msg).is_ok());
 
         // Verify tx_id
         let recomputed = tx.compute_tx_id(test_chain_id()).unwrap();

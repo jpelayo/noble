@@ -215,6 +215,10 @@ impl WireFormat for Transaction {
         cbor::write_array(buf, self.inputs.len());
         for inp in &self.inputs { inp.encode_wire(buf); }
 
+        // "issuer_sig" (alphabetically between "inputs" and "metadata")
+        cbor::write_text(buf, "issuer_sig");
+        self.issuer_sig.encode_wire(buf);
+
         // "metadata"
         cbor::write_text(buf, "metadata");
         cbor::write_array(buf, self.metadata.len());
@@ -224,10 +228,6 @@ impl WireFormat for Transaction {
         cbor::write_text(buf, "outputs");
         cbor::write_array(buf, self.outputs.len());
         for out in &self.outputs { out.encode_wire(buf); }
-
-        // "publisher_sig"
-        cbor::write_text(buf, "publisher_sig");
-        self.publisher_sig.encode_wire(buf);
 
         // "timestamp"
         cbor::write_text(buf, "timestamp");
@@ -616,7 +616,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: vec![0x42; 32],
                 signature: vec![0x00; 64],

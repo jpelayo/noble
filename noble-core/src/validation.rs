@@ -53,18 +53,18 @@ pub struct BlockValidationContext<'a> {
 fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), ValidationError> {
     use noble_crypto::bip137;
 
-    let sig = &tx.publisher_sig;
+    let sig = &tx.issuer_sig;
 
     // Ensure correct scheme
     if sig.scheme_id != SCHEME_BIP137 {
-        return Err(ValidationError::PublisherSigInvalid(
+        return Err(ValidationError::IssuerSigInvalid(
             "T26: expected SCHEME_BIP137 (0x03)".to_string(),
         ));
     }
 
     // Signature must be exactly 65 bytes
     if sig.signature.len() != bip137::BIP137_SIG_LEN {
-        return Err(ValidationError::PublisherSigInvalid(format!(
+        return Err(ValidationError::IssuerSigInvalid(format!(
             "T26: BIP-137 signature must be {} bytes, got {}",
             bip137::BIP137_SIG_LEN,
             sig.signature.len()
@@ -94,11 +94,11 @@ fn validate_bip137_signature(tx: &Transaction, _chain_id: u32) -> Result<(), Val
 
     // Recover the public key from the BIP-137 signature
     let recovered_pk = bip137::verify_bip137(&sig.signature, &message)
-        .map_err(|e| ValidationError::PublisherSigInvalid(format!("T26: {e}")))?;
+        .map_err(|e| ValidationError::IssuerSigInvalid(format!("T26: {e}")))?;
 
     // Compare recovered key with declared public key
     if recovered_pk != sig.public_key {
-        return Err(ValidationError::PublisherSigInvalid(
+        return Err(ValidationError::IssuerSigInvalid(
             "T26: recovered public key does not match declared signer".to_string(),
         ));
     }
@@ -167,15 +167,15 @@ fn validate_tx_protocol_fields(
     }
     tracing::trace!(skew = diff, "T4: timestamp skew check passed");
 
-    // T5: Publisher scheme recognized
-    if !is_recognized_scheme(tx.publisher_sig.scheme_id) {
+    // T5: Issuer scheme recognized
+    if !is_recognized_scheme(tx.issuer_sig.scheme_id) {
         return Err(ValidationError::UnrecognizedScheme(
-            tx.publisher_sig.scheme_id,
+            tx.issuer_sig.scheme_id,
         ));
     }
     tracing::trace!(
-        scheme_id = tx.publisher_sig.scheme_id,
-        "T5: publisher scheme recognized"
+        scheme_id = tx.issuer_sig.scheme_id,
+        "T5: issuer scheme recognized"
     );
 
     Ok(())
@@ -194,19 +194,19 @@ fn validate_tx_signatures(
             ValidationError::Internal("signing message computation failed".into())
         })?;
 
-    // T6/T26: Publisher signature verification
-    if tx.publisher_sig.scheme_id == SCHEME_BIP137 {
+    // T6/T26: Issuer signature verification
+    if tx.issuer_sig.scheme_id == SCHEME_BIP137 {
         // T26: BIP-137 recoverable signature — uses Bitcoin Signed Message format
         validate_bip137_signature(tx, ctx.chain_id)?;
-        tracing::trace!("T26: BIP-137 publisher signature verified");
+        tracing::trace!("T26: BIP-137 issuer signature verified");
     } else {
-        tx.publisher_sig
+        tx.issuer_sig
             .verify_standalone(&signing_msg)
             .map_err(|e| {
-                tracing::debug!("publisher signature verification failed: {e}");
-                ValidationError::PublisherSigInvalid("signature verification failed".into())
+                tracing::debug!("issuer signature verification failed: {e}");
+                ValidationError::IssuerSigInvalid("signature verification failed".into())
             })?;
-        tracing::trace!("T6: publisher signature verified");
+        tracing::trace!("T6: issuer signature verified");
     }
 
     // T7: Additional signature verification
@@ -711,7 +711,7 @@ mod tests {
             outputs: vec![],
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -727,7 +727,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -773,7 +773,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -791,7 +791,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -802,7 +802,7 @@ mod tests {
     fn t5_unknown_scheme() {
         let (sk, pk) = ed25519::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
-        tx.publisher_sig.scheme_id = 0xFF;
+        tx.issuer_sig.scheme_id = 0xFF;
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -811,18 +811,18 @@ mod tests {
         ));
     }
 
-    // --- T6: Publisher signature ---
+    // --- T6: Issuer signature ---
 
     #[test]
-    fn t6_invalid_publisher_sig() {
+    fn t6_invalid_issuer_sig() {
         let (sk, pk) = ed25519::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
-        tx.publisher_sig.signature = vec![0u8; 64]; // Bad sig
+        tx.issuer_sig.signature = vec![0u8; 64]; // Bad sig
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
             result,
-            Err(ValidationError::PublisherSigInvalid(_))
+            Err(ValidationError::IssuerSigInvalid(_))
         ));
     }
 
@@ -1060,7 +1060,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1075,7 +1075,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -1089,7 +1089,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(result, Err(ValidationError::UnknownTxType(0xFF))));
@@ -1123,7 +1123,7 @@ mod tests {
             outputs: vec![], // No outputs = missing recipient
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1138,7 +1138,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -1166,7 +1166,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1181,7 +1181,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -1204,7 +1204,7 @@ mod tests {
             outputs: vec![], // no outputs
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1219,7 +1219,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -1246,7 +1246,7 @@ mod tests {
             }],
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1261,7 +1261,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(result.is_ok(), "notarization with change output should pass: {result:?}");
@@ -1285,7 +1285,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1300,7 +1300,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(result.is_ok(), "self-transfer is valid in UTXO model: {result:?}");
@@ -1320,7 +1320,7 @@ mod tests {
             outputs: vec![],
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1335,7 +1335,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(result.is_ok(), "notarization without outputs should pass: {result:?}");
@@ -1445,7 +1445,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1460,7 +1460,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -1494,7 +1494,7 @@ mod tests {
             outputs: vec![],
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1509,7 +1509,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -1542,7 +1542,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1557,7 +1557,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
@@ -1587,7 +1587,7 @@ mod tests {
             outputs: vec![],
             checksum: sha256(b"attested document"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1602,7 +1602,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -1642,7 +1642,7 @@ mod tests {
             let extra_priv = NoblePrivateKey::Ed25519(extra_sk);
             tx.additional_sigs.push(extra_priv.sign(&msg).unwrap());
         }
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -1667,7 +1667,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -1737,7 +1737,7 @@ mod tests {
             outputs: vec![], // Missing new key output
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1752,7 +1752,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -1780,7 +1780,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1795,7 +1795,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -1805,7 +1805,7 @@ mod tests {
         let (sk, pk) = ed25519::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         // Corrupt the signature to make it invalid (T6)
-        tx.publisher_sig.signature = vec![0u8; 64];
+        tx.issuer_sig.signature = vec![0u8; 64];
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let (block, _) = make_valid_block(vec![(tx, tx_id)]);
@@ -1841,7 +1841,7 @@ mod tests {
             outputs: vec![],
             checksum: sha256(b"gw-valid"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1855,7 +1855,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -1875,7 +1875,7 @@ mod tests {
             outputs: vec![],
             checksum: sha256(b"gw-invalid"),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1889,7 +1889,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -1926,7 +1926,7 @@ mod tests {
             outputs: vec![],
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_BIP137,
                 public_key: compressed_pk,
                 signature: sig.to_vec(),
@@ -1956,7 +1956,7 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
-            matches!(result, Err(ValidationError::PublisherSigInvalid(_))),
+            matches!(result, Err(ValidationError::IssuerSigInvalid(_))),
             "wrong checksum must fail BIP-137 validation: {result:?}"
         );
     }
@@ -1979,7 +1979,7 @@ mod tests {
             outputs: vec![],
             checksum,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_BIP137,
                 public_key: compressed_pk,
                 signature: vec![0u8; 32], // Wrong length
@@ -1994,7 +1994,7 @@ mod tests {
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
-            matches!(result, Err(ValidationError::PublisherSigInvalid(_))),
+            matches!(result, Err(ValidationError::IssuerSigInvalid(_))),
             "non-65-byte BIP-137 sig must be rejected: {result:?}"
         );
     }
@@ -2019,7 +2019,7 @@ mod tests {
             }],
             checksum: sha256(b"should not be here"), // non-zero checksum on transfer
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2034,7 +2034,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -2058,7 +2058,7 @@ mod tests {
             outputs: vec![],
             checksum: Hash256::ZERO, // zero checksum on notarization
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2073,7 +2073,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -2102,7 +2102,7 @@ mod tests {
             }],
             checksum: sha256(b"should not be here"), // non-zero checksum on key rotation
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2117,7 +2117,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(
@@ -2148,7 +2148,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let ctx = default_tx_ctx();
@@ -2171,7 +2171,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let ctx = default_tx_ctx();
@@ -2197,7 +2197,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let ctx = default_tx_ctx();
@@ -2233,7 +2233,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_SECP256K1,
                 public_key: compressed_pk.clone(),
                 signature: vec![],
@@ -2248,7 +2248,7 @@ mod tests {
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         let sig = noble_crypto::secp256k1::sign(&sk, &msg).unwrap();
-        tx.publisher_sig.signature = sig;
+        tx.issuer_sig.signature = sig;
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id, compressed_pk)
     }
@@ -2286,7 +2286,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2300,7 +2300,7 @@ mod tests {
         };
         let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());

@@ -206,7 +206,7 @@ function makeTransaction(seed, timestamp) {
     outputs,
     signer: signerHex,
     signer_name: null, // populated by backend name resolver in production
-    publisher_sig: sigEnv, // kept for backward compat with legacy GUI paths
+    issuer_sig: sigEnv, // kept for backward compat with legacy GUI paths
     additional_sigs: seed % 4 === 0 ? [makeSignatureEnvelope(seed + 1000)] : [],
     metadata,
     has_encrypted_locator: hasLocator,
@@ -341,7 +341,7 @@ function generateChain(numBlocks) {
   const txIndex = new Map();    // tx_id → { block_height, tx }
   const checksumIndex = new Map(); // checksum → [{ block_height, tx_id, timestamp }]
   const versionChainIndex = new Map(); // prev_checksum → [successor_tx_id]
-  const publisherIndex = new Map(); // signerHex → [{ tx_id, checksum, block_height, timestamp, version }]
+  const issuerIndex = new Map(); // signerHex → [{ tx_id, checksum, block_height, timestamp, version }]
 
   let prevHash = '0'.repeat(64); // genesis prev_block_hash
 
@@ -395,11 +395,11 @@ function generateChain(numBlocks) {
         versionChainIndex.get(prevChecksum).push(txId);
       }
 
-      // Build publisher index (notarization txs only, tx_type=0)
+      // Build issuer index (notarization txs only, tx_type=0)
       if (tx.tx_type === 0) {
-        const signerHex = bytesToHexLocal(tx.publisher_sig.public_key);
-        if (!publisherIndex.has(signerHex)) publisherIndex.set(signerHex, []);
-        publisherIndex.get(signerHex).push({
+        const signerHex = bytesToHexLocal(tx.issuer_sig.public_key);
+        if (!issuerIndex.has(signerHex)) issuerIndex.set(signerHex, []);
+        issuerIndex.get(signerHex).push({
           tx_id: txId,
           checksum: tx.checksum,
           block_height: h,
@@ -418,7 +418,7 @@ function generateChain(numBlocks) {
     prevHash = blockHash;
   }
 
-  return { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex };
+  return { blocks, txIndex, checksumIndex, versionChainIndex, issuerIndex };
 }
 
 // ── Generate Mock Mempool ──
@@ -461,8 +461,8 @@ export class MockRpcClient {
   #pkiStatus = { configured: false, cn: null, fingerprint: null, expiry: null, bound_at: null };
 
   constructor({ latencyMin = 50, latencyMax = 150, firstRun = false } = {}) {
-    const { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex } = generateChain(100);
-    this.#chain = { blocks, txIndex, checksumIndex, versionChainIndex, publisherIndex };
+    const { blocks, txIndex, checksumIndex, versionChainIndex, issuerIndex } = generateChain(100);
+    this.#chain = { blocks, txIndex, checksumIndex, versionChainIndex, issuerIndex };
     this.#mempool = generateMempool(50, 99);
     this.#peers = makePeers(99);
     this.#validators = [...VALIDATORS]; // mutable copy per instance
@@ -674,10 +674,15 @@ export class MockRpcClient {
         return { root_checksum: params.checksum, versions, count: versions.length };
       }
 
-      case 'noble_getDocumentsByPublisher': {
+      case 'noble_getDocumentsByIssuer': {
         const pubkey = params.public_key;
-        const docs = this.#chain.publisherIndex.get(pubkey) || [];
-        return { publisher: pubkey, documents: docs, count: docs.length };
+        const docs = this.#chain.issuerIndex.get(pubkey) || [];
+        return { issuer: pubkey, documents: docs, count: docs.length };
+      }
+
+      case 'noble_searchDocumentsByMetadata': {
+        // Mock: return empty for now — no metadata index in mock
+        return { key: params.key, value: params.value, documents: [], count: 0 };
       }
 
       case 'noble_decryptLocator': {
@@ -780,7 +785,7 @@ export class MockRpcClient {
           current_height: this.chainHeight,
           highest_known: this.chainHeight,
           progress: 1.0,
-          state: 'Complete',
+          state: 'Aligned',
         };
 
       case 'noble_getValidatorList':
@@ -1645,7 +1650,7 @@ export class MockRpcClient {
             { name: 'bans',             estimated_bytes: 1_024,      estimated_keys: 2 },
             { name: 'peer_memory',      estimated_bytes: 48_000,     estimated_keys: 23 },
             { name: 'version_chain',    estimated_bytes: 680_000,    estimated_keys: 1540 },
-            { name: 'publisher_index',  estimated_bytes: 374_592,    estimated_keys: 198 },
+            { name: 'issuer_index',  estimated_bytes: 374_592,    estimated_keys: 198 },
           ],
         };
 
@@ -1987,11 +1992,11 @@ export class MockRpcClient {
         timestamp: tx.timestamp,
       });
 
-      // Update publisher index (notarization txs only)
+      // Update issuer index (notarization txs only)
       if (tx.tx_type === 0) {
-        const signerHex = bytesToHexLocal(tx.publisher_sig.public_key);
-        if (!this.#chain.publisherIndex.has(signerHex)) this.#chain.publisherIndex.set(signerHex, []);
-        this.#chain.publisherIndex.get(signerHex).push({
+        const signerHex = bytesToHexLocal(tx.issuer_sig.public_key);
+        if (!this.#chain.issuerIndex.has(signerHex)) this.#chain.issuerIndex.set(signerHex, []);
+        this.#chain.issuerIndex.get(signerHex).push({
           tx_id: txId,
           checksum: tx.checksum,
           block_height: h,

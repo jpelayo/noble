@@ -9,7 +9,7 @@ public struct VersionEntry: Codable, Equatable, Sendable, Identifiable {
     public let checksum: Hash256
     public let previousChecksum: Hash256?
     public let txId: Hash256
-    public let publisher: NobleAddress
+    public let issuer: NobleAddress
     public let blockHeight: UInt64
     public let timestamp: Date
 
@@ -17,14 +17,14 @@ public struct VersionEntry: Codable, Equatable, Sendable, Identifiable {
         checksum: Hash256,
         previousChecksum: Hash256?,
         txId: Hash256,
-        publisher: NobleAddress,
+        issuer: NobleAddress,
         blockHeight: UInt64,
         timestamp: Date
     ) {
         self.checksum = checksum
         self.previousChecksum = previousChecksum
         self.txId = txId
-        self.publisher = publisher
+        self.issuer = issuer
         self.blockHeight = blockHeight
         self.timestamp = timestamp
     }

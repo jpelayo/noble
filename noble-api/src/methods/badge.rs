@@ -351,7 +351,7 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
         outputs: vec![],
         checksum: Hash256::ZERO,
         timestamp: now,
-        publisher_sig: noble_crypto::SignatureEnvelope {
+        issuer_sig: noble_crypto::SignatureEnvelope {
             scheme_id: pk.scheme_id(),
             public_key: pk.key_bytes().to_vec(),
             signature: Vec::new(),
@@ -374,7 +374,7 @@ fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
     drop(keystore);
 
     let mut signed_tx = tx;
-    signed_tx.publisher_sig = sig_envelope;
+    signed_tx.issuer_sig = sig_envelope;
 
     // Admit to mempool with storage-backed lookups.
     let tx_id = {

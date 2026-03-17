@@ -74,7 +74,7 @@ pub const TX_TYPE_LOCKED: u8 = 0x06;
 
 /// Transaction type: unlocking — references a locked tx (0x06) by tx_id and
 /// publishes the decryption password. The node decrypts the locked tx's fields
-/// and re-indexes them (checksum, version chain, publisher).
+/// and re-indexes them (checksum, version chain, issuer).
 pub const TX_TYPE_UNLOCKING: u8 = 0x07;
 
 /// Transaction type: coinbase (block reward + collected fees).
@@ -169,6 +169,12 @@ pub const META_KEY_PREV_CHECKSUM: &str = "doc:prev_checksum";
 
 /// Well-known metadata key: version ordinal (UTF-8 positive integer string).
 pub const META_KEY_VERSION: &str = "doc:version";
+
+/// Well-known metadata key: document author (person or organization).
+pub const META_KEY_AUTHOR: &str = "author";
+
+/// Well-known metadata key: document publisher (distributing organization).
+pub const META_KEY_PUBLISHER: &str = "publisher";
 
 /// S34: Block height at which `source_address` becomes mandatory for secp256k1
 /// transfer senders. Below this height, legacy implicit fallback is allowed.

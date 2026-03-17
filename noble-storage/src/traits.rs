@@ -186,12 +186,18 @@ pub trait StorageEngine {
         self.lookup_checksum(checksum).map(|v| !v.is_empty())
     }
 
-    // ── Publisher Index ──
+    // ── Issuer Index ──
 
     /// Look up all tx_ids published (notarizations) by a given public key.
     /// `pubkey_wire` is the wire-format key bytes ([scheme_id || raw_key]).
-    /// Returns empty vec if no documents exist for this publisher.
-    fn lookup_by_publisher(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError>;
+    /// Returns empty vec if no documents exist for this issuer.
+    fn lookup_by_issuer(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError>;
+
+    // ── Metadata Index ──
+
+    /// Look up all tx_ids where a metadata key has the given value.
+    /// Used by "Search by Author" to find documents with `author=X` or `publisher=X`.
+    fn lookup_by_metadata(&self, key: &str, value: &[u8]) -> Result<Vec<Hash256>, StorageError>;
 
     // ── Cycle History (H-002) ──
 

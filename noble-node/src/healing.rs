@@ -258,6 +258,10 @@ pub struct ForkEvalResult {
     pub min_fork_duration: u32,
 }
 
+// AlignmentState + AlignmentSnapshot live in noble-consensus::alignment
+// (shared between noble-node and noble-api).
+use noble_consensus::{AlignmentSnapshot, AlignmentState};
+
 // ---------------------------------------------------------------------------
 // HealingManager
 // ---------------------------------------------------------------------------
@@ -313,6 +317,9 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     fork_resolution_strategy: ForkResolutionStrategy,
     fork_resolution_delay_cycles: u32,
 
+    // ── Alignment state (shared with ApiState — single source of truth) ──
+    alignment: Arc<RwLock<AlignmentSnapshot>>,
+
     // ── IO channels (set after construction via set_io_channels) ──
     network_cmd: Option<mpsc::Sender<NetworkCommand>>,
     new_block_tx: Option<broadcast::Sender<serde_json::Value>>,
@@ -365,6 +372,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             fork_resolver,
             fork_resolution_strategy,
             fork_resolution_delay_cycles,
+            alignment: Arc::new(RwLock::new(AlignmentSnapshot::default())),
             network_cmd: None,
             new_block_tx: None,
             cycle_phase_tx: None,
@@ -481,6 +489,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     pub fn sync_target_height_shared(&self) -> &Arc<AtomicU64> { &self.sync_target_height_shared }
     pub fn sync_progress_current(&self) -> &Arc<AtomicU64> { &self.sync_progress_current }
     pub fn sync_progress_total(&self) -> &Arc<AtomicU64> { &self.sync_progress_total }
+    pub fn alignment(&self) -> &Arc<RwLock<AlignmentSnapshot>> { &self.alignment }
 
     /// Returns true if we are in the Fetching state and this height is in the manifest.
     pub fn is_sync_block(&self, height: u64) -> bool {
@@ -541,6 +550,157 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             if let Err(e) = sender.send(json) {
                 tracing::debug!(task = "healing", "new_block broadcast dropped (no subscribers): {e}");
             }
+        }
+    }
+
+    // ── Centralized alignment computation ──
+
+    /// Compute the canonical alignment state. Called once per tick, AFTER
+    /// `detect_forks()`. This is THE single source of truth — `getSyncStatus`
+    /// reads from the shared snapshot, and the GUI renders it without any
+    /// independent logic.
+    pub fn compute_alignment(&mut self) {
+        // 1. Read consensus state (lock 4 — dropped before storage).
+        let (height, local_hash, has_proposals) = {
+            let engine = self.consensus.read();
+            let (h, hash) = engine.chain_tip();
+            let proposals = !engine.candidate_tracker().is_empty();
+            (h, hash, proposals)
+        };
+
+        // 2. Read peer info (lock 7 — dropped before storage).
+        let local_chain_id = self.get_chain_id();
+        let local_tip_hex = hex::encode(local_hash.as_bytes());
+        let peers_snapshot: Vec<(Option<u64>, Option<String>)> = {
+            let info = self.peer_info.read();
+            info.values()
+                .filter(|e| {
+                    // Only same-chain peers.
+                    match e.chain_id {
+                        Some(cid) if local_chain_id != 0 && cid != local_chain_id => false,
+                        _ => true,
+                    }
+                })
+                .map(|e| (e.chain_tip_height, e.chain_tip_hash.clone()))
+                .collect()
+        };
+
+        // Total connected peers (for Isolated check).
+        let connected_peers = peers_snapshot.len();
+        // Peers with chain_tip data (for majority check — pre-announce peers excluded).
+        let peers_with_tip: usize = peers_snapshot.iter()
+            .filter(|(h, hash)| h.is_some() && hash.is_some())
+            .count();
+        let highest_known = peers_snapshot.iter()
+            .filter_map(|(h, _)| *h)
+            .max()
+            .unwrap_or(height)
+            .max(height);
+
+        // 3. Decision tree — early exits for non-majority-check states.
+        let state = if height == 0 && connected_peers == 0 {
+            AlignmentState::Isolated
+        } else if height == 0 && !has_proposals {
+            AlignmentState::Bootstrapping
+        } else if height == 0 {
+            AlignmentState::Creating
+        } else if connected_peers == 0 {
+            AlignmentState::Isolated
+        } else if highest_known.saturating_sub(height) > 10 {
+            AlignmentState::Syncing
+        } else if peers_with_tip == 0 {
+            // Connected peers but none have announced chain tips yet.
+            // No evidence of disagreement — assume aligned.
+            AlignmentState::Aligned
+        } else {
+            // 4. Healing fork override: if dwell timer running, force Diverged.
+            let dwell_counter = {
+                let resolver = self.fork_resolver.lock();
+                resolver.dwell_counter()
+            };
+            if dwell_counter > 0 {
+                AlignmentState::Diverged
+            } else {
+                // 5. Majority chain check. Need storage (lock 2) — safe because
+                //    consensus(4) and peer_info(7) are already dropped.
+                let mut agreeing: usize = 0;
+                {
+                    let storage = self.storage.read();
+                    for (peer_h, peer_hash) in &peers_snapshot {
+                        let (Some(ph), Some(phash)) = (peer_h, peer_hash) else { continue };
+                        if *phash == local_tip_hex {
+                            // Exact tip match — definitely agreeing.
+                            agreeing += 1;
+                        } else if *ph <= height {
+                            // Peer behind or at same height with different tip.
+                            // Check if their tip matches our chain at their height.
+                            match storage.get_block_hash_by_height(*ph) {
+                                Ok(our_hash) => {
+                                    if hex::encode(our_hash.as_bytes()) == *phash {
+                                        agreeing += 1; // Same chain, just behind.
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::trace!(task = "alignment", "storage miss at height {ph}: {e}");
+                                }
+                            }
+                        }
+                        // Peer ahead with unknown tip: can't verify, don't count.
+                    }
+                }
+
+                // agreeing + self vs peers-with-tip + self.
+                // Peers without chain_tip (pre-announce) are excluded from both sides.
+                let local_side = agreeing + 1;
+                let total = peers_with_tip + 1;
+                if local_side * 2 > total {
+                    AlignmentState::Aligned
+                } else {
+                    AlignmentState::Diverged
+                }
+            }
+        };
+
+        // 6. Read dwell for cycles_remaining (if Diverged from fork).
+        let cycles_remaining = if matches!(state, AlignmentState::Diverged) {
+            let resolver = self.fork_resolver.lock();
+            let dwell = resolver.dwell_counter();
+            if dwell > 0 {
+                Some(resolver.min_fork_duration().saturating_sub(dwell))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let progress = if highest_known == 0 { 0.0 } else { height as f64 / highest_known as f64 };
+
+        let snapshot = AlignmentSnapshot {
+            state,
+            height,
+            peer_count: connected_peers,
+            highest_known,
+            progress,
+            cycles_remaining,
+        };
+
+        // 7. Detect state transition and emit WS event.
+        let prev_state = self.alignment.read().state;
+        *self.alignment.write() = snapshot;
+
+        if state != prev_state {
+            self.broadcast_event(serde_json::json!({
+                "event": "alignment_changed",
+                "state": state.label(),
+                "severity": state.severity(),
+                "height": height,
+                "peer_count": connected_peers,
+                "highest_known": highest_known,
+                "progress": progress,
+                "cycles_remaining": cycles_remaining,
+                "previous_state": prev_state.label(),
+            }));
         }
     }
 
@@ -1517,9 +1677,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // Clear cycle history.
         self.clear_cycle_history_storage();
 
-        // Reset fork state.
+        // Reset fork and alignment state.
         self.fork_visible = false;
         self.fork_common_ancestor = None;
+        *self.alignment.write() = AlignmentSnapshot::default();
 
         // Clear stale chain state from peer_info (stale-cache-#3).
         self.clear_peer_chain_state();
@@ -1576,6 +1737,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.chain_vote_weight.store(0, Ordering::Relaxed);
         self.fork_visible = false;
         self.fork_common_ancestor = None;
+        *self.alignment.write() = AlignmentSnapshot::default();
 
         // 2b. Clear announce cache.
         self.announce_cache.lock().clear();

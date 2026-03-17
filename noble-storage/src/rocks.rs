@@ -36,7 +36,7 @@
 //! - `bans`: peer_id bytes → banned_until (u64 BE)
 //! - `peer_memory`: identity_key wire → CBOR-encoded PeerRecord
 //! - `version_chain`: prev_checksum (32B) → concatenated successor tx_ids (N×32B)
-//! - `publisher_index`: pubkey_wire → concatenated notarization tx_ids (N×32B)
+//! - `issuer_index`: pubkey_wire → concatenated notarization tx_ids (N×32B)
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -72,16 +72,18 @@ const CF_ADDRESS_HISTORY: &str = "address_history";
 const CF_BANS: &str = "bans";
 const CF_PEER_MEMORY: &str = "peer_memory";
 const CF_VERSION_CHAIN: &str = "version_chain";
-const CF_PUBLISHER_INDEX: &str = "publisher_index";
+const CF_ISSUER_INDEX: &str = "issuer_index";
 const CF_BADGE_STATE: &str = "badge_state";
 const CF_EVIDENCE: &str = "evidence";
+const CF_METADATA_INDEX: &str = "metadata_index";
 
 /// All column family names, for introspection (storage stats).
 const ALL_CF_NAMES: &[&str] = &[
     CF_BLOCKS, CF_BLOCK_HASHES, CF_TX_INDEX, CF_CHECKSUM_INDEX,
     CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_UTXO_SET, CF_ADDRESS_UTXOS,
     CF_UNDO_DATA, CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY,
-    CF_VERSION_CHAIN, CF_PUBLISHER_INDEX, CF_BADGE_STATE, CF_EVIDENCE,
+    CF_VERSION_CHAIN, CF_ISSUER_INDEX, CF_BADGE_STATE, CF_EVIDENCE,
+    CF_METADATA_INDEX,
 ];
 
 // --- Chain state keys ---
@@ -116,7 +118,7 @@ impl Default for RocksDbConfig {
 /// RocksDB-backed `StorageEngine` implementation.
 ///
 /// Uses 13 column families with bloom filters, Zstd compression on blocks,
-/// and merge operators on `checksum_index`, `version_chain`, and `publisher_index`
+/// and merge operators on `checksum_index`, `version_chain`, and `issuer_index`
 /// for append-only tx_id lists.
 pub struct RocksDbStorage {
     db: DB,
@@ -152,9 +154,10 @@ impl RocksDbStorage {
             Self::cf_bans(),
             Self::cf_peer_memory(),
             Self::cf_version_chain(config),
-            Self::cf_publisher_index(config),
+            Self::cf_issuer_index(config),
             Self::cf_badge_state(),
             Self::cf_evidence(),
+            Self::cf_metadata_index(),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cfs)
@@ -246,13 +249,13 @@ impl RocksDbStorage {
         ColumnFamilyDescriptor::new(CF_PEER_MEMORY, Options::default())
     }
 
-    fn cf_publisher_index(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
+    fn cf_issuer_index(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
         let mut opts = Options::default();
-        opts.set_merge_operator_associative("publisher_merge", checksum_merge_operator);
+        opts.set_merge_operator_associative("issuer_merge", checksum_merge_operator);
         let mut table_opts = rocksdb::BlockBasedOptions::default();
         table_opts.set_bloom_filter(config.bloom_filter_bits as f64, false);
         opts.set_block_based_table_factory(&table_opts);
-        ColumnFamilyDescriptor::new(CF_PUBLISHER_INDEX, opts)
+        ColumnFamilyDescriptor::new(CF_ISSUER_INDEX, opts)
     }
 
     fn cf_version_chain(config: &RocksDbConfig) -> ColumnFamilyDescriptor {
@@ -270,6 +273,12 @@ impl RocksDbStorage {
 
     fn cf_evidence() -> ColumnFamilyDescriptor {
         ColumnFamilyDescriptor::new(CF_EVIDENCE, Options::default())
+    }
+
+    fn cf_metadata_index() -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_merge_operator_associative("metadata_merge", checksum_merge_operator);
+        ColumnFamilyDescriptor::new(CF_METADATA_INDEX, opts)
     }
 
     // --- Helpers ---
@@ -531,7 +540,8 @@ impl StorageEngine for RocksDbStorage {
         // checksum_index CF: checksum → merge-append tx_id (notarizations only)
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
-        let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
+        let cf_issuer = self.cf(CF_ISSUER_INDEX)?;
+        let cf_meta = self.cf(CF_METADATA_INDEX)?;
         for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
             let handler = noble_core::tx_types::handler_for(tx.tx_type);
             if handler.map_or(false, |h| h.needs_notarization_indexing()) {
@@ -549,13 +559,22 @@ impl StorageEngine for RocksDbStorage {
                     }
                 }
 
-                // publisher_index CF: pubkey_wire → merge-append tx_id
-                let publisher_wire = tx
-                    .publisher_sig
+                // issuer_index CF: pubkey_wire → merge-append tx_id
+                let issuer_wire = tx
+                    .issuer_sig
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?
                     .to_wire_bytes();
-                batch.merge_cf(cf_publisher, &publisher_wire, tx_id.as_bytes());
+                batch.merge_cf(cf_issuer, &issuer_wire, tx_id.as_bytes());
+
+                // metadata_index CF: [key_len:u16 || key || value] → merge-append tx_id
+                for entry in &tx.metadata {
+                    let mut idx_key = Vec::with_capacity(2 + entry.key.len() + entry.value.len());
+                    idx_key.extend_from_slice(&(entry.key.len() as u16).to_be_bytes());
+                    idx_key.extend_from_slice(entry.key.as_bytes());
+                    idx_key.extend_from_slice(&entry.value);
+                    batch.merge_cf(cf_meta, &idx_key, tx_id.as_bytes());
+                }
             }
         }
 
@@ -1161,14 +1180,15 @@ impl StorageEngine for RocksDbStorage {
                 .map_err(|e| StorageError::Database(e.to_string()))?;
         }
 
-        // Clear and rebuild merge-append indexes (checksum, version_chain, publisher)
+        // Clear and rebuild merge-append indexes (checksum, version_chain, issuer, metadata)
         let mut clear_batch = WriteBatch::default();
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
-        let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
+        let cf_issuer = self.cf(CF_ISSUER_INDEX)?;
+        let cf_meta = self.cf(CF_METADATA_INDEX)?;
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
 
-        for cf in [cf_checksum, cf_version, cf_publisher, cf_history] {
+        for cf in [cf_checksum, cf_version, cf_issuer, cf_meta, cf_history] {
             let iter = self.db.iterator_cf(cf, IteratorMode::Start);
             for item in iter {
                 let (key, _) = item.map_err(|e| StorageError::Database(e.to_string()))?;
@@ -1186,10 +1206,11 @@ impl StorageEngine for RocksDbStorage {
             .write(clear_batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Replay checksum_index, version_chain, publisher_index, and history from 0..=target_height
+        // Replay checksum_index, version_chain, issuer_index, metadata_index, and history from 0..=target_height
         let cf_checksum = self.cf(CF_CHECKSUM_INDEX)?;
         let cf_version = self.cf(CF_VERSION_CHAIN)?;
-        let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
+        let cf_issuer = self.cf(CF_ISSUER_INDEX)?;
+        let cf_meta = self.cf(CF_METADATA_INDEX)?;
         let cf_history = self.cf(CF_ADDRESS_HISTORY)?;
 
         let mut replay_batch = WriteBatch::default();
@@ -1225,22 +1246,31 @@ impl StorageEngine for RocksDbStorage {
                         }
                     }
 
-                    let publisher_wire = tx
-                        .publisher_sig
+                    let issuer_wire = tx
+                        .issuer_sig
                         .to_noble_public_key()
                         .map_err(|e| StorageError::Codec(e.to_string()))?
                         .to_wire_bytes();
-                    replay_batch.merge_cf(cf_publisher, &publisher_wire, tx_id.as_bytes());
+                    replay_batch.merge_cf(cf_issuer, &issuer_wire, tx_id.as_bytes());
+
+                    // metadata_index replay
+                    for entry in &tx.metadata {
+                        let mut idx_key = Vec::with_capacity(2 + entry.key.len() + entry.value.len());
+                        idx_key.extend_from_slice(&(entry.key.len() as u16).to_be_bytes());
+                        idx_key.extend_from_slice(entry.key.as_bytes());
+                        idx_key.extend_from_slice(&entry.value);
+                        replay_batch.merge_cf(cf_meta, &idx_key, tx_id.as_bytes());
+                    }
                 }
 
                 // Rebuild address history
                 let mut history_addresses: Vec<Vec<u8>> = Vec::new();
                 if !tx.is_coinbase() {
                     // We don't have the spent UTXO addresses at replay time easily,
-                    // but we can get them from the publisher_sig for simple cases.
-                    // For a complete solution, use the publisher's key.
+                    // but we can get them from the issuer_sig for simple cases.
+                    // For a complete solution, use the issuer's key.
                     let sender_pk = tx
-                        .publisher_sig
+                        .issuer_sig
                         .to_noble_public_key()
                         .map_err(|e| StorageError::Codec(e.to_string()))?;
                     let sender_wire = NobleAddress::Noble(sender_pk).to_wire_bytes();
@@ -1331,7 +1361,7 @@ impl StorageEngine for RocksDbStorage {
             .write(batch)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
-        // Clear UTXO set, address UTXOs, undo data, history, checksum, version_chain, publisher_index
+        // Clear UTXO set, address UTXOs, undo data, history, checksum, version_chain, issuer_index
         let mut clear_batch = WriteBatch::default();
         for cf_name in [
             CF_UTXO_SET,
@@ -1340,7 +1370,8 @@ impl StorageEngine for RocksDbStorage {
             CF_ADDRESS_HISTORY,
             CF_CHECKSUM_INDEX,
             CF_VERSION_CHAIN,
-            CF_PUBLISHER_INDEX,
+            CF_ISSUER_INDEX,
+            CF_METADATA_INDEX,
         ] {
             let cf = self.cf(cf_name)?;
             let iter = self.db.iterator_cf(cf, IteratorMode::Start);
@@ -1425,7 +1456,8 @@ impl StorageEngine for RocksDbStorage {
             CF_BANS,
             CF_PEER_MEMORY,
             CF_VERSION_CHAIN,
-            CF_PUBLISHER_INDEX,
+            CF_ISSUER_INDEX,
+            CF_METADATA_INDEX,
             CF_BADGE_STATE,
             CF_EVIDENCE,
         ];
@@ -1763,13 +1795,33 @@ impl StorageEngine for RocksDbStorage {
         }
     }
 
-    fn lookup_by_publisher(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError> {
+    fn lookup_by_issuer(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError> {
         self.check_open()?;
 
-        let cf_publisher = self.cf(CF_PUBLISHER_INDEX)?;
+        let cf_issuer = self.cf(CF_ISSUER_INDEX)?;
         let raw = self
             .db
-            .get_cf(cf_publisher, pubkey_wire)
+            .get_cf(cf_issuer, pubkey_wire)
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+
+        match raw {
+            None => Ok(vec![]),
+            Some(bytes) => parse_checksum_index_value(&bytes),
+        }
+    }
+
+    fn lookup_by_metadata(&self, key: &str, value: &[u8]) -> Result<Vec<Hash256>, StorageError> {
+        self.check_open()?;
+
+        let cf_meta = self.cf(CF_METADATA_INDEX)?;
+        let mut idx_key = Vec::with_capacity(2 + key.len() + value.len());
+        idx_key.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        idx_key.extend_from_slice(key.as_bytes());
+        idx_key.extend_from_slice(value);
+
+        let raw = self
+            .db
+            .get_cf(cf_meta, &idx_key)
             .map_err(|e| StorageError::Database(e.to_string()))?;
 
         match raw {
@@ -2043,7 +2095,7 @@ mod tests {
             outputs: vec![TxOut { value, address: address.clone() }],
             checksum: Hash256::ZERO,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2056,7 +2108,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2089,7 +2141,7 @@ mod tests {
             }],
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2102,7 +2154,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2133,7 +2185,7 @@ mod tests {
             outputs,
             checksum: Hash256::ZERO,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2146,7 +2198,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2660,7 +2712,7 @@ mod tests {
         assert!(names.contains(&"bans"));
         assert!(names.contains(&"peer_memory"));
         assert!(names.contains(&"version_chain"));
-        assert!(names.contains(&"publisher_index"));
+        assert!(names.contains(&"issuer_index"));
         assert!(names.contains(&"badge_state"));
         assert!(names.contains(&"evidence"));
     }

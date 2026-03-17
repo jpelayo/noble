@@ -203,6 +203,14 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
         removeTrap = _trapFocus(panel, close);
     }
 
+    function updateNav() {
+        const stepObj = steps[current];
+        const nextBtn = nav.querySelector('.btn-primary');
+        if (nextBtn && stepObj.canAdvance) {
+            nextBtn.disabled = !stepObj.canAdvance();
+        }
+    }
+
     function close() {
         if (removeTrap) { removeTrap(); removeTrap = null; }
         overlay.classList.remove('visible');
@@ -216,7 +224,7 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
         }
     }
 
-    return { el: bodyEl, close, renderStep: () => renderStep() };
+    return { el: bodyEl, close, renderStep: () => renderStep(), updateNav: () => updateNav() };
 }
 
 /** Close any active modal (top of stack). */

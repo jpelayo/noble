@@ -58,7 +58,7 @@ impl OutPoint {
 
 /// A transaction input: reference to a UTXO being spent.
 ///
-/// Unlike Bitcoin, NOBLE uses a single transaction-level signature (`publisher_sig`)
+/// Unlike Bitcoin, NOBLE uses a single transaction-level signature (`issuer_sig`)
 /// rather than per-input scriptSig/witness data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxIn {

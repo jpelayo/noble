@@ -1333,8 +1333,8 @@ impl CycleEngine {
                         None
                     };
 
-                    let mut proposer_wire = vec![tx.publisher_sig.scheme_id];
-                    proposer_wire.extend_from_slice(&tx.publisher_sig.public_key);
+                    let mut proposer_wire = vec![tx.issuer_sig.scheme_id];
+                    proposer_wire.extend_from_slice(&tx.issuer_sig.public_key);
                     let proposal = badge::BadgeProposal::new(
                         proposal_type,
                         target_entry.value.clone(),
@@ -1370,8 +1370,8 @@ impl CycleEngine {
 
                     let proposal_hash = hex::encode(&phash_entry.value);
                     let approve = vote_entry.value.first() == Some(&1);
-                    let mut voter_wire = vec![tx.publisher_sig.scheme_id];
-                    voter_wire.extend_from_slice(&tx.publisher_sig.public_key);
+                    let mut voter_wire = vec![tx.issuer_sig.scheme_id];
+                    voter_wire.extend_from_slice(&tx.issuer_sig.public_key);
 
                     // Voter must hold an active badge.
                     if !self.badge_store.is_active(&voter_wire) {
@@ -2288,7 +2288,7 @@ mod tests {
             outputs: vec![TxOut { value: subsidy, address: validator_addr }],
             checksum: Hash256::ZERO,
             timestamp: now,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: val_pub.scheme_id(),
                 public_key: val_pub.key_bytes().to_vec(),
                 signature: vec![],
@@ -2305,7 +2305,7 @@ mod tests {
         let cb_msg = coinbase_tx.compute_signing_message_for_chain(chain_id).unwrap();
         let cb_sig = val_priv.sign(&cb_msg).unwrap();
         let mut coinbase_signed = coinbase_tx;
-        coinbase_signed.publisher_sig = cb_sig;
+        coinbase_signed.issuer_sig = cb_sig;
 
         let tx_id = coinbase_signed.compute_tx_id(chain_id).unwrap();
         let merkle_root = noble_core::compute_merkle_root(&[tx_id]);

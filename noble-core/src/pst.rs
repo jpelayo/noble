@@ -87,7 +87,7 @@ impl From<noble_codec::CodecError> for PstError {
 /// The role a signer plays in a partially signed transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignerRole {
-    /// The transaction's main signer (must match `Transaction.publisher_sig`).
+    /// The transaction's main signer (must match `Transaction.issuer_sig`).
     Primary,
     /// An additional co-signer (appended to `additional_sigs`).
     Additional,
@@ -136,7 +136,7 @@ pub struct PartiallySignedTransaction {
 impl PartiallySignedTransaction {
     /// Create a new PST from an unsigned transaction.
     ///
-    /// The transaction's existing `publisher_sig` is preserved as-is (typically
+    /// The transaction's existing `issuer_sig` is preserved as-is (typically
     /// a placeholder with an empty signature). The caller should add signers
     /// with [`add_signer`](Self::add_signer) before distributing the PST.
     pub fn new(tx: Transaction, description: Option<String>) -> Self {
@@ -222,8 +222,8 @@ impl PartiallySignedTransaction {
             .find(|e| e.role == SignerRole::Primary)
             .ok_or(PstError::NoPrimarySigner)?;
 
-        // Set the publisher signature from the primary signer.
-        tx.publisher_sig = primary_entry
+        // Set the issuer signature from the primary signer.
+        tx.issuer_sig = primary_entry
             .signature
             .clone()
             .expect("is_complete guarantees Some");
@@ -290,7 +290,7 @@ mod tests {
             outputs: vec![],
             checksum: Hash256::from_bytes([0xAB; 32]),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pub_key.key_bytes().to_vec(),
                 signature: vec![], // placeholder — unsigned
@@ -375,9 +375,9 @@ mod tests {
 
         let finalized = pst.finalize().unwrap();
 
-        // The publisher_sig should come from the primary signer.
-        assert_eq!(finalized.publisher_sig.public_key, pk.key_bytes().to_vec());
-        assert!(!finalized.publisher_sig.signature.is_empty());
+        // The issuer_sig should come from the primary signer.
+        assert_eq!(finalized.issuer_sig.public_key, pk.key_bytes().to_vec());
+        assert!(!finalized.issuer_sig.signature.is_empty());
 
         // The additional_sigs should contain the second signer.
         assert_eq!(finalized.additional_sigs.len(), 1);
@@ -388,7 +388,7 @@ mod tests {
 
         // Verify the primary signature is valid.
         let msg = finalized.compute_signing_message_for_chain(TEST_CHAIN_ID).unwrap();
-        pk.verify(&msg, &finalized.publisher_sig).unwrap();
+        pk.verify(&msg, &finalized.issuer_sig).unwrap();
     }
 
     #[test]

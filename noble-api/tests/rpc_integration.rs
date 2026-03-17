@@ -682,7 +682,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         outputs: vec![TxOut { value: subsidy, address: addr }],
         checksum: noble_crypto::Hash256::ZERO,
         timestamp: 1_700_000_001,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.to_vec(),
             signature: vec![],
@@ -695,7 +695,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         contract_data: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx.publisher_sig = priv_key.sign(&msg).unwrap();
+    tx.issuer_sig = priv_key.sign(&msg).unwrap();
     let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
     // Get genesis hash for prev_block_hash

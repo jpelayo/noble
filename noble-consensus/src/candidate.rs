@@ -190,7 +190,7 @@ impl CandidateTracker {
     ///
     /// These transactions should be re-admitted to the mempool.
     /// Uses tx_id for dedup — two different transactions can share a checksum
-    /// (same document, different publishers), so checksum is not sufficient.
+    /// (same document, different issuers), so checksum is not sufficient.
     pub fn collect_orphaned_txs(&self, winner_hash: &Hash256, chain_id: u32) -> Vec<Transaction> {
         // Collect tx_ids from winner block as a dedup set
         let winner_tx_ids: HashSet<[u8; 32]> = self

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_consensus::ConsensusStateMachine;
 use noble_network::NetworkCommand;
 use noble_storage::StorageEngine;
 
@@ -315,44 +314,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
     }
 
     async fn get_sync_status(&self) -> Result<SyncStatusResponse, ErrorObjectOwned> {
-        let consensus = self.consensus.read();
-        let (height, _hash) = consensus.chain_tip();
-        drop(consensus); // Release lock before acquiring peer_info (lock order).
-
-        // Compute highest_known from connected peers' chain tips.
-        let (highest_known, has_peers) = {
-            let info = self.peer_info.read();
-            let max_peer_height = info.values()
-                .filter_map(|entry| entry.chain_tip_height)
-                .max();
-            let h = max_peer_height.unwrap_or(height).max(height);
-            (h, !info.is_empty())
-        };
-
-        let progress = if highest_known == 0 {
-            0.0
-        } else {
-            height as f64 / highest_known as f64
-        };
-        let synced = height >= highest_known && height > 0;
-        let state = if !has_peers && height == 0 {
-            "Isolated"
-        } else if height == 0 {
-            "Bootstrapping"
-        } else if !has_peers {
-            "Isolated"
-        } else if synced {
-            "Aligned"
-        } else {
-            "Syncing"
-        };
-
+        // Single source of truth: read from the shared AlignmentSnapshot
+        // computed by HealingManager::compute_alignment() per tick.
+        let snap = self.alignment.read().clone();
         Ok(SyncStatusResponse {
-            synced,
-            current_height: height,
-            highest_known,
-            progress,
-            state: state.to_string(),
+            synced: matches!(snap.state, noble_consensus::AlignmentState::Aligned),
+            current_height: snap.height,
+            highest_known: snap.highest_known,
+            progress: snap.progress,
+            state: snap.state.label().to_string(),
         })
     }
 

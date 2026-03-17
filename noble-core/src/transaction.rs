@@ -47,8 +47,8 @@ pub struct Transaction {
     pub checksum: Hash256,
     /// Unix timestamp (seconds).
     pub timestamp: u64,
-    /// Publisher's signature over the signing payload.
-    pub publisher_sig: SignatureEnvelope,
+    /// Issuer's signature over the signing payload.
+    pub issuer_sig: SignatureEnvelope,
     /// Additional co-signer signatures (accreditation bodies, labs, etc.).
     pub additional_sigs: Vec<SignatureEnvelope>,
     /// Key-value metadata entries.
@@ -90,7 +90,7 @@ impl Transaction {
     ///
     /// Uses the frozen wire format for the signing payload. The payload commits
     /// to input outpoints, outputs, checksum, timestamp, metadata, and chain_id.
-    /// Excludes publisher_sig and additional_sigs.
+    /// Excludes issuer_sig and additional_sigs.
     pub fn compute_signing_message_for_chain(
         &self,
         chain_id: u32,
@@ -158,7 +158,7 @@ mod tests {
             }],
             checksum: Hash256::from_bytes([0xAB; 32]),
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.key_bytes().to_vec(),
                 signature: vec![],
@@ -176,7 +176,7 @@ mod tests {
 
         let msg = tx.compute_signing_message_for_chain(0x4E4F424C).unwrap();
         let envelope = priv_key.sign(&msg).unwrap();
-        tx.publisher_sig = envelope;
+        tx.issuer_sig = envelope;
         tx
     }
 
@@ -328,7 +328,7 @@ mod tests {
             outputs: vec![TxOut { value: 100_000_000, address: addr.clone() }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],
@@ -359,7 +359,7 @@ mod tests {
             ],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],

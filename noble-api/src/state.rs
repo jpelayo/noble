@@ -325,6 +325,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Overall sync target height (shared with HealingManager for real-time reads).
     pub sync_progress_total: Arc<std::sync::atomic::AtomicU64>,
 
+    /// Centralized alignment state. Written by HealingManager per tick, read by RPC.
+    pub alignment: Arc<parking_lot::RwLock<noble_consensus::AlignmentSnapshot>>,
+
     /// Cached faucet discovery results. Updated by the node on cycle boundaries.
     pub faucet_cache: crate::types::FaucetCache,
 

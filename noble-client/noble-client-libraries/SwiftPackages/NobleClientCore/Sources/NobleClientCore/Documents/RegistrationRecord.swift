@@ -8,7 +8,7 @@ public struct RegistrationRecord: Codable, Equatable, Sendable, Identifiable {
     public var id: String { txId.hex }
     public let txId: Hash256
     public let checksum: Hash256
-    public let publisher: NobleAddress
+    public let issuer: NobleAddress
     public let blockHeight: UInt64
     public let timestamp: Date
     public let metadata: [MetadataItem]
@@ -17,7 +17,7 @@ public struct RegistrationRecord: Codable, Equatable, Sendable, Identifiable {
     public init(
         txId: Hash256,
         checksum: Hash256,
-        publisher: NobleAddress,
+        issuer: NobleAddress,
         blockHeight: UInt64,
         timestamp: Date,
         metadata: [MetadataItem] = [],
@@ -25,7 +25,7 @@ public struct RegistrationRecord: Codable, Equatable, Sendable, Identifiable {
     ) {
         self.txId = txId
         self.checksum = checksum
-        self.publisher = publisher
+        self.issuer = issuer
         self.blockHeight = blockHeight
         self.timestamp = timestamp
         self.metadata = metadata

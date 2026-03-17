@@ -128,7 +128,7 @@ mod tests {
         // Verify the attestation is included in the signing payload
         // (changing it would invalidate the signature)
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(tx.publisher_sig.verify_standalone(&msg).is_ok());
+        assert!(tx.issuer_sig.verify_standalone(&msg).is_ok());
     }
 
     #[test]

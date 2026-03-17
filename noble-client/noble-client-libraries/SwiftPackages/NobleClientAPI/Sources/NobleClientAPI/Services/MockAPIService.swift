@@ -197,7 +197,7 @@ public struct MockAPIService: NobleAPIService {
         let record = RegistrationRecord(
             txId: txId,
             checksum: cs,
-            publisher: Self.sampleSender,
+            issuer: Self.sampleSender,
             blockHeight: 1_200,
             timestamp: Date(timeIntervalSinceNow: -3600),
             metadata: [MetadataItem(key: "filename", value: "contract.pdf")],
@@ -219,7 +219,7 @@ public struct MockAPIService: NobleAPIService {
             RegistrationRecord(
                 txId: txId,
                 checksum: cs,
-                publisher: Self.sampleSender,
+                issuer: Self.sampleSender,
                 blockHeight: 1_200,
                 timestamp: Date(timeIntervalSinceNow: -3600),
                 metadata: [MetadataItem(key: "filename", value: "contract.pdf")],
@@ -237,7 +237,7 @@ public struct MockAPIService: NobleAPIService {
                 checksum: cs,
                 previousChecksum: nil,
                 txId: txId,
-                publisher: Self.sampleSender,
+                issuer: Self.sampleSender,
                 blockHeight: 1_200,
                 timestamp: Date(timeIntervalSinceNow: -3600)
             ),

@@ -638,8 +638,11 @@ input, textarea, select, button {
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: var(--font-size-sm);
+  font-size: 1rem;
   font-family: var(--font-mono);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .form-input:focus {

@@ -8,13 +8,13 @@ use crate::constants::TX_TYPE_UNLOCKING;
 ///
 /// References a locked transaction (0x06) by tx_id and publishes the
 /// decryption password. On commit, the node decrypts the locked tx's
-/// encrypted fields and re-indexes them (checksum, version chain, publisher).
+/// encrypted fields and re-indexes them (checksum, version chain, issuer).
 ///
 /// Required metadata keys:
 /// - `unlock:txid` — hex tx_id of the locked transaction (64 chars)
 /// - `unlock:password` — the decryption password (raw UTF-8 bytes, NOT hex-encoded)
 ///
-/// The publisher must be the same signer as the locked transaction.
+/// The issuer must be the same signer as the locked transaction.
 pub struct Unlocking;
 
 impl TxTypeHandler for Unlocking {

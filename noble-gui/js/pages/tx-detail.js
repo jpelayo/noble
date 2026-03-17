@@ -188,33 +188,33 @@ export function init(root, ctx) {
       root.appendChild(outputPanel);
     }
 
-    // Publisher signature / signer
+    // Issuer signature / signer
     const sigPanel = document.createElement('div');
     sigPanel.className = 'panel';
     if (tx.signer) {
       // UTXO-model RPC returns a flat `signer` hex string
       sigPanel.innerHTML = `
-        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-header">Issuer Signature</div>
         <div class="panel-body">
           <dl class="detail-grid">
-            <dt>Signer</dt><dd>${tx.signer_name ? `<strong>${tx.signer_name}</strong> ` : ''}<span class="mono"><a href="#/verify?tab=publisher&publisher=${tx.signer}" title="View all documents by this publisher">${tx.signer}</a></span></dd>
+            <dt>Signer</dt><dd>${tx.signer_name ? `<strong>${tx.signer_name}</strong> ` : ''}<span class="mono"><a href="#/verify?tab=issuer&issuer=${tx.signer}" title="View all documents by this issuer">${tx.signer}</a></span></dd>
           </dl>
         </div>
       `;
-    } else if (tx.publisher_sig) {
+    } else if (tx.issuer_sig) {
       sigPanel.innerHTML = `
-        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-header">Issuer Signature</div>
         <div class="panel-body">
           <dl class="detail-grid">
-            <dt>Scheme</dt><dd>${formatScheme(tx.publisher_sig.scheme_id)}</dd>
-            <dt>Public Key</dt><dd class="mono"><a href="#/verify?tab=publisher&publisher=${bytesToHex(tx.publisher_sig.public_key)}" title="View all documents by this publisher">${bytesToHex(tx.publisher_sig.public_key)}</a></dd>
-            <dt>Signature</dt><dd class="mono">${bytesToHex(tx.publisher_sig.signature)}</dd>
+            <dt>Scheme</dt><dd>${formatScheme(tx.issuer_sig.scheme_id)}</dd>
+            <dt>Public Key</dt><dd class="mono"><a href="#/verify?tab=issuer&issuer=${bytesToHex(tx.issuer_sig.public_key)}" title="View all documents by this issuer">${bytesToHex(tx.issuer_sig.public_key)}</a></dd>
+            <dt>Signature</dt><dd class="mono">${bytesToHex(tx.issuer_sig.signature)}</dd>
           </dl>
         </div>
       `;
     } else {
       sigPanel.innerHTML = `
-        <div class="panel-header">Publisher Signature</div>
+        <div class="panel-header">Issuer Signature</div>
         <div class="panel-body"><em>Not available</em></div>
       `;
     }

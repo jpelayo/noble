@@ -129,7 +129,7 @@ impl TransactionBuilder {
             outputs,
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
                 signature: vec![],
@@ -145,7 +145,7 @@ impl TransactionBuilder {
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
-        tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tx.issuer_sig = keystore.sign(signer, &msg)?;
         tracing::trace!(task = "wallet_build", "notarization built, fee: {}", fee);
         Ok(tx)
     }
@@ -210,7 +210,7 @@ impl TransactionBuilder {
             outputs,
             checksum: Hash256::ZERO,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
                 signature: vec![],
@@ -226,7 +226,7 @@ impl TransactionBuilder {
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
-        tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tx.issuer_sig = keystore.sign(signer, &msg)?;
         tracing::trace!(task = "wallet_build", "transfer built, fee: {}", fee);
         Ok(tx)
     }
@@ -312,7 +312,7 @@ impl TransactionBuilder {
             outputs,
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: signer.scheme_id(),
                 public_key: signer.key_bytes().to_vec(),
                 signature: vec![],
@@ -328,7 +328,7 @@ impl TransactionBuilder {
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
-        tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tx.issuer_sig = keystore.sign(signer, &msg)?;
         Ok(tx)
     }
 
@@ -379,7 +379,7 @@ impl TransactionBuilder {
         let msg = tx
             .compute_signing_message_for_chain(chain_id)
             .map_err(|e| WalletError::Crypto(e.to_string()))?;
-        tx.publisher_sig = keystore.sign(signer, &msg)?;
+        tx.issuer_sig = keystore.sign(signer, &msg)?;
         Ok(())
     }
 
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(tx.outputs[0].value, 100_000 - MIN_TX_FEE);
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(pk.verify(&msg, &tx.publisher_sig).is_ok());
+        assert!(pk.verify(&msg, &tx.issuer_sig).is_ok());
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(tx.checksum, Hash256::ZERO);
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        assert!(sender_pk.verify(&msg, &tx.publisher_sig).is_ok());
+        assert!(sender_pk.verify(&msg, &tx.issuer_sig).is_ok());
     }
 
     #[test]
@@ -525,6 +525,6 @@ mod tests {
 
         let msg_after = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert_ne!(msg_before, msg_after);
-        assert!(pk.verify(&msg_after, &tx.publisher_sig).is_ok());
+        assert!(pk.verify(&msg_after, &tx.issuer_sig).is_ok());
     }
 }

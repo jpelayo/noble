@@ -244,8 +244,8 @@ impl Mempool {
         let addr_wire = addr.to_wire_bytes();
         self.by_id.values()
             .filter(|entry| {
-                // Check if the publisher (sender) matches the queried address
-                entry.tx.publisher_sig.to_noble_public_key()
+                // Check if the issuer (sender) matches the queried address
+                entry.tx.issuer_sig.to_noble_public_key()
                     .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == addr_wire)
                     .unwrap_or(false)
             })
@@ -310,7 +310,7 @@ impl Mempool {
 
         // Step 2.5: Per-sender rate limit
         tracing::trace!("mempool step 2.5: per-sender rate limit");
-        if let Ok(sender) = tx.publisher_sig.to_noble_public_key() {
+        if let Ok(sender) = tx.issuer_sig.to_noble_public_key() {
             let sender_wire = sender.to_wire_bytes();
             let count = self
                 .by_sender
@@ -485,7 +485,7 @@ impl Mempool {
         }
 
         // Remove from sender index
-        if let Ok(sender) = entry.tx.publisher_sig.to_noble_public_key() {
+        if let Ok(sender) = entry.tx.issuer_sig.to_noble_public_key() {
             let sender_wire = sender.to_wire_bytes();
             if let Some(set) = self.by_sender.get_mut(&sender_wire) {
                 set.remove(tx_id);
@@ -533,11 +533,11 @@ impl Mempool {
     // --- Internal helpers ---
 
     fn validate_structure(&self, tx: &Transaction) -> Result<(), MempoolError> {
-        // T5: Publisher scheme recognized
-        if !is_recognized_scheme(tx.publisher_sig.scheme_id) {
+        // T5: Issuer scheme recognized
+        if !is_recognized_scheme(tx.issuer_sig.scheme_id) {
             return Err(MempoolError::StructuralValidation(format!(
-                "unrecognized publisher scheme {:#04x}",
-                tx.publisher_sig.scheme_id
+                "unrecognized issuer scheme {:#04x}",
+                tx.issuer_sig.scheme_id
             )));
         }
 
@@ -564,10 +564,10 @@ impl Mempool {
             .compute_signing_message_for_chain(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
             .map_err(|e| MempoolError::Internal(e.to_string()))?;
 
-        // T6: Publisher signature
-        tx.publisher_sig
+        // T6: Issuer signature
+        tx.issuer_sig
             .verify_standalone(&signing_msg)
-            .map_err(|e| MempoolError::SignatureInvalid(format!("publisher: {e}")))?;
+            .map_err(|e| MempoolError::SignatureInvalid(format!("issuer: {e}")))?;
 
         // T7: Additional signatures
         for (i, sig) in tx.additional_sigs.iter().enumerate() {
@@ -601,7 +601,7 @@ impl Mempool {
         let size = entry.size_bytes;
 
         // Populate sender index
-        if let Ok(sender) = entry.tx.publisher_sig.to_noble_public_key() {
+        if let Ok(sender) = entry.tx.issuer_sig.to_noble_public_key() {
             let sender_wire = sender.to_wire_bytes();
             self.by_sender.entry(sender_wire).or_default().insert(tx_id);
         }
@@ -706,7 +706,7 @@ mod tests {
             outputs: vec![TxOut { value: change, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -719,7 +719,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         tx
     }
 
@@ -833,7 +833,7 @@ mod tests {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
-        tx.publisher_sig.scheme_id = 0xFF;
+        tx.issuer_sig.scheme_id = 0xFF;
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
@@ -854,7 +854,7 @@ mod tests {
             outputs: vec![TxOut { value: 999_000, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -876,7 +876,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
@@ -885,11 +885,11 @@ mod tests {
     // --- Step 5+6: Signature verification ---
 
     #[test]
-    fn step6_reject_invalid_publisher_sig() {
+    fn step6_reject_invalid_issuer_sig() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = ed25519::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", MIN_TX_FEE);
-        tx.publisher_sig.signature = vec![0u8; 64]; // Corrupt signature
+        tx.issuer_sig.signature = vec![0u8; 64]; // Corrupt signature
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
@@ -931,7 +931,7 @@ mod tests {
             outputs: vec![TxOut { value: input_value, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -944,7 +944,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         // Custom UTXO lookup that returns the exact input value
         struct ExactUtxoLookup { outpoint: OutPoint, value: u64 }
@@ -1148,7 +1148,7 @@ mod tests {
             outputs,
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1161,7 +1161,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         tx
     }
 
@@ -1369,7 +1369,7 @@ mod tests {
             outputs: vec![TxOut { value: change, address: addr }],
             checksum,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1382,7 +1382,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         tx
     }
 
@@ -1456,7 +1456,7 @@ mod tests {
             outputs: vec![TxOut { value: 100_000_000, address: addr }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1469,7 +1469,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(

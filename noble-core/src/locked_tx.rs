@@ -235,7 +235,7 @@ mod tests {
             outputs: vec![],
             checksum: Hash256::ZERO,
             timestamp: 1000,
-            publisher_sig: SignatureEnvelope { scheme_id: 0x02, public_key: vec![0; 33], signature: vec![0; 64] },
+            issuer_sig: SignatureEnvelope { scheme_id: 0x02, public_key: vec![0; 33], signature: vec![0; 64] },
             additional_sigs: vec![],
             metadata: vec![
                 // Insert in non-alphabetical order to test sorting

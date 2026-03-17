@@ -236,13 +236,13 @@ public struct LiveNobleAPIService: NobleAPIService {
         return (dto.versions ?? []).compactMap { v in
             guard let cs = v.checksum.flatMap({ Hash256(hex: $0) }),
                   let txId = v.tx_id.flatMap({ Hash256(hex: $0) }) else { return nil }
-            // Publisher not available in version DTO — placeholder (API limitation)
-            let publisher = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
+            // Issuer not available in version DTO — placeholder (API limitation)
+            let issuer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
             return VersionEntry(
                 checksum: cs,
                 previousChecksum: nil,
                 txId: txId,
-                publisher: publisher,
+                issuer: issuer,
                 blockHeight: v.block_height ?? 0,
                 timestamp: v.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? .now
             )
@@ -301,12 +301,12 @@ public struct LiveNobleAPIService: NobleAPIService {
     private static func mapRegistration(dto: RegistrationRecordDTO, checksum: String) -> RegistrationRecord? {
         guard let txId = dto.tx_id.flatMap({ Hash256(hex: $0) }),
               let cs = Hash256(hex: checksum) else { return nil }
-        let publisher: NobleAddress
-        if let pubStr = dto.publisher, let parsed = NobleAddress(wireHex: pubStr) {
-            publisher = parsed
+        let issuer: NobleAddress
+        if let pubStr = dto.issuer, let parsed = NobleAddress(wireHex: pubStr) {
+            issuer = parsed
         } else {
-            print("[NobleAPI] Warning: could not parse publisher '\(dto.publisher ?? "nil")' — using placeholder")
-            publisher = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
+            print("[NobleAPI] Warning: could not parse issuer '\(dto.issuer ?? "nil")' — using placeholder")
+            issuer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
         }
         let metadata = (dto.metadata ?? []).map { MetadataItem(key: $0.key, value: $0.value) }
         let timestamp = dto.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? .now
@@ -314,7 +314,7 @@ public struct LiveNobleAPIService: NobleAPIService {
         return RegistrationRecord(
             txId: txId,
             checksum: cs,
-            publisher: publisher,
+            issuer: issuer,
             blockHeight: dto.block_height ?? 0,
             timestamp: timestamp,
             metadata: metadata,

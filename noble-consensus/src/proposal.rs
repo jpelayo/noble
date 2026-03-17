@@ -104,7 +104,7 @@ pub fn propose_block(
         outputs: coinbase_outputs,
         checksum: Hash256::ZERO,
         timestamp,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: validator_pubkey.scheme_id(),
             public_key: validator_pubkey.key_bytes().to_vec(),
             signature: vec![],
@@ -119,7 +119,7 @@ pub fn propose_block(
     let coinbase_msg = coinbase
         .compute_signing_message_for_chain(chain_id)
         .map_err(|e| format!("failed to compute coinbase signing message: {e}"))?;
-    coinbase.publisher_sig = validator_key
+    coinbase.issuer_sig = validator_key
         .sign(&coinbase_msg)
         .map_err(|e| format!("failed to sign coinbase: {e}"))?;
 
@@ -214,7 +214,7 @@ mod tests {
             outputs: vec![TxOut { value: 1_000_000, address: addr }],
             checksum,
             timestamp: now_secs(),
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk,
                 signature: vec![],
@@ -229,7 +229,7 @@ mod tests {
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         tx
     }
 

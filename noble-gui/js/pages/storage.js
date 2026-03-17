@@ -8,7 +8,7 @@ import { formatNumber, formatBytes } from '../utils.js';
 /** Color for a CF name — blocks/indexes/state/misc grouping. */
 function cfColor(name) {
   if (name === 'blocks') return '#10b981';
-  if (['block_hashes', 'tx_index', 'checksum_index', 'version_chain', 'publisher_index'].includes(name)) return '#3b82f6';
+  if (['block_hashes', 'tx_index', 'checksum_index', 'version_chain', 'issuer_index'].includes(name)) return '#3b82f6';
   if (['chain_state', 'validator_state', 'address_balances', 'address_history'].includes(name)) return '#8b5cf6';
   return '#6b7280';
 }

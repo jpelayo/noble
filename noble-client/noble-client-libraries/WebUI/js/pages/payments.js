@@ -299,29 +299,54 @@ export function init(root, ctx) {
             const input = document.createElement('input');
             input.className = 'form-input';
             input.type = 'text';
-            input.placeholder = 'Noble public key (hex)';
+            input.autocapitalize = 'none';
+            input.autocorrect = 'off';
+            input.spellcheck = false;
+            input.placeholder = 'nbl1... address';
             input.value = recipient;
 
             const feedback = document.createElement('div');
-            feedback.style.cssText = 'font-size:var(--font-size-xs); margin-top:var(--gap-xs)';
+            feedback.style.cssText = 'font-size:var(--font-size-xs); margin-top:var(--gap-xs); min-height:1.2em';
+
+            let debounceTimer = null;
+
+            async function validateRecipient() {
+                if (!recipient) {
+                    recipientValid = false;
+                    feedback.textContent = '';
+                    wizard.updateNav();
+                    return;
+                }
+                try {
+                    const r = await Bridge.call('noble_api', 'validateAddress', { address: recipient });
+                    // Guard: user may have changed input while we were awaiting
+                    if (input.value.trim() !== recipient) return;
+                    recipientValid = r.valid;
+                    feedback.textContent = r.valid ? '\u2713 Valid address' : '\u2717 Invalid address';
+                    feedback.style.color = r.valid ? 'var(--success)' : 'var(--error)';
+                    wizard.updateNav();
+                } catch {
+                    feedback.textContent = '\u2717 Validation failed';
+                    feedback.style.color = 'var(--error)';
+                    recipientValid = false;
+                    wizard.updateNav();
+                }
+            }
 
             input.addEventListener('input', () => {
                 recipient = input.value.trim();
                 recipientValid = false;
                 feedback.textContent = '';
-            });
-            input.addEventListener('blur', async () => {
-                if (!recipient) return;
-                try {
-                    const r = await Bridge.call('noble_api', 'validateAddress', { address: recipient });
-                    recipientValid = r.valid;
-                    feedback.textContent = r.valid ? '\u2713 Valid address' : '\u2717 Invalid address';
-                    feedback.style.color = r.valid ? 'var(--success)' : 'var(--error)';
-                    wizard.renderStep();
-                } catch {
-                    feedback.textContent = '\u2717 Validation failed';
-                    feedback.style.color = 'var(--error)';
+                wizard.updateNav();
+                clearTimeout(debounceTimer);
+                if (recipient.length >= 4) {
+                    debounceTimer = setTimeout(validateRecipient, 500);
                 }
+            });
+
+            input.addEventListener('blur', () => {
+                clearTimeout(debounceTimer);
+                validateRecipient();
             });
 
             group.appendChild(input);
@@ -338,12 +363,12 @@ export function init(root, ctx) {
                 input.value = addr;
                 feedback.textContent = '\u2713 From contacts';
                 feedback.style.color = 'var(--success)';
-                wizard.renderStep();
+                wizard.updateNav();
             }));
             el.appendChild(pickBtn);
 
             // Auto-validate if prefilled
-            if (recipient) input.dispatchEvent(new Event('blur'));
+            if (recipient) validateRecipient();
         }
 
         function renderAmountStep(el) {
@@ -360,7 +385,7 @@ export function init(root, ctx) {
             input.inputMode = 'decimal';
             input.placeholder = '0.000000';
             input.value = amount;
-            input.addEventListener('input', () => { amount = input.value.trim(); });
+            input.addEventListener('input', () => { amount = input.value.trim(); wizard.updateNav(); });
 
             const maxBtn = document.createElement('button');
             maxBtn.className = 'btn btn-sm amount-max-btn';

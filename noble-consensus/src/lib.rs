@@ -3,6 +3,7 @@
 
 //! Proof of Reputation cycle engine, vote management and fork tracking for the NOBLE protocol.
 
+pub mod alignment;
 pub mod badge;
 pub mod candidate;
 pub mod checkpoint;
@@ -45,3 +46,4 @@ pub use strategy::VotingStrategy;
 pub use registry::{ParticipantEntry, ParticipantSource, ValidatorRegistry, ValidatorSnapshot, SnapshotEntry};
 pub use validator::{KnownPeerEntry, PendingRotation, ValidatorList, ValidatorLiveness};
 pub use vote::{ConsensusStrength, MigrationResult, PorVote, VoteError, VoteManager};
+pub use alignment::{AlignmentSnapshot, AlignmentState};

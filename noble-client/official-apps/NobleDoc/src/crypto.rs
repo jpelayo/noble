@@ -479,7 +479,7 @@ fn build_transaction_cbor(
     cbor::write_map(&mut buf, field_count);
 
     // Alphabetical order: additional_sigs, checksum, gateway_address(?),
-    // inputs, metadata, outputs, publisher_sig, timestamp, tx_type, version
+    // inputs, metadata, outputs, issuer_sig, timestamp, tx_type, version
 
     cbor::write_text(&mut buf, "additional_sigs");
     cbor::write_array(&mut buf, 0);
@@ -524,8 +524,8 @@ fn build_transaction_cbor(
         cbor::write_uint(&mut buf, out.value);
     }
 
-    // publisher_sig as wire bytes: [scheme_id(1) || pubkey_len(1) || pubkey || sig]
-    cbor::write_text(&mut buf, "publisher_sig");
+    // issuer_sig as wire bytes: [scheme_id(1) || pubkey_len(1) || pubkey || sig]
+    cbor::write_text(&mut buf, "issuer_sig");
     let mut sig_wire = Vec::with_capacity(2 + public_key.len() + signature.len());
     sig_wire.push(NobleProtocol::SCHEME_SECP256K1);
     sig_wire.push(public_key.len() as u8);

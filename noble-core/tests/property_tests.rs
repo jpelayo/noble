@@ -58,12 +58,12 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
         arb_hash256(),                                          // checksum
         1_600_000_000u64..1_800_000_000u64,                     // timestamp
         arb_hash256(),                                          // input txid
-        arb_signature_envelope(),                               // publisher_sig
+        arb_signature_envelope(),                               // issuer_sig
         prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
         prop::collection::vec(arb_metadata_entry(), 0..=4),     // metadata
     )
         .prop_map(
-            |(checksum, timestamp, input_txid, publisher_sig, additional_sigs, metadata)| Transaction {
+            |(checksum, timestamp, input_txid, issuer_sig, additional_sigs, metadata)| Transaction {
                 version: 1,
                 tx_type: 0,
                 inputs: vec![TxIn {
@@ -72,7 +72,7 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 outputs: vec![],
                 checksum,
                 timestamp,
-                publisher_sig,
+                issuer_sig,
                 additional_sigs,
                 metadata,
                 encrypted_locator: None,
@@ -210,7 +210,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
         1_600_000_000u64..1_800_000_000u64, // timestamp
         1u64..1_000_000u64,                 // amount (> 0)
         arb_hash256(),                      // input txid
-        arb_signature_envelope(),           // publisher_sig
+        arb_signature_envelope(),           // issuer_sig
         prop::collection::vec(arb_signature_envelope(), 0..=3), // additional_sigs
         prop::collection::vec(arb_metadata_entry(), 0..=4), // metadata
         prop::collection::vec(any::<u8>(), 32..=32), // recipient key bytes
@@ -220,7 +220,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                 timestamp,
                 amount,
                 input_txid,
-                publisher_sig,
+                issuer_sig,
                 additional_sigs,
                 metadata,
                 recipient_bytes,
@@ -237,7 +237,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     }],
                     checksum: Hash256::ZERO,
                     timestamp,
-                    publisher_sig,
+                    issuer_sig,
                     additional_sigs,
                     metadata,
                     encrypted_locator: None,
@@ -294,7 +294,7 @@ fn signed_transaction_roundtrip_100() {
             outputs,
             checksum,
             timestamp: 1_700_000_000 + i,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.clone(),
                 signature: vec![],
@@ -308,7 +308,7 @@ fn signed_transaction_roundtrip_100() {
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         // Roundtrip through CBOR
         let bytes = tx.to_cbor().unwrap();
@@ -347,7 +347,7 @@ fn signing_message_includes_tx_type() {
         outputs: vec![],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],
@@ -360,7 +360,7 @@ fn signing_message_includes_tx_type() {
         contract_data: None,
     };
     let msg0 = tx0.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx0.publisher_sig = priv_key.sign(&msg0).unwrap();
+    tx0.issuer_sig = priv_key.sign(&msg0).unwrap();
 
     // Transfer tx (same timestamp but different type)
     let mut tx1 = Transaction {
@@ -373,7 +373,7 @@ fn signing_message_includes_tx_type() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],
@@ -386,7 +386,7 @@ fn signing_message_includes_tx_type() {
         contract_data: None,
     };
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    tx1.publisher_sig = priv_key.sign(&msg1).unwrap();
+    tx1.issuer_sig = priv_key.sign(&msg1).unwrap();
 
     assert_ne!(msg0, msg1, "signing message must differ between tx types");
 }
@@ -413,7 +413,7 @@ fn signing_message_includes_recipient() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],
@@ -436,7 +436,7 @@ fn signing_message_includes_recipient() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],
@@ -479,7 +479,7 @@ fn signing_message_includes_amount() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],
@@ -502,7 +502,7 @@ fn signing_message_includes_amount() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519,
             public_key: pk.clone(),
             signature: vec![],

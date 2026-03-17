@@ -20,7 +20,7 @@ struct RegistrationRecordDTO: Decodable, Sendable {
     let tx_id: String?
     let timestamp: UInt64?
     let version: String?
-    let publisher: String?
+    let issuer: String?
     let metadata: [MetadataDTO]?
     let fee: UInt64?
 }
@@ -57,10 +57,10 @@ struct DocumentVersionDTO: Decodable, Sendable {
     let timestamp: UInt64?
 }
 
-// MARK: - noble_getDocumentsByPublisher
+// MARK: - noble_getDocumentsByIssuer
 
-struct DocumentsByPublisherDTO: Decodable, Sendable {
-    let publisher: String?
+struct DocumentsByIssuerDTO: Decodable, Sendable {
+    let issuer: String?
     let documents: [RegistrationRecordDTO]?
     let count: Int?
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Document-related RPC methods: lookupChecksum, verifyDocument, getDocumentHistory,
-//! getDocumentVersions, getDocumentsByPublisher.
+//! getDocumentVersions, getDocumentsByIssuer.
 
 use std::sync::Arc;
 
@@ -49,12 +49,20 @@ pub trait DocumentApi {
         checksum: String,
     ) -> Result<DocumentVersionsResponse, ErrorObjectOwned>;
 
-    /// Find all documents registered by a specific publisher public key.
-    #[method(name = "getDocumentsByPublisher")]
-    async fn get_documents_by_publisher(
+    /// Find all documents registered by a specific issuer public key.
+    #[method(name = "getDocumentsByIssuer")]
+    async fn get_documents_by_issuer(
         &self,
         public_key: String,
-    ) -> Result<DocumentsByPublisherResponse, ErrorObjectOwned>;
+    ) -> Result<DocumentsByIssuerResponse, ErrorObjectOwned>;
+
+    /// Search documents by metadata key/value. Used for author/publisher search.
+    #[method(name = "searchDocumentsByMetadata")]
+    async fn search_documents_by_metadata(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<MetadataSearchResponse, ErrorObjectOwned>;
 }
 
 /// Build `RegistrationRecord`s from a list of tx_ids using storage lookups.
@@ -208,11 +216,11 @@ fn build_version_chain<S: StorageEngine>(
     Some(versions)
 }
 
-/// Parse a publisher public key from hex. Accepts:
+/// Parse an issuer public key from hex. Accepts:
 /// - 33 bytes (Ed25519 wire: 0x01 + 32B key)
 /// - 34 bytes (secp256k1 wire: 0x02 + 33B compressed key)
 /// - 32 bytes (raw Ed25519 key → prepend 0x01 scheme byte)
-fn parse_publisher_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
+fn parse_issuer_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
     let bytes =
         hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
     match bytes.len() {
@@ -230,7 +238,7 @@ fn parse_publisher_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
             Ok(wire)
         }
         _ => Err(ApiError::InvalidAddress(format!(
-            "publisher key must be 32, 33, or 34 bytes, got {}",
+            "issuer key must be 32, 33, or 34 bytes, got {}",
             bytes.len()
         ))
         .into()),
@@ -334,15 +342,15 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         })
     }
 
-    async fn get_documents_by_publisher(
+    async fn get_documents_by_issuer(
         &self,
         public_key: String,
-    ) -> Result<DocumentsByPublisherResponse, ErrorObjectOwned> {
+    ) -> Result<DocumentsByIssuerResponse, ErrorObjectOwned> {
         use noble_core::constants::META_KEY_VERSION;
 
-        let wire = parse_publisher_wire(&public_key)?;
+        let wire = parse_issuer_wire(&public_key)?;
         let storage = self.storage.read();
-        let tx_ids = storage.lookup_by_publisher(&wire).map_err(ApiError::from)?;
+        let tx_ids = storage.lookup_by_issuer(&wire).map_err(ApiError::from)?;
 
         let mut documents = Vec::with_capacity(tx_ids.len());
         for tx_id in &tx_ids {
@@ -357,7 +365,7 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
                     .find(|m| m.key == META_KEY_VERSION)
                     .and_then(|m| std::str::from_utf8(&m.value).ok())
                     .and_then(|s| s.parse::<u32>().ok());
-                documents.push(PublisherDocumentRecord {
+                documents.push(IssuerDocumentRecord {
                     tx_id: hash_to_hex(tx_id),
                     checksum: hash_to_hex(&tx.checksum),
                     block_height,
@@ -368,8 +376,62 @@ impl<S: StorageEngine + Send + Sync + 'static> DocumentApiServer for Arc<ApiStat
         }
 
         let count = documents.len();
-        Ok(DocumentsByPublisherResponse {
-            publisher: public_key,
+        Ok(DocumentsByIssuerResponse {
+            issuer: public_key,
+            documents,
+            count,
+        })
+    }
+
+    async fn search_documents_by_metadata(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<MetadataSearchResponse, ErrorObjectOwned> {
+        use noble_core::constants::META_KEY_VERSION;
+
+        if key.is_empty() || value.is_empty() {
+            return Err(ApiError::InvalidParam("key and value must be non-empty".into()).into());
+        }
+        if key.len() > 64 {
+            return Err(ApiError::InvalidParam("key too long (max 64 bytes)".into()).into());
+        }
+        if value.len() > 256 {
+            return Err(ApiError::InvalidParam("value too long (max 256 bytes)".into()).into());
+        }
+
+        let storage = self.storage.read();
+        let tx_ids = storage
+            .lookup_by_metadata(&key, value.as_bytes())
+            .map_err(ApiError::from)?;
+
+        let mut documents = Vec::with_capacity(tx_ids.len());
+        for tx_id in &tx_ids {
+            if let Ok(tx) = storage.get_transaction(tx_id) {
+                let block_height = storage
+                    .get_transaction_location(tx_id)
+                    .map(|(h, _)| h)
+                    .unwrap_or(0);
+                let version = tx
+                    .metadata
+                    .iter()
+                    .find(|m| m.key == META_KEY_VERSION)
+                    .and_then(|m| std::str::from_utf8(&m.value).ok())
+                    .and_then(|s| s.parse::<u32>().ok());
+                documents.push(IssuerDocumentRecord {
+                    tx_id: hash_to_hex(tx_id),
+                    checksum: hash_to_hex(&tx.checksum),
+                    block_height,
+                    timestamp: tx.timestamp,
+                    version,
+                });
+            }
+        }
+
+        let count = documents.len();
+        Ok(MetadataSearchResponse {
+            key,
+            value,
             documents,
             count,
         })

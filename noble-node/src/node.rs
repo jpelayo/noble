@@ -1729,6 +1729,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             sync_target_height: self.healing.sync_target_height_shared().clone(),
             sync_progress_current: self.healing.sync_progress_current().clone(),
             sync_progress_total: self.healing.sync_progress_total().clone(),
+            alignment: self.healing.alignment().clone(),
             faucet_cache: self.faucet_cache.clone(),
             faucet_address: parking_lot::RwLock::new(config.faucet.address.clone()),
             faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
@@ -2087,24 +2088,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     self.healing.advance_sync(now);
 
                     // ── Fork detection (clue ingestion only) ──
-                    {
-                        let result = self.healing.detect_forks();
-                        if !self.healing.sync_behind() {
-                            if result.dwell_after > 0 {
-                                let remaining = result.min_fork_duration.saturating_sub(result.dwell_after);
-                                let _ = cycle_phase_tx.send(serde_json::json!({
-                                    "event": "fork_alignment_pending",
-                                    "cycles_remaining": remaining,
-                                    "dwell_counter": result.dwell_after,
-                                    "tracked_height": result.tracked_height,
-                                }));
-                            } else if result.dwell_before > 0 {
-                                let _ = cycle_phase_tx.send(serde_json::json!({
-                                    "event": "fork_alignment_clear",
-                                }));
-                            }
-                        }
-                    }
+                    self.healing.detect_forks();
+
+                    // ── Centralized alignment state (single source of truth) ──
+                    // Emits `alignment_changed` WS event on state transitions.
+                    self.healing.compute_alignment();
 
                     // ── Cross-chain detection (clue ingestion only) ──
                     self.healing.detect_cross_chain();
@@ -5168,7 +5156,7 @@ mod tests {
             }],
             checksum: Hash256::ZERO,
             timestamp,
-            publisher_sig: noble_crypto::SignatureEnvelope {
+            issuer_sig: noble_crypto::SignatureEnvelope {
                 scheme_id: pub_key.scheme_id(),
                 public_key: pub_key.key_bytes().to_vec(),
                 signature: vec![],
@@ -5181,7 +5169,7 @@ mod tests {
         contract_data: None,
         };
         let cb_msg = coinbase.compute_signing_message_for_chain(chain_id).unwrap();
-        coinbase.publisher_sig = priv_key.sign(&cb_msg).unwrap();
+        coinbase.issuer_sig = priv_key.sign(&cb_msg).unwrap();
 
         let tx_id = coinbase.compute_tx_id(chain_id).unwrap();
         let merkle_root = compute_merkle_root(&[tx_id]);

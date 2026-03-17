@@ -70,7 +70,7 @@ pub trait TxTypeHandler: Send + Sync {
     fn is_coinbase(&self) -> bool { false }
 
     /// Whether this type needs notarization-specific storage indexing
-    /// (checksum index, version chain, publisher index).
+    /// (checksum index, version chain, issuer index).
     fn needs_notarization_indexing(&self) -> bool { false }
 
     /// Whether BIP-137 signing uses the transfer message format

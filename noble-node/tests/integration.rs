@@ -86,7 +86,7 @@ fn storage_only_indexes_notarization_checksums() {
             outputs: vec![TxOut { value: subsidy_h, address: val_addr.clone() }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000 + h,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
             },
             additional_sigs: vec![], metadata: vec![], encrypted_locator: None,
@@ -94,7 +94,7 @@ fn storage_only_indexes_notarization_checksums() {
         contract_data: None,
         };
         let msg = cb.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        cb.publisher_sig = priv_key.sign(&msg).unwrap();
+        cb.issuer_sig = priv_key.sign(&msg).unwrap();
         let cb_id = cb.compute_tx_id(test_chain_id()).unwrap();
         if h == 1 { first_coinbase_id = cb_id; }
 
@@ -132,7 +132,7 @@ fn storage_only_indexes_notarization_checksums() {
         outputs: vec![TxOut { value: subsidy - 2, address: val_addr.clone() }], // change
         checksum: doc_hash,
         timestamp: 1_700_000_008,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
@@ -143,7 +143,7 @@ fn storage_only_indexes_notarization_checksums() {
         contract_data: None,
     };
     let msg = notarization.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    notarization.publisher_sig = priv_key.sign(&msg).unwrap();
+    notarization.issuer_sig = priv_key.sign(&msg).unwrap();
     let notarization_id = notarization.compute_tx_id(test_chain_id()).unwrap();
 
     // Key rotation tx (zero checksum — should NOT be indexed)
@@ -161,7 +161,7 @@ fn storage_only_indexes_notarization_checksums() {
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_008,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
@@ -172,7 +172,7 @@ fn storage_only_indexes_notarization_checksums() {
         contract_data: None,
     };
     let msg = key_rotation.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    key_rotation.publisher_sig = priv_key.sign(&msg).unwrap();
+    key_rotation.issuer_sig = priv_key.sign(&msg).unwrap();
     let key_rotation_id = key_rotation.compute_tx_id(test_chain_id()).unwrap();
 
     // Block 2 with coinbase + notarization + key rotation
@@ -185,7 +185,7 @@ fn storage_only_indexes_notarization_checksums() {
         outputs: vec![TxOut { value: subsidy_2 + total_fees, address: val_addr }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_008,
-        publisher_sig: SignatureEnvelope {
+        issuer_sig: SignatureEnvelope {
             scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
@@ -196,7 +196,7 @@ fn storage_only_indexes_notarization_checksums() {
         contract_data: None,
     };
     let msg = coinbase2.compute_signing_message_for_chain(test_chain_id()).unwrap();
-    coinbase2.publisher_sig = priv_key.sign(&msg).unwrap();
+    coinbase2.issuer_sig = priv_key.sign(&msg).unwrap();
     let coinbase2_id = coinbase2.compute_tx_id(test_chain_id()).unwrap();
 
     let transactions = vec![coinbase2, notarization, key_rotation];

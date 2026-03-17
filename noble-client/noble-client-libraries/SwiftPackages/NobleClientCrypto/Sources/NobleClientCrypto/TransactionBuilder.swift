@@ -133,7 +133,7 @@ public struct TransactionBuilder: Sendable {
             outputs: outputs,
             checksum: checksum,
             timestamp: timestamp,
-            publisherSig: SignatureData(
+            issuerSig: SignatureData(
                 schemeId: NobleProtocol.schemeSecp256k1,
                 publicKey: publicKey,
                 signature: signature
@@ -210,7 +210,7 @@ public struct TransactionBuilder: Sendable {
             outputs: outputs,
             checksum: dummyChecksum,
             timestamp: timestamp,
-            publisherSig: SignatureData(
+            issuerSig: SignatureData(
                 schemeId: NobleProtocol.schemeSecp256k1,
                 publicKey: publicKey,
                 signature: signature
@@ -303,7 +303,7 @@ public struct TransactionBuilder: Sendable {
         outputs: [TxOutputCbor],
         checksum: Hash256,
         timestamp: UInt64,
-        publisherSig: SignatureData,
+        issuerSig: SignatureData,
         additionalSigs: [SignatureData],
         metadata: [MetadataItem],
         gatewayAddress: [UInt8]?
@@ -336,7 +336,7 @@ public struct TransactionBuilder: Sendable {
         entries[.utf8String("checksum")] = .byteString(Self.hexToBytes(checksum.hex))
         entries[.utf8String("timestamp")] = .unsignedInt(timestamp)
 
-        entries[.utf8String("publisher_sig")] = encodeSig(publisherSig)
+        entries[.utf8String("issuer_sig")] = encodeSig(issuerSig)
 
         let addSigs = additionalSigs.map { encodeSig($0) }
         entries[.utf8String("additional_sigs")] = .array(addSigs)

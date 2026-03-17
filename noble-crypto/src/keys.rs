@@ -271,7 +271,7 @@ impl NobleVerifier for NoblePublicKey {
 /// A signature bundled with its scheme identifier and the signer's public key.
 ///
 /// This is the standard signature format used throughout the NOBLE protocol,
-/// including `publisher_sig`, `additional_sigs`, and `validator_sig`.
+/// including `issuer_sig`, `additional_sigs`, and `validator_sig`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureEnvelope {
     /// Signature scheme identifier (SCHEME_ED25519 or SCHEME_SECP256K1).

@@ -347,90 +347,56 @@ function populateChainIdentity(nodeInfo) {
   bar.style.display = '';
 }
 
-// ── Fork / alignment status indicator ──
-// Shows only states the operator can act on. Reflects the healing manager's
-// assessment, not raw peer_info snapshots. Transient propagation delays
-// (1-3 blocks, seconds) are invisible — only persistent divergence and
-// active sync appear.
+// ── Alignment status indicator ──
+// Pure renderer — reads from centralized getSyncStatus (computed by
+// HealingManager::compute_alignment per tick). Zero independent logic.
+
+const ALIGNMENT_SEVERITY = {
+  Isolated: 'high', Bootstrapping: 'syncing', Creating: 'syncing',
+  Syncing: 'syncing', Aligned: 'zero', Diverged: 'medium',
+};
 
 async function updateForkStatus() {
   const bar = document.getElementById('fork-status-bar');
   if (!bar) return;
   try {
-    const forkData = await rpc.call('noble_getDetectedForks').catch(() => null);
-    if (!forkData) { bar.style.display = 'none'; return; }
-
-    const label = document.getElementById('fork-status-label');
-    const detail = document.getElementById('fork-status-detail');
-    const myHeight = forkData.local_height;
-    const peerCount = forkData.peer_count || 0;
-    const highestKnown = forkData.highest_known || myHeight;
-    const behind = highestKnown - myHeight;
-
-    // Hide during genesis formation — nothing meaningful to show.
-    if (myHeight === 0) {
-      bar.style.display = 'none';
-      return;
-    }
-
-    let severity, statusText, detailText;
-
-    if (peerCount === 0) {
-      // Actionable: operator needs to connect peers.
-      severity = 'high';
-      statusText = 'Isolated';
-      detailText = `height ${myHeight} \u00b7 no peers`;
-    } else if (behind > 10) {
-      // Actionable: operator should know sync is in progress.
-      severity = 'syncing';
-      const pct = highestKnown > 0 ? (myHeight / highestKnown * 100).toFixed(1) + '%' : '';
-      statusText = `<span class="fork-sync-spinner"></span>Syncing`;
-      detailText = pct
-        ? `block ${myHeight} / ${highestKnown} (${pct})`
-        : `${behind} blocks behind`;
-    } else {
-      // Normal operation: aligned, slightly behind (propagation), or ahead.
-      // None of these require operator action — show green "Aligned".
-      severity = 'zero';
-      statusText = 'Aligned';
-      detailText = `height ${myHeight}`;
-    }
-
-    bar.dataset.severity = severity;
-    label.innerHTML = statusText;
-    detail.textContent = detailText;
-    bar.style.display = '';
+    const sync = await rpc.call('noble_getSyncStatus').catch(() => null);
+    if (!sync) { bar.style.display = 'none'; return; }
+    renderAlignment(sync.state, sync.current_height, sync.highest_known, sync.progress, null);
   } catch (e) {
     bar.style.display = 'none';
   }
 }
 
-// Listen for healing manager events via WebSocket. Only show "Diverged"
-// when the healing manager has confirmed a persistent fork (dwell timer
-// started). This replaces the raw fork detection with the healing
-// manager's evaluated assessment.
-function onHealingEvent(data) {
+function onAlignmentChanged(data) {
+  renderAlignment(data.state, data.height, data.highest_known, data.progress, data.cycles_remaining);
+}
+
+function renderAlignment(st, height, highestKnown, progress, cyclesRemaining) {
   const bar = document.getElementById('fork-status-bar');
   if (!bar) return;
   const label = document.getElementById('fork-status-label');
   const detail = document.getElementById('fork-status-detail');
 
-  if (data.event === 'fork_alignment_pending') {
-    // Healing manager confirmed: persistent fork, dwell timer running.
-    bar.dataset.severity = 'medium';
-    label.innerHTML = 'Diverged';
-    detail.textContent = `${data.cycles_remaining} cycle(s) to resolution`;
-    bar.style.display = '';
-  } else if (data.event === 'fork_auto_resolved') {
-    // Fork resolved — back to aligned.
-    bar.dataset.severity = 'zero';
-    label.innerHTML = 'Aligned';
-    detail.textContent = `resolved \u2192 height ${data.target_height || '?'}`;
-    bar.style.display = '';
-  } else if (data.event === 'fork_alignment_clear') {
-    // Dwell timer cleared — no longer diverged.
-    updateForkStatus();
+  bar.dataset.severity = ALIGNMENT_SEVERITY[st] || 'zero';
+
+  if (st === 'Syncing') {
+    const pct = progress > 0 ? (progress * 100).toFixed(1) + '%' : '';
+    label.innerHTML = '<span class="fork-sync-spinner"></span>Syncing';
+    detail.textContent = pct
+      ? `block ${height} / ${highestKnown} (${pct})`
+      : 'catching up';
+  } else if (st === 'Diverged' && cyclesRemaining != null) {
+    label.textContent = 'Diverged';
+    detail.textContent = `${cyclesRemaining} cycle(s) to resolution`;
+  } else if (st === 'Isolated' && height > 0) {
+    label.textContent = 'Isolated';
+    detail.textContent = `height ${height} \u00b7 no peers`;
+  } else {
+    label.textContent = st;
+    detail.textContent = height > 0 ? `height ${height}` : '';
   }
+  bar.style.display = '';
 }
 
 // ── Fetch initial data ──
@@ -480,7 +446,7 @@ ws.subscribe('newBlocks', (block) => {
   if (wasBootstrap && block.height > 0) {
     rpc.call('noble_getNodeInfo').then(populateChainIdentity).catch(() => {});
   }
-  updateForkStatus();
+  // Alignment state arrives via alignment_changed WS events — no polling needed.
 });
 
 // New-transaction notifications: { tx_id }
@@ -493,8 +459,8 @@ ws.subscribe('newTransactions', () => {
 
 ws.subscribe('cyclePhaseChange', (data) => {
   if (data.phase) state.cyclePhase = data.phase;
-  // Healing manager events arrive on this channel.
-  if (data && data.event) onHealingEvent(data);
+  // Centralized alignment state change.
+  if (data && data.event === 'alignment_changed') onAlignmentChanged(data);
 });
 
 // ── Global connectivity log (survives page navigation) ──
@@ -516,10 +482,8 @@ ws.subscribe('peerUpdates', (data) => {
     // Notify network page if it's mounted.
     window.dispatchEvent(new CustomEvent('noble-conn-log'));
   }
-  // Peer topology changed — fork picture may differ now.
-  updateForkStatus();
-  // Check for healing manager events (fork_alignment_pending, etc.)
-  if (data && data.event) onHealingEvent(data);
+  // Alignment state is server-driven via alignment_changed events.
+  if (data && data.event === 'alignment_changed') onAlignmentChanged(data);
 });
 
 // ── Network online/offline resilience ──

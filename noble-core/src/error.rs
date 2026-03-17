@@ -32,13 +32,13 @@ pub enum ValidationError {
         max_skew: u64,
     },
 
-    /// T5: Publisher signature uses an unrecognized scheme.
+    /// T5: Issuer signature uses an unrecognized scheme.
     #[error("T5: unrecognized signature scheme {0:#04x}")]
     UnrecognizedScheme(u8),
 
-    /// T6: Publisher signature verification failed.
-    #[error("T6: publisher signature invalid: {0}")]
-    PublisherSigInvalid(String),
+    /// T6: Issuer signature verification failed.
+    #[error("T6: issuer signature invalid: {0}")]
+    IssuerSigInvalid(String),
 
     /// T7: An additional signature verification failed.
     #[error("T7: additional signature {index} invalid: {reason}")]
@@ -162,7 +162,7 @@ pub enum ValidationError {
     #[error("T22: encrypted_locator only allowed on notarization tx (tx_type 0x00)")]
     LocatorOnNonNotarization,
 
-    /// T24: Transfer to self (recipient == publisher_sig signer) — balance inflation attack.
+    /// T24: Transfer to self (recipient == issuer_sig signer) — balance inflation attack.
     #[error("T24: transfer to self is not allowed")]
     SelfTransfer,
 

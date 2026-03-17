@@ -1,6 +1,6 @@
 /**
  * NOBLE Dashboard — Document Verification Page
- * Three tabs: Verify by Checksum | Decrypt Locator | Search by Publisher
+ * Three tabs: Verify by Checksum | Decrypt Locator | Search by Issuer
  */
 
 import { truncateHash, formatTimestamp, isHex64 } from '../utils.js';
@@ -10,22 +10,24 @@ export function init(root, ctx) {
 
   // Determine initial tab from query params
   const initialTab = params.tab === 'locator' ? 'locator'
-    : params.tab === 'publisher' ? 'publisher'
+    : params.tab === 'author' ? 'author'
+    : params.tab === 'issuer' ? 'issuer'
     : 'checksum';
   const prefillChecksum = params.checksum || '';
   const prefillTx = params.tx || '';
-  const prefillPublisher = params.publisher || '';
+  const prefillIssuer = params.issuer || '';
 
   root.innerHTML = `
     <div class="page-header">
       <h1>Document Verification</h1>
-      <p>Verify document integrity, decrypt locators, or search by publisher</p>
+      <p>Verify document integrity, decrypt locators, or search by issuer</p>
     </div>
 
     <div class="verify-tabs" style="display:flex;gap:0;margin-bottom:var(--gap-lg);border-bottom:2px solid var(--border)">
       <button class="verify-tab" data-tab="checksum" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Verify by Checksum</button>
       <button class="verify-tab" data-tab="locator" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Decrypt Locator</button>
-      <button class="verify-tab" data-tab="publisher" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Search by Publisher</button>
+      <button class="verify-tab" data-tab="author" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Search by Author</button>
+      <button class="verify-tab" data-tab="issuer" style="padding:var(--gap-sm) var(--gap);border:none;background:none;cursor:pointer;font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s">Search by Issuer</button>
     </div>
 
     <!-- Checksum tab -->
@@ -59,19 +61,36 @@ export function init(root, ctx) {
       </div>
     </div>
 
-    <!-- Publisher tab -->
-    <div id="tab-publisher" class="verify-tab-content" style="display:none">
+    <!-- Author tab -->
+    <div id="tab-author" class="verify-tab-content" style="display:none">
       <div class="panel">
-        <div class="panel-header">Search Documents by Publisher</div>
+        <div class="panel-header">Search Documents by Author or Publisher</div>
         <div class="panel-body">
           <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)">
-            Enter a publisher's public key (hex) to find all documents they have registered on the NOBLE blockchain.
+            Enter an author or publisher name to find all documents they have registered. Searches the <code>author</code> and <code>publisher</code> metadata fields.
           </p>
           <div class="search-bar">
-            <input type="text" id="publisher-input" placeholder="Publisher public key (hex)..." value="${esc(prefillPublisher)}" />
-            <button id="publisher-btn">Search</button>
+            <input type="text" id="author-input" placeholder="Author or publisher name..." />
+            <button id="author-btn">Search</button>
           </div>
-          <div id="publisher-result"></div>
+          <div id="author-result"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Issuer tab -->
+    <div id="tab-issuer" class="verify-tab-content" style="display:none">
+      <div class="panel">
+        <div class="panel-header">Search Documents by Issuer</div>
+        <div class="panel-body">
+          <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)">
+            Enter an issuer's public key (hex) to find all documents they have registered on the NOBLE blockchain.
+          </p>
+          <div class="search-bar">
+            <input type="text" id="issuer-input" placeholder="Issuer public key (hex)..." value="${esc(prefillIssuer)}" />
+            <button id="issuer-btn">Search</button>
+          </div>
+          <div id="issuer-result"></div>
         </div>
       </div>
     </div>
@@ -82,7 +101,8 @@ export function init(root, ctx) {
   const tabContents = {
     checksum: root.querySelector('#tab-checksum'),
     locator: root.querySelector('#tab-locator'),
-    publisher: root.querySelector('#tab-publisher'),
+    author: root.querySelector('#tab-author'),
+    issuer: root.querySelector('#tab-issuer'),
   };
 
   function switchTab(name) {
@@ -335,32 +355,32 @@ export function init(root, ctx) {
     decryptLocator();
   }
 
-  // ── Publisher search ──
-  const publisherInput = root.querySelector('#publisher-input');
-  const publisherBtn = root.querySelector('#publisher-btn');
-  const publisherResult = root.querySelector('#publisher-result');
+  // ── Issuer search ──
+  const issuerInput = root.querySelector('#issuer-input');
+  const issuerBtn = root.querySelector('#issuer-btn');
+  const issuerResult = root.querySelector('#issuer-result');
 
-  async function searchPublisher() {
-    const pubkey = publisherInput.value.trim();
+  async function searchIssuer() {
+    const pubkey = issuerInput.value.trim();
     if (!pubkey) return;
 
     if (!/^[0-9a-fA-F]{64,68}$/.test(pubkey)) {
-      publisherResult.innerHTML = '<div class="empty-state">Please enter a valid hex public key (64-68 characters)</div>';
+      issuerResult.innerHTML = '<div class="empty-state">Please enter a valid hex public key (64-68 characters)</div>';
       return;
     }
 
-    publisherResult.innerHTML = '<div class="empty-state">Searching...</div>';
+    issuerResult.innerHTML = '<div class="empty-state">Searching...</div>';
 
     try {
-      const res = await rpc.call('noble_getDocumentsByPublisher', { public_key: pubkey });
+      const res = await rpc.call('noble_getDocumentsByIssuer', { public_key: pubkey });
 
       if (!res.documents || res.documents.length === 0) {
-        publisherResult.innerHTML = `
+        issuerResult.innerHTML = `
           <div style="padding:var(--gap-lg);text-align:center">
             <div style="font-size:2rem;color:var(--text-muted);margin-bottom:var(--gap)">&#128269;</div>
             <h3 style="color:var(--text-secondary)">No Documents Found</h3>
             <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
-              No notarizations found for this publisher key.
+              No notarizations found for this issuer key.
             </p>
           </div>
         `;
@@ -380,10 +400,10 @@ export function init(root, ctx) {
         `;
       }
 
-      publisherResult.innerHTML = `
+      issuerResult.innerHTML = `
         <div style="padding:var(--gap);text-align:center;margin-bottom:var(--gap)">
           <p style="color:var(--text-secondary);font-size:var(--font-size-sm)">
-            Found <strong>${res.count}</strong> document(s) by this publisher
+            Found <strong>${res.count}</strong> document(s) by this issuer
           </p>
         </div>
         <table class="data-table">
@@ -392,24 +412,104 @@ export function init(root, ctx) {
         </table>
       `;
 
-      publisherResult.querySelectorAll('tr.clickable').forEach(tr => {
+      issuerResult.querySelectorAll('tr.clickable').forEach(tr => {
         tr.addEventListener('click', () => {
           location.hash = `#/tx/${tr.dataset.txid}`;
         });
       });
 
     } catch (e) {
-      publisherResult.innerHTML = `<div class="empty-state">Search error: ${e.message || e}</div>`;
+      issuerResult.innerHTML = `<div class="empty-state">Search error: ${e.message || e}</div>`;
     }
   }
 
-  publisherBtn.addEventListener('click', searchPublisher);
-  publisherInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchPublisher(); });
+  issuerBtn.addEventListener('click', searchIssuer);
+  issuerInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchIssuer(); });
 
-  // Auto-search if publisher was prefilled via query param
-  if (prefillPublisher) {
-    searchPublisher();
+  // Auto-search if issuer was prefilled via query param
+  if (prefillIssuer) {
+    searchIssuer();
   }
+
+  // ── Author / publisher metadata search ──
+  const authorInput = root.querySelector('#author-input');
+  const authorBtn = root.querySelector('#author-btn');
+  const authorResult = root.querySelector('#author-result');
+
+  async function searchAuthor() {
+    const name = authorInput.value.trim();
+    if (!name) return;
+
+    authorResult.innerHTML = '<div class="empty-state">Searching...</div>';
+
+    try {
+      // Search both "author" and "publisher" metadata keys.
+      const [authorRes, pubRes] = await Promise.all([
+        rpc.call('noble_searchDocumentsByMetadata', { key: 'author', value: name }),
+        rpc.call('noble_searchDocumentsByMetadata', { key: 'publisher', value: name }),
+      ]);
+
+      // Merge and deduplicate by tx_id.
+      const seen = new Set();
+      const docs = [];
+      for (const doc of [...(authorRes.documents || []), ...(pubRes.documents || [])]) {
+        if (!seen.has(doc.tx_id)) {
+          seen.add(doc.tx_id);
+          docs.push(doc);
+        }
+      }
+
+      if (docs.length === 0) {
+        authorResult.innerHTML = `
+          <div style="padding:var(--gap-lg);text-align:center">
+            <div style="font-size:2rem;color:var(--text-muted);margin-bottom:var(--gap)">&#128269;</div>
+            <h3 style="color:var(--text-secondary)">No Documents Found</h3>
+            <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-top:var(--gap-sm)">
+              No documents found with author or publisher matching "${esc(name)}".
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      let rows = '';
+      for (const doc of docs) {
+        rows += `
+          <tr class="clickable" data-txid="${doc.tx_id}">
+            <td>${doc.block_height}</td>
+            <td>${formatTimestamp(doc.timestamp)}</td>
+            <td class="mono">${truncateHash(doc.checksum)}</td>
+            <td class="mono">${truncateHash(doc.tx_id)}</td>
+            <td>${doc.version || '\u2014'}</td>
+          </tr>
+        `;
+      }
+
+      authorResult.innerHTML = `
+        <div style="padding:var(--gap);text-align:center;margin-bottom:var(--gap)">
+          <p style="color:var(--text-secondary);font-size:var(--font-size-sm)">
+            Found <strong>${docs.length}</strong> document(s) by "${esc(name)}"
+          </p>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Block</th><th>Timestamp</th><th>Checksum</th><th>Transaction</th><th>Version</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+
+      authorResult.querySelectorAll('tr.clickable').forEach(tr => {
+        tr.addEventListener('click', () => {
+          location.hash = `#/tx/${tr.dataset.txid}`;
+        });
+      });
+
+    } catch (e) {
+      authorResult.innerHTML = `<div class="empty-state">Search error: ${e.message || e}</div>`;
+    }
+  }
+
+  authorBtn.addEventListener('click', searchAuthor);
+  authorInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchAuthor(); });
 
   return { destroy() {} };
 }

@@ -48,8 +48,10 @@ struct Inner {
     cycle_history: BTreeMap<u64, Vec<u8>>,
     /// Version chain: prev_checksum → list of tx_ids that reference it via doc:prev_checksum.
     version_chain: HashMap<Hash256, Vec<Hash256>>,
-    /// Publisher index: pubkey_wire_bytes → list of notarization tx_ids.
-    publisher_index: HashMap<Vec<u8>, Vec<Hash256>>,
+    /// Issuer index: pubkey_wire_bytes → list of notarization tx_ids.
+    issuer_index: HashMap<Vec<u8>, Vec<Hash256>>,
+    /// Metadata index: composite key [key_len:u16 || key || value] → list of tx_ids.
+    metadata_index: HashMap<Vec<u8>, Vec<Hash256>>,
     /// Badge state: pubkey_wire → CBOR-encoded VoteBadge.
     badges: HashMap<Vec<u8>, Vec<u8>>,
     /// Badge proposals: proposal_hash → CBOR-encoded BadgeProposal.
@@ -122,7 +124,7 @@ impl StorageEngine for MemoryStorage {
             }
         }
 
-        // --- Version chain indexing + publisher index ---
+        // --- Version chain indexing + issuer index ---
         for (tx, tx_id) in block.transactions.iter().zip(tx_ids.iter()) {
             if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                 if let Some(prev_hex) = tx
@@ -140,15 +142,27 @@ impl StorageEngine for MemoryStorage {
                     }
                 }
 
-                // publisher_index: pubkey_wire → list of notarization tx_ids
-                let publisher_wire = tx
-                    .publisher_sig
+                // issuer_index: pubkey_wire → list of notarization tx_ids
+                let issuer_wire = tx
+                    .issuer_sig
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?
                     .to_wire_bytes();
-                let pub_entry = inner.publisher_index.entry(publisher_wire).or_default();
+                let pub_entry = inner.issuer_index.entry(issuer_wire).or_default();
                 if pub_entry.len() < MAX_CHECKSUM_REGISTRATIONS {
                     pub_entry.push(*tx_id);
+                }
+
+                // metadata_index: [key_len:u16 || key || value] → list of tx_ids
+                for entry in &tx.metadata {
+                    let mut idx_key = Vec::with_capacity(2 + entry.key.len() + entry.value.len());
+                    idx_key.extend_from_slice(&(entry.key.len() as u16).to_be_bytes());
+                    idx_key.extend_from_slice(entry.key.as_bytes());
+                    idx_key.extend_from_slice(&entry.value);
+                    let meta_entry = inner.metadata_index.entry(idx_key).or_default();
+                    if meta_entry.len() < MAX_CHECKSUM_REGISTRATIONS {
+                        meta_entry.push(*tx_id);
+                    }
                 }
             }
         }
@@ -232,9 +246,9 @@ impl StorageEngine for MemoryStorage {
             }
 
             // --- Address history ---
-            // Record sender history (publisher of the tx)
+            // Record sender history (issuer of the tx)
             let sender_pk = tx
-                .publisher_sig
+                .issuer_sig
                 .to_noble_public_key()
                 .map_err(|e| StorageError::Codec(e.to_string()))?;
             let sender_addr = NobleAddress::Noble(sender_pk);
@@ -524,12 +538,13 @@ impl StorageEngine for MemoryStorage {
             }
         }
 
-        // Clear and replay address_history, version_chain, publisher_index
+        // Clear and replay address_history, version_chain, issuer_index
         inner.address_history.clear();
         inner.version_chain.clear();
-        inner.publisher_index.clear();
+        inner.issuer_index.clear();
+        inner.metadata_index.clear();
 
-        // Replay address history + version chain + publisher index from 0..=target_height
+        // Replay address history + version chain + issuer index from 0..=target_height
         for h in 0..=target_height {
             let hash = *inner.block_heights.get(&h).ok_or_else(|| {
                 StorageError::Database(format!("missing block at height {h} during replay"))
@@ -547,7 +562,7 @@ impl StorageEngine for MemoryStorage {
 
                 // Address history: sender
                 let sender_pk = tx
-                    .publisher_sig
+                    .issuer_sig
                     .to_noble_public_key()
                     .map_err(|e| StorageError::Codec(e.to_string()))?;
                 let sender_addr = NobleAddress::Noble(sender_pk);
@@ -565,7 +580,7 @@ impl StorageEngine for MemoryStorage {
                     }
                 }
 
-                // Version chain + publisher index
+                // Version chain + issuer index
                 if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.needs_notarization_indexing()) {
                     if let Some(prev_hex) = tx
                         .metadata
@@ -582,16 +597,25 @@ impl StorageEngine for MemoryStorage {
                         }
                     }
 
-                    let publisher_wire = tx
-                        .publisher_sig
+                    let issuer_wire = tx
+                        .issuer_sig
                         .to_noble_public_key()
                         .map_err(|e| StorageError::Codec(e.to_string()))?
                         .to_wire_bytes();
                     inner
-                        .publisher_index
-                        .entry(publisher_wire)
+                        .issuer_index
+                        .entry(issuer_wire)
                         .or_default()
                         .push(tx_id);
+
+                    // Replay metadata_index
+                    for entry in &tx.metadata {
+                        let mut idx_key = Vec::with_capacity(2 + entry.key.len() + entry.value.len());
+                        idx_key.extend_from_slice(&(entry.key.len() as u16).to_be_bytes());
+                        idx_key.extend_from_slice(entry.key.as_bytes());
+                        idx_key.extend_from_slice(&entry.value);
+                        inner.metadata_index.entry(idx_key).or_default().push(tx_id);
+                    }
                 }
             }
         }
@@ -659,7 +683,8 @@ impl StorageEngine for MemoryStorage {
         inner.created_outputs.clear();
         inner.address_history.clear();
         inner.version_chain.clear();
-        inner.publisher_index.clear();
+        inner.issuer_index.clear();
+        inner.metadata_index.clear();
 
         // Replay genesis (height 0) UTXO set
         if let Some(&genesis_hash) = inner.block_heights.get(&0) {
@@ -723,7 +748,8 @@ impl StorageEngine for MemoryStorage {
         inner.peer_records.clear();
         inner.cycle_history.clear();
         inner.version_chain.clear();
-        inner.publisher_index.clear();
+        inner.issuer_index.clear();
+        inner.metadata_index.clear();
         inner.badges.clear();
         inner.badge_proposals.clear();
         inner.block_votes.clear();
@@ -875,14 +901,28 @@ impl StorageEngine for MemoryStorage {
             .unwrap_or_default())
     }
 
-    // ── Publisher Index ──
+    // ── Issuer Index ──
 
-    fn lookup_by_publisher(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError> {
+    fn lookup_by_issuer(&self, pubkey_wire: &[u8]) -> Result<Vec<Hash256>, StorageError> {
         let inner = self.inner.read().unwrap();
         Self::check_open(&inner)?;
         Ok(inner
-            .publisher_index
+            .issuer_index
             .get(pubkey_wire)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn lookup_by_metadata(&self, key: &str, value: &[u8]) -> Result<Vec<Hash256>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Self::check_open(&inner)?;
+        let mut idx_key = Vec::with_capacity(2 + key.len() + value.len());
+        idx_key.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        idx_key.extend_from_slice(key.as_bytes());
+        idx_key.extend_from_slice(value);
+        Ok(inner
+            .metadata_index
+            .get(&idx_key)
             .cloned()
             .unwrap_or_default())
     }
@@ -1106,7 +1146,7 @@ mod tests {
             },
             checksum: Hash256::ZERO,
             timestamp: 0,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1119,7 +1159,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(chain_id).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(chain_id).unwrap();
         (tx, tx_id)
     }
@@ -1135,7 +1175,7 @@ mod tests {
             outputs: vec![],
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1148,7 +1188,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -1169,7 +1209,7 @@ mod tests {
             outputs,
             checksum: Hash256::ZERO,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -1182,7 +1222,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2016,7 +2056,7 @@ mod tests {
             outputs: vec![],
             checksum,
             timestamp,
-            publisher_sig: SignatureEnvelope {
+            issuer_sig: SignatureEnvelope {
                 scheme_id: SCHEME_ED25519,
                 public_key: pk.to_vec(),
                 signature: vec![],
@@ -2029,7 +2069,7 @@ mod tests {
         contract_data: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
-        tx.publisher_sig = priv_key.sign(&msg).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
     }
@@ -2186,10 +2226,10 @@ mod tests {
         assert!(successors.is_empty());
     }
 
-    // ── Publisher Index Tests ──
+    // ── Issuer Index Tests ──
 
     #[test]
-    fn publisher_index_populated_on_commit() {
+    fn issuer_index_populated_on_commit() {
         let store = MemoryStorage::new();
         let (sk, pk) = ed25519::generate_keypair();
         let pub_key = NoblePublicKey::Ed25519(pk.clone());
@@ -2215,22 +2255,22 @@ mod tests {
         );
         store.commit_block(&b1, &h1, &ids1).unwrap();
 
-        let results = store.lookup_by_publisher(&wire).unwrap();
+        let results = store.lookup_by_issuer(&wire).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.contains(&tx_id1));
         assert!(results.contains(&tx_id2));
     }
 
     #[test]
-    fn publisher_index_empty_for_unknown_key() {
+    fn issuer_index_empty_for_unknown_key() {
         let store = MemoryStorage::new();
         let unknown_wire = vec![0x01; 33]; // fake Ed25519 wire key
-        let results = store.lookup_by_publisher(&unknown_wire).unwrap();
+        let results = store.lookup_by_issuer(&unknown_wire).unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
-    fn publisher_index_multiple_publishers() {
+    fn issuer_index_multiple_issuers() {
         let store = MemoryStorage::new();
 
         let (sk_a, pk_a) = ed25519::generate_keypair();
@@ -2268,18 +2308,18 @@ mod tests {
             make_block_with_validator(vec![(tx_b, tx_id_b)], 4, h3, 1_700_000_004, &sk_a, &pk_a);
         store.commit_block(&b4, &_h4, &ids4).unwrap();
 
-        // Each publisher should only see their own tx_id
-        let results_a = store.lookup_by_publisher(&wire_a).unwrap();
+        // Each issuer should only see their own tx_id
+        let results_a = store.lookup_by_issuer(&wire_a).unwrap();
         assert_eq!(results_a.len(), 1);
         assert_eq!(results_a[0], tx_id_a);
 
-        let results_b = store.lookup_by_publisher(&wire_b).unwrap();
+        let results_b = store.lookup_by_issuer(&wire_b).unwrap();
         assert_eq!(results_b.len(), 1);
         assert_eq!(results_b[0], tx_id_b);
     }
 
     #[test]
-    fn publisher_index_rollback_clears_and_replays() {
+    fn issuer_index_rollback_clears_and_replays() {
         let store = MemoryStorage::new();
         let (sk, pk) = ed25519::generate_keypair();
         let pub_key = NoblePublicKey::Ed25519(pk.clone());
@@ -2312,13 +2352,13 @@ mod tests {
         store.commit_block(&b3, &_h3, &ids3).unwrap();
 
         // Before rollback: 3 tx_ids
-        assert_eq!(store.lookup_by_publisher(&wire).unwrap().len(), 3);
+        assert_eq!(store.lookup_by_issuer(&wire).unwrap().len(), 3);
 
         // Rollback to height 1 (removes blocks 2 and 3)
         store.rollback_to_height(1, test_chain_id()).unwrap();
 
         // After rollback: only tx_id1 from block 1
-        let results = store.lookup_by_publisher(&wire).unwrap();
+        let results = store.lookup_by_issuer(&wire).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], tx_id1);
     }
@@ -2369,9 +2409,9 @@ mod tests {
         let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
         let count = store.count_address_history(&sender_addr).unwrap();
         // coinbase txs at heights 0,1,2 (3 entries) + 2 notarization txs = 5
-        // But only notarizations use the sender_addr (coinbase publisher is a random key)
-        // Actually, the coinbase publisher IS the sender (since make_coinbase_tx generates its own key).
-        // The notarization publisher IS the sender.
+        // But only notarizations use the sender_addr (coinbase issuer is a random key)
+        // Actually, the coinbase issuer IS the sender (since make_coinbase_tx generates its own key).
+        // The notarization issuer IS the sender.
         // So sender_addr only appears for the 2 notarization txs.
         assert!(count >= 2, "sender should have at least 2 history entries");
     }
