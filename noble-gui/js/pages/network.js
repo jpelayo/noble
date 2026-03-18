@@ -56,7 +56,7 @@ export function init(root, ctx) {
       <div class="panel-header">Dial Peer</div>
       <div class="panel-body">
         <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin:0 0 var(--gap)">
-          Manually connect to a peer by entering their multiaddr.
+          Manually connect to a peer by entering the ip address.
         </p>
         <div style="display:flex;gap:var(--gap-sm);align-items:center">
           <input id="net-dial-addr" type="text" maxlength="256" placeholder="e.g. node.infinitecontext.com or 192.168.5.20"

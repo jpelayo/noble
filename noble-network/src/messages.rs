@@ -164,6 +164,9 @@ pub enum GossipMessage {
         /// Decay-weighted cumulative vote weight for chain legitimacy comparison.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chain_vote_weight: Option<u64>,
+        /// Node's minimum fee rate (groats/byte) for block proposal filtering.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_fee_rate: Option<u64>,
         /// Human-readable chain label (hex chain ID or empty).
         #[serde(default)]
         network_name: String,
@@ -531,6 +534,7 @@ mod tests {
             proposed_hash: Some(hex::encode([0xCC; 32])),
             chain_id: 0x34E9E7A4,
             chain_vote_weight: Some(42_000),
+            min_fee_rate: Some(1),
             network_name: "34E9E7A4".into(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x00,
@@ -568,6 +572,7 @@ mod tests {
             proposed_hash: None,
             chain_id: 0,
             chain_vote_weight: None,
+            min_fee_rate: None,
             network_name: String::new(),
             timestamp: 1_700_000_000,
             signature_scheme: 0x01,

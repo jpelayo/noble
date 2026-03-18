@@ -90,7 +90,10 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
 ///
 /// Encodes the full `SignatureEnvelope` as CBOR.
 pub fn vote_to_signature_bytes(vote: &PorVote) -> Vec<u8> {
-    vote.signature.to_cbor().unwrap_or_default()
+    vote.signature.to_cbor().unwrap_or_else(|e| {
+        tracing::warn!(task = "vote_bridge", "failed to CBOR-encode vote signature: {e}");
+        Vec::new()
+    })
 }
 
 /// Reconstruct a `PorVote` from wire bytes received over the network.
@@ -103,9 +106,21 @@ pub fn wire_to_por_vote(
     signature_bytes: &[u8],
     round: u8,
 ) -> Option<PorVote> {
-    let voter_pubkey = NoblePublicKey::from_wire_bytes(voter_id).ok()?;
+    let voter_pubkey = match NoblePublicKey::from_wire_bytes(voter_id) {
+        Ok(pk) => pk,
+        Err(e) => {
+            tracing::debug!(task = "vote_bridge", "malformed voter_id ({} bytes): {e}", voter_id.len());
+            return None;
+        }
+    };
     let candidate_hash = Hash256(*candidate_hash);
-    let signature = SignatureEnvelope::from_cbor(signature_bytes).ok()?;
+    let signature = match SignatureEnvelope::from_cbor(signature_bytes) {
+        Ok(sig) => sig,
+        Err(e) => {
+            tracing::debug!(task = "vote_bridge", "malformed vote signature CBOR ({} bytes): {e}", signature_bytes.len());
+            return None;
+        }
+    };
 
     Some(PorVote {
         cycle,

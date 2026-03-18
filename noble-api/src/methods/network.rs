@@ -362,15 +362,41 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
             })
             .collect();
 
-        // Merge CBOR-persistent known_peers for any identity keys not in PeerRecords.
-        // This ensures candidate discovery survives chain resets (PeerRecords wiped).
+        // Merge CBOR-persistent known_peers: enrich existing PeerRecords that lack
+        // announce data, and add entries for peers not in PeerRecords at all.
+        // This ensures candidate discovery survives chain resets (PeerRecords wiped)
+        // and handles the case where the PeerRecord exists but has no announce yet.
         let registry = self.validator_registry.read();
         for (key_hex, peer) in registry.known_peers() {
-            // Convert hex wire key to nbl1 display format for consistency.
             let display_key = hex::decode(key_hex).ok()
                 .and_then(|wire| noble_crypto::noble_addr::encode_wire_bytes(&wire))
                 .unwrap_or_else(|| key_hex.clone());
             if seen_keys.contains(&display_key) {
+                // PeerRecord exists — enrich it with known_peer data if the
+                // PeerRecord has no announce (wants_to_validate/vote are false).
+                if let Some(entry) = result.iter_mut().find(|r| r.identity_key == display_key) {
+                    if !entry.wants_to_validate && peer.wants_to_validate {
+                        entry.wants_to_validate = true;
+                    }
+                    if !entry.wants_to_vote && peer.wants_to_vote {
+                        entry.wants_to_vote = true;
+                    }
+                    if entry.node_name.is_none() {
+                        entry.node_name = peer.node_name.clone();
+                    }
+                    if entry.org_type.is_none() {
+                        entry.org_type = peer.org_type.clone();
+                    }
+                    if entry.node_role.is_none() {
+                        entry.node_role = peer.node_role.clone();
+                    }
+                    if entry.host_address.is_none() {
+                        entry.host_address = peer.host_address.clone();
+                    }
+                    if entry.country_code.is_none() {
+                        entry.country_code = peer.country_code.clone();
+                    }
+                }
                 continue;
             }
             result.push(PeerRecordResponse {

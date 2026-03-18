@@ -405,7 +405,7 @@ mod tests {
 
         let message = sha256(b"validator sign test");
         let envelope = priv_key.sign(message.as_bytes()).unwrap();
-        assert_eq!(envelope.scheme_id, crate::schemes::SCHEME_VALIDATOR_SECP256K1);
+        assert_eq!(envelope.scheme_id, crate::schemes::SCHEME_SECP256K1);
         assert!(pub_key.verify(message.as_bytes(), &envelope).is_ok());
     }
 

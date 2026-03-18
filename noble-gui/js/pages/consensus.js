@@ -768,8 +768,9 @@ export function init(root, ctx) {
         if (id && seenAnnounceIdentities.has(id)) return;
         if (id) seenAnnounceIdentities.add(id);
         pushActivity(data);
-        // Refresh panels so friendly names replace raw hex keys immediately.
-        scheduleReload(loadValidators, loadVoteTallies, loadTimeline);
+        // Refresh panels so friendly names replace raw hex keys immediately
+        // and new candidates appear in the candidates list.
+        scheduleReload(loadValidators, loadVoteTallies, loadTimeline, loadCandidates);
       } else {
         pushActivity(data);
       }

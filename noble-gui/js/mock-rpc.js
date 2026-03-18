@@ -59,7 +59,7 @@ function makePublicKey(seed) {
 }
 
 function makeSignatureEnvelope(seed) {
-  const pubKey = [];
+  const pubKey = [0x02]; // compressed secp256k1 prefix
   for (let i = 0; i < 32; i++) pubKey.push((seed * 5 + i * 11) % 256);
   const sig = [];
   for (let i = 0; i < 64; i++) sig.push((seed * 7 + i * 3) % 256);
