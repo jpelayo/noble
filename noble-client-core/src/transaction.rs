@@ -223,11 +223,29 @@ fn sign_and_encode(tx: &mut Transaction, private_key: &[u8], chain_id: u32) -> R
 
 fn parse_address(addr: &str) -> Result<NobleAddress, String> {
     if addr.starts_with("nbl1") {
-        // Decode bech32m → NoblePublicKey → NobleAddress::Noble
+        // Noble bech32m → NoblePublicKey → NobleAddress::Noble
         let pk = noble_crypto::noble_addr::decode(addr)
-            .map_err(|e| format!("invalid bech32m address: {e}"))?;
+            .map_err(|e| format!("invalid Noble address: {e}"))?;
         Ok(NobleAddress::Noble(pk))
+    } else if addr.starts_with("bc1") || addr.starts_with("BC1") || addr.starts_with('1') {
+        // Bitcoin address (P2WPKH bc1q..., P2TR bc1p..., P2PKH 1...)
+        let parsed = noble_crypto::bitcoin_addr::parse_bitcoin_address(addr)
+            .map_err(|e| format!("invalid Bitcoin address: {e}"))?;
+        match parsed.address_type {
+            noble_crypto::bitcoin_addr::BitcoinAddressType::P2pkh
+            | noble_crypto::bitcoin_addr::BitcoinAddressType::P2wpkh => {
+                let hash: [u8; 20] = parsed.data.try_into()
+                    .map_err(|_| "Bitcoin Hash160 must be 20 bytes")?;
+                Ok(NobleAddress::BitcoinHash160(hash))
+            }
+            noble_crypto::bitcoin_addr::BitcoinAddressType::P2tr => {
+                let xonly: [u8; 32] = parsed.data.try_into()
+                    .map_err(|_| "Bitcoin Taproot must be 32 bytes")?;
+                Ok(NobleAddress::BitcoinTaproot(xonly))
+            }
+        }
     } else {
+        // Hex wire bytes fallback
         let bytes = hex::decode(addr).map_err(|e| format!("invalid address hex: {e}"))?;
         NobleAddress::from_wire_bytes(&bytes)
             .map_err(|e| format!("invalid address wire bytes: {e}"))
