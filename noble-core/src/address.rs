@@ -163,13 +163,9 @@ impl NobleAddress {
     /// For a secp256k1 public key, derive the corresponding BitcoinHash160 address.
     /// Only applies to secp256k1 keys.
     pub fn bitcoin_hash160_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {
-        match pk {
-            NoblePublicKey::Secp256k1(bytes) => {
-                let h160 = noble_crypto::bitcoin_addr::hash160(bytes);
-                Some(NobleAddress::BitcoinHash160(h160))
-            }
-            _ => None,
-        }
+        let NoblePublicKey::Secp256k1(bytes) = pk;
+        let h160 = noble_crypto::bitcoin_addr::hash160(bytes);
+        Some(NobleAddress::BitcoinHash160(h160))
     }
 
     /// For a secp256k1 public key, derive the corresponding BitcoinTaproot address.
@@ -178,14 +174,13 @@ impl NobleAddress {
     /// `x(P + tagged_hash("TapTweak", x(P)) · G)`, NOT the raw x-only pubkey.
     /// Only applies to secp256k1 keys.
     pub fn bitcoin_taproot_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {
-        match pk {
-            NoblePublicKey::Secp256k1(bytes) if bytes.len() == 33 => {
-                let compressed: [u8; 33] = bytes.as_slice().try_into().ok()?;
-                let output_key = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed)?;
-                Some(NobleAddress::BitcoinTaproot(output_key))
-            }
-            _ => None,
+        let NoblePublicKey::Secp256k1(bytes) = pk;
+        if bytes.len() != 33 {
+            return None;
         }
+        let compressed: [u8; 33] = bytes.as_slice().try_into().ok()?;
+        let output_key = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed)?;
+        Some(NobleAddress::BitcoinTaproot(output_key))
     }
 }
 

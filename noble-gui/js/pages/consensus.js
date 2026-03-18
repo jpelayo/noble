@@ -464,6 +464,7 @@ export function init(root, ctx) {
     warning:            '\u26a0',  // warning triangle
     phase_change:       '\u25cf',  // filled circle
     heartbeat:          '\u25cf',  // filled circle
+    startup_info:       '\u25cf',  // filled circle
     chain_tip_updated:      '\u2195',  // up-down arrow (alignment)
     fork_detected:          '\u26a0',  // warning triangle
     fork_aligned:           '\u2713',  // checkmark
@@ -506,6 +507,7 @@ export function init(root, ctx) {
       case 'blockchain_discovered': return '#c084fc';
       case 'sync_requested': return '#94a3b8';
       case 'heartbeat': return '#6ee7b7';
+      case 'startup_info': return '#6ee7b7';
       case 'chain_tip_updated': return '#94a3b8';
       case 'fork_detected': return '#f59e0b';
       case 'fork_aligned': return 'var(--success, #22c55e)';
@@ -602,6 +604,8 @@ export function init(root, ctx) {
       case 'sync_requested':
         return 'Sync requested \u2014 polling peer chain tips';
       case 'heartbeat':
+        return data.message;
+      case 'startup_info':
         return data.message;
       case 'chain_tip_updated':
         return `Peer ${data.node_name || hashLabel(data.peer_id)} at height ${data.height}`;

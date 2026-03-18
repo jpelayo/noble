@@ -139,16 +139,12 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .create_key(scheme_id, &passphrase)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        // Derive Bitcoin display addresses for secp256k1 keys
-        let bitcoin_addresses = match &pubkey {
-            noble_crypto::NoblePublicKey::Secp256k1(raw) => {
-                if let Ok(compressed) = <&[u8; 33]>::try_from(raw.as_slice()) {
-                    derive_bitcoin_addresses(compressed)
-                } else {
-                    vec![]
-                }
-            }
-            _ => vec![],
+        // Derive Bitcoin display addresses
+        let noble_crypto::NoblePublicKey::Secp256k1(ref raw) = pubkey;
+        let bitcoin_addresses = if let Ok(compressed) = <&[u8; 33]>::try_from(raw.as_slice()) {
+            derive_bitcoin_addresses(compressed)
+        } else {
+            vec![]
         };
 
         Ok(CreateAddressResponse {
@@ -341,18 +337,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         };
 
         let key_bytes = pubkey.key_bytes();
-        let (private_key_hex, public_key_hex, wire_hex_str, btc_addrs) =
-            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
-                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
-                (
-                    None, // Private key stays in keystore — not exposed over RPC
-                    Some(hex::encode(key_bytes)),
-                    Some(hex::encode(pubkey.to_wire_bytes())),
-                    Some(derive_bitcoin_addresses(&key)),
-                )
-            } else {
-                (None, Some(hex::encode(key_bytes)), Some(hex::encode(pubkey.to_wire_bytes())), None)
-            };
+        let NoblePublicKey::Secp256k1(ref bytes) = pubkey;
+        let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+        let (private_key_hex, public_key_hex, wire_hex_str, btc_addrs) = (
+            None, // Private key stays in keystore — not exposed over RPC
+            Some(hex::encode(key_bytes)),
+            Some(hex::encode(pubkey.to_wire_bytes())),
+            Some(derive_bitcoin_addresses(&key)),
+        );
 
         Ok(GenerateMnemonicResponse {
             mnemonic,
@@ -377,19 +369,15 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         // Guard: if a secp256k1 key already exists, return it (idempotent import)
         let existing = keystore.list_keys().unwrap_or_default();
         if let Some(existing_pk) = existing.iter().find(|k| k.scheme_id() == SCHEME_SECP256K1) {
-            let (bitcoin_address, bitcoin_addresses) =
-                if let NoblePublicKey::Secp256k1(ref bytes) = existing_pk {
-                    let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
-                    let addrs = derive_bitcoin_addresses(&key);
-                    let p2wpkh = addrs
-                        .iter()
-                        .find(|a| a.address_type == "p2wpkh")
-                        .map(|a| a.address.clone())
-                        .unwrap_or_default();
-                    (p2wpkh, addrs)
-                } else {
-                    (String::new(), vec![])
-                };
+            let NoblePublicKey::Secp256k1(ref bytes) = existing_pk;
+            let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+            let addrs = derive_bitcoin_addresses(&key);
+            let p2wpkh = addrs
+                .iter()
+                .find(|a| a.address_type == "p2wpkh")
+                .map(|a| a.address.clone())
+                .unwrap_or_default();
+            let (bitcoin_address, bitcoin_addresses) = (p2wpkh, addrs);
             return Ok(ImportKeyResponse {
                 public_key: existing_pk.to_address(),
                 bitcoin_address,
@@ -402,19 +390,15 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         // Derive Bitcoin display addresses
-        let (bitcoin_address, bitcoin_addresses) =
-            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
-                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
-                let addrs = derive_bitcoin_addresses(&key);
-                let p2wpkh = addrs
-                    .iter()
-                    .find(|a| a.address_type == "p2wpkh")
-                    .map(|a| a.address.clone())
-                    .unwrap_or_default();
-                (p2wpkh, addrs)
-            } else {
-                (String::new(), vec![])
-            };
+        let NoblePublicKey::Secp256k1(ref bytes) = pubkey;
+        let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+        let addrs = derive_bitcoin_addresses(&key);
+        let p2wpkh = addrs
+            .iter()
+            .find(|a| a.address_type == "p2wpkh")
+            .map(|a| a.address.clone())
+            .unwrap_or_default();
+        let (bitcoin_address, bitcoin_addresses) = (p2wpkh, addrs);
 
         Ok(ImportKeyResponse {
             public_key: pubkey.to_address(),
@@ -435,12 +419,9 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     SCHEME_SECP256K1 => "secp256k1",
                     _ => "unknown",
                 };
-                let bitcoin_addresses = if let NoblePublicKey::Secp256k1(ref bytes) = pk {
-                    if let Ok(key) = <[u8; 33]>::try_from(bytes.as_slice()) {
-                        derive_bitcoin_addresses(&key)
-                    } else {
-                        vec![]
-                    }
+                let NoblePublicKey::Secp256k1(ref bytes) = pk;
+                let bitcoin_addresses = if let Ok(key) = <[u8; 33]>::try_from(bytes.as_slice()) {
+                    derive_bitcoin_addresses(&key)
                 } else {
                     vec![]
                 };
@@ -481,17 +462,13 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .any(|k| k.to_wire_bytes() == pubkey.to_wire_bytes());
 
         let key_bytes = pubkey.key_bytes();
-        let (public_key_hex, wire_hex_str, btc_addrs) =
-            if let NoblePublicKey::Secp256k1(ref bytes) = pubkey {
-                let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
-                (
-                    Some(hex::encode(key_bytes)),
-                    Some(hex::encode(pubkey.to_wire_bytes())),
-                    Some(derive_bitcoin_addresses(&key)),
-                )
-            } else {
-                (Some(hex::encode(key_bytes)), Some(hex::encode(pubkey.to_wire_bytes())), None)
-            };
+        let NoblePublicKey::Secp256k1(ref bytes) = pubkey;
+        let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
+        let (public_key_hex, wire_hex_str, btc_addrs) = (
+            Some(hex::encode(key_bytes)),
+            Some(hex::encode(pubkey.to_wire_bytes())),
+            Some(derive_bitcoin_addresses(&key)),
+        );
 
         Ok(ImportMnemonicResponse {
             address: pubkey.to_address(),

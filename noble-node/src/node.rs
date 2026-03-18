@@ -141,6 +141,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Shared parsed reward address — written by RPC, read by CycleEngine during
     /// block proposals. Hot-reload: writing here takes effect on the next proposal.
     pub engine_reward_address: Arc<parking_lot::RwLock<Option<noble_core::NobleAddress>>>,
+    /// Startup events buffered during init (before WebSocket is available).
+    /// Emitted to the GUI Protocol Activity panel at the beginning of run().
+    pub startup_events: Vec<serde_json::Value>,
 }
 
 impl Node<MemoryStorage> {
@@ -582,6 +585,61 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             config.consensus.fork_resolution_delay_cycles,
         );
 
+        // --- Collect startup events for the GUI Protocol Activity panel ---
+        // These are buffered here because the WebSocket isn't running yet.
+        // They are emitted at the beginning of run().
+        let mut startup_events: Vec<serde_json::Value> = Vec::new();
+        startup_events.push(serde_json::json!({
+            "event": "startup_info",
+            "message": format!("Node v{} starting — chain height: {}", env!("CARGO_PKG_VERSION"), tip.height),
+        }));
+        if announce_keypair.is_some() {
+            let pk_addr = announce_keypair.as_ref().unwrap().1.to_address();
+            startup_events.push(serde_json::json!({
+                "event": "startup_info",
+                "message": format!("Validator key loaded: {pk_addr}"),
+            }));
+        } else {
+            startup_events.push(serde_json::json!({
+                "event": "warning",
+                "message": "No validator key — running in observer mode (no block proposals, no votes, no NodeAnnounce)",
+            }));
+        }
+        {
+            let ks = wallet_keystore.lock();
+            if !ks.is_unlocked() {
+                startup_events.push(serde_json::json!({
+                    "event": "warning",
+                    "message": "Keystore is locked — wallet operations unavailable",
+                }));
+            } else {
+                let key_count = ks.list_keys().map(|k| k.len()).unwrap_or(0);
+                if key_count == 0 {
+                    startup_events.push(serde_json::json!({
+                        "event": "warning",
+                        "message": "Keystore is empty — no wallet keys found",
+                    }));
+                }
+            }
+        }
+        if chain_id == 0 {
+            startup_events.push(serde_json::json!({
+                "event": "startup_info",
+                "message": "Pre-genesis: no blocks yet — waiting to form or join a chain",
+            }));
+        } else {
+            startup_events.push(serde_json::json!({
+                "event": "startup_info",
+                "message": format!("Chain ID: {chain_id:#010X} — height: {}", tip.height),
+            }));
+        }
+        if config.network.seeds.is_empty() {
+            startup_events.push(serde_json::json!({
+                "event": "warning",
+                "message": "No seed peers configured — node cannot discover the network",
+            }));
+        }
+
         Ok(Self {
             storage,
             mempool,
@@ -610,6 +668,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_probe_counter: 0,
             faucet_config: config.faucet.clone(),
             engine_reward_address: engine_reward_address_arc,
+            startup_events,
         })
     }
 
@@ -2049,6 +2108,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             "Node event loop started — chain height: {}",
             self.chain_height()
         );
+
+        // Emit buffered startup events to the GUI Protocol Activity panel.
+        for evt in self.startup_events.drain(..) {
+            let _ = cycle_phase_tx.send(evt);
+        }
 
         // --- Main event loop ---
         loop {

@@ -7,7 +7,7 @@
 use noble_core::{
     EncryptedLocator, ExternalAttestation, LocatorRecipient, MetadataEntry, NobleAddress,
     OutPoint, Transaction, TxIn, TxOut,
-    MIN_TX_FEE, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
+    PROTOCOL_VERSION, TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
 };
 use noble_crypto::ecies::{encrypt_for_recipient, EciesRecipient};
 use noble_crypto::{Hash256, NoblePublicKey, SignatureEnvelope};
