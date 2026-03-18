@@ -364,7 +364,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 if addr.is_empty() { None } else { Some(addr) }
             },
             faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
-            min_fee_rate: self.min_fee_rate,
+            min_fee_rate: self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -1050,6 +1050,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("consensus", "voting_preferred_validator"),
             ("consensus", "voting_subset"),
             ("faucet", "server_enabled"),
+            ("consensus", "min_fee_rate"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {
@@ -1074,6 +1075,15 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         }
         if section == "faucet" && key == "server_enabled" {
             self.faucet_enabled.store(value == "true", std::sync::atomic::Ordering::Relaxed);
+        }
+        if section == "consensus" && key == "min_fee_rate" {
+            if let Ok(v) = value.parse::<u64>() {
+                self.min_fee_rate.store(v, std::sync::atomic::Ordering::Relaxed);
+                // Re-publish NodeAnnounce with updated min_fee_rate so peers see the change.
+                if let Err(e) = self.announce_trigger.try_send(()) {
+                    tracing::debug!(task = "config", "announce trigger after min_fee_rate change: {e}");
+                }
+            }
         }
 
         tracing::info!(

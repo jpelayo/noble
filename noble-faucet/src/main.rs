@@ -56,7 +56,7 @@ impl Default for FaucetConfig {
     fn default() -> Self {
         Self {
             faucet_address: String::new(),
-            drip_amount: 100_000_000, // 1 NOBLE per request (10^8 atomic)
+            drip_amount: noble_core::GROATS_PER_NOBLE, // 1 NOBLE per request
             ip_cooldown_secs: 86400, // 24h per IP
             address_cooldown_secs: 86400, // 24h per address (1 NOBLE/day/address)
             daily_cap: 5_000_000_000, // 50 NOBLE total daily faucet budget (10^8 atomic)

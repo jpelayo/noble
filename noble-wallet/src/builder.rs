@@ -140,6 +140,7 @@ impl TransactionBuilder {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+            expires_at: Some(timestamp + noble_core::DEFAULT_TX_TTL_SECS),
         };
 
         let msg = tx
@@ -221,6 +222,7 @@ impl TransactionBuilder {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+            expires_at: Some(timestamp + noble_core::DEFAULT_TX_TTL_SECS),
         };
 
         let msg = tx
@@ -323,6 +325,7 @@ impl TransactionBuilder {
             external_attestations: attestations,
             gateway_address: None,
         contract_data: None,
+            expires_at: Some(timestamp + noble_core::DEFAULT_TX_TTL_SECS),
         };
 
         let msg = tx

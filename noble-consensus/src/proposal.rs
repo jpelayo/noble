@@ -115,6 +115,7 @@ pub fn propose_block(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     };
     let coinbase_msg = coinbase
         .compute_signing_message_for_chain(chain_id)
@@ -225,6 +226,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+            expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())

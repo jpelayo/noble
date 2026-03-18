@@ -56,6 +56,11 @@ pub struct Transaction {
     /// Optional encrypted locator for private document sharing (notarization only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_locator: Option<EncryptedLocator>,
+    /// Optional expiry timestamp (Unix seconds). If present, the transaction is invalid
+    /// after this time. Enforced at both mempool admission and block validation.
+    /// Clients set this to `timestamp + DEFAULT_TX_TTL_SECS` by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     /// External attestations from non-NOBLE signature schemes (notarization only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_attestations: Vec<ExternalAttestation>,

@@ -340,7 +340,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub faucet_enabled: std::sync::atomic::AtomicBool,
 
     /// Validator's personal minimum fee rate (groats/byte) for block proposal.
-    pub min_fee_rate: u64,
+    /// Hot-reloadable via setConfigValue("consensus", "min_fee_rate", "N").
+    /// Shared with Node for block proposal filtering.
+    pub min_fee_rate: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Canonical node name resolution from validator wire bytes.

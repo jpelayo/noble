@@ -90,19 +90,34 @@ pub async fn handle_faucet(
 ) -> Result<Json<FaucetResponse>, (StatusCode, Json<ErrorResponse>)> {
     let ip = addr.ip().to_string();
 
-    // Validate address format (must be hex, 66 or 68 chars for Ed25519/secp256k1).
-    if req.address.len() < 64
-        || req.address.len() > 68
-        || !req.address.chars().all(|c| c.is_ascii_hexdigit())
+    // Validate and resolve address — accept both bech32m (nbl1...) and hex wire bytes.
+    let resolved_address = if req.address.starts_with("nbl1") {
+        match noble_crypto::noble_addr::decode(&req.address) {
+            Ok(pk) => hex::encode(pk.to_wire_bytes()),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        success: false,
+                        message: "Invalid bech32m address".to_string(),
+                    }),
+                ));
+            }
+        }
+    } else if req.address.len() >= 64
+        && req.address.len() <= 68
+        && req.address.chars().all(|c| c.is_ascii_hexdigit())
     {
+        req.address.clone()
+    } else {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 success: false,
-                message: "Invalid NOBLE address format".to_string(),
+                message: "Invalid NOBLE address format (use nbl1... or hex)".to_string(),
             }),
         ));
-    }
+    };
 
     // Rate limit: per-IP cooldown (24h default).
     {
@@ -122,7 +137,7 @@ pub async fn handle_faucet(
     // Rate limit: per-address cooldown (7d default).
     {
         let db = state.db.clone();
-        let address = req.address.clone();
+        let address = resolved_address.clone();
         let cooldown = state.config.address_cooldown_secs;
         let is_limited =
             db_blocking(move || db.address_recent_distribution(&address, cooldown)).await?;
@@ -153,7 +168,7 @@ pub async fn handle_faucet(
         // Build and sign locally, then submit raw transaction.
         let fee = noble_core::MIN_TX_FEE;
         let tx_hex = wallet
-            .build_transfer(&state.rpc, &req.address, state.config.drip_amount, fee, chain_height)
+            .build_transfer(&state.rpc, &resolved_address, state.config.drip_amount, fee, chain_height)
             .await
             .map_err(|e| internal_error(&format!("Build transfer: {e}")))?;
         state
@@ -167,7 +182,7 @@ pub async fn handle_faucet(
             .rpc
             .send_transfer(
                 &state.config.faucet_address,
-                &req.address,
+                &resolved_address,
                 state.config.drip_amount,
             )
             .await
@@ -177,7 +192,7 @@ pub async fn handle_faucet(
     // Record in DB.
     {
         let db = state.db.clone();
-        let address = req.address.clone();
+        let address = resolved_address.clone();
         let ip_clone = ip.clone();
         let amount = state.config.drip_amount;
         let tx_id_clone = tx_id.clone();
@@ -188,7 +203,7 @@ pub async fn handle_faucet(
     }
 
     tracing::info!(
-        address = %req.address,
+        address = %resolved_address,
         ip = %ip,
         amount = state.config.drip_amount,
         tx_id = %tx_id,
@@ -201,8 +216,8 @@ pub async fn handle_faucet(
         amount: state.config.drip_amount,
         message: format!(
             "Sent {} NOBLE to {}",
-            state.config.drip_amount as f64 / 100_000_000.0,
-            &req.address[..16]
+            state.config.drip_amount as f64 / noble_core::GROATS_PER_NOBLE as f64,
+            &resolved_address[..16]
         ),
     }))
 }

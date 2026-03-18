@@ -338,6 +338,16 @@ pub fn validate_transaction(
     claimed_tx_id: &noble_crypto::Hash256,
     ctx: &TxValidationContext,
 ) -> Result<(), ValidationError> {
+    // T-EXPIRY: Reject expired transactions.
+    if let Some(expires_at) = tx.expires_at {
+        if ctx.current_time > expires_at {
+            return Err(ValidationError::Internal(format!(
+                "transaction expired: expires_at={expires_at}, current_time={}",
+                ctx.current_time
+            )));
+        }
+    }
+
     validate_tx_size_and_counts(tx)?;
     validate_tx_protocol_fields(tx, ctx)?;
     validate_tx_signatures(tx, ctx)?;

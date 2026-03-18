@@ -171,6 +171,7 @@ impl WireFormat for Transaction {
         let mut field_count: usize = 9;
         if self.contract_data.is_some() { field_count += 1; }
         if self.encrypted_locator.is_some() { field_count += 1; }
+        if self.expires_at.is_some() { field_count += 1; }
         if !self.external_attestations.is_empty() { field_count += 1; }
         if self.gateway_address.is_some() { field_count += 1; }
 
@@ -195,6 +196,12 @@ impl WireFormat for Transaction {
         if let Some(ref loc) = self.encrypted_locator {
             cbor::write_text(buf, "encrypted_locator");
             loc.encode_wire(buf);
+        }
+
+        // "expires_at" — omitted when None
+        if let Some(exp) = self.expires_at {
+            cbor::write_text(buf, "expires_at");
+            cbor::write_uint(buf, exp);
         }
 
         // "external_attestations" — omitted when empty
@@ -283,6 +290,7 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     let mut field_count: usize = 8;
     if tx.contract_data.is_some() { field_count += 1; }
     if tx.encrypted_locator.is_some() { field_count += 1; }
+    if tx.expires_at.is_some() { field_count += 1; }
     if !tx.external_attestations.is_empty() { field_count += 1; }
     if tx.gateway_address.is_some() { field_count += 1; }
 
@@ -303,6 +311,11 @@ pub fn tx_signing_payload_bytes(tx: &Transaction, chain_id: u32) -> Vec<u8> {
     if let Some(ref loc) = tx.encrypted_locator {
         cbor::write_text(&mut buf, "encrypted_locator");
         loc.encode_wire(&mut buf);
+    }
+
+    if let Some(exp) = tx.expires_at {
+        cbor::write_text(&mut buf, "expires_at");
+        cbor::write_uint(&mut buf, exp);
     }
 
     if !tx.external_attestations.is_empty() {

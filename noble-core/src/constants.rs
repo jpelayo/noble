@@ -28,6 +28,14 @@ pub const MAX_ADDITIONAL_SIGS: usize = 32;
 /// Production fee validation uses MIN_RELAY_FEE_RATE (groats/byte) instead.
 pub const MIN_TX_FEE: u64 = 1;
 
+/// Default transaction time-to-live in seconds (24 hours).
+/// Clients set `expires_at = timestamp + DEFAULT_TX_TTL_SECS` when building transactions.
+pub const DEFAULT_TX_TTL_SECS: u64 = 86_400;
+
+/// Dust threshold for coin selection (groats). Change outputs below this
+/// value are not worth creating — they cost more in fees to spend than they're worth.
+pub const DUST_THRESHOLD: u64 = 500_000; // 0.005 NOBLE
+
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
 

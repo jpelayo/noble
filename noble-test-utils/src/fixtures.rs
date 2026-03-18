@@ -106,6 +106,7 @@ pub fn make_signed_tx(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
@@ -150,6 +151,7 @@ pub fn make_signed_tx_with_metadata(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
@@ -207,6 +209,7 @@ pub fn make_signed_transfer_tx(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.issuer_sig = keypair.private_key.sign(&msg).unwrap();
@@ -246,6 +249,7 @@ pub fn make_coinbase_tx(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.issuer_sig = validator.private_key.sign(&msg).unwrap();

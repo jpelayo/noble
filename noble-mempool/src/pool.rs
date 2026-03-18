@@ -427,6 +427,15 @@ impl Mempool {
         })?;
 
         // Step 7: Fee rate check (Bitcoin-style free market)
+        // Step 6b: Transaction expiry check.
+        if let Some(expires_at) = tx.expires_at {
+            if current_time > expires_at {
+                return Err(MempoolError::StructuralValidation(format!(
+                    "transaction expired: expires_at={expires_at}, now={current_time}"
+                )));
+            }
+        }
+
         tracing::trace!("mempool step 7: fee rate check");
         let fee_rate = if size_bytes > 0 { fee / size_bytes as u64 } else { 0 };
         if fee_rate < noble_core::MIN_RELAY_FEE_RATE {
@@ -700,7 +709,7 @@ mod tests {
         let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key.clone());
         let checksum = sha256(doc);
-        let input_value = 100_000_000u64; // Fixed input UTXO value for tests
+        let input_value = noble_core::GROATS_PER_NOBLE; // 1 NOBLE per test UTXO
         let change = input_value.saturating_sub(fee);
 
         let mut tx = Transaction {

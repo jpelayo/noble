@@ -97,6 +97,7 @@ fn make_coinbase_tx() -> Transaction {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+            expires_at: None,
     }
 }
 

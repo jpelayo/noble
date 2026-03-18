@@ -123,8 +123,8 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub validator_list_path: Option<std::path::PathBuf>,
     /// Validator's personal minimum fee rate (groats/byte) for block proposal.
     /// Transactions below this rate stay in the mempool but won't be included
-    /// in blocks proposed by this node.
-    pub min_fee_rate: u64,
+    /// in blocks proposed by this node. Shared with ApiState for hot-reload.
+    pub min_fee_rate: Arc<std::sync::atomic::AtomicU64>,
     /// Seed/bootstrap peer addresses from config (for auto-reconnection).
     pub seed_addrs: Vec<String>,
     /// Cooldown: last time redial_known_peers was called (epoch secs). Prevents tight
@@ -571,7 +571,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             validator_list_path: Some(validator_list_path),
-            min_fee_rate: config.consensus.min_fee_rate,
+            min_fee_rate: Arc::new(std::sync::atomic::AtomicU64::new(config.consensus.min_fee_rate)),
             seed_addrs: config.network.seeds.clone(),
             last_redial_at: std::sync::atomic::AtomicU64::new(0),
             last_proposed,
@@ -769,7 +769,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let w = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
                 if w > 0 { Some(w) } else { None }
             },
-            Some(self.min_fee_rate),
+            Some(self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed)),
             now,
             sk,
             self.pki_attestation.clone(),
@@ -1739,7 +1739,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_cache: self.faucet_cache.clone(),
             faucet_address: parking_lot::RwLock::new(config.faucet.address.clone()),
             faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
-            min_fee_rate: config.consensus.min_fee_rate,
+            min_fee_rate: self.min_fee_rate.clone(),
         });
 
         // --- Determine bind addresses ---
@@ -3454,7 +3454,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
-                    let node_min_fee_rate = self.min_fee_rate;
+                    let node_min_fee_rate = self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed);
                     let txs: Vec<noble_core::Transaction> = {
                         let mempool = self.mempool.lock();
                         mempool
