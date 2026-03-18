@@ -148,9 +148,11 @@ public struct MockAPIService: NobleAPIService {
     public func estimateFee() async throws -> FeeEstimate {
         await simulateDelay()
         return FeeEstimate(
-            minFee: NobleAmount(atomic: 1),
-            recommendedFee: NobleAmount(atomic: 100),
-            highPriorityFee: NobleAmount(atomic: 500)
+            lowFeeRate: 1,
+            recommendedFeeRate: 2,
+            highPriorityFeeRate: 5,
+            networkMinFeeRate: 1,
+            networkMedianFeeRate: 2
         )
     }
 

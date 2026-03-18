@@ -1,0 +1,252 @@
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
+//
+// Transaction CBOR serialization — byte-identical to noble-core wire format V1.
+// Field order: alphabetical (ASCII lexicographic) by field name.
+// FROZEN: matches noble-core/src/wire/v1.rs exactly.
+
+#include "tx_builder.h"
+#include <stdlib.h>
+#include <string.h>
+
+// ── Leaf type encoders ──────────────────────────────────────────────────
+
+// Hash256: CBOR byte string, 32 bytes.
+static void encode_hash256(noble_buf_t *buf, const uint8_t hash[HASH256_LEN]) {
+    cbor_write_bytes(buf, hash, HASH256_LEN);
+}
+
+// OutPoint: map(2) { "txid": bytes, "vout": uint }
+static void encode_outpoint(noble_buf_t *buf, const noble_outpoint_t *op) {
+    cbor_write_map(buf, 2);
+    cbor_write_text(buf, "txid", 4);
+    encode_hash256(buf, op->txid);
+    cbor_write_text(buf, "vout", 4);
+    cbor_write_uint(buf, (uint64_t)op->vout);
+}
+
+// TxIn: map(1) { "prev_output": OutPoint }
+static void encode_txin(noble_buf_t *buf, const noble_txin_t *inp) {
+    cbor_write_map(buf, 1);
+    cbor_write_text(buf, "prev_output", 11);
+    encode_outpoint(buf, &inp->prev_output);
+}
+
+// NobleAddress: CBOR byte string (wire format: prefix + data).
+static void encode_address_wire(noble_buf_t *buf, const noble_address_t *addr) {
+    cbor_write_bytes(buf, addr->wire, addr->wire_len);
+}
+
+// TxOut: map(2) { "address": bytes, "value": uint }
+static void encode_txout(noble_buf_t *buf, const noble_txout_t *out) {
+    cbor_write_map(buf, 2);
+    cbor_write_text(buf, "address", 7);
+    encode_address_wire(buf, &out->address);
+    cbor_write_text(buf, "value", 5);
+    cbor_write_uint(buf, out->value);
+}
+
+// MetadataEntry: map(2) { "key": text, "value": bytes }
+static void encode_metadata(noble_buf_t *buf, const noble_metadata_t *m) {
+    cbor_write_map(buf, 2);
+    cbor_write_text(buf, "key", 3);
+    cbor_write_text(buf, m->key, strlen(m->key));
+    cbor_write_text(buf, "value", 5);
+    cbor_write_bytes(buf, m->value, m->value_len);
+}
+
+// SignatureEnvelope: CBOR byte string [scheme_id(1) || pubkey_len(1) || pubkey || sig]
+void tx_encode_sig_envelope(noble_buf_t *buf, const noble_sig_envelope_t *sig) {
+    uint8_t wire[1 + 1 + PUBKEY_LEN + SIG_LEN];
+    size_t pos = 0;
+    wire[pos++] = sig->scheme_id;
+    wire[pos++] = sig->public_key_len;
+    memcpy(wire + pos, sig->public_key, sig->public_key_len);
+    pos += sig->public_key_len;
+    memcpy(wire + pos, sig->signature, sig->signature_len);
+    pos += sig->signature_len;
+    cbor_write_bytes(buf, wire, pos);
+}
+
+// ── Full Transaction encoder ────────────────────────────────────────────
+// Matches noble-core/src/wire/v1.rs Transaction::encode_wire exactly.
+
+void tx_encode_full(noble_buf_t *buf, const noble_tx_t *tx) {
+    // Count fields: 9 base + optional
+    size_t field_count = 9;
+    // contract_data: not supported in client transactions (omitted)
+    // encrypted_locator: not supported in client transactions (omitted)
+    if (tx->expires_at != 0)          field_count++;
+    // external_attestations: not supported in client transactions (omitted)
+    if (tx->gateway_address_len > 0)  field_count++;
+
+    cbor_write_map(buf, field_count);
+
+    // "additional_sigs"
+    cbor_write_text(buf, "additional_sigs", 15);
+    cbor_write_array(buf, tx->additional_sig_count);
+    for (uint8_t i = 0; i < tx->additional_sig_count; i++) {
+        tx_encode_sig_envelope(buf, &tx->additional_sigs[i]);
+    }
+
+    // "checksum"
+    cbor_write_text(buf, "checksum", 8);
+    encode_hash256(buf, tx->checksum);
+
+    // "expires_at" — omitted when 0
+    if (tx->expires_at != 0) {
+        cbor_write_text(buf, "expires_at", 10);
+        cbor_write_uint(buf, tx->expires_at);
+    }
+
+    // "gateway_address" — omitted when empty
+    if (tx->gateway_address_len > 0) {
+        cbor_write_text(buf, "gateway_address", 15);
+        cbor_write_bytes(buf, tx->gateway_address, tx->gateway_address_len);
+    }
+
+    // "inputs"
+    cbor_write_text(buf, "inputs", 6);
+    cbor_write_array(buf, tx->input_count);
+    for (uint8_t i = 0; i < tx->input_count; i++) {
+        encode_txin(buf, &tx->inputs[i]);
+    }
+
+    // "issuer_sig"
+    cbor_write_text(buf, "issuer_sig", 10);
+    tx_encode_sig_envelope(buf, &tx->issuer_sig);
+
+    // "metadata"
+    cbor_write_text(buf, "metadata", 8);
+    cbor_write_array(buf, tx->metadata_count);
+    for (uint8_t i = 0; i < tx->metadata_count; i++) {
+        encode_metadata(buf, &tx->metadata[i]);
+    }
+
+    // "outputs"
+    cbor_write_text(buf, "outputs", 7);
+    cbor_write_array(buf, tx->output_count);
+    for (uint8_t i = 0; i < tx->output_count; i++) {
+        encode_txout(buf, &tx->outputs[i]);
+    }
+
+    // "timestamp"
+    cbor_write_text(buf, "timestamp", 9);
+    cbor_write_uint(buf, tx->timestamp);
+
+    // "tx_type"
+    cbor_write_text(buf, "tx_type", 7);
+    cbor_write_uint(buf, (uint64_t)tx->tx_type);
+
+    // "version"
+    cbor_write_text(buf, "version", 7);
+    cbor_write_uint(buf, (uint64_t)tx->version);
+}
+
+// ── Signing Payload encoder ─────────────────────────────────────────────
+// Matches noble-core/src/wire/v1.rs tx_signing_payload_bytes exactly.
+// Key differences from full tx:
+//   - Includes "chain_id" (not in full tx)
+//   - Uses "input_outpoints" (direct OutPoints, not TxIn wrappers)
+//   - No "issuer_sig" or "additional_sigs"
+//   - Metadata sorted by key before encoding
+
+// Comparison function for qsort on metadata (sort by key, alphabetical).
+static int metadata_cmp(const void *a, const void *b) {
+    const noble_metadata_t *ma = (const noble_metadata_t *)a;
+    const noble_metadata_t *mb = (const noble_metadata_t *)b;
+    return strcmp(ma->key, mb->key);
+}
+
+void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t chain_id) {
+    size_t field_count = 8;
+    if (tx->expires_at != 0)          field_count++;
+    if (tx->gateway_address_len > 0)  field_count++;
+
+    cbor_write_map(buf, field_count);
+
+    // "chain_id"
+    cbor_write_text(buf, "chain_id", 8);
+    cbor_write_uint(buf, (uint64_t)chain_id);
+
+    // "checksum"
+    cbor_write_text(buf, "checksum", 8);
+    encode_hash256(buf, tx->checksum);
+
+    // "expires_at" — omitted when 0
+    if (tx->expires_at != 0) {
+        cbor_write_text(buf, "expires_at", 10);
+        cbor_write_uint(buf, tx->expires_at);
+    }
+
+    // "gateway_address" — omitted when empty
+    if (tx->gateway_address_len > 0) {
+        cbor_write_text(buf, "gateway_address", 15);
+        cbor_write_bytes(buf, tx->gateway_address, tx->gateway_address_len);
+    }
+
+    // "input_outpoints" (NOT "inputs" — direct OutPoints without TxIn wrapper)
+    cbor_write_text(buf, "input_outpoints", 15);
+    cbor_write_array(buf, tx->input_count);
+    for (uint8_t i = 0; i < tx->input_count; i++) {
+        encode_outpoint(buf, &tx->inputs[i].prev_output);
+    }
+
+    // "metadata" — sorted by key before encoding
+    noble_metadata_t sorted[MAX_METADATA];
+    memcpy(sorted, tx->metadata, sizeof(noble_metadata_t) * tx->metadata_count);
+    qsort(sorted, tx->metadata_count, sizeof(noble_metadata_t), metadata_cmp);
+
+    cbor_write_text(buf, "metadata", 8);
+    cbor_write_array(buf, tx->metadata_count);
+    for (uint8_t i = 0; i < tx->metadata_count; i++) {
+        encode_metadata(buf, &sorted[i]);
+    }
+
+    // "outputs"
+    cbor_write_text(buf, "outputs", 7);
+    cbor_write_array(buf, tx->output_count);
+    for (uint8_t i = 0; i < tx->output_count; i++) {
+        encode_txout(buf, &tx->outputs[i]);
+    }
+
+    // "timestamp"
+    cbor_write_text(buf, "timestamp", 9);
+    cbor_write_uint(buf, tx->timestamp);
+
+    // "tx_type"
+    cbor_write_text(buf, "tx_type", 7);
+    cbor_write_uint(buf, (uint64_t)tx->tx_type);
+
+    // "version"
+    cbor_write_text(buf, "version", 7);
+    cbor_write_uint(buf, (uint64_t)tx->version);
+}
+
+// ── Address serde encoding (for JSON/bridge compatibility) ──────────────
+
+void tx_encode_address_serde(noble_buf_t *buf, const noble_address_t *addr) {
+    uint8_t prefix = addr->wire[0];
+    const uint8_t *data = addr->wire + 1;
+    size_t data_len = (size_t)(addr->wire_len - 1);
+
+    switch (prefix) {
+    case 0x02: // Noble secp256k1
+        cbor_write_map(buf, 1);
+        cbor_write_text(buf, "Noble", 5);
+        cbor_write_map(buf, 1);
+        cbor_write_text(buf, "Secp256k1", 9);
+        cbor_write_bytes(buf, data, data_len);
+        break;
+    case 0x80: // Bitcoin Hash160
+        cbor_write_map(buf, 1);
+        cbor_write_text(buf, "BitcoinHash160", 14);
+        cbor_write_bytes(buf, data, data_len);
+        break;
+    case 0x81: // Bitcoin Taproot
+        cbor_write_map(buf, 1);
+        cbor_write_text(buf, "BitcoinTaproot", 14);
+        cbor_write_bytes(buf, data, data_len);
+        break;
+    }
+}

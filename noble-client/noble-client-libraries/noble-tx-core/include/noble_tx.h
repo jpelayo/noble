@@ -1,0 +1,43 @@
+// Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+// SPDX-License-Identifier: Apache-2.0
+//
+// Public API for noble-tx-core: transaction building, signing, and coin selection.
+// All functions accept JSON input and return JSON output (caller frees with noble_free).
+// Produces byte-identical CBOR to the node's noble-codec encoder.
+
+#ifndef NOBLE_TX_H
+#define NOBLE_TX_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Build, sign, and CBOR-encode a transfer transaction.
+// Input JSON: { "recipient": "<address_wire_hex>", "amount": <u64>,
+//               "fee": <u64>, "utxos": [{"txid":"<hex>","vout":<u32>,"value":<u64>}, ...],
+//               "change_address": "<wire_hex>", "private_key": "<hex32>",
+//               "chain_id": <u32> }
+// Output JSON: { "tx_hex": "<cbor_hex>", "tx_id": "<hash_hex>" }
+//         or:  { "error": "<message>" }
+char *noble_sign_transfer(const char *params_json);
+
+// Build, sign, and CBOR-encode a notarization transaction.
+// Input JSON: { "checksum": "<hex32>", "metadata": [{"key":"...","value":"..."},...],
+//               "fee": <u64>, "utxos": [...], "change_address": "<wire_hex>",
+//               "private_key": "<hex32>", "chain_id": <u32> }
+// Output JSON: { "tx_hex": "<cbor_hex>", "tx_id": "<hash_hex>" }
+char *noble_sign_notarization(const char *params_json);
+
+// Run 5-pass coin selection.
+// Input JSON: { "utxos": [...], "target": <u64> }
+// Output JSON: { "selected": [...], "total": <u64>, "change": <u64> }
+char *noble_select_utxos(const char *params_json);
+
+// Free a string returned by any noble_* function.
+void noble_free(char *ptr);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // NOBLE_TX_H

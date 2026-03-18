@@ -17,7 +17,6 @@ members = [
     "noble-tool",
     "noble-faucet",
     "noble-wire",
-    "noble-client-core",
 ]
 resolver = "2"
 

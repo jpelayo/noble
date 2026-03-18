@@ -149,9 +149,11 @@ public struct LiveNobleAPIService: NobleAPIService {
     public func estimateFee() async throws -> FeeEstimate {
         let dto = try await client.call(method: "noble_estimateFee", expecting: FeeEstimateDTO.self)
         return FeeEstimate(
-            minFee: NobleAmount(atomic: dto.min_fee),
-            recommendedFee: NobleAmount(atomic: dto.recommended_fee),
-            highPriorityFee: NobleAmount(atomic: dto.high_priority_fee)
+            lowFeeRate: dto.low_fee_rate,
+            recommendedFeeRate: dto.recommended_fee_rate,
+            highPriorityFeeRate: dto.high_priority_fee_rate,
+            networkMinFeeRate: dto.network_min_fee_rate ?? 1,
+            networkMedianFeeRate: dto.network_median_fee_rate ?? 1
         )
     }
 

@@ -30,7 +30,7 @@ arboard = "3"
 hmac = "0.12"
 sha2_digest = { package = "digest", version = "0.10" }
 pbkdf2 = { version = "0.12", features = ["hmac"] }
-noble-client-core = { path = "../../../noble-client-core" }
+noble-tx-core = { path = "../../noble-client-libraries/noble-tx-core" }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

@@ -63,9 +63,11 @@ struct ValidateAddressDTO: Decodable, Sendable {
 // MARK: - noble_estimateFee
 
 struct FeeEstimateDTO: Decodable, Sendable {
-    let min_fee: UInt64
-    let recommended_fee: UInt64
-    let high_priority_fee: UInt64
+    let low_fee_rate: UInt64
+    let recommended_fee_rate: UInt64
+    let high_priority_fee_rate: UInt64
+    let network_min_fee_rate: UInt64?
+    let network_median_fee_rate: UInt64?
 }
 
 // MARK: - noble_getMempoolInfo

@@ -231,7 +231,7 @@ pub fn handle_crypto_action(
                 .and_then(|v| v.as_u64())
                 .ok_or("Missing parameter: fee")?;
 
-            // Use noble-client-core shared library.
+            // Use noble-tx-core shared C library.
             let metadata_arr: Vec<serde_json::Value> = parse_metadata(params)
                 .iter()
                 .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
@@ -245,15 +245,18 @@ pub fn handle_crypto_action(
                 "private_key": hex::encode(private_key),
                 "chain_id": chain_id,
             });
-            let notarize_params: noble_client_core::transaction::NotarizationParams =
-                serde_json::from_value(input_json).map_err(|e| format!("param error: {e}"))?;
-            let result = noble_client_core::transaction::sign_notarization(notarize_params)?;
-            Ok(serde_json::json!({ "txHex": result.tx_hex, "txId": result.tx_id }))
+            let result_json = noble_tx_core::sign_notarization(&input_json.to_string())
+                .map_err(|e| format!("sign_notarization: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
         }
 
         "signTransfer" => {
-            // Use noble-client-core shared library — builds actual noble-core Transaction,
-            // signs with secp256k1, serializes via noble-codec (identical to node).
+            // Use noble-tx-core shared C library.
             let input_json = serde_json::json!({
                 "recipient": params.get("recipient").and_then(|v| v.as_str()).unwrap_or(""),
                 "amount": params.get("amount").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -263,10 +266,14 @@ pub fn handle_crypto_action(
                 "private_key": hex::encode(private_key),
                 "chain_id": chain_id,
             });
-            let transfer_params: noble_client_core::transaction::TransferParams =
-                serde_json::from_value(input_json).map_err(|e| format!("param error: {e}"))?;
-            let result = noble_client_core::transaction::sign_transfer(transfer_params)?;
-            Ok(serde_json::json!({ "txHex": result.tx_hex, "txId": result.tx_id }))
+            let result_json = noble_tx_core::sign_transfer(&input_json.to_string())
+                .map_err(|e| format!("sign_transfer: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
         }
 
         _ => Err(format!("Unknown action: {action}")),

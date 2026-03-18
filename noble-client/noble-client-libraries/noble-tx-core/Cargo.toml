@@ -1,0 +1,16 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-tx-core"
+description = "Shared C transaction library for Noble clients (CBOR encoding, signing, coin selection)"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "rust-src/lib.rs"
+
+[workspace]
+
+[build-dependencies]
+cc = "1"

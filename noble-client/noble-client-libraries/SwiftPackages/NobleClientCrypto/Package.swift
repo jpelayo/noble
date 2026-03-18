@@ -9,6 +9,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../NobleClientCore"),
+        .package(path: "../../noble-tx-core"),
         .package(url: "https://github.com/GigaBitcoin/secp256k1.swift", from: "0.18.0"),
         .package(url: "https://github.com/valpackett/SwiftCBOR", from: "0.4.7"),
     ],
@@ -17,6 +18,7 @@ let package = Package(
             name: "NobleClientCrypto",
             dependencies: [
                 "NobleClientCore",
+                .product(name: "NobleTxCore", package: "noble-tx-core"),
                 .product(name: "P256K", package: "secp256k1.swift"),
                 .product(name: "SwiftCBOR", package: "SwiftCBOR"),
             ]

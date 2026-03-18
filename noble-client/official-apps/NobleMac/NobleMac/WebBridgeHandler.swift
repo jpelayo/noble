@@ -107,9 +107,11 @@ final class WebBridgeHandler {
         case "estimateFee":
             let fee = try await api.estimateFee()
             return [
-                "minFee": fee.minFee.atomic,
-                "recommendedFee": fee.recommendedFee.atomic,
-                "highPriorityFee": fee.highPriorityFee.atomic,
+                "lowFeeRate": fee.lowFeeRate,
+                "recommendedFeeRate": fee.recommendedFeeRate,
+                "highPriorityFeeRate": fee.highPriorityFeeRate,
+                "networkMinFeeRate": fee.networkMinFeeRate,
+                "networkMedianFeeRate": fee.networkMedianFeeRate,
             ] as [String: Any]
 
         case "verifyDocument":
