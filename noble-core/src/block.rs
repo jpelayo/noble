@@ -67,12 +67,12 @@ pub struct Block {
 mod tests {
     use super::*;
     use noble_codec::NobleCbor;
-    use noble_crypto::{ed25519, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, NoblePrivateKey, NobleSigner, SCHEME_SECP256K1};
 
     fn make_test_header() -> BlockHeader {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk.clone());
 
         let mut header = BlockHeader {
             version: 1,
@@ -83,7 +83,7 @@ mod tests {
             tx_count: 0,
             validator_id: pub_key,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk,
                 signature: vec![],
             },
@@ -152,6 +152,6 @@ mod tests {
     fn validator_id_is_typed() {
         let header = make_test_header();
         // GAP-H11: validator_id carries scheme_id intrinsically
-        assert_eq!(header.validator_id.scheme_id(), SCHEME_ED25519);
+        assert_eq!(header.validator_id.scheme_id(), SCHEME_SECP256K1);
     }
 }

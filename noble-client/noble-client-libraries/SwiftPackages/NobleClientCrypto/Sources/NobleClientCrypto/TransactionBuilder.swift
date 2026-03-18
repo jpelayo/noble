@@ -20,8 +20,6 @@ public enum NobleProtocol {
     public static let primaryChainId: UInt32 = 0x4E4F_424C
     /// Test chain ID ("TSTN" in ASCII).
     public static let testChainId: UInt32 = 0x5453_544E
-    /// Ed25519 scheme ID.
-    public static let schemeEd25519: UInt8 = 0x01
     /// secp256k1 scheme ID.
     public static let schemeSecp256k1: UInt8 = 0x02
     /// Maximum metadata entries per transaction.
@@ -369,15 +367,13 @@ public struct TransactionBuilder: Sendable {
 
     /// Encode a NobleAddress wire bytes as serde-compatible CBOR enum.
     /// Wire format: [prefix(1) || key_bytes]
-    /// Serde CBOR: {"Noble": {"Secp256k1": <bytes>}} or {"Noble": {"Ed25519": <bytes>}}
+    /// Serde CBOR: {"Noble": {"Secp256k1": <bytes>}}
     ///             or {"BitcoinHash160": <20_bytes>} or {"BitcoinTaproot": <32_bytes>}
     static func encodeAddressSerde(_ wire: [UInt8]) -> CBOR {
         guard !wire.isEmpty else { return .byteString(wire) }
         let prefix = wire[0]
         let keyBytes = Array(wire.dropFirst())
         switch prefix {
-        case 0x01: // Ed25519
-            return .map([.utf8String("Noble"): .map([.utf8String("Ed25519"): .byteString(keyBytes)])])
         case 0x02: // Secp256k1
             return .map([.utf8String("Noble"): .map([.utf8String("Secp256k1"): .byteString(keyBytes)])])
         case 0x80: // BitcoinHash160

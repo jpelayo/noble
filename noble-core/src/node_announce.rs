@@ -454,9 +454,9 @@ mod tests {
     use noble_codec::NobleCbor;
     use noble_crypto::NoblePrivateKey;
 
-    fn make_ed25519_keypair() -> (NoblePrivateKey, NoblePublicKey) {
-        let sk_bytes = [42u8; 32];
-        let sk = NoblePrivateKey::Ed25519(sk_bytes.to_vec());
+    fn make_test_keypair() -> (NoblePrivateKey, NoblePublicKey) {
+        let (sk_vec, _) = noble_crypto::secp256k1::generate_keypair();
+        let sk = NoblePrivateKey::Secp256k1(sk_vec);
         let pk = sk.public_key();
         (sk, pk)
     }
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn node_announce_cbor_roundtrip() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let announce = make_announce(&sk, &pk, 1_700_000_000);
         let bytes = announce.to_cbor().unwrap();
         let decoded = NodeAnnounce::from_cbor(&bytes).unwrap();
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn signing_message_deterministic() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let announce = make_announce(&sk, &pk, 1_700_000_000);
         let msg1 = announce.compute_signing_message().unwrap();
         let msg2 = announce.compute_signing_message().unwrap();
@@ -518,14 +518,14 @@ mod tests {
 
     #[test]
     fn verify_valid_signature() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let announce = make_announce(&sk, &pk, 1_700_000_000);
         assert!(announce.verify_signature().is_ok());
     }
 
     #[test]
     fn verify_tampered_signature() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let mut announce = make_announce(&sk, &pk, 1_700_000_000);
         announce.node_name = "tampered-name".to_string();
         assert!(announce.verify_signature().is_err());
@@ -533,10 +533,10 @@ mod tests {
 
     #[test]
     fn verify_wrong_key() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let mut announce = make_announce(&sk, &pk, 1_700_000_000);
         // Replace identity_key with a different key
-        let other_sk = NoblePrivateKey::Ed25519([99u8; 32].to_vec());
+        let other_sk = NoblePrivateKey::Secp256k1([99u8; 32].to_vec());
         announce.identity_key = other_sk.public_key();
         // Signature was signed by the original key, so verify should fail
         assert!(announce.verify_signature().is_err());
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn node_name_length_check() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.node_name = "x".repeat(MAX_NODE_NAME_LEN + 1);
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn org_name_length_check() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.org_name = Some("x".repeat(MAX_ORG_NAME_LEN + 1));
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn timestamp_freshness() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_010_000u64;
         // Stale: more than NODE_ANNOUNCE_MAX_AGE_SECS ago
         let announce = make_announce(&sk, &pk, now - NODE_ANNOUNCE_MAX_AGE_SECS - 1);
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn participation_flags_in_cbor_roundtrip() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let announce = NodeAnnounce::sign(
             pk.clone(),
             "validator-node".to_string(),
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn participation_flags_included_in_signing_message() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let a1 = NodeAnnounce::sign(
             pk.clone(),
             "test".to_string(),
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn all_participation_combinations_valid() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         for (v, vote) in [(false, false), (true, false), (false, true), (true, true)] {
             let a = NodeAnnounce::sign(
                 pk.clone(),
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn pki_binding_message_deterministic() {
-        let (_, pk) = make_ed25519_keypair();
+        let (_, pk) = make_test_keypair();
         let msg1 = compute_pki_binding_message_for_key(&pk);
         let msg2 = compute_pki_binding_message_for_key(&pk);
         assert_eq!(msg1, msg2);
@@ -741,8 +741,8 @@ mod tests {
 
     #[test]
     fn pki_binding_message_differs_per_key() {
-        let sk1 = NoblePrivateKey::Ed25519([42u8; 32].to_vec());
-        let sk2 = NoblePrivateKey::Ed25519([99u8; 32].to_vec());
+        let sk1 = NoblePrivateKey::Secp256k1([42u8; 32].to_vec());
+        let sk2 = NoblePrivateKey::Secp256k1([99u8; 32].to_vec());
         let msg1 = compute_pki_binding_message_for_key(&sk1.public_key());
         let msg2 = compute_pki_binding_message_for_key(&sk2.public_key());
         assert_ne!(msg1, msg2);
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn announce_with_attestation_roundtrip() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let att = make_test_attestation("identity", 256);
         let announce = NodeAnnounce::sign_with_attestation(
             pk.clone(),
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn attestation_not_in_signing_payload() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let att = make_test_attestation("identity", 128);
         // Build identical announces — one with attestation, one without
         let with = NodeAnnounce::sign_with_attestation(
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn attestation_wrong_scope_rejected() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let att = make_test_attestation("hash", 128); // wrong scope
         let announce = NodeAnnounce::sign_with_attestation(
             pk.clone(),
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn attestation_too_large_rejected() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let att = make_test_attestation("identity", MAX_ATTESTATION_DATA_SIZE + 1);
         let announce = NodeAnnounce::sign_with_attestation(
             pk.clone(),
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn country_code_valid_accepted() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let announce = NodeAnnounce::sign(
             pk.clone(),
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn country_code_none_accepted() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let announce = make_announce(&sk, &pk, now);
         assert!(announce.validate(now).is_ok());
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn country_code_invalid_too_short() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("US".to_string());
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn country_code_invalid_too_long() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("USAA".to_string());
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn country_code_invalid_non_alpha() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let now = 1_700_000_000u64;
         let mut announce = make_announce(&sk, &pk, now);
         announce.country_code = Some("12A".to_string());
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn country_code_in_signing_message() {
-        let (sk, pk) = make_ed25519_keypair();
+        let (sk, pk) = make_test_keypair();
         let a1 = NodeAnnounce::sign(
             pk.clone(),
             "test".to_string(),

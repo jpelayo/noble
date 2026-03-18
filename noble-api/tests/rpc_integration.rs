@@ -410,9 +410,11 @@ async fn validate_address_valid() {
     let (url, _handle) = start_test_server(state).await;
     let client = WsClientBuilder::default().build(&url).await.unwrap();
 
-    // A valid Ed25519 wire-format address: scheme_id=0x01 + 32 bytes
-    let mut wire = vec![0x01u8]; // SCHEME_ED25519
-    wire.extend_from_slice(&[0xaa; 32]);
+    // A valid secp256k1 wire-format address: scheme_id=0x02 + 33 bytes compressed key
+    let mut wire = vec![0x02u8]; // SCHEME_SECP256K1
+    let mut key = vec![0x02u8]; // even-y compressed prefix
+    key.extend_from_slice(&[0xaa; 32]);
+    wire.extend_from_slice(&key);
     let address_hex = hex::encode(&wire);
 
     let resp: serde_json::Value = client
@@ -421,7 +423,7 @@ async fn validate_address_valid() {
         .unwrap();
 
     assert_eq!(resp["valid"], true);
-    assert_eq!(resp["scheme_id"], 1); // SCHEME_ED25519
+    assert_eq!(resp["scheme_id"], 2); // SCHEME_SECP256K1
 }
 
 #[tokio::test]
@@ -570,9 +572,11 @@ async fn get_address_balance_shape() {
     let (url, _handle) = start_test_server(state).await;
     let client = WsClientBuilder::default().build(&url).await.unwrap();
 
-    // Create a valid ed25519 address
-    let mut wire = vec![0x01u8]; // Ed25519 scheme_id
-    wire.extend_from_slice(&[0xAB; 32]);
+    // Create a valid secp256k1 address
+    let mut wire = vec![0x02u8]; // secp256k1 scheme_id
+    let mut key = vec![0x02u8]; // even-y compressed prefix
+    key.extend_from_slice(&[0xAB; 32]);
+    wire.extend_from_slice(&key);
     let addr = hex::encode(&wire);
 
     let resp: serde_json::Value = client
@@ -666,12 +670,12 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         TX_TYPE_COINBASE,
     };
     use noble_crypto::{
-        ed25519, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+        secp256k1, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
 
-    let (sk, pk) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-    let addr = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
+    let (sk, pk) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+    let addr = noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.to_vec()));
 
     // Create a coinbase tx (valid — no UTXO inputs to verify)
     let subsidy = noble_core::subsidy_at_height(1);
@@ -683,7 +687,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         checksum: noble_crypto::Hash256::ZERO,
         timestamp: 1_700_000_001,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.to_vec(),
             signature: vec![],
         },
@@ -703,7 +707,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
     let tip = storage.get_chain_tip().unwrap().unwrap();
     let prev_hash = tip.block_hash;
 
-    let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+    let val_pub = NoblePublicKey::Secp256k1(pk.to_vec());
     let tx_ids = vec![tx_id];
     let merkle_root = noble_core::compute_merkle_root(&tx_ids);
 
@@ -716,7 +720,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         tx_count: 1,
         validator_id: val_pub,
         validator_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.to_vec(),
             signature: vec![],
         },

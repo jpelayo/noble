@@ -16,7 +16,7 @@ use noble_consensus::ValidatorList;
 use noble_core::{
     build_genesis, compute_merkle_root, derive_chain_id, Block, GENESIS_TIMESTAMP,
 };
-use noble_crypto::{ed25519, secp256k1, sha256, Hash256};
+use noble_crypto::{secp256k1, sha256, Hash256};
 use noble_storage::{RocksDbStorage, StorageEngine};
 
 // ---------------------------------------------------------------------------
@@ -446,29 +446,10 @@ fn run_hash_benchmarks(results: &mut Vec<(&str, std::time::Duration)>) {
     results.push(("SHA-256 1KB x10000", elapsed));
 }
 
-/// Ed25519 sign + verify and secp256k1 sign + verify.
+/// secp256k1 sign + verify benchmarks.
 fn run_crypto_benchmarks(results: &mut Vec<(&str, std::time::Duration)>) {
     let message = sha256(b"benchmark payload");
-
-    // Ed25519
-    let (ed_sk, ed_pk) = ed25519::generate_keypair();
-
     let iterations = 1_000;
-
-    // Ed25519 sign
-    let start = Instant::now();
-    let mut ed_sig = Vec::new();
-    for _ in 0..iterations {
-        ed_sig = ed25519::sign(&ed_sk, &message.0).expect("ed25519 sign");
-    }
-    results.push(("Ed25519 sign x1000", start.elapsed()));
-
-    // Ed25519 verify
-    let start = Instant::now();
-    for _ in 0..iterations {
-        ed25519::verify(&ed_pk, &message.0, &ed_sig).expect("ed25519 verify");
-    }
-    results.push(("Ed25519 verify x1000", start.elapsed()));
 
     // secp256k1
     let (sec_sk, sec_pk) = secp256k1::generate_keypair();
@@ -894,7 +875,7 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
     if json {
         let entries: Vec<serde_json::Value> = keys.iter().map(|pk| {
             let wire = pk.to_wire_bytes();
-            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "unknown" };
             let mut obj = serde_json::json!({
                 "pubkey_hex": noble_crypto::noble_addr::encode_wire_bytes(&wire)
                     .unwrap_or_else(|| hex::encode(&wire)),
@@ -922,7 +903,7 @@ fn print_key_list_offline(keys: &[noble_crypto::NoblePublicKey], ks_path: &str, 
         println!();
         for pk in keys {
             let display_addr = pk.to_address();
-            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "ed25519" };
+            let scheme = if pk.scheme_id() == SCHEME_SECP256K1 { "secp256k1" } else { "unknown" };
             println!("[{scheme}] {display_addr}");
             if pk.scheme_id() == SCHEME_SECP256K1 {
                 let kb = pk.key_bytes();
@@ -1912,10 +1893,10 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_ed25519_runs() {
+    fn benchmark_secp256k1_runs() {
         let mut results = Vec::new();
         run_crypto_benchmarks(&mut results);
-        // Ed25519 sign, Ed25519 verify, secp256k1 sign, secp256k1 verify
+        // secp256k1 sign, secp256k1 verify
         assert!(results.len() >= 2);
         for (name, dur) in &results {
             assert!(!dur.is_zero(), "{name} took zero time");
@@ -2146,7 +2127,7 @@ mod tests {
 
         // Create a validators.txt with one validator and two known peers
         let mut vlist = ValidatorList::new();
-        let dummy_pk = NoblePublicKey::Ed25519(vec![0xAA; 32]);
+        let dummy_pk = NoblePublicKey::Secp256k1(vec![0xAA; 32]);
         vlist.add_validator(dummy_pk, 100, 1000);
         vlist.update_known_peer(
             "peer1hex", Some("Node A".to_string()), Some("/ip4/1.2.3.4/tcp/8780".to_string()),

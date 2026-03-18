@@ -541,7 +541,7 @@ pub fn announce_signing_payload_bytes(announce: &crate::node_announce::NodeAnnou
 mod tests {
     use super::*;
     use crate::utxo::OutPoint;
-    use noble_crypto::{Hash256, SCHEME_ED25519};
+    use noble_crypto::{Hash256, SCHEME_SECP256K1};
 
     #[test]
     fn hash256_wire_bytes() {
@@ -555,25 +555,25 @@ mod tests {
 
     #[test]
     fn noble_public_key_wire_bytes() {
-        let pk = NoblePublicKey::Ed25519(vec![0xAA; 32]);
+        let pk = NoblePublicKey::Secp256k1(vec![0xAA; 32]);
         let bytes = pk.wire_bytes();
         assert_eq!(bytes[0], 0x58);
         assert_eq!(bytes[1], 33);
-        assert_eq!(bytes[2], SCHEME_ED25519);
+        assert_eq!(bytes[2], SCHEME_SECP256K1);
         assert_eq!(&bytes[3..], &[0xAA; 32]);
     }
 
     #[test]
     fn signature_envelope_wire_bytes() {
         let sig = SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: vec![0xBB; 32],
             signature: vec![0xCC; 64],
         };
         let bytes = sig.wire_bytes();
         assert_eq!(bytes[0], 0x58);
         assert_eq!(bytes[1], 98);
-        assert_eq!(bytes[2], SCHEME_ED25519);
+        assert_eq!(bytes[2], SCHEME_SECP256K1);
         assert_eq!(bytes[3], 32);
         assert_eq!(&bytes[4..36], &[0xBB; 32]);
         assert_eq!(&bytes[36..100], &[0xCC; 64]);
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn wire_bytes_deterministic() {
-        let pk = NoblePublicKey::Ed25519(vec![0x42; 32]);
+        let pk = NoblePublicKey::Secp256k1(vec![0x42; 32]);
         assert_eq!(pk.wire_bytes(), pk.wire_bytes());
 
         let op = OutPoint { txid: Hash256::from_bytes([0xAB; 32]), vout: 42 };
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn encode_wire_matches_wire_bytes() {
         // Verify the default wire_bytes() wrapper matches direct encode_wire
-        let pk = NoblePublicKey::Ed25519(vec![0x42; 32]);
+        let pk = NoblePublicKey::Secp256k1(vec![0x42; 32]);
         let mut direct = Vec::new();
         pk.encode_wire(&mut direct);
         assert_eq!(direct, pk.wire_bytes());
@@ -631,12 +631,12 @@ mod tests {
             inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
             outputs: vec![TxOut {
                 value: 100_000_000,
-                address: NobleAddress::Noble(NoblePublicKey::Ed25519(vec![0x42; 32])),
+                address: NobleAddress::Noble(NoblePublicKey::Secp256k1(vec![0x42; 32])),
             }],
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: vec![0x42; 32],
                 signature: vec![0x00; 64],
             },
@@ -660,9 +660,9 @@ mod tests {
             timestamp: 1_700_000_000,
             height: 42,
             tx_count: 1,
-            validator_id: NoblePublicKey::Ed25519(vec![0x42; 32]),
+            validator_id: NoblePublicKey::Secp256k1(vec![0x42; 32]),
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: vec![0x42; 32],
                 signature: vec![0x00; 64],
             },

@@ -183,8 +183,8 @@ mod tests {
     use noble_core::{Block, BlockHeader, PROTOCOL_VERSION};
     use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{
-        ed25519, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-        SCHEME_ED25519,
+        secp256k1, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+        SCHEME_SECP256K1,
     };
 
     fn make_block(
@@ -193,8 +193,8 @@ mod tests {
         val_sk: &[u8],
         val_pk: &[u8],
     ) -> (Block, Hash256, Vec<Hash256>) {
-        let val_priv = NoblePrivateKey::Ed25519(val_sk.to_vec());
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        let val_priv = NoblePrivateKey::Secp256k1(val_sk.to_vec());
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.to_vec());
         let merkle_root = noble_core::compute_merkle_root(&[]);
         let mut header = BlockHeader {
             version: PROTOCOL_VERSION,
@@ -205,7 +205,7 @@ mod tests {
             tx_count: 0,
             validator_id: val_pub,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pk.to_vec(),
                 signature: vec![],
             },
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn integrity_clean_chain() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (b0, h0, ids0) = make_block(0, Hash256::ZERO, &sk, &pk);
         store.commit_block(&b0, &h0, &ids0).unwrap();
         let (b1, h1, ids1) = make_block(1, h0, &sk, &pk);
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn integrity_detects_height_gap() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (b0, h0, ids0) = make_block(0, Hash256::ZERO, &sk, &pk);
         store.commit_block(&b0, &h0, &ids0).unwrap();
         // Skip height 1, commit height 2 (would need to force this)
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn integrity_single_block() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (b0, h0, ids0) = make_block(0, Hash256::ZERO, &sk, &pk);
         store.commit_block(&b0, &h0, &ids0).unwrap();
 

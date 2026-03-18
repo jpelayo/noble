@@ -21,7 +21,7 @@ use noble_consensus::PorVote;
 use noble_core::node_announce::{NodeRole, OrgType};
 use noble_core::{Block, BlockHeader, NodeAnnounce};
 use noble_test_utils::fixtures::test_chain_id;
-use noble_crypto::{ed25519, Hash256, NoblePrivateKey, NoblePublicKey};
+use noble_crypto::{secp256k1, Hash256, NoblePrivateKey, NoblePublicKey};
 use noble_network::config::NetworkConfig;
 use noble_network::messages::{NetworkCommand, NetworkEvent};
 use noble_network::service::{start_network, NetworkHandle};
@@ -88,8 +88,8 @@ async fn start_gossip_node() -> NetworkHandle {
 
 /// Generate a validator keypair.
 fn make_keypair() -> (NoblePrivateKey, NoblePublicKey) {
-    let (sk, _) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let (sk, _) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
     let pub_key = priv_key.public_key();
     (priv_key, pub_key)
 }
@@ -324,6 +324,7 @@ async fn gossip_block_announce_end_to_end() {
         &pk,
         4 * 1024 * 1024,
         &NoopLookup,
+        None,
     )
     .expect("block proposal should succeed");
     let expected_hash = block.header.compute_block_hash().unwrap();

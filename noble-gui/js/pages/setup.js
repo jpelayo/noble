@@ -84,7 +84,7 @@ export function init(root, ctx) {
     website: '',
     countryCode: '',
     rewardAddress: '',     // Bitcoin or NOBLE address entered by user
-    rewardAddressType: '', // e.g. 'P2WPKH', 'Ed25519'
+    rewardAddressType: '', // e.g. 'P2WPKH', 'secp256k1'
     rewardSkipped: false,  // true when user chose to skip
     walletSkipped: false,  // true when user chose to skip wallet step
     p2pPort: 8780,

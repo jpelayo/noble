@@ -123,6 +123,10 @@ pub struct CycleEngine {
     /// Immutable validator snapshot injected per tick from ValidatorRegistry.
     /// When set, consensus operations use this instead of the internal validator_list.
     validator_snapshot: Option<std::sync::Arc<crate::registry::ValidatorSnapshot>>,
+    /// Shared reward address override for coinbase subsidy + validator fee share.
+    /// When set, the coinbase primary output goes here instead of the validator key.
+    /// Shared with ApiState so RPC hot-reload updates take effect immediately.
+    reward_address: std::sync::Arc<parking_lot::RwLock<Option<noble_core::NobleAddress>>>,
 }
 
 impl CycleEngine {
@@ -185,6 +189,7 @@ impl CycleEngine {
             ),
             utxo_value_lookup: None,
             validator_snapshot: None,
+            reward_address: std::sync::Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -207,6 +212,21 @@ impl CycleEngine {
     /// compute correct fee totals for the coinbase transaction.
     pub fn set_utxo_value_lookup(&mut self, lookup: Box<dyn crate::proposal::UtxoValueLookup + Send + Sync>) {
         self.utxo_value_lookup = Some(lookup);
+    }
+
+    /// Set the reward address for coinbase outputs.
+    ///
+    /// When set, the block subsidy and validator's fee share go to this address
+    /// instead of the validator's secp256k1 key. Accepts any `NobleAddress`
+    /// variant (native, Bitcoin Hash160, Bitcoin Taproot).
+    pub fn set_reward_address(&mut self, addr: noble_core::NobleAddress) {
+        *self.reward_address.write() = Some(addr);
+    }
+
+    /// Returns the shared reward address Arc for wiring to ApiState.
+    /// RPC hot-reload writes to this Arc so the engine picks up changes immediately.
+    pub fn reward_address_arc(&self) -> std::sync::Arc<parking_lot::RwLock<Option<noble_core::NobleAddress>>> {
+        self.reward_address.clone()
     }
 
     /// Update the connected peer count (called by node event loop).
@@ -1890,6 +1910,7 @@ impl CycleEngine {
             None => &noop,
         };
 
+        let reward_addr = self.reward_address.read().clone();
         match crate::proposal::propose_block(
             &txs,
             self.tip_hash,
@@ -1900,6 +1921,7 @@ impl CycleEngine {
             pub_key,
             self.config.max_block_size,
             lookup,
+            reward_addr.as_ref(),
         ) {
             Ok(block) => {
                 // P0-3: Validate self-proposed block before broadcast (same checks as remote proposals).
@@ -2235,11 +2257,11 @@ mod tests {
         TX_TYPE_COINBASE, PROTOCOL_VERSION, subsidy_at_height,
     };
     use noble_test_utils::fixtures::test_chain_id;
-    use noble_crypto::{ed25519, NobleSigner, SignatureEnvelope, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1};
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         (priv_key, pub_key)
     }
@@ -2319,7 +2341,7 @@ mod tests {
             tx_count: 1,
             validator_id: val_pub.clone(),
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pub.key_bytes().to_vec(),
                 signature: vec![],
             },
@@ -2827,7 +2849,7 @@ mod tests {
             tx_count: 0,
             validator_id: vpub.clone(),
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: vpub.key_bytes().to_vec(),
                 signature: vec![],
             },

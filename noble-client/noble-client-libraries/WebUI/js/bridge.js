@@ -174,7 +174,7 @@ class MockBridge {
                 found: true, records: [{ blockHeight: 1230, txId: 'a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890', timestamp: Date.now() / 1000 - 7200 }]
             };
             if (action === 'validateAddress') return {
-                valid: true, scheme: 'ed25519', publicKey: params.address
+                valid: true, scheme: 'secp256k1', publicKey: params.address
             };
         }
 

@@ -411,12 +411,13 @@ impl Default for GatewayConfig {
     }
 }
 
-/// `[rewards]` section — reward address for fee splits.
+/// `[rewards]` section — reward address for block subsidy and fee splits.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RewardsConfig {
     /// Bitcoin address (bc1q..., 1..., bc1p...) or NOBLE public key (hex).
-    /// Receives gateway fee splits. Block subsidy goes to the validator key.
+    /// Receives block subsidy, validator fee share, and gateway fee splits.
+    /// If empty, subsidy goes to the validator key.
     #[serde(default)]
     pub reward_address: String,
 }

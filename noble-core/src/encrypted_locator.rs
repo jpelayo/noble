@@ -33,7 +33,7 @@ pub struct EncryptedLocator {
 pub struct LocatorRecipient {
     /// Recipient's public key (must be a NOBLE wallet key).
     pub recipient: NoblePublicKey,
-    /// Ephemeral public key used for ECDH (X25519 32 bytes or SEC1 33 bytes).
+    /// Ephemeral public key used for ECDH (SEC1 compressed 33 bytes).
     pub ephemeral_pubkey: Vec<u8>,
     /// AES-256-GCM encrypted data key (32 key bytes + 16 GCM tag = 48 bytes).
     pub encrypted_key: Vec<u8>,

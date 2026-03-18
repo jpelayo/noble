@@ -252,7 +252,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Wrapped in RwLock so `setNodeIdentity` can hot-reload after setup.
     pub validator_pubkey: parking_lot::RwLock<Option<String>>,
 
-    /// Signature scheme of the validator key: `"ed25519"` or `"secp256k1"` (if enabled).
+    /// Signature scheme of the validator key: `"secp256k1"`.
     pub validator_scheme: parking_lot::RwLock<Option<String>>,
 
     /// File path used to load the validator key (if enabled).
@@ -270,6 +270,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Configured reward address string (as entered by the operator).
     /// Can be a Bitcoin address (bc1q..., 1..., bc1p...) or hex NOBLE pubkey.
     pub reward_address: RwLock<Option<String>>,
+
+    /// Shared parsed reward address — written by RPC, read by CycleEngine during
+    /// block proposals. Hot-reload: writing here takes effect on the next proposal.
+    pub engine_reward_address: Arc<parking_lot::RwLock<Option<noble_core::NobleAddress>>>,
 
     /// Callback to enable TOTP authentication.
     /// Returns `Ok((secret_base32, otpauth_uri))`.

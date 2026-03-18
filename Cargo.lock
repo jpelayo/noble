@@ -1053,8 +1053,6 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "merlin",
- "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -2137,15 +2135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keccak"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc2af9a1119c51f12a14607e783cb977bde58bc069ff0c3da1095e635d70654"
-dependencies = [
- "cpufeatures",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2764,18 +2753,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "merlin"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58c38e2799fc0978b65dfff8023ec7843e2330bb462f19198840b34b6582397d"
-dependencies = [
- "byteorder",
- "keccak",
- "rand_core 0.6.4",
- "zeroize",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3024,6 +3001,7 @@ dependencies = [
  "noble-core",
  "noble-crypto",
  "noble-test-utils",
+ "parking_lot",
  "proptest",
  "serde",
  "thiserror 2.0.18",
@@ -3036,7 +3014,6 @@ version = "0.60.0"
 dependencies = [
  "aes-gcm",
  "dirs",
- "ed25519-dalek",
  "hex",
  "k256",
  "noble-codec",
@@ -3059,7 +3036,6 @@ dependencies = [
  "bip32",
  "bip39",
  "bs58",
- "ed25519-dalek",
  "hex",
  "hkdf",
  "k256",
@@ -3071,7 +3047,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tracing",
- "x25519-dalek",
  "zeroize",
 ]
 

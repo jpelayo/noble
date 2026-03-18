@@ -7,13 +7,13 @@ use noble_consensus::config::ConsensusConfig;
 use noble_consensus::cycle::CyclePhase;
 use noble_consensus::vote::{PorVote, VoteManager};
 use noble_consensus::{ConsensusStateMachine, CycleEngine, CycleEvent, ValidatorRegistry};
-use noble_crypto::{ed25519, Hash256, NoblePrivateKey};
+use noble_crypto::{secp256k1, Hash256, NoblePrivateKey};
 use proptest::prelude::*;
 
 /// Generate a random validator keypair.
 fn arb_validator() -> (NoblePrivateKey, noble_crypto::NoblePublicKey) {
-    let (sk, _) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let (sk, _) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
     let pub_key = priv_key.public_key();
     (priv_key, pub_key)
 }

@@ -157,8 +157,8 @@ mod tests {
             value: 100_000_000,
             address: NobleAddress::Noble(
                 {
-                let (_, pk) = noble_crypto::ed25519::generate_keypair();
-                noble_crypto::NoblePublicKey::Ed25519(pk)
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
             },
             ),
         };
@@ -171,8 +171,8 @@ mod tests {
             value: 1000,
             address: NobleAddress::Noble(
                 {
-                let (_, pk) = noble_crypto::ed25519::generate_keypair();
-                noble_crypto::NoblePublicKey::Ed25519(pk)
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
             },
             ),
             height: 100,
@@ -190,8 +190,8 @@ mod tests {
             value: 100_000_000,
             address: NobleAddress::Noble(
                 {
-                let (_, pk) = noble_crypto::ed25519::generate_keypair();
-                noble_crypto::NoblePublicKey::Ed25519(pk)
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
             },
             ),
             height: 10,

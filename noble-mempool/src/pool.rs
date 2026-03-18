@@ -681,7 +681,7 @@ mod tests {
     use noble_core::{MetadataEntry, TxIn, TxOut, OutPoint, Transaction, MIN_TX_FEE, PROTOCOL_VERSION};
     use noble_core::address::NobleAddress;
     use noble_crypto::{
-        ed25519, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+        secp256k1, sha256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
     use noble_test_utils::fixtures::test_chain_id;
 
@@ -705,8 +705,8 @@ mod tests {
     /// Build a signed notarization tx (UTXO model).
     /// `fee` = input_value - change_output_value (input_value is fixed at 1_000_000).
     fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], fee: u64) -> Transaction {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key.clone());
         let checksum = sha256(doc);
         let input_value = noble_core::GROATS_PER_NOBLE; // 1 NOBLE per test UTXO
@@ -720,7 +720,7 @@ mod tests {
             checksum,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn admit_valid_tx() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn admit_and_remove() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn step2_reject_mempool_duplicate() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -817,7 +817,7 @@ mod tests {
         }
 
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn step3_reject_bad_version() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.version = 99;
 
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn step4_reject_unknown_scheme() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.issuer_sig.scheme_id = 0xFF;
 
@@ -855,9 +855,9 @@ mod tests {
     #[test]
     fn step4_reject_duplicate_metadata_keys() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(b"meta_doc");
         let mut tx = Transaction {
@@ -868,7 +868,7 @@ mod tests {
             checksum,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn step6_reject_invalid_issuer_sig() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.issuer_sig.signature = vec![0u8; 64]; // Corrupt signature
 
@@ -911,10 +911,10 @@ mod tests {
     #[test]
     fn step6_reject_invalid_additional_sig() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.additional_sigs.push(SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.to_vec(),
             signature: vec![0u8; 64],
         });
@@ -928,10 +928,10 @@ mod tests {
     #[test]
     fn step7_reject_low_fee() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         // Fee = 0 (input_value == output_value). Use a custom UTXO lookup.
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(b"low_fee_doc");
         let outpoint = unique_outpoint();
@@ -945,7 +945,7 @@ mod tests {
             checksum,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn checksum_lookup() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"same_doc", TEST_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"other_doc", TEST_FEE);
@@ -1000,7 +1000,7 @@ mod tests {
     #[test]
     fn iter_by_fee_rate_desc() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx_low = make_signed_tx(&sk, &pk, b"low", TEST_FEE);
         let tx_mid = make_signed_tx(&sk, &pk, b"mid", TEST_FEE * 5);
@@ -1024,7 +1024,7 @@ mod tests {
         let mut config = test_config();
         config.max_count = 3;
         let mut pool = Mempool::new(config);
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"doc2", TEST_FEE * 2);
@@ -1053,7 +1053,7 @@ mod tests {
         let mut config = test_config();
         config.expiry_secs = 3600; // 1 hour
         let mut pool = Mempool::new(config);
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"old", TEST_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"new", TEST_FEE);
@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn sig_cache_avoids_reverification() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"cached", TEST_FEE);
 
         let tx_id = pool
@@ -1101,7 +1101,7 @@ mod tests {
     #[test]
     fn remove_confirmed_batch() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"c1", TEST_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"c2", TEST_FEE);
@@ -1143,9 +1143,9 @@ mod tests {
         amount: u64,
         change: u64,
     ) -> Transaction {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let sender_addr = NobleAddress::Noble(pub_key);
         let recip_addr = NobleAddress::Noble(recipient);
 
@@ -1162,7 +1162,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1181,8 +1181,8 @@ mod tests {
     #[test]
     fn step65_reject_unknown_utxo() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recip) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
 
         let outpoint = unique_outpoint();
         let tx = make_signed_transfer_with_outpoint(&sk, &pk, &recip, outpoint, 500_000, 499_000);
@@ -1197,7 +1197,7 @@ mod tests {
     #[test]
     fn step65_accept_valid_utxo() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx = make_signed_tx(&sk, &pk, b"utxo_ok", TEST_FEE);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
@@ -1207,8 +1207,8 @@ mod tests {
     #[test]
     fn step65_reject_double_spend_in_mempool() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recip) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
 
         // Both txs spend the same outpoint
         let shared_outpoint = unique_outpoint();
@@ -1232,8 +1232,8 @@ mod tests {
     #[test]
     fn step65_spent_outpoints_cleared_on_remove() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recip) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
 
         let shared_outpoint = unique_outpoint();
         let tx1 = make_signed_transfer_with_outpoint(
@@ -1264,7 +1264,7 @@ mod tests {
         let mut config = test_config();
         config.max_per_sender = 3;
         let mut pool = Mempool::new(config);
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Admit 3 txs (at the limit)
         for i in 0..3 {
@@ -1290,8 +1290,8 @@ mod tests {
         let mut config = test_config();
         config.max_per_sender = 2;
         let mut pool = Mempool::new(config);
-        let (sk1, pk1) = ed25519::generate_keypair();
-        let (sk2, pk2) = ed25519::generate_keypair();
+        let (sk1, pk1) = secp256k1::generate_keypair();
+        let (sk2, pk2) = secp256k1::generate_keypair();
 
         // Sender 1: 2 txs (at limit)
         for i in 0..2 {
@@ -1320,7 +1320,7 @@ mod tests {
     #[test]
     fn fee_stats_with_transactions() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
@@ -1343,8 +1343,8 @@ mod tests {
     #[test]
     fn pending_debit_zero_for_unknown_key() {
         let pool = Mempool::new(test_config());
-        let (_sk, pk) = ed25519::generate_keypair();
-        let pubkey = noble_crypto::NoblePublicKey::Ed25519(pk.to_vec());
+        let (_sk, pk) = secp256k1::generate_keypair();
+        let pubkey = noble_crypto::NoblePublicKey::Secp256k1(pk.to_vec());
         assert_eq!(pool.pending_debit(&pubkey), 0);
     }
 
@@ -1358,8 +1358,8 @@ mod tests {
         version: Option<&str>,
         prev_checksum: Option<&str>,
     ) -> Transaction {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key);
         let checksum = sha256(doc);
         let input_value = 100_000_000u64;
@@ -1385,7 +1385,7 @@ mod tests {
             checksum,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1404,7 +1404,7 @@ mod tests {
     #[test]
     fn step2_6_prev_checksum_not_on_chain_rejected() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let prev_hex = "aa".repeat(32);
         let tx =
             make_versioned_notarization(&sk, &pk, b"v2doc", TEST_FEE, Some("2"), Some(&prev_hex));
@@ -1428,7 +1428,7 @@ mod tests {
         }
 
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let prev_hex = "aa".repeat(32);
         let prev_hash = Hash256::from_hex(&prev_hex).unwrap();
         let chain = ChecksumExists(prev_hash);
@@ -1447,7 +1447,7 @@ mod tests {
     #[test]
     fn step2_6_no_version_metadata_skipped() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         // Normal notarization without any version metadata
         let tx = make_signed_tx(&sk, &pk, b"normal_doc", TEST_FEE);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
@@ -1459,9 +1459,9 @@ mod tests {
     #[test]
     fn reject_coinbase_in_mempool() {
         let mut pool = Mempool::new(test_config());
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let pub_key = NoblePublicKey::Ed25519(pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let pub_key = NoblePublicKey::Secp256k1(pk.to_vec());
         let addr = NobleAddress::Noble(pub_key);
 
         let mut tx = Transaction {
@@ -1472,7 +1472,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },

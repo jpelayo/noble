@@ -271,15 +271,15 @@ mod tests {
     use super::*;
     use crate::metadata::MetadataEntry;
     use crate::utxo::{OutPoint, TxIn};
-    use noble_crypto::{ed25519, Hash256, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, Hash256, SCHEME_SECP256K1};
 
     const TEST_CHAIN_ID: u32 = 0x4E4F424C;
 
     /// Helper: create an unsigned test transaction and its signing keypair.
     fn make_unsigned_tx() -> (Transaction, NoblePrivateKey, NoblePublicKey) {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let tx = Transaction {
             version: 1,
@@ -291,7 +291,7 @@ mod tests {
             checksum: Hash256::from_bytes([0xAB; 32]),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pub_key.key_bytes().to_vec(),
                 signature: vec![], // placeholder — unsigned
             },
@@ -314,9 +314,9 @@ mod tests {
         let (tx, _sk, pk) = make_unsigned_tx();
 
         // Second signer
-        let (sk2_raw, pk2_raw) = ed25519::generate_keypair();
-        let _sk2 = NoblePrivateKey::Ed25519(sk2_raw);
-        let pk2 = NoblePublicKey::Ed25519(pk2_raw);
+        let (sk2_raw, pk2_raw) = secp256k1::generate_keypair();
+        let _sk2 = NoblePrivateKey::Secp256k1(sk2_raw);
+        let pk2 = NoblePublicKey::Secp256k1(pk2_raw);
 
         let mut pst = PartiallySignedTransaction::new(tx, Some("test PST".into()));
 
@@ -360,9 +360,9 @@ mod tests {
     fn pst_finalize_produces_valid_tx() {
         let (tx, sk, pk) = make_unsigned_tx();
 
-        let (sk2_raw, pk2_raw) = ed25519::generate_keypair();
-        let sk2 = NoblePrivateKey::Ed25519(sk2_raw);
-        let pk2 = NoblePublicKey::Ed25519(pk2_raw);
+        let (sk2_raw, pk2_raw) = secp256k1::generate_keypair();
+        let sk2 = NoblePrivateKey::Secp256k1(sk2_raw);
+        let pk2 = NoblePublicKey::Secp256k1(pk2_raw);
 
         let mut pst = PartiallySignedTransaction::new(tx, Some("finalize test".into()));
         pst.add_signer(pk.clone(), SignerRole::Primary);
@@ -395,9 +395,9 @@ mod tests {
     fn pst_cbor_roundtrip() {
         let (tx, sk, pk) = make_unsigned_tx();
 
-        let (sk2_raw, pk2_raw) = ed25519::generate_keypair();
-        let sk2 = NoblePrivateKey::Ed25519(sk2_raw);
-        let pk2 = NoblePublicKey::Ed25519(pk2_raw);
+        let (sk2_raw, pk2_raw) = secp256k1::generate_keypair();
+        let sk2 = NoblePrivateKey::Secp256k1(sk2_raw);
+        let pk2 = NoblePublicKey::Secp256k1(pk2_raw);
 
         let mut pst = PartiallySignedTransaction::new(tx, Some("roundtrip".into()));
         pst.add_signer(pk, SignerRole::Primary);
@@ -421,8 +421,8 @@ mod tests {
         pst.add_signer(pk, SignerRole::Primary);
 
         // Generate a completely unrelated key.
-        let (unknown_sk_raw, _) = ed25519::generate_keypair();
-        let unknown_sk = NoblePrivateKey::Ed25519(unknown_sk_raw);
+        let (unknown_sk_raw, _) = secp256k1::generate_keypair();
+        let unknown_sk = NoblePrivateKey::Secp256k1(unknown_sk_raw);
 
         let result = pst.sign(&unknown_sk, TEST_CHAIN_ID);
         assert!(result.is_err());
@@ -436,8 +436,8 @@ mod tests {
     fn pst_finalize_incomplete_errors() {
         let (tx, _sk, pk) = make_unsigned_tx();
 
-        let (_, pk2_raw) = ed25519::generate_keypair();
-        let pk2 = NoblePublicKey::Ed25519(pk2_raw);
+        let (_, pk2_raw) = secp256k1::generate_keypair();
+        let pk2 = NoblePublicKey::Secp256k1(pk2_raw);
 
         let mut pst = PartiallySignedTransaction::new(tx, None);
         pst.add_signer(pk, SignerRole::Primary);

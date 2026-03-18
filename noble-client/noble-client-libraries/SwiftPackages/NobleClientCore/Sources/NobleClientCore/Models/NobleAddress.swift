@@ -4,11 +4,9 @@
 /// A NOBLE blockchain address — either bech32 `nbl1…` display format or wire-format hex.
 ///
 /// Display format (from RPC):
-/// - `nbl1q…` — Ed25519 (bech32, witness v0)
 /// - `nbl1p…` — secp256k1 (bech32m, witness v1)
 ///
 /// Wire-hex format (legacy):
-/// - `0x01` + 32 bytes — Ed25519
 /// - `0x02` + 33 bytes — secp256k1
 /// - `0x80` + 20 bytes — Bitcoin Hash160
 /// - `0x81` + 32 bytes — Bitcoin Taproot
@@ -27,7 +25,6 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
     /// The scheme identifier byte (first byte of wire data), or derived from bech32 prefix.
     public var schemeId: UInt8 {
         let lower = raw.lowercased()
-        if lower.hasPrefix("nbl1q") { return 0x01 }      // Ed25519
         if lower.hasPrefix("nbl1p") { return 0x02 }      // secp256k1
         // Legacy hex path
         guard raw.count >= 2,
@@ -38,7 +35,6 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
     /// Human-readable scheme name.
     public var schemeName: String {
         switch schemeId {
-        case 0x01: "Ed25519"
         case 0x02: "secp256k1"
         case 0x80: "Hash160"
         case 0x81: "Taproot"
@@ -57,17 +53,17 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
     /// Noble bech32 display string (`nbl1q…` or `nbl1p…`).
     ///
     /// If already bech32, returns as-is.
-    /// If hex wire format with Ed25519 (0x01) or secp256k1 (0x02) prefix, encodes to bech32.
+    /// If hex wire format with secp256k1 (0x02) prefix, encodes to bech32m.
     /// For non-Noble addresses (Bitcoin, unknown), returns `raw` unchanged.
     public var nobleBech32: String {
         if isNobleBech32 { return raw }
         // Only encode Noble native schemes
-        guard schemeId == 0x01 || schemeId == 0x02 else { return raw }
+        guard schemeId == 0x02 else { return raw }
         let wireBytes = Self.hexToBytes(raw)
         guard wireBytes.count >= 2 else { return raw }
         let keyBytes = Array(wireBytes.dropFirst()) // strip scheme_id
-        let witnessVersion: UInt8 = schemeId == 0x01 ? 0 : 1
-        let useBech32m = witnessVersion >= 1
+        let witnessVersion: UInt8 = 1
+        let useBech32m = true
         guard let encoded = Self.encodeBech32(hrp: "nbl", witnessVersion: witnessVersion, program: keyBytes, bech32m: useBech32m) else {
             return raw
         }
@@ -82,8 +78,7 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
         guard isNobleBech32 else { return raw }
         // Decode bech32 segwit → scheme_id + key bytes
         guard let bytes = Self.decodeBech32Program(raw) else { return raw }
-        let lower = raw.lowercased()
-        let schemePrefix: UInt8 = lower.hasPrefix("nbl1q") ? 0x01 : 0x02
+        let schemePrefix: UInt8 = 0x02
         return ([schemePrefix] + bytes).map { String(format: "%02x", $0) }.joined()
     }
 

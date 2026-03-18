@@ -13,8 +13,8 @@ use noble_consensus::{
 use noble_core::{Block, BlockHeader, OutPoint, TxIn, TxOut, PROTOCOL_VERSION, TX_TYPE_NOTARIZATION};
 use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{
-    ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-    SCHEME_ED25519,
+    secp256k1, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+    SCHEME_SECP256K1,
 };
 use noble_storage::{MemoryStorage, StorageEngine};
 
@@ -64,11 +64,11 @@ fn storage_only_indexes_notarization_checksums() {
     let storage = MemoryStorage::new();
 
     // Use the same key for validator and tx signer so subsidy covers fees.
-    let (sk, pk) = ed25519::generate_keypair();
-    let (_, new_pk) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-    let val_priv = NoblePrivateKey::Ed25519(sk.to_vec());
-    let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+    let (sk, pk) = secp256k1::generate_keypair();
+    let (_, new_pk) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+    let val_priv = NoblePrivateKey::Secp256k1(sk.to_vec());
+    let val_pub = NoblePublicKey::Secp256k1(pk.to_vec());
 
     let val_addr = noble_core::NobleAddress::Noble(val_pub.clone());
 
@@ -87,7 +87,7 @@ fn storage_only_indexes_notarization_checksums() {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000 + h,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+                scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
             },
             additional_sigs: vec![], metadata: vec![], encrypted_locator: None,
             external_attestations: vec![], gateway_address: None,
@@ -105,7 +105,7 @@ fn storage_only_indexes_notarization_checksums() {
             timestamp: 1_700_000_000 + h, height: h, tx_count: 1,
             validator_id: val_pub.clone(),
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+                scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
             },
         };
         let msg = hdr.compute_signing_message().unwrap();
@@ -133,7 +133,7 @@ fn storage_only_indexes_notarization_checksums() {
         checksum: doc_hash,
         timestamp: 1_700_000_008,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
         metadata: vec![],
@@ -148,7 +148,7 @@ fn storage_only_indexes_notarization_checksums() {
 
     // Key rotation tx (zero checksum — should NOT be indexed)
     // Uses the change output from the notarization (in-block spending)
-    let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+    let new_key = NoblePublicKey::Secp256k1(new_pk.to_vec());
     let mut key_rotation = noble_core::Transaction {
         version: PROTOCOL_VERSION,
         tx_type: noble_core::TX_TYPE_KEY_ROTATION,
@@ -162,7 +162,7 @@ fn storage_only_indexes_notarization_checksums() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_008,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
         metadata: vec![],
@@ -186,7 +186,7 @@ fn storage_only_indexes_notarization_checksums() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_008,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
         },
         additional_sigs: vec![],
         metadata: vec![],
@@ -212,7 +212,7 @@ fn storage_only_indexes_notarization_checksums() {
         tx_count: 3,
         validator_id: val_pub,
         validator_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519, public_key: pk.to_vec(), signature: vec![],
+            scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![],
         },
     };
     let msg = header.compute_signing_message().unwrap();
@@ -241,8 +241,8 @@ fn storage_only_indexes_notarization_checksums() {
 /// A validator in the validator list should successfully propose and broadcast.
 #[test]
 fn self_proposal_validates_before_broadcast() {
-    let (sk, _) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let (sk, _) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
     let pub_key = priv_key.public_key();
 
     let mut reg = noble_consensus::ValidatorRegistry::empty();

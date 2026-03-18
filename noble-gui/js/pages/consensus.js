@@ -41,7 +41,7 @@ export function init(root, ctx) {
   // Both live API and mock return nbl1… bech32 strings. Legacy object format handled for safety.
   function valKey(pk) {
     if (typeof pk === 'string') return pk;
-    const k = pk.Ed25519 || pk.Secp256k1 || [];
+    const k = pk.Secp256k1 || [];
     return k.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
@@ -2145,9 +2145,7 @@ export function init(root, ctx) {
 
   function showValidatorDetail(v) {
     const keyHex = valKey(v.public_key);
-    const scheme = typeof v.public_key === 'string'
-      ? (v.public_key.startsWith('nbl1q') ? 'Ed25519' : 'secp256k1')
-      : (v.public_key.Ed25519 ? 'Ed25519' : 'secp256k1');
+    const scheme = 'secp256k1';
     const br = v.reputation_breakdown;
 
     detailPanel.innerHTML = `
@@ -2213,8 +2211,8 @@ export function init(root, ctx) {
             </p>
             <div class="form-group">
               <label for="cs-add-key">Node ID (Public Key)</label>
-              <input id="cs-add-key" type="text" placeholder="nbl1q… address or 64-char hex key" maxlength="128" spellcheck="false" autocomplete="off">
-              <div class="form-hint">Noble address (nbl1q…) or 64-character hex public key</div>
+              <input id="cs-add-key" type="text" placeholder="nbl1… address or hex key" maxlength="128" spellcheck="false" autocomplete="off">
+              <div class="form-hint">Noble address (nbl1…) or hex public key</div>
               <div class="form-error" id="cs-add-error"></div>
             </div>
             <div class="form-group">
@@ -2251,7 +2249,7 @@ export function init(root, ctx) {
       const isHex64 = /^[0-9a-fA-F]{64}$/.test(keyInput_);
 
       if (!isNbl1 && !isHex64) {
-        errorEl.textContent = 'Invalid key: enter a Noble address (nbl1q…) or 64 hex characters.';
+        errorEl.textContent = 'Invalid key: enter a Noble address (nbl1…) or hex public key.';
         return;
       }
       const hexKey = isHex64 ? keyInput_.toLowerCase() : keyInput_;

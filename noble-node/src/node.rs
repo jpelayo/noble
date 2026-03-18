@@ -138,6 +138,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub faucet_probe_counter: u64,
     /// Faucet discovery config.
     pub faucet_config: crate::config::FaucetConfig,
+    /// Shared parsed reward address — written by RPC, read by CycleEngine during
+    /// block proposals. Hot-reload: writing here takes effect on the next proposal.
+    pub engine_reward_address: Arc<parking_lot::RwLock<Option<noble_core::NobleAddress>>>,
 }
 
 impl Node<MemoryStorage> {
@@ -422,6 +425,30 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             engine.set_voting_enabled(false);
         }
 
+        // Wire reward address: if configured, coinbase subsidy goes to this address
+        // instead of the validator key. Accepts Bitcoin addresses (bc1q, bc1p, 1...)
+        // and Noble hex pubkeys.
+        if !config.rewards.reward_address.is_empty() {
+            match noble_api::types::parse_address(&config.rewards.reward_address) {
+                Ok(addr) => {
+                    tracing::info!(
+                        task = "init",
+                        "Reward address for subsidy: {} ({})",
+                        config.rewards.reward_address,
+                        addr.address_type(),
+                    );
+                    engine.set_reward_address(addr);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "init",
+                        "Invalid reward_address '{}': {e} — subsidy will go to validator key",
+                        config.rewards.reward_address,
+                    );
+                }
+            }
+        }
+
         // Load badge state from storage into the consensus engine.
         {
             let s = storage.read();
@@ -483,6 +510,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         engine.set_utxo_value_lookup(Box::new(ArcStorageUtxoValueLookup {
             storage: Arc::clone(&storage),
         }));
+        // Grab shared reward address Arc BEFORE engine is moved into the consensus lock.
+        // This Arc is shared with ApiState so RPC hot-reload updates the engine immediately.
+        let engine_reward_address_arc = engine.reward_address_arc();
         let consensus = Arc::new(RwLock::new(engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---
@@ -579,6 +609,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_cache: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             faucet_probe_counter: 0,
             faucet_config: config.faucet.clone(),
+            engine_reward_address: engine_reward_address_arc,
         })
     }
 
@@ -1222,7 +1253,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             if let Some((ref _sk, ref pk)) = self.announce_keypair {
                 let pubkey_hex = hex::encode(pk.to_wire_bytes());
                 let scheme = match pk {
-                    noble_crypto::NoblePublicKey::Ed25519(_) => "ed25519",
                     noble_crypto::NoblePublicKey::Secp256k1(_) => "secp256k1",
                 };
                 (Some(pubkey_hex), Some(scheme.to_string()), Some("unified-keystore".to_string()))
@@ -1713,6 +1743,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     auto
                 }
             }),
+            engine_reward_address: self.engine_reward_address.clone(),
             enable_totp: enable_totp_closure,
             set_config_value: set_config_value_closure,
             config_path,
@@ -3773,7 +3804,7 @@ impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoVa
 /// Try to load a validator key from the unified keystore.
 ///
 /// Only loads SCHEME_VALIDATOR_SECP256K1 (mnemonic-derived).
-/// Legacy Ed25519 keys are rejected with a warning.
+/// Load validator key from the keystore or validator.key file.
 fn load_validator_from_keystore(
     keystore: &KeyStore,
 ) -> Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)> {
@@ -3790,15 +3821,6 @@ fn load_validator_from_keystore(
             pk.to_address()
         );
         return Some((sk, pk));
-    }
-    // Reject legacy Ed25519
-    if keystore.get_raw(noble_crypto::SCHEME_VALIDATOR_ED25519).is_ok() {
-        tracing::error!(
-            task = "config_load",
-            "DEPRECATED: Legacy Ed25519 validator key found in keystore. \
-             This key type is no longer supported. Re-run setup with your \
-             mnemonic to generate a secp256k1 validator key."
-        );
     }
     None
 }
@@ -3925,14 +3947,6 @@ fn load_validator_key(
         noble_crypto::SCHEME_SECP256K1 => {
             noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec())
         }
-        noble_crypto::SCHEME_ED25519 => {
-            tracing::error!(
-                task = "config_load",
-                "DEPRECATED: validator.key contains an Ed25519 key (scheme 0x01). \
-                 Only secp256k1 is supported. Re-run setup with your mnemonic."
-            );
-            return None;
-        }
         _ => {
             tracing::error!(
                 task = "config_load",
@@ -3964,18 +3978,11 @@ fn migrate_legacy_keys_into_keystore(
     chain_meta: &[u8; 32],
     validator_key: &Option<(noble_crypto::NoblePrivateKey, noble_crypto::NoblePublicKey)>,
 ) {
-    // 1. Validator key → SCHEME_VALIDATOR_ED25519 or SCHEME_VALIDATOR_SECP256K1
+    // 1. Validator key → SCHEME_VALIDATOR_SECP256K1
     if let Some((sk, _pk)) = validator_key {
-        let scheme = match sk {
-            noble_crypto::NoblePrivateKey::Ed25519(_)
-            | noble_crypto::NoblePrivateKey::ValidatorEd25519(_) => {
-                noble_crypto::SCHEME_VALIDATOR_ED25519
-            }
-            _ => noble_crypto::SCHEME_VALIDATOR_SECP256K1,
-        };
+        let scheme = noble_crypto::SCHEME_VALIDATOR_SECP256K1;
         if !keystore.has_scheme(scheme).unwrap_or(true) {
             if let Some(raw) = sk.raw_bytes().or_else(|| {
-                // On-chain Ed25519/Secp256k1 variants: extract via clone_for_test hack
                 None
             }) {
                 match keystore.store_raw(scheme, raw, passphrase) {
@@ -5221,9 +5228,9 @@ mod tests {
         assert_eq!(node.chain_height(), 0);
 
         // Build a valid block 1 from a foreign validator.
-        let (sk, pk) = noble_crypto::ed25519::generate_keypair();
-        let priv_key = noble_crypto::NoblePrivateKey::Ed25519(sk);
-        let pub_key = noble_crypto::NoblePublicKey::Ed25519(pk);
+        let (sk, pk) = noble_crypto::secp256k1::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk);
         let block1 = build_test_block_1(&priv_key, &pub_key, 1_773_600_000);
 
         // Attempt sync import directly — this should NOT commit block 1
@@ -5300,9 +5307,9 @@ mod tests {
         // votes must NOT commit block 1 (dual-witness requires 2 R1 voters).
         use noble_consensus::{CycleEngine, ConsensusConfig, CycleEvent, CycleIo};
 
-        let (sk, pk_bytes) = noble_crypto::ed25519::generate_keypair();
-        let priv_key = noble_crypto::NoblePrivateKey::Ed25519(sk);
-        let pub_key = noble_crypto::NoblePublicKey::Ed25519(pk_bytes);
+        let (sk, pk_bytes) = noble_crypto::secp256k1::generate_keypair();
+        let priv_key = noble_crypto::NoblePrivateKey::Secp256k1(sk);
+        let pub_key = noble_crypto::NoblePublicKey::Secp256k1(pk_bytes);
 
         let config = ConsensusConfig {
             min_unique_voters: 2,

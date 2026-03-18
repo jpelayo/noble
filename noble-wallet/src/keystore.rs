@@ -24,8 +24,8 @@ use zeroize::Zeroize;
 
 use noble_crypto::keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
 use noble_crypto::{
-    SCHEME_ED25519, SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
-    SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_ED25519, SCHEME_VALIDATOR_SECP256K1,
+    SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
+    SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
 };
 
 use crate::error::WalletError;
@@ -142,9 +142,6 @@ impl KeyStore {
                 let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
                 let priv_key = NoblePrivateKey::Secp256k1(sk.clone());
                 (sk, priv_key)
-            }
-            SCHEME_ED25519 => {
-                return Err(WalletError::UnsupportedScheme(scheme_id));
             }
             other => return Err(WalletError::UnsupportedScheme(other)),
         };
@@ -555,9 +552,7 @@ impl KeyStore {
             };
 
             let priv_key = match encrypted.scheme_id {
-                SCHEME_ED25519 => NoblePrivateKey::Ed25519(secret.clone()),
                 SCHEME_SECP256K1 => NoblePrivateKey::Secp256k1(secret.clone()),
-                SCHEME_VALIDATOR_ED25519 => NoblePrivateKey::ValidatorEd25519(secret.clone()),
                 SCHEME_VALIDATOR_SECP256K1 => NoblePrivateKey::ValidatorSecp256k1(secret.clone()),
                 SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(secret.clone()),
                 SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(secret.clone()),
@@ -663,7 +658,7 @@ impl KeyStore {
     ///
     /// The bytes are encrypted with the keystore passphrase and stored on disk.
     /// A synthetic "public key" (SHA-256 of the raw bytes) is used for the filename.
-    /// For signing-capable internal schemes (ValidatorEd25519/ValidatorSecp256k1),
+    /// For signing-capable internal schemes (ValidatorSecp256k1/ValidatorSecp256k1),
     /// the real public key is derived and used as the filename.
     ///
     /// The passphrase is validated only for on-chain wallet schemes; internal
@@ -681,7 +676,6 @@ impl KeyStore {
         }
 
         let priv_key = match scheme_id {
-            SCHEME_VALIDATOR_ED25519 => NoblePrivateKey::ValidatorEd25519(raw_bytes.to_vec()),
             SCHEME_VALIDATOR_SECP256K1 => NoblePrivateKey::ValidatorSecp256k1(raw_bytes.to_vec()),
             SCHEME_P2P_IDENTITY => NoblePrivateKey::P2pIdentity(raw_bytes.to_vec()),
             SCHEME_TLS_KEY => NoblePrivateKey::TlsKey(raw_bytes.to_vec()),
@@ -693,7 +687,7 @@ impl KeyStore {
         let pub_key = priv_key.public_key();
 
         // For internal keys (0x80+), the filename must use the internal scheme_id
-        // rather than the public key's on-chain scheme (Ed25519/Secp256k1), so
+        // rather than the public key's on-chain scheme (Secp256k1/Secp256k1), so
         // has_scheme() can find them by their actual scheme_id.
         let wire_bytes = if noble_crypto::is_signing_scheme(scheme_id) {
             pub_key.to_wire_bytes()
@@ -870,11 +864,11 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn create_key_ed25519() {
+    fn create_key_secp256k1() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
-        assert_eq!(pk.scheme_id(), SCHEME_ED25519);
+        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
 
         let keys = ks.list_keys().unwrap();
         assert_eq!(keys.len(), 1);
@@ -899,7 +893,7 @@ mod tests {
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         // Unlock first (empty keystore), then create key so it's available.
         ks.unlock("test-pass-long").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
 
         let msg = sha256(b"wallet sign test");
         let envelope = ks.sign(&pk, msg.as_bytes()).unwrap();
@@ -913,7 +907,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("pass1-is-long!").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "pass1-is-long!").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "pass1-is-long!").unwrap();
         ks.lock();
         assert!(!ks.is_unlocked());
 
@@ -931,7 +925,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("correct-is-ok!").unwrap();
-        let _pk = ks.create_key(SCHEME_ED25519, "correct-is-ok!").unwrap();
+        let _pk = ks.create_key(SCHEME_SECP256K1, "correct-is-ok!").unwrap();
         ks.lock();
 
         // Unlock with wrong passphrase.
@@ -948,7 +942,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("passphrase-ok").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         // Sign works while unlocked.
         let msg = sha256(b"lock test");
@@ -965,7 +959,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         // Create key without unlocking (key file on disk but not in memory).
-        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         let msg = sha256(b"locked sign test");
         let result = ks.sign(&pk, msg.as_bytes());
@@ -977,7 +971,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("passphrase-ok").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
         assert_eq!(ks.list_keys().unwrap().len(), 1);
 
         ks.delete_key(&pk, "passphrase-ok").unwrap();
@@ -989,7 +983,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("passphrase-ok").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         // Sign while unlocked.
         let msg = sha256(b"roundtrip test");
@@ -1019,7 +1013,7 @@ mod tests {
     fn multiple_keys_different_schemes() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let _pk1 = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let _pk1 = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
         let _pk2 = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         let keys = ks.list_keys().unwrap();
@@ -1034,7 +1028,7 @@ mod tests {
         let result = ks.create_key(SCHEME_SECP256K1, "passphrase-ok");
         assert!(matches!(result, Err(WalletError::DuplicateKey(_))));
         // Different scheme still works
-        ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
     }
 
     #[test]
@@ -1055,7 +1049,7 @@ mod tests {
     fn short_passphrase_rejected() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let result = ks.create_key(SCHEME_ED25519, "short");
+        let result = ks.create_key(SCHEME_SECP256K1, "short");
         assert!(
             matches!(result, Err(WalletError::PassphraseTooWeak(_))),
             "expected PassphraseTooWeak, got: {result:?}"
@@ -1067,7 +1061,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         // 12 chars exactly should pass
-        let result = ks.create_key(SCHEME_ED25519, "123456789012");
+        let result = ks.create_key(SCHEME_SECP256K1, "123456789012");
         assert!(result.is_ok(), "12-char passphrase should be accepted");
     }
 
@@ -1076,7 +1070,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("correct-is-ok!").unwrap();
-        let _pk = ks.create_key(SCHEME_ED25519, "correct-is-ok!").unwrap();
+        let _pk = ks.create_key(SCHEME_SECP256K1, "correct-is-ok!").unwrap();
         ks.lock();
 
         // Exhaust attempts with wrong passphrase
@@ -1098,7 +1092,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
         let file_path = dir
             .path()
             .join("keys")
@@ -1288,7 +1282,7 @@ mod tests {
         let pk = ks
             .store_raw(SCHEME_P2P_IDENTITY, &raw, "passphrase-ok")
             .unwrap();
-        assert_eq!(pk.scheme_id(), SCHEME_ED25519); // synthetic pubkey
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1); // synthetic pubkey
 
         // Unlock and retrieve
         ks.unlock("passphrase-ok").unwrap();
@@ -1326,16 +1320,16 @@ mod tests {
     fn store_raw_validator_key() {
         let dir = tempdir().unwrap();
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
-        let (sk, _pk) = noble_crypto::ed25519::generate_keypair();
+        let (sk, _pk) = noble_crypto::secp256k1::generate_keypair();
         let pk = ks
-            .store_raw(SCHEME_VALIDATOR_ED25519, &sk, "passphrase-ok")
+            .store_raw(SCHEME_VALIDATOR_SECP256K1, &sk, "passphrase-ok")
             .unwrap();
-        // Validator Ed25519 derives a real Ed25519 public key
-        assert_eq!(pk.scheme_id(), SCHEME_ED25519);
+        // Validator Secp256k1 derives a real Secp256k1 public key
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
 
         // Unlock, get raw, and verify it round-trips
         ks.unlock("passphrase-ok").unwrap();
-        let got = ks.get_raw(SCHEME_VALIDATOR_ED25519).unwrap();
+        let got = ks.get_raw(SCHEME_VALIDATOR_SECP256K1).unwrap();
         assert_eq!(got, sk);
     }
 
@@ -1345,7 +1339,7 @@ mod tests {
         let mut ks = KeyStore::new(dir.path().join("keys")).unwrap();
 
         // Create a wallet key (on-chain signing)
-        ks.create_key(SCHEME_ED25519, "passphrase-ok").unwrap();
+        ks.create_key(SCHEME_SECP256K1, "passphrase-ok").unwrap();
 
         // Store internal keys
         ks.store_raw(SCHEME_P2P_IDENTITY, b"p2p-proto-bytes", "passphrase-ok")

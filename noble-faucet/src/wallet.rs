@@ -24,7 +24,7 @@ pub struct FaucetWallet {
 impl FaucetWallet {
     /// Open (or create) a faucet wallet in `keystore_dir`.
     ///
-    /// - If the keystore is empty, generates a new Ed25519 key.
+    /// - If the keystore is empty, generates a new secp256k1 key.
     /// - Unlocks the keystore with `passphrase`.
     pub fn open_or_create(
         keystore_dir: &std::path::Path,

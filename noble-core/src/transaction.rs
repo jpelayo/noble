@@ -134,11 +134,11 @@ mod tests {
     use crate::constants::TX_TYPE_COINBASE;
     use crate::utxo::OutPoint;
     use noble_codec::NobleCbor;
-    use noble_crypto::{ed25519, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, NoblePrivateKey, NobleSigner, SCHEME_SECP256K1};
 
     fn make_test_keypair() -> (NoblePrivateKey, noble_crypto::NoblePublicKey) {
-        let (sk, pk) = ed25519::generate_keypair();
-        (NoblePrivateKey::Ed25519(sk), noble_crypto::NoblePublicKey::Ed25519(pk))
+        let (sk, pk) = secp256k1::generate_keypair();
+        (NoblePrivateKey::Secp256k1(sk), noble_crypto::NoblePublicKey::Secp256k1(pk))
     }
 
     /// Build a test notarization transaction (UTXO model).
@@ -164,7 +164,7 @@ mod tests {
             checksum: Hash256::from_bytes([0xAB; 32]),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.key_bytes().to_vec(),
                 signature: vec![],
             },
@@ -334,7 +334,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519, public_key: pk.key_bytes().to_vec(), signature: vec![],
+                scheme_id: SCHEME_SECP256K1, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],
             metadata: vec![],
@@ -365,7 +365,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519, public_key: pk.key_bytes().to_vec(), signature: vec![],
+                scheme_id: SCHEME_SECP256K1, public_key: pk.key_bytes().to_vec(), signature: vec![],
             },
             additional_sigs: vec![],
             metadata: vec![],

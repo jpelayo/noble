@@ -391,7 +391,7 @@ impl TransactionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::{sha256, SCHEME_ED25519};
+    use noble_crypto::{sha256, SCHEME_SECP256K1};
     use noble_test_utils::fixtures::test_chain_id;
     use tempfile::tempdir;
 
@@ -399,7 +399,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("test-pass-long").unwrap();
-        let pk = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
         (ks, pk)
     }
 
@@ -436,8 +436,8 @@ mod tests {
     #[test]
     fn build_transfer_valid() {
         let (ks, sender_pk) = setup_keystore();
-        let (_, recipient_bytes) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NoblePublicKey::Ed25519(recipient_bytes);
+        let (_, recipient_bytes) = noble_crypto::secp256k1::generate_keypair();
+        let recipient = NoblePublicKey::Secp256k1(recipient_bytes);
         let recipient_addr = NobleAddress::Noble(recipient.clone());
 
         let (utxos, change_addr) = make_test_utxos(&sender_pk, 100_000_000);
@@ -458,8 +458,8 @@ mod tests {
     #[test]
     fn build_transfer_zero_amount_rejected() {
         let (ks, sender_pk) = setup_keystore();
-        let (_, rb) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (_, rb) = noble_crypto::secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(rb));
         let (utxos, addr) = make_test_utxos(&sender_pk, 100_000_000);
 
         let result = TransactionBuilder::build_transfer(
@@ -472,8 +472,8 @@ mod tests {
     #[test]
     fn build_transfer_insufficient_funds() {
         let (ks, sender_pk) = setup_keystore();
-        let (_, rb) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (_, rb) = noble_crypto::secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(rb));
         let (utxos, addr) = make_test_utxos(&sender_pk, 100); // only 100 atomic
 
         let result = TransactionBuilder::build_transfer(
@@ -486,8 +486,8 @@ mod tests {
     #[test]
     fn build_transfer_with_memo() {
         let (ks, sender_pk) = setup_keystore();
-        let (_, rb) = noble_crypto::ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(rb));
+        let (_, rb) = noble_crypto::secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(rb));
         let (utxos, addr) = make_test_utxos(&sender_pk, 100_000_000);
 
         let tx = TransactionBuilder::build_transfer(
@@ -516,8 +516,8 @@ mod tests {
 
         let msg_before = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
 
-        let (_, gw_pk) = noble_crypto::ed25519::generate_keypair();
-        let gw_key = NoblePublicKey::Ed25519(gw_pk);
+        let (_, gw_pk) = noble_crypto::secp256k1::generate_keypair();
+        let gw_key = NoblePublicKey::Secp256k1(gw_pk);
         let gw_wire = gw_key.to_wire_bytes();
 
         TransactionBuilder::set_gateway_and_resign(&mut tx, &ks, &pk, gw_wire, test_chain_id()).unwrap();

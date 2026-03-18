@@ -53,7 +53,7 @@ pub fn decrypt_locator(
 mod tests {
     use super::*;
     use noble_core::ExternalAttestation;
-    use noble_crypto::{ed25519, sha256, NoblePublicKey, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, sha256, NoblePublicKey, SCHEME_SECP256K1};
     use noble_test_utils::fixtures::test_chain_id;
 
     fn setup_keystore_and_build(
@@ -64,7 +64,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
         ks.unlock("test-pass-long").unwrap();
-        let signer = ks.create_key(SCHEME_ED25519, "test-pass-long").unwrap();
+        let signer = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
 
         let addr = noble_core::NobleAddress::Noble(signer.clone());
         let utxo = crate::builder::SelectedUtxo {
@@ -91,10 +91,10 @@ mod tests {
     }
 
     #[test]
-    fn build_and_decrypt_locator_ed25519() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
+    fn build_and_decrypt_locator_secp256k1() {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let url = b"https://example.com/document.pdf";
         let tx = setup_keystore_and_build(url, &[pub_key], vec![]);
@@ -109,8 +109,8 @@ mod tests {
 
     #[test]
     fn build_with_attestations_in_signing_payload() {
-        let (_sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk);
+        let (_sk, pk) = secp256k1::generate_keypair();
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let attestation = ExternalAttestation {
             scheme: "pkcs7".into(),
@@ -133,9 +133,9 @@ mod tests {
 
     #[test]
     fn decrypt_locator_recovers_url() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let url = b"https://storage.example.com/docs/contract-v2.pdf";
         let tx = setup_keystore_and_build(url, &[pub_key], vec![]);
@@ -146,11 +146,11 @@ mod tests {
 
     #[test]
     fn decrypt_locator_wrong_key_fails() {
-        let (_sk1, pk1) = ed25519::generate_keypair();
-        let (sk2, _pk2) = ed25519::generate_keypair();
+        let (_sk1, pk1) = secp256k1::generate_keypair();
+        let (sk2, _pk2) = secp256k1::generate_keypair();
 
-        let pub_key1 = NoblePublicKey::Ed25519(pk1);
-        let priv_key2 = NoblePrivateKey::Ed25519(sk2);
+        let pub_key1 = NoblePublicKey::Secp256k1(pk1);
+        let priv_key2 = NoblePrivateKey::Secp256k1(sk2);
 
         let url = b"https://secret.example.com/doc.pdf";
         let tx = setup_keystore_and_build(url, &[pub_key1], vec![]);

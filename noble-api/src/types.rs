@@ -38,8 +38,8 @@ pub fn parse_pubkey(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
 /// Parse an address string into a `NobleAddress`.
 ///
 /// Accepts:
-/// - Noble native addresses: `nbl1q…` (Ed25519), `nbl1p…` (secp256k1)
-/// - Hex-encoded wire-format NOBLE public keys (Ed25519: 0x01, secp256k1: 0x02)
+/// - Noble native addresses: `nbl1p…` (secp256k1 bech32m)
+/// - Hex-encoded wire-format NOBLE public keys (secp256k1: 0x02)
 /// - Bitcoin addresses: P2PKH (1...), P2WPKH (bc1q...), P2TR (bc1p...)
 /// - Hex-encoded Bitcoin address wire bytes (0x80, 0x81 prefix)
 pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
@@ -547,7 +547,7 @@ pub struct WalletInfoResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
-    /// Balance held in Noble (Ed25519/secp256k1) address buckets.
+    /// Balance held in Noble (secp256k1) address buckets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub noble_balance: Option<u64>,
     /// Balance held in Bitcoin Hash160 (P2PKH/P2WPKH) address buckets.
@@ -710,7 +710,7 @@ pub struct SubmitBatchResponse {
 pub struct ValidateAddressResponse {
     pub valid: bool,
     pub scheme_id: Option<u8>,
-    /// Address type: "ed25519", "secp256k1", "bitcoin_hash160", "bitcoin_taproot"
+    /// Address type: "secp256k1", "bitcoin_hash160", "bitcoin_taproot"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address_type: Option<String>,
 }
@@ -1102,7 +1102,7 @@ pub struct BitcoinAddressEntry {
 pub struct WalletKeyEntry {
     /// Wire-format hex-encoded public key.
     pub pubkey_hex: String,
-    /// Signature scheme: `"ed25519"` or `"secp256k1"`.
+    /// Signature scheme: `"secp256k1"`.
     pub scheme: String,
     /// Derived Bitcoin display addresses (secp256k1 keys only).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1155,7 +1155,7 @@ pub struct TotpStatusResponse {
 /// Response for `noble_setRewardAddress`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetRewardAddressResponse {
-    /// The detected address type: "bitcoin_hash160", "bitcoin_taproot", "ed25519", "secp256k1".
+    /// The detected address type: "bitcoin_hash160", "bitcoin_taproot", "secp256k1".
     pub address_type: String,
     /// Human-readable display address.
     pub display_address: String,
@@ -1547,10 +1547,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_pubkey_valid_ed25519() {
-        // Generate a valid ed25519 pubkey hex via wire format: scheme_id(1) + 32 bytes
-        let mut wire = vec![0x01]; // Ed25519 scheme_id
-        wire.extend_from_slice(&[0xAB; 32]);
+    fn parse_pubkey_valid_secp256k1() {
+        // Generate a valid secp256k1 pubkey hex via wire format: scheme_id(0x02) + 33 bytes
+        let mut wire = vec![0x02]; // secp256k1 scheme_id
+        // Compressed secp256k1 key: 0x02 prefix + 32 bytes x-coordinate
+        let mut key = vec![0x02]; // even-y compressed prefix
+        key.extend_from_slice(&[0xAB; 32]);
+        wire.extend_from_slice(&key);
         let hex_str = hex::encode(&wire);
         let result = parse_pubkey(&hex_str);
         assert!(result.is_ok());

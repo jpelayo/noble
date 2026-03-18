@@ -24,7 +24,7 @@
 //!    - Start with `NobleAddress::Noble(sender_pk)`.
 //!    - For secp256k1 senders, if the Noble bucket has insufficient balance,
 //!      fall back to the `BitcoinHash160` bucket.
-//!    - Ed25519 senders always use the Noble bucket (no aliasing).
+//!    - Senders without a Bitcoin alias always use the Noble bucket.
 
 use crate::address::NobleAddress;
 use noble_crypto::keys::NoblePublicKey;
@@ -88,7 +88,7 @@ where
             Ok(btc_addr)
         }
     } else {
-        // Ed25519 — only Noble bucket exists
+        // No Bitcoin alias — only Noble bucket exists
         Ok(noble_addr)
     }
 }
@@ -123,7 +123,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::{ed25519, secp256k1};
+    use noble_crypto::{secp256k1, secp256k1};
 
     fn make_secp_pk() -> NoblePublicKey {
         let (_, pk) = secp256k1::generate_keypair();
@@ -131,8 +131,8 @@ mod tests {
     }
 
     fn make_ed_pk() -> NoblePublicKey {
-        let (_, pk) = ed25519::generate_keypair();
-        NoblePublicKey::Ed25519(pk)
+        let (_, pk) = secp256k1::generate_keypair();
+        NoblePublicKey::Secp256k1(pk)
     }
 
     #[test]
@@ -197,11 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_legacy_ed25519_no_fallback() {
+    fn resolve_legacy_secp256k1_no_fallback() {
         let pk = make_ed_pk();
         let noble_addr = NobleAddress::Noble(pk.clone());
 
-        // Ed25519 always uses Noble, even if balance is 0
+        // No Bitcoin alias — always uses Noble, even if balance is 0
         let result = resolve_debit_address(&None, &pk, 100, |_| 0);
         assert_eq!(result.unwrap(), noble_addr);
     }
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn enforced_at_activation_ed25519_exempt() {
+    fn enforced_at_activation_secp256k1_exempt() {
         let pk = make_ed_pk();
         let noble_addr = NobleAddress::Noble(pk.clone());
 

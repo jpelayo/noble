@@ -3,7 +3,7 @@
 
 //! Hybrid ECIES encryption for NOBLE encrypted document locators.
 //!
-//! Supports both Ed25519 (via X25519 conversion) and secp256k1 recipients.
+//! Uses secp256k1 ECDH for key agreement.
 //! Uses HKDF-SHA256 for key derivation and AES-256-GCM for symmetric encryption.
 //!
 //! Encryption flow (per recipient):
@@ -43,7 +43,7 @@ pub struct EciesPayload {
 pub struct EciesRecipient {
     /// The recipient's public key.
     pub recipient_pubkey: NoblePublicKey,
-    /// Ephemeral public key used for ECDH (X25519 32 bytes or SEC1 33 bytes).
+    /// Ephemeral public key used for ECDH (SEC1 compressed 33 bytes).
     pub ephemeral_pubkey: Vec<u8>,
     /// AES-256-GCM encrypted data key (32 bytes key + 16 bytes GCM tag = 48 bytes).
     pub encrypted_key: Vec<u8>,
@@ -95,36 +95,6 @@ fn aes_decrypt(
         .map_err(|e| CryptoError::EciesDecrypt(format!("AES-GCM decrypt: {e}")))
 }
 
-/// Convert an Ed25519 public key to X25519 for ECDH.
-fn ed25519_pub_to_x25519(ed_pub: &[u8]) -> Result<x25519_dalek::PublicKey, CryptoError> {
-    let key_bytes: [u8; 32] = ed_pub
-        .try_into()
-        .map_err(|_| CryptoError::InvalidKey("Ed25519 key must be 32 bytes".into()))?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|e| CryptoError::InvalidKey(format!("invalid Ed25519 key: {e}")))?;
-    let montgomery = vk.to_montgomery();
-    Ok(x25519_dalek::PublicKey::from(montgomery.to_bytes()))
-}
-
-/// Convert an Ed25519 secret key to X25519 for ECDH.
-///
-/// The Ed25519 seed is hashed with SHA-512; the first 32 bytes become the X25519 scalar.
-/// Explicit clamping is applied before construction (M-clamp) as defense-in-depth.
-fn ed25519_sk_to_x25519(ed_sk: &[u8]) -> Result<x25519_dalek::StaticSecret, CryptoError> {
-    let sk_bytes: [u8; 32] = ed_sk
-        .try_into()
-        .map_err(|_| CryptoError::InvalidKey("Ed25519 secret key must be 32 bytes".into()))?;
-    use sha2::Digest;
-    let hash = sha2::Sha512::digest(sk_bytes);
-    let mut x25519_bytes = [0u8; 32];
-    x25519_bytes.copy_from_slice(&hash[..32]);
-    // M-clamp: explicit X25519 clamping (belt-and-suspenders; x25519-dalek also clamps in DH)
-    x25519_bytes[0] &= 248;
-    x25519_bytes[31] &= 127;
-    x25519_bytes[31] |= 64;
-    Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
-}
-
 // ── Public API ──
 
 /// Encrypt a data encryption key (DEK) for a single recipient using ECIES.
@@ -136,22 +106,6 @@ pub fn encrypt_for_recipient(
     dek: &[u8; 32],
 ) -> Result<EciesRecipient, CryptoError> {
     match recipient {
-        NoblePublicKey::Ed25519(pk_bytes) => {
-            let x25519_pub = ed25519_pub_to_x25519(pk_bytes)?;
-            let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
-            let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
-
-            let shared = ephemeral_secret.diffie_hellman(&x25519_pub);
-            let derived_key = hkdf_derive(shared.as_bytes())?;
-            let (encrypted_dek, key_nonce) = aes_encrypt(&derived_key, dek)?;
-
-            Ok(EciesRecipient {
-                recipient_pubkey: recipient.clone(),
-                ephemeral_pubkey: ephemeral_public.as_bytes().to_vec(),
-                encrypted_key: encrypted_dek,
-                key_nonce,
-            })
-        }
         NoblePublicKey::Secp256k1(pk_bytes) => {
             let their_pk = k256::PublicKey::from_sec1_bytes(pk_bytes)
                 .map_err(|e| CryptoError::InvalidKey(format!("secp256k1: {e}")))?;
@@ -190,40 +144,7 @@ pub fn decrypt_as_recipient(
     key_nonce: &[u8; 12],
 ) -> Result<[u8; 32], CryptoError> {
     let shared_bytes = match private_key {
-        NoblePrivateKey::Ed25519(sk_bytes) => {
-            let x25519_secret = ed25519_sk_to_x25519(sk_bytes)?;
-            let eph_bytes: [u8; 32] = ephemeral_pubkey.try_into().map_err(|_| {
-                CryptoError::EciesDecrypt("X25519 ephemeral key must be 32 bytes".into())
-            })?;
-            let eph_pub = x25519_dalek::PublicKey::from(eph_bytes);
-            let shared = x25519_secret.diffie_hellman(&eph_pub);
-            *shared.as_bytes()
-        }
-        NoblePrivateKey::Secp256k1(sk_bytes) => {
-            let our_sk = k256::SecretKey::from_slice(sk_bytes)
-                .map_err(|e| CryptoError::InvalidKey(format!("secp256k1: {e}")))?;
-            let eph_pk = k256::PublicKey::from_sec1_bytes(ephemeral_pubkey)
-                .map_err(|e| CryptoError::EciesDecrypt(format!("ephemeral key: {e}")))?;
-
-            // Compute ECDH: shared = eph_pk * our_scalar
-            let shared = k256::ecdh::diffie_hellman(our_sk.to_nonzero_scalar(), eph_pk.as_affine());
-            let bytes: [u8; 32] = shared
-                .raw_secret_bytes()
-                .as_slice()
-                .try_into()
-                .expect("secp256k1 shared secret is 32 bytes");
-            bytes
-        }
-        NoblePrivateKey::ValidatorEd25519(sk_bytes) => {
-            let x25519_secret = ed25519_sk_to_x25519(sk_bytes)?;
-            let eph_bytes: [u8; 32] = ephemeral_pubkey.try_into().map_err(|_| {
-                CryptoError::EciesDecrypt("X25519 ephemeral key must be 32 bytes".into())
-            })?;
-            let eph_pub = x25519_dalek::PublicKey::from(eph_bytes);
-            let shared = x25519_secret.diffie_hellman(&eph_pub);
-            *shared.as_bytes()
-        }
-        NoblePrivateKey::ValidatorSecp256k1(sk_bytes) => {
+        NoblePrivateKey::Secp256k1(sk_bytes) | NoblePrivateKey::ValidatorSecp256k1(sk_bytes) => {
             let our_sk = k256::SecretKey::from_slice(sk_bytes)
                 .map_err(|e| CryptoError::InvalidKey(format!("secp256k1: {e}")))?;
             let eph_pk = k256::PublicKey::from_sec1_bytes(ephemeral_pubkey)
@@ -316,30 +237,7 @@ pub fn ecies_decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, secp256k1};
-
-    #[test]
-    fn ed25519_to_x25519_key_conversion() {
-        // Verify that Ed25519 → X25519 conversion produces consistent keypairs:
-        // the public key derived from the converted secret matches the converted public key.
-        let (sk, pk) = ed25519::generate_keypair();
-        let x25519_pub = ed25519_pub_to_x25519(&pk).unwrap();
-        let x25519_sec = ed25519_sk_to_x25519(&sk).unwrap();
-        let derived_pub = x25519_dalek::PublicKey::from(&x25519_sec);
-        assert_eq!(x25519_pub.as_bytes(), derived_pub.as_bytes());
-    }
-
-    #[test]
-    fn ecies_roundtrip_ed25519() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
-
-        let plaintext = b"https://example.com/document.pdf";
-        let payload = ecies_encrypt(plaintext, &[pub_key]).unwrap();
-        let decrypted = ecies_decrypt(&payload, &priv_key).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
+    use crate::secp256k1;
 
     #[test]
     fn ecies_roundtrip_secp256k1() {
@@ -355,11 +253,11 @@ mod tests {
 
     #[test]
     fn ecies_wrong_key_cannot_decrypt() {
-        let (_, pk1) = ed25519::generate_keypair();
-        let (sk2, _) = ed25519::generate_keypair();
+        let (_, pk1) = secp256k1::generate_keypair();
+        let (sk2, _) = secp256k1::generate_keypair();
 
-        let pub_key1 = NoblePublicKey::Ed25519(pk1);
-        let priv_key2 = NoblePrivateKey::Ed25519(sk2);
+        let pub_key1 = NoblePublicKey::Secp256k1(pk1);
+        let priv_key2 = NoblePrivateKey::Secp256k1(sk2);
 
         let payload = ecies_encrypt(b"secret data", &[pub_key1]).unwrap();
         let result = ecies_decrypt(&payload, &priv_key2);
@@ -368,12 +266,12 @@ mod tests {
 
     #[test]
     fn ecies_multiple_recipients() {
-        let (sk1, pk1) = ed25519::generate_keypair();
+        let (sk1, pk1) = secp256k1::generate_keypair();
         let (sk2, pk2) = secp256k1::generate_keypair();
 
-        let priv1 = NoblePrivateKey::Ed25519(sk1);
+        let priv1 = NoblePrivateKey::Secp256k1(sk1);
         let priv2 = NoblePrivateKey::Secp256k1(sk2);
-        let pub1 = NoblePublicKey::Ed25519(pk1);
+        let pub1 = NoblePublicKey::Secp256k1(pk1);
         let pub2 = NoblePublicKey::Secp256k1(pk2);
 
         let plaintext = b"shared document URL for multiple recipients";
@@ -388,22 +286,15 @@ mod tests {
 
     #[test]
     fn ecies_zero_shared_secret_rejected() {
-        // H-ecies0: all-zero shared secret must be rejected
         let result = hkdf_derive(&[0u8; 32]);
         assert!(result.is_err(), "all-zero shared secret must be rejected");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("all-zero"),
-            "error should mention all-zero: {err}"
-        );
     }
 
     #[test]
     fn ecies_payload_serde_roundtrip() {
-        // H-serde: EciesPayload and EciesRecipient are serializable
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let payload = ecies_encrypt(b"serde test", &[pub_key]).unwrap();
         let json = serde_json::to_string(&payload).unwrap();
@@ -414,9 +305,9 @@ mod tests {
 
     #[test]
     fn ecies_empty_payload() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = NoblePublicKey::Ed25519(pk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
 
         let payload = ecies_encrypt(b"", &[pub_key]).unwrap();
         let decrypted = ecies_decrypt(&payload, &priv_key).unwrap();

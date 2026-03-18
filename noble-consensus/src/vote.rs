@@ -566,11 +566,11 @@ impl VoteManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::ed25519;
+    use noble_crypto::secp256k1;
 
     fn make_vote(cycle: u64, candidate: Hash256) -> (PorVote, NoblePublicKey) {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let vote = PorVote::sign(cycle, candidate, &priv_key, pub_key.clone()).unwrap();
         (vote, pub_key)
@@ -628,8 +628,8 @@ mod tests {
     fn p02_same_validator_key_duplicate_rejected() {
         let mut mgr = VoteManager::new();
         let candidate = hash_n(1);
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let vote1 = PorVote::sign(0, candidate, &priv_key, pub_key.clone()).unwrap();
         let vote2 = PorVote::sign(0, candidate, &priv_key, pub_key).unwrap();
@@ -892,8 +892,8 @@ mod tests {
     fn r2_votes_separate_from_r1() {
         let mut mgr = VoteManager::new();
         let candidate = hash_n(1);
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
 
         // R1 vote
@@ -926,8 +926,8 @@ mod tests {
 
         // R2: 3 votes for A (>50% of 5) → Strong override
         for i in 0..3u8 {
-            let (sk, _) = ed25519::generate_keypair();
-            let priv_key = NoblePrivateKey::Ed25519(sk);
+            let (sk, _) = secp256k1::generate_keypair();
+            let priv_key = NoblePrivateKey::Secp256k1(sk);
             let pub_key = priv_key.public_key();
             let v = PorVote::sign_round(0, a, 2, &priv_key, pub_key).unwrap();
             mgr.record_vote(&[20 + i], &v).unwrap();
@@ -957,8 +957,8 @@ mod tests {
         }
 
         // R2: 1 vote for A (not >50%) → no override, falls through to R1
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let v = PorVote::sign_round(0, a, 2, &priv_key, pub_key).unwrap();
         mgr.record_vote(&[20], &v).unwrap();
@@ -1040,8 +1040,8 @@ mod tests {
         let mut mgr = VoteManager::new();
         let candidate_a = hash_n(1);
         let candidate_b = hash_n(2);
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
 
         // First vote for candidate A

@@ -3,7 +3,6 @@
 
 //! Multi-scheme key types and unified signing/verification interface.
 //!
-//! Supports Ed25519 and secp256k1 through a single API. Public keys
 //! use a wire format of `[scheme_id || key_bytes]` (GAP-H11).
 
 use serde::{Deserialize, Serialize};
@@ -11,10 +10,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::CryptoError;
 use crate::schemes::{
-    SCHEME_ED25519, SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
-    SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_ED25519, SCHEME_VALIDATOR_SECP256K1,
+    SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1,
+    SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
 };
-use crate::{ed25519, secp256k1};
+use crate::secp256k1;
 
 /// A public key supporting multiple signature schemes.
 ///
@@ -22,8 +21,6 @@ use crate::{ed25519, secp256k1};
 /// Carries the scheme_id intrinsically — no need for a separate field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NoblePublicKey {
-    /// Ed25519 public key (32 bytes).
-    Ed25519(Vec<u8>),
     /// Compressed secp256k1 public key (33 bytes).
     Secp256k1(Vec<u8>),
 }
@@ -37,12 +34,8 @@ pub enum NoblePublicKey {
 /// keystore-only secrets that don't produce transaction signatures.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub enum NoblePrivateKey {
-    /// Ed25519 secret key (32 bytes) — on-chain signing (0x01).
-    Ed25519(Vec<u8>),
     /// secp256k1 secret key (32 bytes) — on-chain signing (0x02).
     Secp256k1(Vec<u8>),
-    /// Validator Ed25519 signing key (32 bytes) — block proposal + votes (0x80).
-    ValidatorEd25519(Vec<u8>),
     /// Validator secp256k1 signing key (32 bytes) — block proposal + votes (0x81).
     ValidatorSecp256k1(Vec<u8>),
     /// libp2p identity key — protobuf-encoded keypair bytes (0x82).
@@ -58,9 +51,7 @@ pub enum NoblePrivateKey {
 impl std::fmt::Debug for NoblePrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variant = match self {
-            Self::Ed25519(_) => "Ed25519",
             Self::Secp256k1(_) => "Secp256k1",
-            Self::ValidatorEd25519(_) => "ValidatorEd25519",
             Self::ValidatorSecp256k1(_) => "ValidatorSecp256k1",
             Self::P2pIdentity(_) => "P2pIdentity",
             Self::TlsKey(_) => "TlsKey",
@@ -76,9 +67,7 @@ impl NoblePrivateKey {
     /// accidental cloning — use only in tests and when ownership must be shared.
     pub fn clone_for_test(&self) -> Self {
         match self {
-            Self::Ed25519(sk) => Self::Ed25519(sk.clone()),
             Self::Secp256k1(sk) => Self::Secp256k1(sk.clone()),
-            Self::ValidatorEd25519(sk) => Self::ValidatorEd25519(sk.clone()),
             Self::ValidatorSecp256k1(sk) => Self::ValidatorSecp256k1(sk.clone()),
             Self::P2pIdentity(sk) => Self::P2pIdentity(sk.clone()),
             Self::TlsKey(sk) => Self::TlsKey(sk.clone()),
@@ -92,7 +81,6 @@ impl NoblePublicKey {
     /// Return the scheme identifier for this key.
     pub fn scheme_id(&self) -> u8 {
         match self {
-            Self::Ed25519(_) => SCHEME_ED25519,
             Self::Secp256k1(_) => SCHEME_SECP256K1,
         }
     }
@@ -100,7 +88,7 @@ impl NoblePublicKey {
     /// Return the raw key bytes (without scheme prefix).
     pub fn key_bytes(&self) -> &[u8] {
         match self {
-            Self::Ed25519(b) | Self::Secp256k1(b) => b,
+            Self::Secp256k1(bytes) => bytes,
         }
     }
 
@@ -112,7 +100,6 @@ impl NoblePublicKey {
         wire
     }
 
-    /// Human-readable address: `nbl1q…` (Ed25519) or `nbl1p…` (secp256k1).
     pub fn to_address(&self) -> String {
         crate::noble_addr::encode(self)
     }
@@ -127,16 +114,6 @@ impl NoblePublicKey {
         let key_bytes = &bytes[1..];
 
         match scheme_id {
-            SCHEME_ED25519 => {
-                if key_bytes.len() != ed25519::PUBLIC_KEY_LEN {
-                    return Err(CryptoError::InvalidKey(format!(
-                        "Ed25519 public key: expected {} bytes, got {}",
-                        ed25519::PUBLIC_KEY_LEN,
-                        key_bytes.len()
-                    )));
-                }
-                Ok(Self::Ed25519(key_bytes.to_vec()))
-            }
             SCHEME_SECP256K1 => {
                 if key_bytes.len() != secp256k1::PUBLIC_KEY_LEN {
                     return Err(CryptoError::InvalidKey(format!(
@@ -162,7 +139,6 @@ impl NoblePublicKey {
         }
 
         match self {
-            Self::Ed25519(pk) => ed25519::verify(pk, message, &sig.signature),
             Self::Secp256k1(pk) => secp256k1::verify(pk, message, &sig.signature),
         }
     }
@@ -172,9 +148,7 @@ impl NoblePrivateKey {
     /// Return the scheme identifier for this key.
     pub fn scheme_id(&self) -> u8 {
         match self {
-            Self::Ed25519(_) => SCHEME_ED25519,
             Self::Secp256k1(_) => SCHEME_SECP256K1,
-            Self::ValidatorEd25519(_) => SCHEME_VALIDATOR_ED25519,
             Self::ValidatorSecp256k1(_) => SCHEME_VALIDATOR_SECP256K1,
             Self::P2pIdentity(_) => SCHEME_P2P_IDENTITY,
             Self::TlsKey(_) => SCHEME_TLS_KEY,
@@ -185,27 +159,20 @@ impl NoblePrivateKey {
 
     /// Derive the corresponding public key.
     ///
-    /// For on-chain signing keys (Ed25519, Secp256k1) and validator keys,
     /// this derives the real public key. For non-signing types (P2P, TLS, TOTP),
-    /// returns a synthetic Ed25519 "public key" that is the SHA-256 hash of
     /// the raw bytes — used only as a keystore filename, not for verification.
     pub fn public_key(&self) -> NoblePublicKey {
         match self {
-            Self::Ed25519(sk) | Self::ValidatorEd25519(sk) => {
-                let signing_key =
-                    ed25519_dalek::SigningKey::from_bytes(&sk.as_slice().try_into().unwrap());
-                let vk = signing_key.verifying_key();
-                NoblePublicKey::Ed25519(vk.to_bytes().to_vec())
-            }
             Self::Secp256k1(sk) | Self::ValidatorSecp256k1(sk) => {
                 let signing_key = k256::ecdsa::SigningKey::from_slice(sk).unwrap();
                 let vk = signing_key.verifying_key();
                 NoblePublicKey::Secp256k1(vk.to_sec1_bytes().to_vec())
             }
             Self::P2pIdentity(raw) | Self::TlsKey(raw) | Self::TotpSecret(raw) | Self::FaucetPassphrase(raw) => {
-                // Synthetic: SHA-256 of raw bytes, used as keystore filename only.
+                // Synthetic: SHA-256 of raw bytes → secp256k1 pubkey, used as keystore filename only.
                 let hash = crate::sha256(raw);
-                NoblePublicKey::Ed25519(hash.as_bytes().to_vec())
+                let sk = k256::ecdsa::SigningKey::from_slice(&hash.0).unwrap();
+                NoblePublicKey::Secp256k1(sk.verifying_key().to_sec1_bytes().to_vec())
             }
         }
     }
@@ -215,10 +182,8 @@ impl NoblePrivateKey {
     /// For on-chain signing keys, returns `None` — use `sign()` instead.
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Ed25519(_) | Self::Secp256k1(_) => None,
-            Self::ValidatorEd25519(b)
-            | Self::ValidatorSecp256k1(b)
-            | Self::P2pIdentity(b)
+            Self::Secp256k1(_) | Self::ValidatorSecp256k1(_) => None,
+            Self::P2pIdentity(b)
             | Self::TlsKey(b)
             | Self::TotpSecret(b)
             | Self::FaucetPassphrase(b) => Some(b),
@@ -242,9 +207,7 @@ pub trait NobleVerifier {
 impl NobleSigner for NoblePrivateKey {
     fn sign(&self, message: &[u8; 32]) -> Result<SignatureEnvelope, CryptoError> {
         let (sig_scheme_id, signature) = match self {
-            Self::Ed25519(sk) => (SCHEME_ED25519, ed25519::sign(sk, message)?),
             Self::Secp256k1(sk) => (SCHEME_SECP256K1, secp256k1::sign(sk, message)?),
-            Self::ValidatorEd25519(sk) => (SCHEME_ED25519, ed25519::sign(sk, message)?),
             Self::ValidatorSecp256k1(sk) => (SCHEME_SECP256K1, secp256k1::sign(sk, message)?),
             Self::P2pIdentity(_) | Self::TlsKey(_) | Self::TotpSecret(_) | Self::FaucetPassphrase(_) => {
                 return Err(CryptoError::VerificationFailed(
@@ -274,7 +237,7 @@ impl NobleVerifier for NoblePublicKey {
 /// including `issuer_sig`, `additional_sigs`, and `validator_sig`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureEnvelope {
-    /// Signature scheme identifier (SCHEME_ED25519 or SCHEME_SECP256K1).
+    /// Signature scheme identifier ( or SCHEME_SECP256K1).
     pub scheme_id: u8,
     /// The signer's public key bytes (without scheme prefix).
     pub public_key: Vec<u8>,
@@ -286,22 +249,6 @@ impl SignatureEnvelope {
     /// Validate that the public_key and signature byte lengths match the declared scheme.
     pub fn validate_lengths(&self) -> Result<(), CryptoError> {
         match self.scheme_id {
-            SCHEME_ED25519 => {
-                if self.public_key.len() != ed25519::PUBLIC_KEY_LEN {
-                    return Err(CryptoError::InvalidKey(format!(
-                        "Ed25519 public key: expected {} bytes, got {}",
-                        ed25519::PUBLIC_KEY_LEN,
-                        self.public_key.len()
-                    )));
-                }
-                if self.signature.len() != ed25519::SIGNATURE_LEN {
-                    return Err(CryptoError::VerificationFailed(format!(
-                        "Ed25519 signature: expected {} bytes, got {}",
-                        ed25519::SIGNATURE_LEN,
-                        self.signature.len()
-                    )));
-                }
-            }
             SCHEME_SECP256K1 => {
                 if self.public_key.len() != secp256k1::PUBLIC_KEY_LEN {
                     return Err(CryptoError::InvalidKey(format!(
@@ -326,7 +273,6 @@ impl SignatureEnvelope {
     /// Verify this signature against the provided message, using the embedded public key.
     pub fn verify_standalone(&self, message: &[u8]) -> Result<(), CryptoError> {
         match self.scheme_id {
-            SCHEME_ED25519 => ed25519::verify(&self.public_key, message, &self.signature),
             SCHEME_SECP256K1 => secp256k1::verify(&self.public_key, message, &self.signature),
             other => Err(CryptoError::UnknownScheme(other)),
         }
@@ -335,7 +281,6 @@ impl SignatureEnvelope {
     /// Extract the NoblePublicKey from this envelope.
     pub fn to_noble_public_key(&self) -> Result<NoblePublicKey, CryptoError> {
         match self.scheme_id {
-            SCHEME_ED25519 => Ok(NoblePublicKey::Ed25519(self.public_key.clone())),
             SCHEME_SECP256K1 => Ok(NoblePublicKey::Secp256k1(self.public_key.clone())),
             other => Err(CryptoError::UnknownScheme(other)),
         }
@@ -350,15 +295,6 @@ mod tests {
     // --- Key generation and derivation ---
 
     #[test]
-    fn ed25519_keypair_derivation() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = priv_key.public_key();
-        assert_eq!(pub_key.key_bytes(), pk.as_slice());
-        assert_eq!(pub_key.scheme_id(), SCHEME_ED25519);
-    }
-
-    #[test]
     fn secp256k1_keypair_derivation() {
         let (sk, pk) = secp256k1::generate_keypair();
         let priv_key = NoblePrivateKey::Secp256k1(sk);
@@ -368,18 +304,6 @@ mod tests {
     }
 
     // --- Wire format ---
-
-    #[test]
-    fn ed25519_wire_roundtrip() {
-        let (_, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk);
-        let wire = pub_key.to_wire_bytes();
-        assert_eq!(wire[0], SCHEME_ED25519);
-        assert_eq!(wire.len(), 1 + ed25519::PUBLIC_KEY_LEN);
-
-        let decoded = NoblePublicKey::from_wire_bytes(&wire).unwrap();
-        assert_eq!(pub_key, decoded);
-    }
 
     #[test]
     fn secp256k1_wire_roundtrip() {
@@ -406,25 +330,11 @@ mod tests {
 
     #[test]
     fn wire_format_wrong_key_length() {
-        let mut wire = vec![SCHEME_ED25519];
-        wire.extend_from_slice(&[0u8; 16]); // Too short for Ed25519
+        let mut wire = vec![];
         assert!(NoblePublicKey::from_wire_bytes(&wire).is_err());
     }
 
     // --- NobleSigner / NobleVerifier ---
-
-    #[test]
-    fn ed25519_sign_verify_through_traits() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let pub_key = priv_key.public_key();
-
-        let message = sha256(b"trait test message");
-        let envelope = priv_key.sign(message.as_bytes()).unwrap();
-
-        assert_eq!(envelope.scheme_id, SCHEME_ED25519);
-        assert!(NobleVerifier::verify(&pub_key, message.as_bytes(), &envelope).is_ok());
-    }
 
     #[test]
     fn secp256k1_sign_verify_through_traits() {
@@ -440,15 +350,6 @@ mod tests {
     }
 
     // --- SignatureEnvelope ---
-
-    #[test]
-    fn envelope_verify_standalone_ed25519() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let msg = sha256(b"standalone test");
-        let envelope = priv_key.sign(msg.as_bytes()).unwrap();
-        assert!(envelope.verify_standalone(msg.as_bytes()).is_ok());
-    }
 
     #[test]
     fn envelope_verify_standalone_secp256k1() {
@@ -471,8 +372,8 @@ mod tests {
 
     #[test]
     fn envelope_to_noble_public_key() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let msg = sha256(b"pubkey extraction");
         let envelope = priv_key.sign(msg.as_bytes()).unwrap();
@@ -483,45 +384,12 @@ mod tests {
 
     // --- Cross-scheme rejection ---
 
-    #[test]
-    fn cross_scheme_verification_rejected() {
-        let (ed_sk, _) = ed25519::generate_keypair();
-        let (_, secp_pk) = secp256k1::generate_keypair();
-
-        let ed_priv = NoblePrivateKey::Ed25519(ed_sk);
-        let secp_pub = NoblePublicKey::Secp256k1(secp_pk);
-
-        let msg = sha256(b"cross-scheme");
-        let ed_envelope = ed_priv.sign(msg.as_bytes()).unwrap();
-
-        // Trying to verify an Ed25519 signature with a secp256k1 key
-        let result = secp_pub.verify(msg.as_bytes(), &ed_envelope);
-        assert!(result.is_err(), "cross-scheme verification must fail");
-    }
-
-    // --- CBOR serialization ---
-
-    #[test]
-    fn signature_envelope_cbor_roundtrip() {
-        use noble_codec::NobleCbor;
-
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
-        let msg = sha256(b"cbor roundtrip");
-        let envelope = priv_key.sign(msg.as_bytes()).unwrap();
-
-        let bytes = envelope.to_cbor().unwrap();
-        let decoded = SignatureEnvelope::from_cbor(&bytes).unwrap();
-        assert_eq!(envelope, decoded);
-    }
 
     #[test]
     fn noble_public_key_cbor_roundtrip() {
         use noble_codec::NobleCbor;
-
-        let (_, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk);
-
+        let (_, pk) = secp256k1::generate_keypair();
+        let pub_key = NoblePublicKey::Secp256k1(pk);
         let bytes = pub_key.to_cbor().unwrap();
         let decoded = NoblePublicKey::from_cbor(&bytes).unwrap();
         assert_eq!(pub_key, decoded);
@@ -531,14 +399,13 @@ mod tests {
 
     #[test]
     fn validator_key_sign_verify() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::ValidatorEd25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::ValidatorSecp256k1(sk);
         let pub_key = priv_key.public_key();
 
         let message = sha256(b"validator sign test");
         let envelope = priv_key.sign(message.as_bytes()).unwrap();
-        // Validator keys sign with the underlying scheme (Ed25519)
-        assert_eq!(envelope.scheme_id, SCHEME_ED25519);
+        assert_eq!(envelope.scheme_id, crate::schemes::SCHEME_VALIDATOR_SECP256K1);
         assert!(pub_key.verify(message.as_bytes(), &envelope).is_ok());
     }
 
@@ -558,8 +425,8 @@ mod tests {
         assert_eq!(priv_key.scheme_id(), 0x84);
 
         // On-chain keys return None
-        let (sk, _) = ed25519::generate_keypair();
-        let signing_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let signing_key = NoblePrivateKey::Secp256k1(sk);
         assert_eq!(signing_key.raw_bytes(), None);
     }
 
@@ -578,8 +445,8 @@ mod tests {
 
     #[test]
     fn private_key_debug_redacted() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let debug_str = format!("{:?}", priv_key);
         assert!(
             debug_str.contains("[REDACTED]"),
@@ -593,35 +460,10 @@ mod tests {
 
     #[test]
     fn private_key_clone_for_test() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let cloned = priv_key.clone_for_test();
-        // Both can derive the same public key
         assert_eq!(priv_key.public_key(), cloned.public_key());
-    }
-
-    #[test]
-    fn signature_envelope_validate_lengths_ed25519() {
-        let envelope = SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: vec![0u8; 32],
-            signature: vec![0u8; 64],
-        };
-        assert!(envelope.validate_lengths().is_ok());
-
-        let bad_pk = SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: vec![0u8; 16], // wrong length
-            signature: vec![0u8; 64],
-        };
-        assert!(bad_pk.validate_lengths().is_err());
-
-        let bad_sig = SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
-            public_key: vec![0u8; 32],
-            signature: vec![0u8; 32], // wrong length
-        };
-        assert!(bad_sig.validate_lengths().is_err());
     }
 
     #[test]
@@ -648,10 +490,10 @@ mod tests {
     fn noble_public_key_hash_consistent() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-
-        let (_, pk1) = ed25519::generate_keypair();
-        let key1 = NoblePublicKey::Ed25519(pk1);
-
+        let (_, pk1_bytes) = secp256k1::generate_keypair();
+        let key1 = NoblePublicKey::Secp256k1(pk1_bytes.clone());
+        let (_, pk2_bytes) = secp256k1::generate_keypair();
+        let key2 = NoblePublicKey::Secp256k1(pk2_bytes);
         // Same key hashes to the same value
         let mut h1 = DefaultHasher::new();
         key1.hash(&mut h1);
@@ -660,8 +502,6 @@ mod tests {
         assert_eq!(h1.finish(), h2.finish(), "same key must produce same hash");
 
         // Different key hashes to a different value (probabilistic but near-certain)
-        let (_, pk2) = ed25519::generate_keypair();
-        let key2 = NoblePublicKey::Ed25519(pk2);
         let mut h3 = DefaultHasher::new();
         key2.hash(&mut h3);
         assert_ne!(

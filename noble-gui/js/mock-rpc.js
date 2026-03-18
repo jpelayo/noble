@@ -6,9 +6,9 @@
  *
  * Type alignment:
  *   Hash256        → 64-char hex string
- *   NoblePublicKey → { "Ed25519": [u8; 32] } or { "Secp256k1": [u8; 33] }
+ *   NoblePublicKey → { "Secp256k1": [u8; 33] }
  *   SignatureEnvelope → { scheme_id: u8, public_key: [u8], signature: [u8] }
- *   scheme_id: 0x00 = Ed25519, 0x01 = secp256k1
+ *   scheme_id: 0x02 = secp256k1
  */
 
 // ── Constants ──
@@ -52,10 +52,10 @@ function deterministicHash(seed) {
 function makePublicKey(seed) {
   const bytes = [];
   for (let i = 0; i < 32; i++) bytes.push((seed * 3 + i * 7) % 256);
-  // Real API returns nbl1q… bech32 string for Ed25519 keys.
-  // Mock produces a fake nbl1q… string from the deterministic bytes.
+  // Real API returns nbl1p… bech32m string for secp256k1 keys.
+  // Mock produces a fake nbl1p… string from the deterministic bytes.
   const hex = bytes.map(b => b.toString(16).padStart(2, '0')).join('');
-  return 'nbl1q' + hex;
+  return 'nbl1p' + hex;
 }
 
 function makeSignatureEnvelope(seed) {
@@ -64,7 +64,7 @@ function makeSignatureEnvelope(seed) {
   const sig = [];
   for (let i = 0; i < 64; i++) sig.push((seed * 7 + i * 3) % 256);
   return {
-    scheme_id: 0x00, // Ed25519
+    scheme_id: 0x02, // secp256k1
     public_key: pubKey,
     signature: sig,
   };
@@ -699,7 +699,7 @@ export class MockRpcClient {
           locator_metadata: {
             has_locator: true,
             recipient_count: entry.tx.locator_recipient_count || 1,
-            encryption_scheme: 'ECIES-X25519',
+            encryption_scheme: 'ECIES-secp256k1',
           },
         };
       }
@@ -798,10 +798,10 @@ export class MockRpcClient {
 
       case 'noble_addValidator': {
         const hexKey = params.public_key;
-        if (!hexKey || hexKey.length !== 64) throw { code: -32602, message: 'Invalid public key: expected 64 hex characters (Ed25519)' };
+        if (!hexKey || hexKey.length !== 66) throw { code: -32602, message: 'Invalid public key: expected 66 hex characters (secp256k1)' };
         const keyBytes = [];
         for (let i = 0; i < hexKey.length; i += 2) keyBytes.push(parseInt(hexKey.slice(i, i + 2), 16));
-        const mockNbl1Key = 'nbl1q' + hexKey;
+        const mockNbl1Key = 'nbl1p' + hexKey;
         const exists = this.#validators.find(v => v.public_key === mockNbl1Key);
         if (exists) throw { code: -32602, message: `Validator already in list: ${exists.name}` };
         const now = Math.floor(Date.now() / 1000);
@@ -1069,7 +1069,7 @@ export class MockRpcClient {
             first_active: null,
           };
         }
-        const walletKey = this.#validators[0].public_key; // bech32 string (nbl1q...)
+        const walletKey = this.#validators[0].public_key; // bech32m string (nbl1p...)
         const address = walletKey; // real API returns bech32 address
         const blocksValidated = this.#validators[0].blocks_produced;
         // Subsidy: 100 NOBLE (100_000_000 atomic) per block
@@ -1104,7 +1104,7 @@ export class MockRpcClient {
       case 'noble_listAddresses': {
         const walletKey = this.#validators[0].public_key; // bech32 string
         // Real API returns bech32 pubkey_hex via pk.to_address()
-        return { keys: [{ pubkey_hex: walletKey, scheme: 'ed25519', bitcoin_addresses: [] }] };
+        return { keys: [{ pubkey_hex: walletKey, scheme: 'secp256k1', bitcoin_addresses: [] }] };
       }
 
       case 'noble_getWalletTransactions': {
@@ -1722,7 +1722,7 @@ export class MockRpcClient {
         return {
           enabled: true,
           pubkey_hex: '01' + randomHex(32),
-          scheme: 'ed25519',
+          scheme: 'secp256k1',
           key_path: '/data/noble/validator.key',
         };
 
@@ -1891,7 +1891,7 @@ export class MockRpcClient {
   _generateTraceEntries(count, levelFilter, taskFilter) {
     const levels = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR'];
     const targets = [
-      'noble_core::validation', 'noble_crypto::ed25519', 'noble_storage::rocks',
+      'noble_core::validation', 'noble_crypto::secp256k1', 'noble_storage::rocks',
       'noble_mempool::pool', 'noble_consensus::cycle_engine', 'noble_network::service',
       'noble_api::server', 'noble_wallet::keystore', 'noble_node::node',
       'noble_consensus::vote_manager', 'noble_network::peer_manager',
@@ -1906,7 +1906,7 @@ export class MockRpcClient {
       'Peer 12D3KooW...a3f2 connected (outbound)',
       'CycleEngine step: Proposals & Voting → Reflection & Propagation',
       'Mempool admit: 8-step validation passed for tx {{id}}',
-      'Ed25519 signature verified in 0.12ms',
+      'secp256k1 signature verified in 0.34ms',
       'RPC request: noble_getBlockCount (2ms)',
       'GossipSub: received tx announcement from 3 peers',
       'Vote received for candidate block {{hash}}',

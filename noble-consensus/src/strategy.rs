@@ -237,7 +237,7 @@ mod tests {
     use crate::validator::ValidatorList;
     use noble_core::{Block, BlockHeader, PROTOCOL_VERSION};
     use noble_crypto::{
-        ed25519, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+        secp256k1, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
 
     /// Create an empty snapshot (no validators).
@@ -261,8 +261,8 @@ mod tests {
     }
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         (priv_key, pub_key)
     }
@@ -281,7 +281,7 @@ mod tests {
             tx_count: 0,
             validator_id: val_pub.clone(),
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pub.key_bytes().to_vec(),
                 signature: vec![],
             },

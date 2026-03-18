@@ -3,7 +3,7 @@
 
 [package]
 name = "noble-crypto"
-description = "SHA-256, Ed25519, secp256k1 and multi-scheme key management for the NOBLE protocol"
+description = "SHA-256, secp256k1, ECIES and multi-scheme key management for the NOBLE protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,10 +16,8 @@ sha2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 hex.workspace = true
-ed25519-dalek.workspace = true
 k256.workspace = true
 rand.workspace = true
-x25519-dalek.workspace = true
 hkdf.workspace = true
 aes-gcm.workspace = true
 zeroize.workspace = true

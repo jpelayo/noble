@@ -1015,7 +1015,7 @@ fn read_validator_pubkey(key_path: &Path) -> Option<String> {
     let private_key = match raw[0] {
         0x02 => NoblePrivateKey::Secp256k1(raw[1..].to_vec()),
         0x01 => {
-            eprintln!("  WARNING: Legacy Ed25519 validator key found. Re-run setup with your mnemonic.");
+            eprintln!("  WARNING: Legacy validator key (unsupported scheme 0x01). Re-run setup with your mnemonic.");
             return None;
         }
         _ => return None,

@@ -198,7 +198,8 @@ mod tests {
         assert_eq!(identity.subject_cn().as_deref(), Some("Test Node"));
 
         // Sign a binding for a test NOBLE key
-        let sk = noble_crypto::NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let (sk_bytes, _) = noble_crypto::secp256k1::generate_keypair();
+        let sk = noble_crypto::NoblePrivateKey::Secp256k1(sk_bytes);
         let pk = sk.public_key();
         let att = identity.sign_pki_binding(&pk).unwrap();
         assert_eq!(att.scheme, "pkcs7");

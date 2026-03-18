@@ -479,11 +479,11 @@ impl ValidatorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::{ed25519, NoblePrivateKey};
+    use noble_crypto::{secp256k1, NoblePrivateKey};
 
     fn make_pubkey() -> NoblePublicKey {
-        let (sk, _) = ed25519::generate_keypair();
-        NoblePrivateKey::Ed25519(sk).public_key()
+        let (sk, _) = secp256k1::generate_keypair();
+        NoblePrivateKey::Secp256k1(sk).public_key()
     }
 
     #[test]

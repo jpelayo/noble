@@ -330,7 +330,7 @@ mod tests {
                 prev_block_hash: prev_hash,
                 merkle_root: Hash256::ZERO,
                 tx_count: 0,
-                validator_id: NoblePublicKey::Ed25519(vec![0; 32]),
+                validator_id: NoblePublicKey::Secp256k1(vec![0; 32]),
                 validator_sig: SignatureEnvelope {
                     scheme_id: 1,
                     public_key: vec![0; 32],

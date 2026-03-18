@@ -1099,8 +1099,8 @@ mod tests {
     use noble_core::{Block, BlockHeader, OutPoint, Transaction, TxIn, TxOut, PROTOCOL_VERSION};
     use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{
-        ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-        SCHEME_ED25519,
+        secp256k1, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+        SCHEME_SECP256K1,
     };
 
     /// Convenience: wrap a NoblePublicKey into a NobleAddress for balance lookups.
@@ -1127,8 +1127,8 @@ mod tests {
         let total = subsidy + extra_fees;
         // Coinbase uses a dummy signer (the validator's key isn't necessarily available,
         // but tests that need it pass sk/pk explicitly).
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
 
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
@@ -1147,7 +1147,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 0,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1166,7 +1166,7 @@ mod tests {
 
     /// Create a notarization tx that has no inputs/outputs (fee=0 notarization for testing).
     fn make_signed_tx(sk: &[u8], pk: &[u8], doc: &[u8], timestamp: u64) -> (Transaction, Hash256) {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let checksum = sha256(doc);
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
@@ -1176,7 +1176,7 @@ mod tests {
             checksum,
             timestamp,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1201,7 +1201,7 @@ mod tests {
         outputs: Vec<TxOut>,
         timestamp: u64,
     ) -> (Transaction, Hash256) {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
@@ -1210,7 +1210,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1233,9 +1233,9 @@ mod tests {
         prev_hash: Hash256,
         timestamp: u64,
     ) -> (Block, Hash256, Vec<Hash256>) {
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let val_priv = NoblePrivateKey::Ed25519(val_sk);
-        let val_pub = NoblePublicKey::Ed25519(val_pk.clone());
+        let (val_sk, val_pk) = secp256k1::generate_keypair();
+        let val_priv = NoblePrivateKey::Secp256k1(val_sk);
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.clone());
 
         let transactions: Vec<Transaction> = txs.iter().map(|(tx, _)| tx.clone()).collect();
         let tx_ids: Vec<Hash256> = txs.iter().map(|(_, id)| *id).collect();
@@ -1250,7 +1250,7 @@ mod tests {
             tx_count: transactions.len() as u32,
             validator_id: val_pub,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pk,
                 signature: vec![],
             },
@@ -1288,8 +1288,8 @@ mod tests {
         val_pk: &[u8],
         fees: u64,
     ) -> (Block, Hash256, Vec<Hash256>) {
-        let val_priv = NoblePrivateKey::Ed25519(val_sk.to_vec());
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        let val_priv = NoblePrivateKey::Secp256k1(val_sk.to_vec());
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.to_vec());
         let validator_addr = NobleAddress::Noble(val_pub.clone());
 
         // Build coinbase tx (subsidy + fees)
@@ -1313,7 +1313,7 @@ mod tests {
             tx_count: transactions.len() as u32,
             validator_id: val_pub,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pk.to_vec(),
                 signature: vec![],
             },
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn commit_and_retrieve_block() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
         let (block, block_hash, tx_ids) = make_block_with_validator(
             vec![(tx.clone(), tx_id)],
@@ -1367,7 +1367,7 @@ mod tests {
     #[test]
     fn commit_and_retrieve_transaction() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
         let (block, block_hash, tx_ids) = make_block_with_validator(
             vec![(tx.clone(), tx_id)],
@@ -1388,7 +1388,7 @@ mod tests {
     #[test]
     fn checksum_lookup() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Two different txs registering the same document (sender = validator, so funded)
         let (tx1, tx_id1) = make_signed_tx(&sk, &pk, b"same_doc", 1_700_000_000);
@@ -1423,7 +1423,7 @@ mod tests {
     #[test]
     fn chain_tip_updates() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Block 0 (sender = validator, so funded)
         let (tx0, tx_id0) = make_signed_tx(&sk, &pk, b"doc0", 1_700_000_000);
@@ -1490,15 +1490,15 @@ mod tests {
     #[test]
     fn balance_zero_for_unknown_address() {
         let store = MemoryStorage::new();
-        let (_, pk) = ed25519::generate_keypair();
-        let pubkey = NoblePublicKey::Ed25519(pk);
+        let (_, pk) = secp256k1::generate_keypair();
+        let pubkey = NoblePublicKey::Secp256k1(pk);
         assert_eq!(store.get_balance(&addr(&pubkey)).unwrap(), 0);
     }
 
     #[test]
     fn subsidy_credited_to_validator() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (block, block_hash, tx_ids) =
             make_block_with_validator(vec![], 1, Hash256::ZERO, 1_700_000_000, &sk, &pk);
         let validator = block.header.validator_id.clone();
@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn subsidy_halves_at_halving_interval() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (block, block_hash, tx_ids) =
             make_block_with_validator(vec![], HALVING_INTERVAL, Hash256::ZERO, 1_700_000_000, &sk, &pk);
         let validator = block.header.validator_id.clone();
@@ -1522,7 +1522,7 @@ mod tests {
         let store = MemoryStorage::new();
 
         // Fund sender as validator of block 1 (gets subsidy via coinbase)
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (sender_sk, sender_pk) = secp256k1::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
             1,
@@ -1533,7 +1533,7 @@ mod tests {
         );
         store.commit_block(&block0, &hash0, &ids0).unwrap();
 
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
+        let sender_pub = NoblePublicKey::Secp256k1(sender_pk.to_vec());
         let sender_addr = NobleAddress::Noble(sender_pub.clone());
         assert_eq!(store.get_balance(&sender_addr).unwrap(), INITIAL_SUBSIDY);
 
@@ -1560,8 +1560,8 @@ mod tests {
         }
 
         // Now create a transfer spending the original coinbase
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(recip_pk));
+        let (_, recip_pk) = secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(recip_pk));
         let amount = 100_000u64;
         let fee = 1_000u64;
         let change = INITIAL_SUBSIDY - amount - fee;
@@ -1612,9 +1612,9 @@ mod tests {
         let store = MemoryStorage::new();
 
         // Sender has no UTXOs — try to spend a non-existent outpoint
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(recip_pk));
+        let (sender_sk, sender_pk) = secp256k1::generate_keypair();
+        let (_, recip_pk) = secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(recip_pk));
         let fake_outpoint = OutPoint {
             txid: Hash256::from_bytes([0xAA; 32]),
             vout: 0,
@@ -1641,7 +1641,7 @@ mod tests {
         let store = MemoryStorage::new();
 
         // Fund sender
-        let (sender_sk, sender_pk) = ed25519::generate_keypair();
+        let (sender_sk, sender_pk) = secp256k1::generate_keypair();
         let (block0, hash0, ids0) = make_block_with_validator(
             vec![],
             1,
@@ -1663,7 +1663,7 @@ mod tests {
         );
         store.commit_block(&block1, &hash1, &ids1).unwrap();
 
-        let sender_pub = NoblePublicKey::Ed25519(sender_pk.to_vec());
+        let sender_pub = NoblePublicKey::Secp256k1(sender_pk.to_vec());
         let history = store.get_address_history(&addr(&sender_pub), 0, 100).unwrap();
         assert!(history.contains(&id1));
     }
@@ -1671,8 +1671,8 @@ mod tests {
     #[test]
     fn history_empty_for_unknown() {
         let store = MemoryStorage::new();
-        let (_, pk) = ed25519::generate_keypair();
-        let pubkey = NoblePublicKey::Ed25519(pk);
+        let (_, pk) = secp256k1::generate_keypair();
+        let pubkey = NoblePublicKey::Secp256k1(pk);
         let history = store.get_address_history(&addr(&pubkey), 0, 100).unwrap();
         assert!(history.is_empty());
     }
@@ -1680,7 +1680,7 @@ mod tests {
     #[test]
     fn multi_block_balance_accumulation() {
         let store = MemoryStorage::new();
-        let (val_sk, val_pk) = ed25519::generate_keypair();
+        let (val_sk, val_pk) = secp256k1::generate_keypair();
 
         let mut prev_hash = Hash256::ZERO;
         for h in 1..4 {
@@ -1696,7 +1696,7 @@ mod tests {
             prev_hash = hash;
         }
 
-        let val_pub = NoblePublicKey::Ed25519(val_pk.to_vec());
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.to_vec());
         assert_eq!(store.get_balance(&addr(&val_pub)).unwrap(), INITIAL_SUBSIDY * 3);
     }
 
@@ -1705,7 +1705,7 @@ mod tests {
     #[test]
     fn rollback_removes_blocks() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let mut prev = Hash256::ZERO;
         for h in 0..3u64 {
@@ -1725,8 +1725,8 @@ mod tests {
     #[test]
     fn rollback_restores_utxo_state() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
-        let val_pub = NoblePublicKey::Ed25519(pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let val_pub = NoblePublicKey::Secp256k1(pk.to_vec());
 
         let mut prev = Hash256::ZERO;
         for h in 0..4u64 {
@@ -1746,7 +1746,7 @@ mod tests {
     #[test]
     fn rollback_noop_at_tip() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (b, hash, ids) =
             make_block_with_validator(vec![], 0, Hash256::ZERO, 1_700_000_000, &sk, &pk);
         store.commit_block(&b, &hash, &ids).unwrap();
@@ -1758,7 +1758,7 @@ mod tests {
     #[test]
     fn rollback_clears_tx_index() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Block 0: empty (fund validator)
         let (b0, h0, ids0) =
@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn get_transaction_location_found() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         let (tx1, id1) = make_signed_tx(&sk, &pk, b"doc1", 1_700_000_000);
         let (tx2, id2) = make_signed_tx(&sk, &pk, b"doc2", 1_700_000_000);
@@ -1873,7 +1873,7 @@ mod tests {
     #[test]
     fn get_recent_timestamps_returns_newest_first() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Commit 3 blocks with distinct timestamps
         let mut prev_hash = Hash256::ZERO;
@@ -1899,10 +1899,10 @@ mod tests {
     #[test]
     fn store_and_load_key_rotation() {
         let store = MemoryStorage::new();
-        let (_, old_pk) = ed25519::generate_keypair();
-        let (_, new_pk) = ed25519::generate_keypair();
-        let old_key = NoblePublicKey::Ed25519(old_pk.to_vec());
-        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let (_, old_pk) = secp256k1::generate_keypair();
+        let (_, new_pk) = secp256k1::generate_keypair();
+        let old_key = NoblePublicKey::Secp256k1(old_pk.to_vec());
+        let new_key = NoblePublicKey::Secp256k1(new_pk.to_vec());
 
         store.store_key_rotation(&old_key, &new_key, 42).unwrap();
 
@@ -1916,10 +1916,10 @@ mod tests {
     #[test]
     fn remove_key_rotation() {
         let store = MemoryStorage::new();
-        let (_, old_pk) = ed25519::generate_keypair();
-        let (_, new_pk) = ed25519::generate_keypair();
-        let old_key = NoblePublicKey::Ed25519(old_pk.to_vec());
-        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let (_, old_pk) = secp256k1::generate_keypair();
+        let (_, new_pk) = secp256k1::generate_keypair();
+        let old_key = NoblePublicKey::Secp256k1(old_pk.to_vec());
+        let new_key = NoblePublicKey::Secp256k1(new_pk.to_vec());
 
         store.store_key_rotation(&old_key, &new_key, 42).unwrap();
         store.remove_key_rotation(&old_key).unwrap();
@@ -2034,7 +2034,7 @@ mod tests {
         use noble_core::constants::{META_KEY_PREV_CHECKSUM, META_KEY_VERSION};
         use noble_core::MetadataEntry;
 
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let checksum = sha256(doc);
         let mut metadata = Vec::new();
         if let Some(prev) = prev_checksum {
@@ -2057,7 +2057,7 @@ mod tests {
             checksum,
             timestamp,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn version_chain_indexed_on_commit() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Block 0: v1 notarization (no prev_checksum)
         let (tx1, tx_id1) =
@@ -2115,7 +2115,7 @@ mod tests {
     #[test]
     fn version_chain_empty_for_non_versioned() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Commit a normal notarization without version metadata
         let (tx, tx_id) = make_signed_tx(&sk, &pk, b"plain_doc", 1_700_000_000);
@@ -2132,7 +2132,7 @@ mod tests {
     #[test]
     fn version_chain_multiple_successors() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Block 0: v1
         let (tx1, tx_id1) =
@@ -2184,7 +2184,7 @@ mod tests {
     #[test]
     fn version_chain_rollback_cleans_index() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Block 0: empty genesis
         let (b0, h0, ids0) =
@@ -2231,8 +2231,8 @@ mod tests {
     #[test]
     fn issuer_index_populated_on_commit() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let pub_key = NoblePublicKey::Secp256k1(pk.clone());
         let wire = pub_key.to_wire_bytes();
 
         // Block 0: empty genesis
@@ -2264,7 +2264,7 @@ mod tests {
     #[test]
     fn issuer_index_empty_for_unknown_key() {
         let store = MemoryStorage::new();
-        let unknown_wire = vec![0x01; 33]; // fake Ed25519 wire key
+        let unknown_wire = vec![0x01; 33]; // fake wire key (unrecognised scheme)
         let results = store.lookup_by_issuer(&unknown_wire).unwrap();
         assert!(results.is_empty());
     }
@@ -2273,12 +2273,12 @@ mod tests {
     fn issuer_index_multiple_issuers() {
         let store = MemoryStorage::new();
 
-        let (sk_a, pk_a) = ed25519::generate_keypair();
-        let pub_a = NoblePublicKey::Ed25519(pk_a.clone());
+        let (sk_a, pk_a) = secp256k1::generate_keypair();
+        let pub_a = NoblePublicKey::Secp256k1(pk_a.clone());
         let wire_a = pub_a.to_wire_bytes();
 
-        let (sk_b, pk_b) = ed25519::generate_keypair();
-        let pub_b = NoblePublicKey::Ed25519(pk_b.clone());
+        let (sk_b, pk_b) = secp256k1::generate_keypair();
+        let pub_b = NoblePublicKey::Secp256k1(pk_b.clone());
         let wire_b = pub_b.to_wire_bytes();
 
         // Block 0: empty genesis (subsidy(0)=0)
@@ -2321,8 +2321,8 @@ mod tests {
     #[test]
     fn issuer_index_rollback_clears_and_replays() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
-        let pub_key = NoblePublicKey::Ed25519(pk.clone());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let pub_key = NoblePublicKey::Secp256k1(pk.clone());
         let wire = pub_key.to_wire_bytes();
 
         // Block 0: empty genesis
@@ -2368,8 +2368,8 @@ mod tests {
     #[test]
     fn count_address_history_empty() {
         let store = MemoryStorage::new();
-        let (_, pk) = ed25519::generate_keypair();
-        let address = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
+        let (_, pk) = secp256k1::generate_keypair();
+        let address = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk));
         let count = store.count_address_history(&address).unwrap();
         assert_eq!(count, 0, "empty store should have 0 history entries");
     }
@@ -2377,7 +2377,7 @@ mod tests {
     #[test]
     fn count_address_history_after_block() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
         // Genesis block
         let genesis = make_block_with_validator(vec![], 0, Hash256::ZERO, 1_000_000, &sk, &pk);
@@ -2406,7 +2406,7 @@ mod tests {
             .commit_block(&block2.0, &block2.1, &block2.2)
             .unwrap();
 
-        let sender_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk));
+        let sender_addr = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk));
         let count = store.count_address_history(&sender_addr).unwrap();
         // coinbase txs at heights 0,1,2 (3 entries) + 2 notarization txs = 5
         // But only notarizations use the sender_addr (coinbase issuer is a random key)
@@ -2421,8 +2421,8 @@ mod tests {
     #[test]
     fn coinbase_maturity_enforced() {
         let store = MemoryStorage::new();
-        let (sk, pk) = ed25519::generate_keypair();
-        let _val_addr = NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
+        let (sk, pk) = secp256k1::generate_keypair();
+        let _val_addr = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.to_vec()));
 
         // Block 0: coinbase gives subsidy to validator
         let (b0, h0, ids0) =
@@ -2434,8 +2434,8 @@ mod tests {
             txid: ids0[0],
             vout: 0,
         };
-        let (_, recip_pk) = ed25519::generate_keypair();
-        let recipient = NobleAddress::Noble(NoblePublicKey::Ed25519(recip_pk));
+        let (_, recip_pk) = secp256k1::generate_keypair();
+        let recipient = NobleAddress::Noble(NoblePublicKey::Secp256k1(recip_pk));
 
         let (tx, tx_id) = make_transfer_tx(
             &sk,

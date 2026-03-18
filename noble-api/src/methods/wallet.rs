@@ -9,7 +9,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_crypto::{NoblePublicKey, SCHEME_ED25519 as SCHEME_ED, SCHEME_SECP256K1 as SCHEME_SEC};
+use noble_crypto::{NoblePublicKey, SCHEME_SECP256K1};
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
@@ -322,7 +322,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Guard: reject if any secp256k1 key already exists
         let existing = keystore.list_keys().unwrap_or_default();
-        if existing.iter().any(|k| k.scheme_id() == SCHEME_SEC) {
+        if existing.iter().any(|k| k.scheme_id() == SCHEME_SECP256K1) {
             return Err(ApiError::InvalidParam(
                 "A secp256k1 wallet key already exists. Delete it first to generate a new one.".into(),
             ).into());
@@ -376,7 +376,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // Guard: if a secp256k1 key already exists, return it (idempotent import)
         let existing = keystore.list_keys().unwrap_or_default();
-        if let Some(existing_pk) = existing.iter().find(|k| k.scheme_id() == SCHEME_SEC) {
+        if let Some(existing_pk) = existing.iter().find(|k| k.scheme_id() == SCHEME_SECP256K1) {
             let (bitcoin_address, bitcoin_addresses) =
                 if let NoblePublicKey::Secp256k1(ref bytes) = existing_pk {
                     let key: [u8; 33] = bytes.as_slice().try_into().unwrap_or([0u8; 33]);
@@ -432,8 +432,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .into_iter()
             .map(|pk| {
                 let scheme = match pk.scheme_id() {
-                    SCHEME_ED => "ed25519",
-                    SCHEME_SEC => "secp256k1",
+                    SCHEME_SECP256K1 => "secp256k1",
                     _ => "unknown",
                 };
                 let bitcoin_addresses = if let NoblePublicKey::Secp256k1(ref bytes) = pk {

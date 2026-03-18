@@ -325,7 +325,7 @@ export function init(root, ctx) {
           <dl class="detail-grid">
             <dt>Has Locator</dt><dd>${meta.has_locator !== undefined ? (meta.has_locator ? 'Yes' : 'No') : 'Yes'}</dd>
             <dt>Recipients</dt><dd>${meta.recipient_count || 'N/A'}</dd>
-            <dt>Encryption</dt><dd>${esc(meta.encryption_scheme || 'ECIES-X25519')}</dd>
+            <dt>Encryption</dt><dd>${esc(meta.encryption_scheme || 'ECIES-secp256k1')}</dd>
             <dt>Transaction</dt><dd class="mono"><a href="#/tx/${txId}">${truncateHash(txId)}</a></dd>
           </dl>
         </div>

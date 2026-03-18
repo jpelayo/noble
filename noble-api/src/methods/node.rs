@@ -18,7 +18,7 @@ use crate::state::{ApiState, NodeIdentityData};
 use crate::types::*;
 
 // Bring noble_crypto into scope for validator key generation.
-use noble_crypto::{SCHEME_ED25519, SCHEME_SECP256K1};
+use noble_crypto::SCHEME_SECP256K1;
 
 #[rpc(server, namespace = "noble")]
 pub trait NodeApi {
@@ -975,10 +975,16 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             *gw = Some(wire_bytes);
         }
 
-        // Update in-memory reward address.
+        // Update in-memory reward address (display).
         {
             let mut ra = self.reward_address.write();
             *ra = Some(trimmed.clone());
+        }
+
+        // Hot-reload into consensus engine — next block proposal uses the new address.
+        {
+            let mut era = self.engine_reward_address.write();
+            *era = Some(noble_addr.clone());
         }
 
         // Persist to noble.toml via set_config_value if available.
@@ -1082,6 +1088,20 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 // Re-publish NodeAnnounce with updated min_fee_rate so peers see the change.
                 if let Err(e) = self.announce_trigger.try_send(()) {
                     tracing::debug!(task = "config", "announce trigger after min_fee_rate change: {e}");
+                }
+            }
+        }
+        if section == "rewards" && key == "reward_address" {
+            // Hot-reload: update engine reward address + gateway key + display string.
+            match parse_address(&value) {
+                Ok(addr) => {
+                    *self.engine_reward_address.write() = Some(addr.clone());
+                    *self.gateway_key.write() = Some(addr.to_wire_bytes());
+                    *self.reward_address.write() = Some(value.clone());
+                    tracing::info!(task = "config", "Reward address hot-reloaded: {}", addr.address_type());
+                }
+                Err(e) => {
+                    tracing::warn!(task = "config", "Invalid reward_address in hot-reload: {e}");
                 }
             }
         }
@@ -1862,10 +1882,6 @@ fn read_validator_pubkey(path: &std::path::Path, chain_meta: &[u8; 32]) -> Optio
     let key_bytes = &raw[1..33];
     let private_key = match scheme_id {
         SCHEME_SECP256K1 => noble_crypto::NoblePrivateKey::Secp256k1(key_bytes.to_vec()),
-        SCHEME_ED25519 => {
-            tracing::warn!(task = "config_load", "Legacy Ed25519 validator.key — re-run setup with mnemonic");
-            return None;
-        }
         _ => return None,
     };
     Some(private_key.public_key().to_address())

@@ -118,7 +118,7 @@ mod tests {
     use super::*;
     use noble_consensus::PorVote;
     use noble_core::{Block, BlockHeader, PROTOCOL_VERSION};
-    use noble_crypto::{ed25519, Hash256, NoblePrivateKey, SignatureEnvelope};
+    use noble_crypto::{secp256k1, Hash256, NoblePrivateKey, NoblePublicKey, SignatureEnvelope};
 
     #[test]
     fn broadcast_block_converts_to_publish_command() {
@@ -130,7 +130,7 @@ mod tests {
                 timestamp: 1_700_000_000,
                 height: 1,
                 tx_count: 0,
-                validator_id: NoblePublicKey::Ed25519(vec![0; 32]),
+                validator_id: NoblePublicKey::Secp256k1(vec![0; 32]),
                 validator_sig: SignatureEnvelope {
                     scheme_id: 0,
                     public_key: vec![],
@@ -146,8 +146,8 @@ mod tests {
 
     #[test]
     fn broadcast_vote_converts_to_publish_vote_command() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let vote = PorVote::sign(1, Hash256::ZERO, &priv_key, pub_key).unwrap();
         let cmds = cycle_io_to_network_commands(CycleIo::BroadcastVote(vote));
@@ -157,8 +157,8 @@ mod tests {
 
     #[test]
     fn vote_roundtrip_wire_conversion() {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         let original = PorVote::sign(5, Hash256([0xAA; 32]), &priv_key, pub_key).unwrap();
 
@@ -185,7 +185,7 @@ mod tests {
                 timestamp: 1_700_000_000,
                 height: 1,
                 tx_count: 0,
-                validator_id: NoblePublicKey::Ed25519(vec![0; 32]),
+                validator_id: NoblePublicKey::Secp256k1(vec![0; 32]),
                 validator_sig: SignatureEnvelope {
                     scheme_id: 0,
                     public_key: vec![],

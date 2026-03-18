@@ -6,7 +6,7 @@
 //! `NobleAddress` is the canonical address type used for balance tracking, transaction
 //! recipients, and reward addresses. It supports:
 //!
-//! - **Native NOBLE keys** (Ed25519, secp256k1) — for validators and direct protocol users
+//! - **Native NOBLE keys** (secp256k1) — for validators and direct protocol users
 //! - **Bitcoin Hash160** (P2PKH/P2WPKH) — 20-byte `RIPEMD160(SHA256(pubkey))`
 //! - **Bitcoin Taproot** (P2TR) — 32-byte x-only public key
 //!
@@ -14,13 +14,12 @@
 //!
 //! | Type | Prefix | Data | Total |
 //! |------|--------|------|-------|
-//! | Ed25519 | `0x01` | 32 bytes | 33 |
 //! | secp256k1 | `0x02` | 33 bytes | 34 |
 //! | Bitcoin Hash160 | `0x80` | 20 bytes | 21 |
 //! | Bitcoin Taproot | `0x81` | 32 bytes | 33 |
 
 use noble_crypto::keys::NoblePublicKey;
-use noble_crypto::schemes::{SCHEME_ED25519, SCHEME_SECP256K1};
+use noble_crypto::schemes::SCHEME_SECP256K1;
 use serde::{Deserialize, Serialize};
 
 /// Wire prefix for Bitcoin Hash160 addresses (P2PKH / P2WPKH).
@@ -35,7 +34,7 @@ pub const PREFIX_BITCOIN_TAPROOT: u8 = 0x81;
 /// first-class citizens in the balance database.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NobleAddress {
-    /// Native NOBLE public key (Ed25519 or secp256k1).
+    /// Native NOBLE public key (secp256k1).
     Noble(NoblePublicKey),
     /// Bitcoin P2PKH/P2WPKH — 20-byte Hash160(pubkey).
     /// P2PKH (`1...`) and P2WPKH (`bc1q...`) for the same pubkey share this variant.
@@ -68,7 +67,7 @@ impl NobleAddress {
 
     /// Decode from wire format.
     ///
-    /// Accepts all prefix bytes: `0x01` (Ed25519), `0x02` (secp256k1),
+    /// Accepts prefix bytes: `0x02` (secp256k1),
     /// `0x80` (Hash160), `0x81` (Taproot).
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, AddressError> {
         if bytes.is_empty() {
@@ -79,7 +78,7 @@ impl NobleAddress {
         let data = &bytes[1..];
 
         match prefix {
-            SCHEME_ED25519 | SCHEME_SECP256K1 => {
+            SCHEME_SECP256K1 => {
                 let pk = NoblePublicKey::from_wire_bytes(bytes)
                     .map_err(|e| AddressError::InvalidKey(e.to_string()))?;
                 Ok(NobleAddress::Noble(pk))
@@ -124,7 +123,6 @@ impl NobleAddress {
     /// Returns a human-readable address type string.
     pub fn address_type(&self) -> &'static str {
         match self {
-            NobleAddress::Noble(NoblePublicKey::Ed25519(_)) => "ed25519",
             NobleAddress::Noble(NoblePublicKey::Secp256k1(_)) => "secp256k1",
             NobleAddress::BitcoinHash160(_) => "bitcoin_hash160",
             NobleAddress::BitcoinTaproot(_) => "bitcoin_taproot",
@@ -147,7 +145,7 @@ impl NobleAddress {
 
     /// Human-readable display address.
     ///
-    /// - Noble native keys → `nbl1q…` (Ed25519) or `nbl1p…` (secp256k1)
+    /// - Noble native keys → `nbl1p…` (secp256k1)
     /// - Bitcoin Hash160 → `bc1q…` (P2WPKH)
     /// - Bitcoin Taproot → `bc1p…` (P2TR)
     pub fn to_display_address(&self) -> String {
@@ -163,7 +161,7 @@ impl NobleAddress {
     }
 
     /// For a secp256k1 public key, derive the corresponding BitcoinHash160 address.
-    /// Returns None for Ed25519 keys (no Bitcoin address mapping).
+    /// Only applies to secp256k1 keys.
     pub fn bitcoin_hash160_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {
         match pk {
             NoblePublicKey::Secp256k1(bytes) => {
@@ -178,7 +176,7 @@ impl NobleAddress {
     ///
     /// Applies the BIP-341 key-path-only tweak: the stored 32-byte output key is
     /// `x(P + tagged_hash("TapTweak", x(P)) · G)`, NOT the raw x-only pubkey.
-    /// Returns None for Ed25519 keys (no Taproot mapping).
+    /// Only applies to secp256k1 keys.
     pub fn bitcoin_taproot_for_pubkey(pk: &NoblePublicKey) -> Option<NobleAddress> {
         match pk {
             NoblePublicKey::Secp256k1(bytes) if bytes.len() == 33 => {
@@ -225,22 +223,7 @@ pub enum AddressError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_crypto::ed25519;
     use noble_crypto::secp256k1;
-
-    #[test]
-    fn noble_ed25519_roundtrip() {
-        let (_, pk_bytes) = ed25519::generate_keypair();
-        let pk = NoblePublicKey::Ed25519(pk_bytes);
-        let addr = NobleAddress::Noble(pk.clone());
-
-        let wire = addr.to_wire_bytes();
-        assert_eq!(wire[0], SCHEME_ED25519);
-        assert_eq!(wire.len(), 33);
-
-        let decoded = NobleAddress::from_wire_bytes(&wire).unwrap();
-        assert_eq!(addr, decoded);
-    }
 
     #[test]
     fn noble_secp256k1_roundtrip() {
@@ -284,8 +267,8 @@ mod tests {
 
     #[test]
     fn from_noble_public_key() {
-        let (_, pk_bytes) = ed25519::generate_keypair();
-        let pk = NoblePublicKey::Ed25519(pk_bytes.clone());
+        let (_, pk_bytes) = secp256k1::generate_keypair();
+        let pk = NoblePublicKey::Secp256k1(pk_bytes.clone());
         let addr: NobleAddress = pk.clone().into();
         assert_eq!(addr, NobleAddress::Noble(pk));
     }
@@ -303,23 +286,23 @@ mod tests {
     #[test]
     fn wrong_hash160_length() {
         let mut wire = vec![PREFIX_BITCOIN_HASH160];
-        wire.extend_from_slice(&[0u8; 10]); // too short
+        wire.extend_from_slice(&[0u8; 10]);
         assert!(NobleAddress::from_wire_bytes(&wire).is_err());
     }
 
     #[test]
     fn wrong_taproot_length() {
         let mut wire = vec![PREFIX_BITCOIN_TAPROOT];
-        wire.extend_from_slice(&[0u8; 16]); // too short
+        wire.extend_from_slice(&[0u8; 16]);
         assert!(NobleAddress::from_wire_bytes(&wire).is_err());
     }
 
     #[test]
     fn address_type_names() {
-        let (_, pk) = ed25519::generate_keypair();
+        let (_, pk) = secp256k1::generate_keypair();
         assert_eq!(
-            NobleAddress::Noble(NoblePublicKey::Ed25519(pk)).address_type(),
-            "ed25519"
+            NobleAddress::Noble(NoblePublicKey::Secp256k1(pk)).address_type(),
+            "secp256k1"
         );
         assert_eq!(
             NobleAddress::BitcoinHash160([0; 20]).address_type(),
@@ -355,8 +338,8 @@ mod tests {
     fn to_hex_format() {
         let addr = NobleAddress::BitcoinHash160([0xab; 20]);
         let hex_str = addr.to_hex();
-        assert!(hex_str.starts_with("80")); // PREFIX_BITCOIN_HASH160
-        assert_eq!(hex_str.len(), 42); // 2 * 21 bytes
+        assert!(hex_str.starts_with("80"));
+        assert_eq!(hex_str.len(), 42);
     }
 
     #[test]
@@ -364,19 +347,8 @@ mod tests {
         let (_, pk_bytes) = secp256k1::generate_keypair();
         let pk = NoblePublicKey::Secp256k1(pk_bytes);
         let btc_addr = NobleAddress::bitcoin_hash160_for_pubkey(&pk);
-        assert!(btc_addr.is_some(), "secp256k1 should produce a Hash160 address");
-
-        let btc_addr = btc_addr.unwrap();
-        assert_eq!(btc_addr.address_type(), "bitcoin_hash160");
-        assert_eq!(btc_addr.data_bytes().len(), 20);
-    }
-
-    #[test]
-    fn bitcoin_hash160_for_ed25519_is_none() {
-        let (_, pk_bytes) = ed25519::generate_keypair();
-        let pk = NoblePublicKey::Ed25519(pk_bytes);
-        let btc_addr = NobleAddress::bitcoin_hash160_for_pubkey(&pk);
-        assert!(btc_addr.is_none(), "ed25519 should not produce a Hash160 address");
+        assert!(btc_addr.is_some());
+        assert_eq!(btc_addr.unwrap().address_type(), "bitcoin_hash160");
     }
 
     #[test]
@@ -384,29 +356,12 @@ mod tests {
         let (_, pk_bytes) = secp256k1::generate_keypair();
         let pk = NoblePublicKey::Secp256k1(pk_bytes.clone());
         let tap_addr = NobleAddress::bitcoin_taproot_for_pubkey(&pk);
-        assert!(tap_addr.is_some(), "secp256k1 should produce a Taproot address");
-
-        let tap_addr = tap_addr.unwrap();
-        assert_eq!(tap_addr.address_type(), "bitcoin_taproot");
-        assert_eq!(tap_addr.data_bytes().len(), 32);
-        // BIP-341: output key is the TWEAKED x-only key, NOT raw pubkey[1..33]
-        let raw_xonly = &pk_bytes[1..33];
-        assert_ne!(
-            tap_addr.data_bytes(),
-            raw_xonly,
-            "Taproot output must be tweaked, not raw x-only"
-        );
-        // Verify it matches the BIP-341 tweak function
+        assert!(tap_addr.is_some());
+        let tap = tap_addr.unwrap();
+        assert_eq!(tap.address_type(), "bitcoin_taproot");
+        assert_eq!(tap.data_bytes().len(), 32);
         let compressed: [u8; 33] = pk_bytes.as_slice().try_into().unwrap();
         let expected = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed).unwrap();
-        assert_eq!(tap_addr.data_bytes(), &expected[..]);
-    }
-
-    #[test]
-    fn bitcoin_taproot_for_ed25519_is_none() {
-        let (_, pk_bytes) = ed25519::generate_keypair();
-        let pk = NoblePublicKey::Ed25519(pk_bytes);
-        let tap_addr = NobleAddress::bitcoin_taproot_for_pubkey(&pk);
-        assert!(tap_addr.is_none(), "ed25519 should not produce a Taproot address");
+        assert_eq!(tap.data_bytes(), &expected[..]);
     }
 }

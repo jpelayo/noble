@@ -417,9 +417,7 @@ export function init(root, ctx) {
       container.innerHTML = keys.map(k => {
         const isValidator = validatorDisplay && k.pubkey_hex === validatorDisplay;
         const badge = isValidator ? ' <span class="badge-pki-verified">Validator</span>' : '';
-        const schemeBadge = k.scheme === 'secp256k1'
-          ? '<span style="color:var(--warning)">secp256k1</span>'
-          : '<span style="color:var(--info,#3b82f6)">ed25519</span>';
+        const schemeBadge = '<span style="color:var(--warning)">secp256k1</span>';
         let btcHtml = '';
         if (k.bitcoin_addresses && k.bitcoin_addresses.length > 0) {
           btcHtml = '<div style="margin-top:8px"><strong>Bitcoin derived addresses for wallet compatibility (use is optional):</strong></div>' +

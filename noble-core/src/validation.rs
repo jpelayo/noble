@@ -692,7 +692,7 @@ mod tests {
     use crate::genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP};
     use crate::utxo::{OutPoint, TxIn, TxOut};
     use noble_crypto::{
-        ed25519, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_ED25519,
+        secp256k1, sha256, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
 
     fn test_chain_id() -> u32 {
@@ -708,7 +708,7 @@ mod tests {
     // --- Test helpers ---
 
     fn make_signed_tx(sk: &[u8], pk: &[u8]) -> (Transaction, noble_crypto::Hash256) {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let checksum = sha256(b"test document");
         let timestamp = 1_700_000_000u64;
 
@@ -722,7 +722,7 @@ mod tests {
             checksum,
             timestamp,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn t1_valid_size() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk);
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn t2_wrong_version() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.version = 99;
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
@@ -775,11 +775,11 @@ mod tests {
 
     #[test]
     fn t4_timestamp_too_far_future() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW + 1;
         // Re-sign with new timestamp
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
@@ -794,8 +794,8 @@ mod tests {
 
     #[test]
     fn t4_timestamp_within_window() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.timestamp = 1_700_000_000 + MAX_TX_TIMESTAMP_SKEW; // At the boundary
         let msg = tx
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn t5_unknown_scheme() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.issuer_sig.scheme_id = 0xFF;
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn t6_invalid_issuer_sig() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.issuer_sig.signature = vec![0u8; 64]; // Bad sig
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
@@ -840,10 +840,10 @@ mod tests {
 
     #[test]
     fn t7_invalid_additional_sig() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.additional_sigs.push(SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.to_vec(),
             signature: vec![0u8; 64], // Bad
         });
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn t10_tx_id_mismatch() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, _) = make_signed_tx(&sk, &pk);
         let wrong_id = Hash256::from_bytes([0xFF; 32]);
         let result = validate_transaction(&tx, &wrong_id, &default_tx_ctx());
@@ -873,7 +873,7 @@ mod tests {
         // In the UTXO model, fee = sum(inputs) - sum(outputs) and is checked
         // during stateful validation (requires UTXO lookup). Stateless validation
         // only verifies that non-coinbase txs have inputs.
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk);
         // Stateless validation should pass — fee check is deferred.
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn t11_fee_at_minimum() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk); // Uses MIN_TX_FEE
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
@@ -889,9 +889,9 @@ mod tests {
     // --- Block validation helpers ---
 
     fn make_valid_block(txs: Vec<(Transaction, Hash256)>) -> (Block, NoblePrivateKey) {
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let val_priv = NoblePrivateKey::Ed25519(val_sk);
-        let val_pub = NoblePublicKey::Ed25519(val_pk.clone());
+        let (val_sk, val_pk) = secp256k1::generate_keypair();
+        let val_priv = NoblePrivateKey::Secp256k1(val_sk);
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.clone());
 
         let transactions: Vec<Transaction> = txs.iter().map(|(tx, _)| tx.clone()).collect();
         let tx_ids: Vec<Hash256> = txs.iter().map(|(_, id)| *id).collect();
@@ -906,7 +906,7 @@ mod tests {
             tx_count: transactions.len() as u32,
             validator_id: val_pub,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pk,
                 signature: vec![],
             },
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn b2_prev_hash_mismatch() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk);
         let (mut block, val_priv) = make_valid_block(vec![tx]);
 
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn b7_tx_count_mismatch() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk);
         let (mut block, val_priv) = make_valid_block(vec![tx]);
         block.header.tx_count = 99; // Wrong
@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn b8_invalid_validator_sig() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk);
         let (mut block, _) = make_valid_block(vec![tx]);
         block.header.validator_sig.signature = vec![0u8; 64];
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn b9_validator_not_in_list() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk);
         let (block, _) = make_valid_block(vec![tx]);
 
@@ -1022,7 +1022,7 @@ mod tests {
 
     #[test]
     fn valid_block_with_transaction() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk);
         let (block, _) = make_valid_block(vec![tx]);
 
@@ -1056,8 +1056,8 @@ mod tests {
         pk: &[u8],
         recipient_pk: &[u8],
     ) -> (Transaction, noble_crypto::Hash256) {
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
@@ -1071,7 +1071,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1092,8 +1092,8 @@ mod tests {
 
     #[test]
     fn t13_unknown_tx_type() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         tx.tx_type = 0xFF;
         let msg = tx
@@ -1107,23 +1107,23 @@ mod tests {
 
     #[test]
     fn t13_valid_notarization_type() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk);
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
 
     #[test]
     fn t13_valid_transfer_type() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recipient_pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_transfer_tx(&sk, &pk, &recipient_pk);
         assert!(validate_transaction(&tx, &tx_id, &default_tx_ctx()).is_ok());
     }
 
     #[test]
     fn t14_transfer_missing_recipient() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
@@ -1134,7 +1134,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1160,10 +1160,10 @@ mod tests {
     #[test]
     fn t15_transfer_zero_output_value_rejected() {
         // In UTXO model, a zero-value output is rejected by U7.
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recipient_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
@@ -1177,7 +1177,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1203,8 +1203,8 @@ mod tests {
     #[test]
     fn t15_transfer_empty_outputs_rejected() {
         // In UTXO model, a transfer with no outputs has no recipient.
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 1,
@@ -1215,7 +1215,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1241,9 +1241,9 @@ mod tests {
     #[test]
     fn t17_notarization_with_change_output_accepted() {
         // In UTXO model, notarizations can have outputs (change back to sender).
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let sender = NoblePublicKey::Ed25519(pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let sender = NoblePublicKey::Secp256k1(pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
@@ -1257,7 +1257,7 @@ mod tests {
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1280,9 +1280,9 @@ mod tests {
     #[test]
     fn t24_self_transfer_allowed_in_utxo() {
         // In UTXO model, sending to your own address is valid (consolidating UTXOs).
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let self_addr = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(pk.to_vec()));
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let self_addr = crate::NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.to_vec()));
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
@@ -1296,7 +1296,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1319,8 +1319,8 @@ mod tests {
     #[test]
     fn t17_notarization_without_outputs_accepted() {
         // In UTXO model, notarization can have zero outputs (entire input is fee).
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
@@ -1331,7 +1331,7 @@ mod tests {
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1429,15 +1429,15 @@ mod tests {
     fn t22_locator_on_transfer_rejected() {
         use crate::encrypted_locator::{EncryptedLocator, LocatorRecipient};
 
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recipient_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let locator = EncryptedLocator {
             ciphertext: vec![0u8; 48],
             nonce: [0u8; 12],
             recipients: vec![LocatorRecipient {
-                recipient: NoblePublicKey::Ed25519(pk.to_vec()),
+                recipient: NoblePublicKey::Secp256k1(pk.to_vec()),
                 ephemeral_pubkey: vec![0u8; 32],
                 encrypted_key: vec![0u8; 48],
                 key_nonce: [0u8; 12],
@@ -1456,7 +1456,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1483,13 +1483,13 @@ mod tests {
     fn t22_locator_on_notarization_accepted() {
         use crate::encrypted_locator::{EncryptedLocator, LocatorRecipient};
 
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let locator = EncryptedLocator {
             ciphertext: vec![0u8; 48],
             nonce: [0u8; 12],
             recipients: vec![LocatorRecipient {
-                recipient: NoblePublicKey::Ed25519(pk.to_vec()),
+                recipient: NoblePublicKey::Secp256k1(pk.to_vec()),
                 ephemeral_pubkey: vec![0u8; 32],
                 encrypted_key: vec![0u8; 48],
                 key_nonce: [0u8; 12],
@@ -1505,7 +1505,7 @@ mod tests {
             checksum: sha256(b"test document"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1530,10 +1530,10 @@ mod tests {
     fn t23_attestations_on_transfer_rejected() {
         use crate::encrypted_locator::ExternalAttestation;
 
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recipient_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let attestation = ExternalAttestation {
             scheme: "pkcs7".into(),
             scope: "hash".into(),
@@ -1553,7 +1553,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1580,8 +1580,8 @@ mod tests {
     fn t23_attestations_on_notarization_accepted() {
         use crate::encrypted_locator::ExternalAttestation;
 
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let attestation = ExternalAttestation {
             scheme: "smime".into(),
             scope: "both".into(),
@@ -1598,7 +1598,7 @@ mod tests {
             checksum: sha256(b"attested document"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1622,7 +1622,7 @@ mod tests {
     #[test]
     fn tx_without_locator_deserializes() {
         // Transaction without encrypted_locator/external_attestations (backward compat)
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, _) = make_signed_tx(&sk, &pk);
         assert!(tx.encrypted_locator.is_none());
         assert!(tx.external_attestations.is_empty());
@@ -1639,8 +1639,8 @@ mod tests {
 
     #[test]
     fn t7b_too_many_additional_sigs() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Add MAX_ADDITIONAL_SIGS + 1 valid signatures
@@ -1648,8 +1648,8 @@ mod tests {
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
         for _ in 0..=MAX_ADDITIONAL_SIGS {
-            let (extra_sk, _) = ed25519::generate_keypair();
-            let extra_priv = NoblePrivateKey::Ed25519(extra_sk);
+            let (extra_sk, _) = secp256k1::generate_keypair();
+            let extra_priv = NoblePrivateKey::Secp256k1(extra_sk);
             tx.additional_sigs.push(extra_priv.sign(&msg).unwrap());
         }
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
@@ -1663,8 +1663,8 @@ mod tests {
 
     #[test]
     fn t8b_too_many_metadata_entries() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Add MAX_METADATA_ENTRIES + 1 entries
@@ -1688,13 +1688,13 @@ mod tests {
 
     #[test]
     fn duplicate_tx_in_block_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (tx, tx_id) = make_signed_tx(&sk, &pk);
 
         // Create a block with the same transaction twice
-        let (val_sk, val_pk) = ed25519::generate_keypair();
-        let val_priv = NoblePrivateKey::Ed25519(val_sk);
-        let val_pub = NoblePublicKey::Ed25519(val_pk.clone());
+        let (val_sk, val_pk) = secp256k1::generate_keypair();
+        let val_priv = NoblePrivateKey::Secp256k1(val_sk);
+        let val_pub = NoblePublicKey::Secp256k1(val_pk.clone());
 
         let transactions = vec![tx.clone(), tx.clone()];
         let merkle_root = compute_merkle_root(&[tx_id, tx_id]);
@@ -1708,7 +1708,7 @@ mod tests {
             tx_count: 2,
             validator_id: val_pub,
             validator_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: val_pk,
                 signature: vec![],
             },
@@ -1736,8 +1736,8 @@ mod tests {
     #[test]
     fn t17b_key_rotation_missing_new_key_rejected() {
         // In UTXO model, key rotation requires at least one output (new key in outputs[0].address).
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
@@ -1748,7 +1748,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1774,10 +1774,10 @@ mod tests {
     #[test]
     fn t17b_key_rotation_with_new_key_accepted() {
         // In UTXO model, key rotation carries the new key in outputs[0].address.
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, new_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, new_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let new_key = NoblePublicKey::Secp256k1(new_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
@@ -1791,7 +1791,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn b11_invalid_tx_in_block() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
         // Corrupt the signature to make it invalid (T6)
         tx.issuer_sig.signature = vec![0u8; 64];
@@ -1836,12 +1836,12 @@ mod tests {
 
     #[test]
     fn t25_valid_gateway_address_accepted() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, gw_pk) = ed25519::generate_keypair();
-        let gw_key = NoblePublicKey::Ed25519(gw_pk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, gw_pk) = secp256k1::generate_keypair();
+        let gw_key = NoblePublicKey::Secp256k1(gw_pk);
         let gw_wire = gw_key.to_wire_bytes();
 
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
@@ -1852,7 +1852,7 @@ mod tests {
             checksum: sha256(b"gw-valid"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -1873,9 +1873,9 @@ mod tests {
 
     #[test]
     fn t25_invalid_gateway_address_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
 
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: 0,
@@ -1886,7 +1886,7 @@ mod tests {
             checksum: sha256(b"gw-invalid"),
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2013,10 +2013,10 @@ mod tests {
 
     #[test]
     fn t27_transfer_nonzero_checksum_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, recipient_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let recipient = NoblePublicKey::Ed25519(recipient_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recipient_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let recipient = NoblePublicKey::Secp256k1(recipient_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_TRANSFER,
@@ -2030,7 +2030,7 @@ mod tests {
             checksum: sha256(b"should not be here"), // non-zero checksum on transfer
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2057,8 +2057,8 @@ mod tests {
 
     #[test]
     fn t28_notarization_zero_checksum_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_NOTARIZATION,
@@ -2069,7 +2069,7 @@ mod tests {
             checksum: Hash256::ZERO, // zero checksum on notarization
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2096,10 +2096,10 @@ mod tests {
 
     #[test]
     fn t27b_key_rotation_nonzero_checksum_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, new_pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
-        let new_key = NoblePublicKey::Ed25519(new_pk.to_vec());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, new_pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let new_key = NoblePublicKey::Secp256k1(new_pk.to_vec());
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
             tx_type: TX_TYPE_KEY_ROTATION,
@@ -2113,7 +2113,7 @@ mod tests {
             checksum: sha256(b"should not be here"), // non-zero checksum on key rotation
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn t25_gateway_bitcoin_hash160_valid() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Set a valid Bitcoin Hash160 gateway address (0x80 prefix + 20 bytes)
@@ -2154,7 +2154,7 @@ mod tests {
         tx.gateway_address = Some(gateway);
 
         // Re-sign for chain
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[test]
     fn t25_gateway_bitcoin_taproot_valid() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Set a valid Bitcoin Taproot gateway address (0x81 prefix + 32 bytes)
@@ -2177,7 +2177,7 @@ mod tests {
         tx.gateway_address = Some(gateway);
 
         // Re-sign for chain
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
@@ -2194,7 +2194,7 @@ mod tests {
 
     #[test]
     fn t25_gateway_invalid_prefix_rejected() {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         let (mut tx, _) = make_signed_tx(&sk, &pk);
 
         // Set an invalid gateway address with unknown prefix 0xFF
@@ -2203,7 +2203,7 @@ mod tests {
         tx.gateway_address = Some(gateway);
 
         // Re-sign for chain
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
             .unwrap();
@@ -2270,19 +2270,19 @@ mod tests {
     #[test]
     fn t31_secp256k1_transfer_passes() {
         // secp256k1 transfer in UTXO model (no source_address needed).
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
+        let (_, other_pk) = secp256k1::generate_keypair();
+        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Secp256k1(other_pk.to_vec()));
         let (tx, tx_id, _) = make_secp_transfer(recipient, 100);
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(result.is_ok(), "secp256k1 transfer should pass: {result:?}");
     }
 
     #[test]
-    fn t32_ed25519_transfer_passes() {
-        // Ed25519 transfer in UTXO model.
-        let (sk, pk) = ed25519::generate_keypair();
-        let (_, other_pk) = ed25519::generate_keypair();
-        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Ed25519(other_pk.to_vec()));
+    fn t32_secp256k1_transfer_passes() {
+        // secp256k1 transfer in UTXO model (manual construction).
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, other_pk) = secp256k1::generate_keypair();
+        let recipient = crate::NobleAddress::Noble(NoblePublicKey::Secp256k1(other_pk.to_vec()));
 
         let mut tx = Transaction {
             version: PROTOCOL_VERSION,
@@ -2297,7 +2297,7 @@ mod tests {
             checksum: Hash256::ZERO,
             timestamp: 1_700_000_000,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.to_vec(),
                 signature: vec![],
             },
@@ -2308,12 +2308,12 @@ mod tests {
             gateway_address: None,
         contract_data: None,
         };
-        let priv_key = NoblePrivateKey::Ed25519(sk.to_vec());
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
 
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
-        assert!(result.is_ok(), "Ed25519 transfer should pass: {result:?}");
+        assert!(result.is_ok(), "secp256k1 transfer should pass: {result:?}");
     }
 }

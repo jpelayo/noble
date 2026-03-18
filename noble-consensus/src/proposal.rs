@@ -9,6 +9,7 @@ use noble_core::{
     PROTOCOL_VERSION, TX_TYPE_COINBASE, subsidy_at_height,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
+use tracing;
 
 /// Look up a UTXO's value by outpoint. Used by propose_block to compute fees.
 pub trait UtxoValueLookup {
@@ -18,10 +19,12 @@ pub trait UtxoValueLookup {
 /// Propose a new block from a pre-sorted list of mempool transactions.
 ///
 /// Automatically prepends a coinbase transaction at index 0 carrying
-/// `subsidy_at_height(height) + total_fees` to the validator address.
+/// `subsidy_at_height(height) + total_fees` to the reward address
+/// (or the validator address if no reward address is configured).
 ///
 /// `mempool_txs` should already be sorted by fee descending (highest first).
 /// `utxo_lookup` is used to resolve input UTXO values for fee computation.
+/// `reward_address` overrides the coinbase recipient (subsidy + validator fee share).
 ///
 /// Returns the complete signed block.
 #[allow(clippy::too_many_arguments)]
@@ -35,8 +38,11 @@ pub fn propose_block(
     validator_pubkey: &NoblePublicKey,
     max_size: usize,
     utxo_lookup: &dyn UtxoValueLookup,
+    reward_address: Option<&NobleAddress>,
 ) -> Result<Block, String> {
-    let validator_addr = NobleAddress::Noble(validator_pubkey.clone());
+    let validator_addr = reward_address
+        .cloned()
+        .unwrap_or_else(|| NobleAddress::Noble(validator_pubkey.clone()));
 
     // Select transactions that fit within max_size
     let mut selected: Vec<Transaction> = Vec::new();
@@ -89,11 +95,21 @@ pub fn propose_block(
     let mut gw_entries: Vec<_> = gateway_shares.into_iter().collect();
     gw_entries.sort_by(|a, b| a.0.cmp(&b.0));
     for (gw_wire, gw_amount) in gw_entries {
-        if let Ok(gw_addr) = NobleAddress::from_wire_bytes(&gw_wire) {
-            coinbase_outputs.push(TxOut {
-                value: gw_amount,
-                address: gw_addr,
-            });
+        match NobleAddress::from_wire_bytes(&gw_wire) {
+            Ok(gw_addr) => {
+                coinbase_outputs.push(TxOut {
+                    value: gw_amount,
+                    address: gw_addr,
+                });
+            }
+            Err(e) => {
+                // Recover the gateway's share back to the validator to prevent
+                // value destruction (coinbase total must equal subsidy + fees).
+                tracing::warn!(
+                    "gateway address decode failed ({e}), recovering {gw_amount} groats to validator"
+                );
+                coinbase_outputs[0].value += gw_amount;
+            }
         }
     }
 
@@ -174,7 +190,7 @@ mod tests {
     use super::*;
     use noble_core::{MAX_BLOCK_SIZE, MIN_TX_FEE};
     use noble_test_utils::fixtures::test_chain_id;
-    use noble_crypto::{ed25519, sha256, NoblePrivateKey, NobleSigner, SCHEME_ED25519};
+    use noble_crypto::{secp256k1, sha256, NoblePrivateKey, NobleSigner, SCHEME_SECP256K1};
 
     /// Test UTXO lookup that returns a fixed value for any outpoint.
     struct FixedUtxoLookup(u64);
@@ -185,8 +201,8 @@ mod tests {
     }
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {
-        let (sk, _) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let pub_key = priv_key.public_key();
         (priv_key, pub_key)
     }
@@ -200,10 +216,10 @@ mod tests {
 
     fn make_test_tx(doc: &[u8], _fee: u64) -> Transaction {
         use noble_core::{NobleAddress, OutPoint, TxIn, TxOut};
-        let (sk, pk) = ed25519::generate_keypair();
-        let priv_key = NoblePrivateKey::Ed25519(sk);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
         let checksum = sha256(doc);
-        let addr = NobleAddress::Noble(noble_crypto::NoblePublicKey::Ed25519(pk.clone()));
+        let addr = NobleAddress::Noble(noble_crypto::NoblePublicKey::Secp256k1(pk.clone()));
         let prev_outpoint = OutPoint {
             txid: sha256(&pk),
             vout: 0,
@@ -216,7 +232,7 @@ mod tests {
             checksum,
             timestamp: now_secs(),
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk,
                 signature: vec![],
             },
@@ -248,6 +264,7 @@ mod tests {
             &val_pub,
             MAX_BLOCK_SIZE,
             &FixedUtxoLookup(2_000_000),
+            None,
         )
         .unwrap();
 
@@ -275,6 +292,7 @@ mod tests {
             &val_pub,
             MAX_BLOCK_SIZE,
             &FixedUtxoLookup(2_000_000),
+            None,
         )
         .unwrap();
 
@@ -302,6 +320,7 @@ mod tests {
             &val_pub,
             tx1_size, // exactly one tx
             &FixedUtxoLookup(2_000_000),
+            None,
         )
         .unwrap();
 
@@ -329,6 +348,7 @@ mod tests {
             &val_pub,
             MAX_BLOCK_SIZE,
             &FixedUtxoLookup(2_000_000),
+            None,
         )
         .unwrap();
 

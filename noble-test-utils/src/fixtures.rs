@@ -12,8 +12,8 @@ use noble_core::{
     genesis::{build_genesis, derive_chain_id, GENESIS_TIMESTAMP},
 };
 use noble_crypto::{
-    ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-    SCHEME_ED25519,
+    secp256k1, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+    SCHEME_SECP256K1,
 };
 
 /// Fixed seed used by all tests to produce a deterministic genesis block.
@@ -48,12 +48,12 @@ pub struct TestKeypair {
 }
 
 impl TestKeypair {
-    /// Generate a new random Ed25519 keypair.
+    /// Generate a new random secp256k1 keypair.
     pub fn generate() -> Self {
-        let (sk, pk) = ed25519::generate_keypair();
+        let (sk, pk) = secp256k1::generate_keypair();
         Self {
-            private_key: NoblePrivateKey::Ed25519(sk.clone()),
-            public_key: NoblePublicKey::Ed25519(pk.clone()),
+            private_key: NoblePrivateKey::Secp256k1(sk.clone()),
+            public_key: NoblePublicKey::Secp256k1(pk.clone()),
             sk_bytes: sk,
             pk_bytes: pk,
         }
@@ -96,7 +96,7 @@ pub fn make_signed_tx(
         checksum,
         timestamp,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
         },
@@ -141,7 +141,7 @@ pub fn make_signed_tx_with_metadata(
         checksum,
         timestamp,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
         },
@@ -199,7 +199,7 @@ pub fn make_signed_transfer_tx(
         checksum: Hash256::ZERO,
         timestamp,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: keypair.pk_bytes.clone(),
             signature: vec![],
         },
@@ -239,7 +239,7 @@ pub fn make_coinbase_tx(
         checksum: Hash256::ZERO,
         timestamp,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: validator.pk_bytes.clone(),
             signature: vec![],
         },
@@ -291,7 +291,7 @@ pub fn make_signed_block_with_validator(
         tx_count: transactions.len() as u32,
         validator_id: validator.public_key.clone(),
         validator_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: validator.pk_bytes.clone(),
             signature: vec![],
         },

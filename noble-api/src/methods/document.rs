@@ -217,9 +217,9 @@ fn build_version_chain<S: StorageEngine>(
 }
 
 /// Parse an issuer public key from hex. Accepts:
-/// - 33 bytes (Ed25519 wire: 0x01 + 32B key)
 /// - 34 bytes (secp256k1 wire: 0x02 + 33B compressed key)
-/// - 32 bytes (raw Ed25519 key → prepend 0x01 scheme byte)
+/// - 33 bytes (legacy wire format — validated via `from_wire_bytes`)
+/// - 32 bytes (raw key bytes → prepend 0x02 secp256k1 scheme byte)
 fn parse_issuer_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
     let bytes =
         hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
@@ -231,9 +231,9 @@ fn parse_issuer_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
             Ok(bytes)
         }
         32 => {
-            // Raw Ed25519 key — prepend scheme byte 0x01
+            // Raw key bytes — prepend secp256k1 scheme byte 0x02
             let mut wire = Vec::with_capacity(33);
-            wire.push(noble_crypto::SCHEME_ED25519);
+            wire.push(noble_crypto::SCHEME_SECP256K1);
             wire.extend_from_slice(&bytes);
             Ok(wire)
         }

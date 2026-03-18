@@ -3,9 +3,6 @@
 
 //! Signature scheme identifiers used throughout the NOBLE protocol.
 
-/// Ed25519 signature scheme identifier.
-pub const SCHEME_ED25519: u8 = 0x01;
-
 /// secp256k1 (ECDSA) signature scheme identifier.
 pub const SCHEME_SECP256K1: u8 = 0x02;
 
@@ -15,13 +12,10 @@ pub const SCHEME_BIP137: u8 = 0x03;
 // --- Internal (non-signing) scheme IDs (0x80+) ---
 // These are used for keystore storage of secrets that don't produce on-chain signatures.
 
-/// Validator signing key stored as Ed25519 (block proposal + vote signing).
-pub const SCHEME_VALIDATOR_ED25519: u8 = 0x80;
-
 /// Validator signing key stored as secp256k1 (block proposal + vote signing).
 pub const SCHEME_VALIDATOR_SECP256K1: u8 = 0x81;
 
-/// libp2p identity key (Ed25519, protobuf-encoded keypair bytes).
+/// libp2p identity key (protobuf-encoded keypair bytes).
 pub const SCHEME_P2P_IDENTITY: u8 = 0x82;
 
 /// TLS private key (raw PKCS#8 DER bytes).
@@ -37,10 +31,8 @@ pub const SCHEME_FAUCET_PASSPHRASE: u8 = 0x85;
 pub fn is_recognized_scheme(scheme_id: u8) -> bool {
     matches!(
         scheme_id,
-        SCHEME_ED25519
             | SCHEME_SECP256K1
             | SCHEME_BIP137
-            | SCHEME_VALIDATOR_ED25519
             | SCHEME_VALIDATOR_SECP256K1
             | SCHEME_P2P_IDENTITY
             | SCHEME_TLS_KEY
@@ -51,7 +43,7 @@ pub fn is_recognized_scheme(scheme_id: u8) -> bool {
 
 /// Check whether a scheme ID is an on-chain signing scheme (produces transaction/block signatures).
 pub fn is_signing_scheme(scheme_id: u8) -> bool {
-    matches!(scheme_id, SCHEME_ED25519 | SCHEME_SECP256K1 | SCHEME_BIP137)
+    matches!(scheme_id, SCHEME_SECP256K1 | SCHEME_BIP137)
 }
 
 #[cfg(test)]
@@ -60,10 +52,8 @@ mod tests {
 
     #[test]
     fn recognized_schemes() {
-        assert!(is_recognized_scheme(SCHEME_ED25519));
         assert!(is_recognized_scheme(SCHEME_SECP256K1));
         assert!(is_recognized_scheme(SCHEME_BIP137));
-        assert!(is_recognized_scheme(SCHEME_VALIDATOR_ED25519));
         assert!(is_recognized_scheme(SCHEME_VALIDATOR_SECP256K1));
         assert!(is_recognized_scheme(SCHEME_P2P_IDENTITY));
         assert!(is_recognized_scheme(SCHEME_TLS_KEY));
@@ -81,10 +71,8 @@ mod tests {
 
     #[test]
     fn signing_schemes() {
-        assert!(is_signing_scheme(SCHEME_ED25519));
         assert!(is_signing_scheme(SCHEME_SECP256K1));
         assert!(is_signing_scheme(SCHEME_BIP137));
-        assert!(!is_signing_scheme(SCHEME_VALIDATOR_ED25519));
         assert!(!is_signing_scheme(SCHEME_VALIDATOR_SECP256K1));
         assert!(!is_signing_scheme(SCHEME_P2P_IDENTITY));
         assert!(!is_signing_scheme(SCHEME_TLS_KEY));

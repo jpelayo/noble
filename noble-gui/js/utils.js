@@ -63,8 +63,8 @@ export function formatFee(atomicUnits) {
 
 export function formatScheme(schemeId) {
   switch (schemeId) {
-    case 0x00: return 'Ed25519';
     case 0x01: return 'secp256k1';
+    case 0x02: return 'secp256k1';
     default: return `Unknown(0x${schemeId.toString(16).padStart(2, '0')})`;
   }
 }

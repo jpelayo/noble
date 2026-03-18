@@ -22,8 +22,8 @@ fn test_chain_id() -> u32 {
     *ID
 }
 use noble_crypto::{
-    ed25519, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
-    SCHEME_ED25519,
+    secp256k1, sha256, Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope,
+    SCHEME_SECP256K1,
 };
 use proptest::prelude::*;
 
@@ -47,7 +47,7 @@ fn arb_signature_envelope() -> impl Strategy<Value = SignatureEnvelope> {
         prop::collection::vec(any::<u8>(), 64..=64), // signature
     )
         .prop_map(|(public_key, signature)| SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key,
             signature,
         })
@@ -233,7 +233,7 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     }],
                     outputs: vec![TxOut {
                         value: amount,
-                        address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_bytes)),
+                        address: noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(recipient_bytes)),
                     }],
                     checksum: Hash256::ZERO,
                     timestamp,
@@ -266,9 +266,9 @@ proptest! {
 
 #[test]
 fn signed_transaction_roundtrip_100() {
-    let (sk, pk) = ed25519::generate_keypair();
-    let (_, recipient_pk) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let (sk, pk) = secp256k1::generate_keypair();
+    let (_, recipient_pk) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
 
     for i in 0..100u64 {
         let is_transfer = i >= 70; // ~30 transfer transactions
@@ -280,7 +280,7 @@ fn signed_transaction_roundtrip_100() {
         let outputs = if is_transfer {
             vec![TxOut {
                 value: 1_000 * i + 1,
-                address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())),
+                address: noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(recipient_pk.clone())),
             }]
         } else {
             vec![]
@@ -295,7 +295,7 @@ fn signed_transaction_roundtrip_100() {
             checksum,
             timestamp: 1_700_000_000 + i,
             issuer_sig: SignatureEnvelope {
-                scheme_id: SCHEME_ED25519,
+                scheme_id: SCHEME_SECP256K1,
                 public_key: pk.clone(),
                 signature: vec![],
             },
@@ -331,9 +331,9 @@ fn signed_transaction_roundtrip_100() {
 
 #[test]
 fn signing_message_includes_tx_type() {
-    let (sk, pk) = ed25519::generate_keypair();
-    let (_, recipient_pk) = ed25519::generate_keypair();
-    let priv_key = NoblePrivateKey::Ed25519(sk);
+    let (sk, pk) = secp256k1::generate_keypair();
+    let (_, recipient_pk) = secp256k1::generate_keypair();
+    let priv_key = NoblePrivateKey::Secp256k1(sk);
 
     let input = TxIn {
         prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
@@ -348,7 +348,7 @@ fn signing_message_includes_tx_type() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },
@@ -369,12 +369,12 @@ fn signing_message_includes_tx_type() {
         inputs: vec![input],
         outputs: vec![TxOut {
             value: 50_000,
-            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(recipient_pk.clone())),
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(recipient_pk.clone())),
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },
@@ -395,9 +395,9 @@ fn signing_message_includes_tx_type() {
 
 #[test]
 fn signing_message_includes_recipient() {
-    let (_sk, pk) = ed25519::generate_keypair();
-    let (_, r1_pk) = ed25519::generate_keypair();
-    let (_, r2_pk) = ed25519::generate_keypair();
+    let (_sk, pk) = secp256k1::generate_keypair();
+    let (_, r1_pk) = secp256k1::generate_keypair();
+    let (_, r2_pk) = secp256k1::generate_keypair();
 
     let input = TxIn {
         prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
@@ -409,12 +409,12 @@ fn signing_message_includes_recipient() {
         inputs: vec![input.clone()],
         outputs: vec![TxOut {
             value: 50_000,
-            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r1_pk)),
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(r1_pk)),
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },
@@ -432,12 +432,12 @@ fn signing_message_includes_recipient() {
         inputs: vec![input],
         outputs: vec![TxOut {
             value: 50_000,
-            address: noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r2_pk)),
+            address: noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(r2_pk)),
         }],
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },
@@ -461,9 +461,9 @@ fn signing_message_includes_recipient() {
 
 #[test]
 fn signing_message_includes_amount() {
-    let (_sk, pk) = ed25519::generate_keypair();
-    let (_, r_pk) = ed25519::generate_keypair();
-    let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Ed25519(r_pk));
+    let (_sk, pk) = secp256k1::generate_keypair();
+    let (_, r_pk) = secp256k1::generate_keypair();
+    let recipient = noble_core::NobleAddress::Noble(NoblePublicKey::Secp256k1(r_pk));
 
     let input = TxIn {
         prev_output: OutPoint { txid: Hash256::from_bytes([0x01; 32]), vout: 0 },
@@ -480,7 +480,7 @@ fn signing_message_includes_amount() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },
@@ -503,7 +503,7 @@ fn signing_message_includes_amount() {
         checksum: Hash256::ZERO,
         timestamp: 1_700_000_000,
         issuer_sig: SignatureEnvelope {
-            scheme_id: SCHEME_ED25519,
+            scheme_id: SCHEME_SECP256K1,
             public_key: pk.clone(),
             signature: vec![],
         },

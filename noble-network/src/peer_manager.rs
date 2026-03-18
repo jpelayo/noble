@@ -1102,7 +1102,7 @@ mod tests {
         assert!(pm.get_announce(&p).is_none());
 
         // Create a signed announce
-        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let sk = NoblePrivateKey::Secp256k1(vec![42u8; 32]);
         let pk = sk.public_key();
         let announce = NodeAnnounce::sign(
             pk,
@@ -1143,7 +1143,7 @@ mod tests {
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
 
-        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let sk = NoblePrivateKey::Secp256k1(vec![42u8; 32]);
         let pk = sk.public_key();
         let mut announce = NodeAnnounce::sign(
             pk,
@@ -1181,7 +1181,7 @@ mod tests {
         pm.on_connected(p1, Direction::Outbound);
         pm.on_connected(p2, Direction::Inbound);
 
-        let sk = NoblePrivateKey::Ed25519(vec![42u8; 32]);
+        let sk = NoblePrivateKey::Secp256k1(vec![42u8; 32]);
         let pk = sk.public_key();
 
         // First announce with a version always higher than SOFTWARE_VERSION.
