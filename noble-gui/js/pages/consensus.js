@@ -764,6 +764,8 @@ export function init(root, ctx) {
         if (id && seenAnnounceIdentities.has(id)) return;
         if (id) seenAnnounceIdentities.add(id);
         pushActivity(data);
+        // Refresh panels so friendly names replace raw hex keys immediately.
+        scheduleReload(loadValidators, loadVoteTallies, loadTimeline);
       } else {
         pushActivity(data);
       }
