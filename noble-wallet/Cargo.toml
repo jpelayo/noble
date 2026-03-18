@@ -11,6 +11,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+noble-codec.workspace = true
 noble-core.workspace = true
 noble-crypto.workspace = true
 serde.workspace = true

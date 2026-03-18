@@ -643,7 +643,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             remote_setup: defaults.api.remote_setup,
         },
         wallet: WalletConfig {
-            keystore_path: PathBuf::from("keystore"),
+            keystore_path: PathBuf::from("keystore.noble"),
         },
         logging: LoggingConfig {
             level: defaults.logging.level.clone(),

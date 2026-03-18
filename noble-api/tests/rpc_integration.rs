@@ -68,7 +68,11 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     )));
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let keystore = KeyStore::new(dir.path()).expect("keystore");
+    let chain_meta = [0x42u8; 32];
+    let ks_path = dir.path().join("keystore.noble");
+    let mut keystore = KeyStore::create_for_faucet(&ks_path, &chain_meta).expect("keystore");
+    let ks_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta));
+    keystore.unlock(&ks_pass).expect("unlock");
     let wallet_keystore = Arc::new(Mutex::new(keystore));
     let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
     let network_stats = Arc::new(RwLock::new(NetworkStats::default()));

@@ -62,9 +62,12 @@ mod tests {
         attestations: Vec<ExternalAttestation>,
     ) -> Transaction {
         let dir = tempfile::tempdir().unwrap();
-        let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("test-pass-long").unwrap();
-        let signer = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
+        let chain_meta = [0x42u8; 32];
+        let pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta));
+        let ks_path = dir.path().join("keystore.noble");
+        let mut ks = crate::keystore::KeyStore::create_for_faucet(&ks_path, &chain_meta).unwrap();
+        ks.unlock(&pass).unwrap();
+        let signer = ks.create_key(SCHEME_SECP256K1, &pass).unwrap();
 
         let addr = noble_core::NobleAddress::Noble(signer.clone());
         let utxo = crate::builder::SelectedUtxo {

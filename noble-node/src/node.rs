@@ -266,38 +266,86 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             None
         };
 
-        // --- Load per-installation encryption entropy ---
-        let chain_meta = noble_crypto::file_encrypt::load_or_create_chain_meta(
-            &config.storage.data_dir,
-            &config.security.encryption_mode,
-            encryption_password,
-        )
-        .map_err(|e| format!("failed to load/create .chain_meta: {e}"))?;
+        // --- Load per-installation encryption entropy + keystore ---
+        let keystore_file_path = if config.wallet.keystore_path.is_relative() {
+            config.storage.data_dir.join(&config.wallet.keystore_path)
+        } else {
+            config.wallet.keystore_path.clone()
+        };
 
-        // Create wallet keystore + auto-unlock with chain_meta-derived passphrase.
-        // This must happen BEFORE load_validator_key so the keystore fallback works
-        // for nodes whose validator.key was migrated into the unified keystore.
-        let mut keystore = KeyStore::new(&config.wallet.keystore_path)?;
+        // Detect old directory-based keystore for migration
+        let old_keystore_dir = config.storage.data_dir.join("keystore");
+
+        // When the configured keystore_path IS a directory (old config with "keystore"),
+        // the new keystore file goes next to it with a .noble extension.
+        let keystore_file_path = if keystore_file_path.is_dir() {
+            keystore_file_path.with_extension("noble")
+        } else {
+            keystore_file_path
+        };
+
+        let (chain_meta, mut keystore) = if KeyStore::exists(&keystore_file_path) {
+            // New format: single-file keystore
+            let cm = noble_crypto::file_encrypt::load_chain_meta(
+                &config.storage.data_dir,
+                &config.security.encryption_mode,
+                encryption_password,
+            )
+            .map_err(|e| format!("failed to load .chain_meta: {e}"))?;
+            let ks = KeyStore::open(&keystore_file_path, &cm)?;
+            (cm, ks)
+        } else if old_keystore_dir.is_dir() {
+            // Legacy directory keystore → migrate to single file
+            let cm = noble_crypto::file_encrypt::load_or_create_chain_meta_with_keystore(
+                &config.storage.data_dir,
+                &config.security.encryption_mode,
+                encryption_password,
+                Some(&old_keystore_dir),
+            )
+            .map_err(|e| format!("failed to load/create .chain_meta: {e}"))?;
+            let wp = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&cm));
+            let ks = KeyStore::migrate_from_directory(
+                &old_keystore_dir,
+                &keystore_file_path,
+                &cm,
+                &wp,
+            )?;
+            (cm, ks)
+        } else if config.storage.data_dir.join(".chain_meta").exists() {
+            // chain_meta exists but keystore doesn't — load chain_meta and create keystore
+            let cm = noble_crypto::file_encrypt::load_chain_meta(
+                &config.storage.data_dir,
+                &config.security.encryption_mode,
+                encryption_password,
+            )
+            .map_err(|e| format!("failed to load .chain_meta: {e}"))?;
+            let ks_path = keystore_file_path.clone();
+            KeyStore::create_for_faucet(&ks_path, &cm)?;
+            let ks = KeyStore::open(&ks_path, &cm)?;
+            (cm, ks)
+        } else {
+            // First boot: initialize both chain_meta and keystore
+            let secrets = noble_wallet::NodeSecrets::initialize(
+                &config.storage.data_dir,
+                &keystore_file_path,
+                &config.security.encryption_mode,
+                encryption_password,
+            )
+            .map_err(|e| format!("failed to initialize node secrets: {e}"))?;
+            let cm = *secrets.chain_meta();
+            let ks = KeyStore::open(&keystore_file_path, &cm)?;
+            (cm, ks)
+        };
+
+        // Auto-unlock with chain_meta-derived passphrase.
         let wallet_passphrase = hex::encode(
             noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
         );
-        if keystore.unlock(&wallet_passphrase).is_err() {
-            // Existing keys may use the old empty passphrase — try migration
-            if keystore.unlock("").is_ok() {
-                match keystore.migrate_passphrase("", &wallet_passphrase) {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(task = "wallet_key", "migrated {n} wallet key(s) to chain_meta encryption");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(task = "wallet_key", "wallet key migration failed: {e}");
-                    }
-                }
-                keystore.lock();
-                if keystore.unlock(&wallet_passphrase).is_err() {
-                    tracing::warn!(task = "wallet_key", "keystore unlock failed after passphrase migration");
-                }
-            }
+        if let Err(e) = keystore.unlock(&wallet_passphrase) {
+            tracing::warn!(
+                task = "wallet_key",
+                "keystore unlock failed with chain_meta-derived passphrase: {e}"
+            );
         }
 
         // --- Load validator key (if configured) ---
@@ -4768,7 +4816,7 @@ mod tests {
     fn init_memory_node_starts_stateless() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
         config.storage.data_dir = dir.path().to_path_buf();
 
         let node = Node::init_memory(&config).unwrap();
@@ -4798,7 +4846,7 @@ mod tests {
     fn init_memory_node_idempotent_genesis() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
         config.storage.data_dir = dir.path().to_path_buf();
 
         // First init commits genesis.
@@ -4832,7 +4880,7 @@ mod tests {
     fn verify_recent_blocks_empty_chain() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let node = Node::init_memory(&config).unwrap();
         // No blocks in storage — verify should return clean with 0 checked.
@@ -4848,7 +4896,7 @@ mod tests {
     fn verify_recent_blocks_empty_count() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let node = Node::init_memory(&config).unwrap();
         // count=0 should not panic
@@ -4861,7 +4909,7 @@ mod tests {
     fn rollback_empty_chain_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let node = Node::init_memory(&config).unwrap();
         // Rollback on an empty chain (no tip) should return an error.
@@ -4960,7 +5008,7 @@ mod tests {
     fn handle_network_event_updates_peer_stats() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
@@ -5062,7 +5110,7 @@ mod tests {
     fn pki_attestation_none_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
         config.storage.data_dir = dir.path().to_path_buf();
 
         let node = Node::init_memory(&config).unwrap();
@@ -5077,7 +5125,7 @@ mod tests {
     fn pki_attestation_loads_saved() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
         config.storage.data_dir = dir.path().to_path_buf();
 
         // Pre-seed .chain_meta so Node::init_memory uses the same key.
@@ -5109,7 +5157,7 @@ mod tests {
     fn peer_count_propagates_to_consensus() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
@@ -5177,7 +5225,7 @@ mod tests {
     fn process_cycle_actions_log_and_metric() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let mut node = Node::init_memory(&config).unwrap();
         let (tx, _rx) = mpsc::channel(16);
@@ -5286,7 +5334,7 @@ mod tests {
         // Dual-Witness Rule is enforced.
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
-        config.wallet.keystore_path = dir.path().join("keystore");
+        config.wallet.keystore_path = dir.path().join("keystore.noble");
 
         let node = Node::init_memory(&config).unwrap();
         assert_eq!(node.chain_height(), 0);

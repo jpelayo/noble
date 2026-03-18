@@ -614,7 +614,7 @@ impl Default for ApiConfig {
 impl Default for WalletConfig {
     fn default() -> Self {
         Self {
-            keystore_path: PathBuf::from("keystore"),
+            keystore_path: PathBuf::from("keystore.noble"),
         }
     }
 }

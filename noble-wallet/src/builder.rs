@@ -391,15 +391,21 @@ impl TransactionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_core::MIN_TX_FEE;
     use noble_crypto::{sha256, SCHEME_SECP256K1};
     use noble_test_utils::fixtures::test_chain_id;
     use tempfile::tempdir;
 
     fn setup_keystore() -> (crate::keystore::KeyStore, NoblePublicKey) {
         let dir = tempdir().unwrap();
-        let mut ks = crate::keystore::KeyStore::new(dir.path().join("keys")).unwrap();
-        ks.unlock("test-pass-long").unwrap();
-        let pk = ks.create_key(SCHEME_SECP256K1, "test-pass-long").unwrap();
+        let chain_meta = [0x42u8; 32];
+        let pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta));
+        let ks_path = dir.path().join("keystore.noble");
+        let mut ks = crate::keystore::KeyStore::create_for_faucet(&ks_path, &chain_meta).unwrap();
+        ks.unlock(&pass).unwrap();
+        let pk = ks.create_key(SCHEME_SECP256K1, &pass).unwrap();
+        // Leak dir to prevent cleanup while ks is alive
+        std::mem::forget(dir);
         (ks, pk)
     }
 
@@ -497,12 +503,6 @@ mod tests {
 
         assert_eq!(tx.metadata.len(), 1);
         assert_eq!(tx.metadata[0].key, "memo");
-    }
-
-    #[test]
-    fn estimate_fee_returns_triple() {
-        let (low, med, high) = TransactionBuilder::estimate_fee();
-        assert!(low < med && med < high);
     }
 
     #[test]

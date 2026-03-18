@@ -692,21 +692,50 @@ fn resolve_wallet_paths(config_override: Option<&str>) -> Option<(PathBuf, PathB
     let data_dir = cfg.storage.data_dir
         .unwrap_or_else(noble_core::paths::platform_data_dir);
     let keystore_path = cfg.wallet.keystore_path
-        .unwrap_or_else(|| data_dir.join("keystore"));
+        .unwrap_or_else(|| data_dir.join("keystore.noble"));
 
     Some((data_dir, keystore_path))
 }
 
 /// Load .chain_meta from data_dir and derive the 64-char hex wallet passphrase.
 fn derive_wallet_passphrase(data_dir: &std::path::Path) -> String {
-    let chain_meta = noble_crypto::file_encrypt::load_or_create_chain_meta(
-        data_dir, "automatic", None,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("Error loading .chain_meta: {e}");
-        std::process::exit(1);
-    });
+    let chain_meta = load_chain_meta_or_exit(data_dir);
     hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta))
+}
+
+/// Load .chain_meta from data_dir, exit on failure.
+fn load_chain_meta_or_exit(data_dir: &std::path::Path) -> [u8; 32] {
+    // Try new load_chain_meta first, fall back to load_or_create for compat
+    match noble_crypto::file_encrypt::load_chain_meta(data_dir, "automatic", None) {
+        Ok(cm) => cm,
+        Err(_) => {
+            noble_crypto::file_encrypt::load_or_create_chain_meta(data_dir, "automatic", None)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error loading .chain_meta: {e}");
+                    std::process::exit(1);
+                })
+        }
+    }
+}
+
+/// Open a keystore file given data_dir and keystore path.
+fn open_keystore_or_exit(data_dir: &std::path::Path, ks_path: &std::path::Path) -> noble_wallet::KeyStore {
+    let chain_meta = load_chain_meta_or_exit(data_dir);
+    // Handle migration from old directory format
+    if ks_path.is_dir() {
+        let new_path = ks_path.with_extension("noble");
+        if new_path.exists() {
+            noble_wallet::KeyStore::open(&new_path, &chain_meta)
+                .unwrap_or_else(|e| { eprintln!("Error opening keystore: {e}"); std::process::exit(1); })
+        } else {
+            let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta));
+            noble_wallet::KeyStore::migrate_from_directory(ks_path, &new_path, &chain_meta, &passphrase)
+                .unwrap_or_else(|e| { eprintln!("Error migrating keystore: {e}"); std::process::exit(1); })
+        }
+    } else {
+        noble_wallet::KeyStore::open(ks_path, &chain_meta)
+            .unwrap_or_else(|e| { eprintln!("Error opening keystore: {e}"); std::process::exit(1); })
+    }
 }
 
 fn cmd_wallet(action: WalletCommand) {
@@ -760,8 +789,8 @@ fn cmd_wallet(action: WalletCommand) {
                 let (data_dir, ks_path) = resolve_wallet_paths(config.as_deref())
                     .unwrap_or_else(|| { eprintln!("Error: could not read noble.toml"); std::process::exit(1); });
                 let passphrase = derive_wallet_passphrase(&data_dir);
-                let mut ks = noble_wallet::KeyStore::new(&ks_path)
-                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                let mut ks = open_keystore_or_exit(&data_dir, &ks_path);
+                let _ = ks.unlock(&passphrase);
                 // Accept bech32m (nbl1...) or hex wire bytes.
                 let pk = if pubkey_hex.starts_with("nbl1") {
                     noble_crypto::noble_addr::decode(&pubkey_hex)
@@ -800,8 +829,8 @@ fn cmd_wallet(action: WalletCommand) {
                         // Connection failed — fall back to offline auto-discovery
                         if let Some((data_dir, ks_path)) = resolve_wallet_paths(None) {
                             let passphrase = derive_wallet_passphrase(&data_dir);
-                            let mut ks = noble_wallet::KeyStore::new(&ks_path)
-                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            let mut ks = open_keystore_or_exit(&data_dir, &ks_path);
+                            let _ = ks.unlock(&passphrase);
                             let pk = if pubkey_hex.starts_with("nbl1") {
                                 noble_crypto::noble_addr::decode(&pubkey_hex)
                                     .unwrap_or_else(|e| { eprintln!("Invalid address: {e}"); std::process::exit(1); })
@@ -832,11 +861,12 @@ fn cmd_wallet(action: WalletCommand) {
         } => {
             if config.is_some() {
                 // Offline mode with explicit config
-                let (_data_dir, ks_path) = resolve_wallet_paths(config.as_deref())
+                let (data_dir, ks_path) = resolve_wallet_paths(config.as_deref())
                     .unwrap_or_else(|| { eprintln!("Error: could not read noble.toml"); std::process::exit(1); });
                 let ks_path_str = ks_path.display().to_string();
-                let ks = noble_wallet::KeyStore::new(&ks_path)
-                    .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                let mut ks = open_keystore_or_exit(&data_dir, &ks_path);
+                let passphrase = derive_wallet_passphrase(&data_dir);
+                let _ = ks.unlock(&passphrase);
                 let keys = ks.list_keys()
                     .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                 print_key_list_offline(&keys, &ks_path_str, json);
@@ -850,10 +880,11 @@ fn cmd_wallet(action: WalletCommand) {
                     }
                     Err(_conn_err) => {
                         // Connection failed — fall back to offline auto-discovery
-                        if let Some((_data_dir, ks_path)) = resolve_wallet_paths(None) {
+                        if let Some((data_dir, ks_path)) = resolve_wallet_paths(None) {
                             let ks_path_str = ks_path.display().to_string();
-                            let ks = noble_wallet::KeyStore::new(&ks_path)
-                                .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
+                            let mut ks = open_keystore_or_exit(&data_dir, &ks_path);
+                            let passphrase = derive_wallet_passphrase(&data_dir);
+                            let _ = ks.unlock(&passphrase);
                             let keys = ks.list_keys()
                                 .unwrap_or_else(|e| { eprintln!("Error: {e}"); std::process::exit(1); });
                             print_key_list_offline(&keys, &ks_path_str, json);
@@ -1718,6 +1749,7 @@ fn do_reset_chain(data_dir: PathBuf, confirm: bool, delete_peers: bool) {
         "identity_attestation.cbor",
         "noble.toml",
         "validators.txt",
+        "keystore.noble",
     ];
     let preserved_dirs: &[&str] = &["keystore"];
 

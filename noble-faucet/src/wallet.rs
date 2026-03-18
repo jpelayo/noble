@@ -22,22 +22,42 @@ pub struct FaucetWallet {
 }
 
 impl FaucetWallet {
-    /// Open (or create) a faucet wallet in `keystore_dir`.
+    /// Open (or create) a faucet wallet.
     ///
+    /// `keystore_path` should point to a `.noble` file (new format).
+    /// If the path is a directory (old format), it will be migrated.
     /// - If the keystore is empty, generates a new secp256k1 key.
     /// - Unlocks the keystore with `passphrase`.
     pub fn open_or_create(
-        keystore_dir: &std::path::Path,
+        keystore_path: &std::path::Path,
         passphrase: &str,
         chain_id: u32,
     ) -> Result<Self, String> {
-        let mut keystore =
-            KeyStore::new(keystore_dir).map_err(|e| format!("keystore init: {e}"))?;
+        // Generate a faucet-specific chain_meta from the passphrase (deterministic).
+        let faucet_meta: [u8; 32] = *noble_crypto::sha256(passphrase.as_bytes()).as_bytes();
+        let derived_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&faucet_meta));
 
-        // Try unlock first (may already have keys).
-        if let Err(e) = keystore.unlock(passphrase) {
-            tracing::debug!("initial unlock attempt: {e}");
-        }
+        let ks_file = if keystore_path.is_dir() {
+            // Legacy directory path — use file inside parent
+            keystore_path.with_extension("noble")
+        } else {
+            keystore_path.to_path_buf()
+        };
+
+        let mut keystore = if KeyStore::exists(&ks_file) {
+            KeyStore::open(&ks_file, &faucet_meta)
+                .map_err(|e| format!("keystore open: {e}"))?
+        } else if keystore_path.is_dir() {
+            KeyStore::migrate_from_directory(keystore_path, &ks_file, &faucet_meta, &derived_pass)
+                .map_err(|e| format!("keystore migrate: {e}"))?
+        } else {
+            KeyStore::create_for_faucet(&ks_file, &faucet_meta)
+                .map_err(|e| format!("keystore create: {e}"))?
+        };
+
+        // Unlock with chain_meta-derived passphrase
+        keystore.unlock(&derived_pass)
+            .map_err(|e| format!("unlock: {e}"))?;
 
         // Check if we already have a key.
         let keys = keystore
@@ -48,16 +68,9 @@ impl FaucetWallet {
         } else {
             // Generate new secp256k1 key
             keystore
-                .create_key(SCHEME_SECP256K1, passphrase)
+                .create_key(SCHEME_SECP256K1, &derived_pass)
                 .map_err(|e| format!("create key: {e}"))?
         };
-
-        // Ensure unlocked
-        if !keystore.is_unlocked() {
-            keystore
-                .unlock(passphrase)
-                .map_err(|e| format!("unlock: {e}"))?;
-        }
 
         tracing::info!(
             "Faucet wallet ready: {}",
@@ -161,7 +174,8 @@ mod tests {
     #[test]
     fn faucet_wallet_create_and_address() {
         let dir = tempfile::tempdir().unwrap();
-        let w = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
+        let ks_path = dir.path().join("faucet.noble");
+        let w = FaucetWallet::open_or_create(&ks_path, "test-pass-long", 0x4E4F424C).unwrap();
         let addr = w.address();
         // secp256k1: nbl1p… bech32m address
         assert!(addr.starts_with("nbl1p"), "should be Noble secp256k1 address (nbl1p…), got: {addr}");
@@ -173,11 +187,12 @@ mod tests {
     #[test]
     fn faucet_wallet_reopen_same_key() {
         let dir = tempfile::tempdir().unwrap();
-        let w1 = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
+        let ks_path = dir.path().join("faucet.noble");
+        let w1 = FaucetWallet::open_or_create(&ks_path, "test-pass-long", 0x4E4F424C).unwrap();
         let addr1 = w1.address();
         drop(w1);
 
-        let w2 = FaucetWallet::open_or_create(dir.path(), "test-pass-long", 0x4E4F424C).unwrap();
+        let w2 = FaucetWallet::open_or_create(&ks_path, "test-pass-long", 0x4E4F424C).unwrap();
         assert_eq!(w2.address(), addr1, "same keystore should yield same address");
     }
 }

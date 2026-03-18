@@ -392,6 +392,115 @@ pub fn unlock_chain_meta(
     Ok(arr)
 }
 
+/// Load the per-installation `.chain_meta` entropy file (load only, never creates).
+///
+/// Returns an error if the file does not exist. Use `create_chain_meta()` to
+/// generate a new file during first-time setup.
+pub fn load_chain_meta(
+    data_dir: &std::path::Path,
+    encryption_mode: &str,
+    password: Option<&str>,
+) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
+    let path = data_dir.join(".chain_meta");
+    if !path.exists() {
+        return Err(
+            ".chain_meta not found. Run noble-tool setup to initialize.".into(),
+        );
+    }
+
+    let bytes = std::fs::read(&path)?;
+
+    if is_locked_chain_meta(&bytes) {
+        if encryption_mode == "automatic" {
+            return Err(
+                "chain_meta is password-locked but encryption_mode is 'automatic'. \
+                 Change to 'manual' mode or delete .chain_meta to reset."
+                    .into(),
+            );
+        }
+        let pw = password.ok_or(
+            "encryption_mode is 'manual' but no password provided. \
+             Set NOBLE_ENCRYPTION_PASSWORD or use the unlock page.",
+        )?;
+        if pw.is_empty() {
+            return Err("encryption password must not be empty".into());
+        }
+        return unlock_chain_meta(&bytes, pw);
+    }
+
+    // Raw 32-byte format
+    if bytes.len() != 32 {
+        return Err(format!(
+            "corrupt .chain_meta: expected 32 bytes, got {}",
+            bytes.len()
+        )
+        .into());
+    }
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "corrupt .chain_meta: expected exactly 32 bytes")?;
+
+    // Auto-migrate from raw to locked if mode changed to manual
+    if encryption_mode == "manual" {
+        let pw = password.ok_or("encryption_mode is 'manual' but no password provided")?;
+        if pw.is_empty() {
+            return Err("encryption password must not be empty".into());
+        }
+        let locked = lock_chain_meta(&arr, pw)?;
+        write_atomic(&path, &locked)?;
+    }
+
+    Ok(arr)
+}
+
+/// Create a new per-installation `.chain_meta` entropy file (create only, never overwrites).
+///
+/// Returns an error if the file already exists. Use `load_chain_meta()` to load
+/// an existing file.
+pub fn create_chain_meta(
+    data_dir: &std::path::Path,
+    encryption_mode: &str,
+    password: Option<&str>,
+) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join(".chain_meta");
+
+    if path.exists() {
+        return Err(
+            ".chain_meta already exists. Use load_chain_meta() instead.".into(),
+        );
+    }
+
+    use rand::RngCore;
+    let mut entropy = [0u8; 32];
+    OsRng.fill_bytes(&mut entropy);
+
+    let to_write = if encryption_mode == "manual" {
+        let pw = password.ok_or("encryption_mode is 'manual' but no password provided")?;
+        if pw.is_empty() {
+            return Err("encryption password must not be empty".into());
+        }
+        lock_chain_meta(&entropy, pw)?
+    } else {
+        entropy.to_vec()
+    };
+
+    write_atomic(&path, &to_write)?;
+    Ok(entropy)
+}
+
+/// Delete the `.chain_meta` file. Returns Ok even if the file does not exist.
+pub fn destroy_chain_meta(
+    data_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = data_dir.join(".chain_meta");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Load or create the per-installation `.chain_meta` entropy file.
 ///
 /// Supports two modes:
@@ -403,6 +512,22 @@ pub fn load_or_create_chain_meta(
     data_dir: &std::path::Path,
     encryption_mode: &str,
     password: Option<&str>,
+) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
+    load_or_create_chain_meta_with_keystore(data_dir, encryption_mode, password, None)
+}
+
+/// Same as [`load_or_create_chain_meta`] but accepts an optional keystore path.
+///
+/// If `.chain_meta` does not exist and `keystore_path` points to a directory
+/// with existing encrypted key files, this function **refuses to create new
+/// entropy** and returns an error. Creating new chain_meta when encrypted
+/// keys exist would orphan the keystore (keys encrypted with the old entropy
+/// become permanently undecryptable).
+pub fn load_or_create_chain_meta_with_keystore(
+    data_dir: &std::path::Path,
+    encryption_mode: &str,
+    password: Option<&str>,
+    keystore_path: Option<&std::path::Path>,
 ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
     // Ensure data_dir exists (tests may use ephemeral paths).
     std::fs::create_dir_all(data_dir)?;
@@ -455,6 +580,28 @@ pub fn load_or_create_chain_meta(
 
         Ok(arr)
     } else {
+        // SAFETY CHECK: refuse to create new chain_meta if an existing
+        // keystore has encrypted key files. New random entropy would orphan
+        // all keys encrypted with the old chain_meta.
+        if let Some(ks_path) = keystore_path {
+            if ks_path.is_dir() {
+                let has_keys = std::fs::read_dir(ks_path)
+                    .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
+                        e.path().extension().map(|ext| ext == "json").unwrap_or(false)
+                    }))
+                    .unwrap_or(false);
+                if has_keys {
+                    return Err(
+                        "FATAL: .chain_meta is missing but keystore contains encrypted keys. \
+                         Creating new entropy would orphan all existing keys. \
+                         Either restore the original .chain_meta file from backup, \
+                         or delete the keystore directory and re-import your mnemonic."
+                            .into(),
+                    );
+                }
+            }
+        }
+
         // Generate new chain_meta
         use rand::RngCore;
         let mut salt = [0u8; 32];
