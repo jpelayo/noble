@@ -506,6 +506,45 @@ mod tests {
     }
 
     #[test]
+    fn build_transfer_to_bitcoin_hash160() {
+        let (ks, sender_pk) = setup_keystore();
+        // Bitcoin P2PKH/P2WPKH address (20-byte Hash160)
+        let hash160 = [0xAB; 20];
+        let recipient = NobleAddress::BitcoinHash160(hash160);
+        let (utxos, change_addr) = make_test_utxos(&sender_pk, 100_000_000);
+
+        let tx = TransactionBuilder::build_transfer(
+            &ks, &sender_pk, recipient, 500_000, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &change_addr,
+        ).unwrap();
+
+        assert_eq!(tx.tx_type, TX_TYPE_TRANSFER);
+        assert_eq!(tx.outputs[0].value, 500_000);
+        // Verify signature is valid
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        assert!(sender_pk.verify(&msg, &tx.issuer_sig).is_ok());
+    }
+
+    #[test]
+    fn build_transfer_to_bitcoin_taproot() {
+        let (ks, sender_pk) = setup_keystore();
+        // Bitcoin P2TR address (32-byte x-only pubkey)
+        let xonly = [0xCD; 32];
+        let recipient = NobleAddress::BitcoinTaproot(xonly);
+        let (utxos, change_addr) = make_test_utxos(&sender_pk, 100_000_000);
+
+        let tx = TransactionBuilder::build_transfer(
+            &ks, &sender_pk, recipient, 250_000, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &change_addr,
+        ).unwrap();
+
+        assert_eq!(tx.tx_type, TX_TYPE_TRANSFER);
+        assert_eq!(tx.outputs[0].value, 250_000);
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        assert!(sender_pk.verify(&msg, &tx.issuer_sig).is_ok());
+    }
+
+    #[test]
     fn set_gateway_and_resign_updates_field_and_signature() {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);

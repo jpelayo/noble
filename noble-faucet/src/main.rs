@@ -176,8 +176,11 @@ async fn main() {
         .expect("Failed to create RPC client (check URL scheme)");
 
     // Resolve passphrase via RPC or CLI fallback.
-    let keystore_is_empty = !keystore_dir.exists()
-        || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    // Check if a keystore exists — either old directory format or new .noble file format.
+    let ks_noble_file = keystore_dir.with_extension("noble");
+    let keystore_is_empty = !ks_noble_file.exists()
+        && (!keystore_dir.exists()
+            || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true));
 
     // Priority: --passphrase CLI > env var > RPC getFaucetSecret > generate new (first boot)
     // Also capture chain_meta from RPC for TLS key decryption.

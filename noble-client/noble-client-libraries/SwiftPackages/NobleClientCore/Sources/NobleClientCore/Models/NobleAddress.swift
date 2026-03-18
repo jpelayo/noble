@@ -1,6 +1,8 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
+import CryptoKit
+
 /// A NOBLE blockchain address — either bech32 `nbl1…` display format or wire-format hex.
 ///
 /// Display format (from RPC):
@@ -73,13 +75,94 @@ public struct NobleAddress: Codable, Equatable, Hashable, Sendable, Identifiable
     /// Wire-format hex string (scheme_id + key bytes).
     ///
     /// If the address is bech32 `nbl1…`, decodes back to wire hex.
+    /// If the address is Bitcoin bech32 `bc1q…`/`bc1p…`, decodes the witness program
+    /// and returns `0x80` + Hash160 (20 bytes) or `0x81` + x-only pubkey (32 bytes).
+    /// If the address is Bitcoin Base58 (`1…` or `3…`), decodes the 20-byte hash.
     /// If already hex, returns as-is.
     public var wireHex: String {
-        guard isNobleBech32 else { return raw }
-        // Decode bech32 segwit → scheme_id + key bytes
-        guard let bytes = Self.decodeBech32Program(raw) else { return raw }
-        let schemePrefix: UInt8 = 0x02
-        return ([schemePrefix] + bytes).map { String(format: "%02x", $0) }.joined()
+        let lower = raw.lowercased()
+
+        // Noble bech32 → decode to 0x02 + key bytes
+        if lower.hasPrefix("nbl1") {
+            guard let bytes = Self.decodeBech32Program(raw) else { return raw }
+            let schemePrefix: UInt8 = 0x02
+            return ([schemePrefix] + bytes).map { String(format: "%02x", $0) }.joined()
+        }
+
+        // Bitcoin bech32 segwit → decode witness program
+        if lower.hasPrefix("bc1q") {
+            // P2WPKH: witness v0, 20-byte program → 0x80 + 20 bytes
+            guard let program = Self.decodeBech32Program(raw), program.count == 20 else { return raw }
+            return ([UInt8(0x80)] + program).map { String(format: "%02x", $0) }.joined()
+        }
+        if lower.hasPrefix("bc1p") {
+            // P2TR: witness v1, 32-byte program → 0x81 + 32 bytes
+            guard let program = Self.decodeBech32Program(raw), program.count == 32 else { return raw }
+            return ([UInt8(0x81)] + program).map { String(format: "%02x", $0) }.joined()
+        }
+
+        // Bitcoin Base58 legacy (P2PKH "1…" or P2SH "3…") → decode 20-byte hash
+        if raw.hasPrefix("1") || raw.hasPrefix("3") {
+            if let hash = Self.decodeBase58Check(raw), hash.count == 20 {
+                return ([UInt8(0x80)] + hash).map { String(format: "%02x", $0) }.joined()
+            }
+            return raw
+        }
+
+        // Already hex wire format
+        return raw
+    }
+
+    /// Decode a Base58Check address to its 20-byte hash payload (strips version + checksum).
+    private static func decodeBase58Check(_ addr: String) -> [UInt8]? {
+        let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        var num: [UInt8] = [0]
+
+        for ch in addr {
+            guard let digitIdx = alphabet.firstIndex(of: ch) else { return nil }
+            let digit = UInt8(alphabet.distance(from: alphabet.startIndex, to: digitIdx))
+            var carry = UInt16(digit)
+            for i in 0..<num.count {
+                carry += UInt16(num[i]) * 58
+                num[i] = UInt8(carry & 0xFF)
+                carry >>= 8
+            }
+            while carry > 0 {
+                num.append(UInt8(carry & 0xFF))
+                carry >>= 8
+            }
+        }
+
+        // Count leading '1's (leading zero bytes)
+        let leadingZeros = addr.prefix(while: { $0 == "1" }).count
+
+        // Reverse (big-endian)
+        var result = [UInt8](repeating: 0, count: leadingZeros) + num.reversed()
+
+        // Strip trailing zeros that were added by the bignum arithmetic
+        while result.last == 0 && result.count > leadingZeros + 25 {
+            result.removeLast()
+        }
+
+        // Expected: 1 byte version + 20 byte hash + 4 byte checksum = 25 bytes
+        guard result.count == 25 else { return nil }
+
+        // Verify checksum (double SHA-256 of first 21 bytes)
+        let payload = Array(result[0..<21])
+        let hash1 = SHA256Hasher.hash(payload)
+        let hash2 = SHA256Hasher.hash(hash1)
+        guard Array(result[21..<25]) == Array(hash2[0..<4]) else { return nil }
+
+        // Return the 20-byte hash (strip version byte)
+        return Array(result[1..<21])
+    }
+
+    /// Minimal SHA-256 helper for Base58Check verification.
+    private enum SHA256Hasher {
+        static func hash(_ data: [UInt8]) -> [UInt8] {
+            let digest = CryptoKit.SHA256.hash(data: data)
+            return Array(digest)
+        }
     }
 
     /// Decode the witness program from a bech32/bech32m segwit address.
