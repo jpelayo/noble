@@ -1,14 +1,20 @@
-// Atomic units → display format (6 decimals, trim trailing zeros).
-// 1 NOBLE = 1,000,000 atomic units.
+// Atomic units → display format (8 decimals, trim trailing zeros, min 2).
+// 1 NOBLE = 100,000,000 groats (8 decimal places).
+function formatFrac(frac) {
+    const full = String(frac).padStart(8, '0');
+    const trimmed = full.replace(/0+$/, '');
+    // Minimum 2 decimal places for readability.
+    return trimmed.length < 2 ? full.slice(0, 2) : trimmed;
+}
+
 export function amountText(atomic) {
     const n = Number(atomic);
     const whole = Math.floor(n / 100_000_000);
     const frac = n % 100_000_000;
-    const fracStr = String(frac).padStart(8, '0').replace(/0+$/, '') || '0';
 
     const el = document.createElement('span');
     el.className = 'mono';
-    el.textContent = `${whole.toLocaleString()}.${fracStr}`;
+    el.textContent = `${whole.toLocaleString()}.${formatFrac(frac)}`;
     return el;
 }
 
@@ -17,6 +23,5 @@ export function formatAmount(atomic) {
     const n = Number(atomic);
     const whole = Math.floor(n / 100_000_000);
     const frac = n % 100_000_000;
-    const fracStr = String(frac).padStart(8, '0').replace(/0+$/, '') || '0';
-    return `${whole.toLocaleString()}.${fracStr}`;
+    return `${whole.toLocaleString()}.${formatFrac(frac)}`;
 }
