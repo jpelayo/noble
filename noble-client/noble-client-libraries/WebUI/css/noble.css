@@ -652,10 +652,11 @@ input, textarea, select, button {
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 
-/* Hide caret briefly on focus to prevent ghost cursor while iOS
-   keyboard pushes the viewport.  JS removes the class after 200ms. */
-.form-input.caret-hidden {
-  caret-color: transparent;
+/* Ghost cursor fix: caret hidden until visualViewport settles after
+   keyboard open. JS manages the class via visualViewport.resize events. */
+input.caret-hidden,
+textarea.caret-hidden {
+  caret-color: transparent !important;
 }
 
 .form-hint {

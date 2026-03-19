@@ -155,13 +155,46 @@ async function boot() {
 
 boot();
 
-// ── iOS caret ghost fix ──
-// When an input gains focus on iOS, the keyboard push displaces the viewport
-// but the caret renders at the original position for a split second.
-// Hide the caret for 200ms after focus, then reveal it once the viewport settles.
-document.addEventListener('focusin', (e) => {
-    if (e.target.classList && e.target.classList.contains('form-input')) {
-        e.target.classList.add('caret-hidden');
-        setTimeout(() => e.target.classList.remove('caret-hidden'), 200);
-    }
-});
+// ── iOS ghost cursor fix (visualViewport-driven) ──
+// Hide caret on focus. Show it only after visualViewport stops resizing
+// (keyboard animation finished). Prevents ghost cursor at old position.
+(function() {
+    document.addEventListener('focusin', (e) => {
+        const el = e.target;
+        if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
+
+        el.classList.add('caret-hidden');
+
+        if (!window.visualViewport) {
+            setTimeout(() => el.classList.remove('caret-hidden'), 300);
+            return;
+        }
+
+        const vv = window.visualViewport;
+        const startHeight = vv.height;
+        let settled = false;
+        let settleTimer = null;
+
+        const show = () => {
+            if (settled) return;
+            settled = true;
+            el.classList.remove('caret-hidden');
+            vv.removeEventListener('resize', onResize);
+        };
+
+        const onResize = () => {
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(show, 100);
+        };
+
+        vv.addEventListener('resize', onResize);
+
+        // Keyboard already open (field switch): no resize → show after 50ms
+        setTimeout(() => {
+            if (!settled && vv.height === startHeight) show();
+        }, 50);
+
+        // Ultimate safety fallback
+        setTimeout(() => { if (!settled) show(); }, 600);
+    });
+})();

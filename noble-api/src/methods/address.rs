@@ -81,10 +81,22 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             }
         }
 
-        // pending = mempool debits targeting this address bucket
-        let pending = {
+        // Pending: net debit + change + per-tx breakdown
+        let (pending, pending_change, pending_transactions) = {
             let mempool = self.mempool.lock();
-            mempool.pending_debit_for_address(&addr)
+            let net = mempool.pending_debit_for_address(&addr);
+            let change = mempool.pending_change_for_address(&addr);
+            let summaries: Vec<PendingTxResponse> = mempool.pending_tx_summaries(&addr)
+                .into_iter()
+                .map(|s| PendingTxResponse {
+                    tx_id: hex::encode(s.tx_id.as_bytes()),
+                    sent: s.outputs_to_others,
+                    change: s.outputs_to_self,
+                    fee: s.fee,
+                    net_debit: s.net_debit,
+                })
+                .collect();
+            (net, change, summaries)
         };
         let available = balance.saturating_sub(pending).saturating_sub(immature_value);
 
@@ -98,10 +110,12 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             balance,
             available,
             pending,
+            pending_change,
             tx_count,
             utxo_count,
             immature_count,
             immature_value,
+            pending_transactions,
         })
     }
 

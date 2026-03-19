@@ -67,6 +67,16 @@ impl Default for MempoolConfig {
     }
 }
 
+/// Pending transaction summary for a specific address — UTXO-level breakdown.
+#[derive(Debug, Clone)]
+pub struct PendingTxSummary {
+    pub tx_id: Hash256,
+    pub outputs_to_self: u64,
+    pub outputs_to_others: u64,
+    pub fee: u64,
+    pub net_debit: u64,
+}
+
 /// An entry in the mempool.
 #[derive(Debug, Clone)]
 pub struct MempoolEntry {
@@ -241,17 +251,72 @@ impl Mempool {
     /// In the UTXO model, pending debits are tracked via the `spent_by_mempool`
     /// set (outpoint-level). This sums output values of mempool txs where
     /// the sender matches the queried address. Returns 0 if no pending txs.
+    /// Net pending debit for an address: outputs going to OTHER addresses + fees.
+    /// Change outputs returning to the sender are NOT counted as debit.
     pub fn pending_debit_for_address(&self, addr: &noble_core::NobleAddress) -> u64 {
         let addr_wire = addr.to_wire_bytes();
         self.by_id.values()
             .filter(|entry| {
-                // Check if the issuer (sender) matches the queried address
                 entry.tx.issuer_sig.to_noble_public_key()
                     .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == addr_wire)
                     .unwrap_or(false)
             })
-            .map(|entry| entry.tx.total_output_value() + entry.fee)
+            .map(|entry| {
+                let outgoing: u64 = entry.tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() != addr_wire)
+                    .map(|o| o.value)
+                    .sum();
+                outgoing.saturating_add(entry.fee)
+            })
             .fold(0u64, |acc, v| acc.saturating_add(v))
+    }
+
+    /// Pending change returning to an address from its own mempool txs.
+    /// These are outputs in the sender's txs that go BACK to the sender.
+    pub fn pending_change_for_address(&self, addr: &noble_core::NobleAddress) -> u64 {
+        let addr_wire = addr.to_wire_bytes();
+        self.by_id.values()
+            .filter(|entry| {
+                entry.tx.issuer_sig.to_noble_public_key()
+                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == addr_wire)
+                    .unwrap_or(false)
+            })
+            .map(|entry| {
+                entry.tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() == addr_wire)
+                    .map(|o| o.value)
+                    .sum::<u64>()
+            })
+            .fold(0u64, |acc, v| acc.saturating_add(v))
+    }
+
+    /// Full pending tx breakdown for an address.
+    pub fn pending_tx_summaries(&self, addr: &noble_core::NobleAddress) -> Vec<PendingTxSummary> {
+        let addr_wire = addr.to_wire_bytes();
+        self.by_id.values()
+            .filter(|entry| {
+                entry.tx.issuer_sig.to_noble_public_key()
+                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == addr_wire)
+                    .unwrap_or(false)
+            })
+            .map(|entry| {
+                let outputs_to_self: u64 = entry.tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() == addr_wire)
+                    .map(|o| o.value)
+                    .sum();
+                let outputs_to_others: u64 = entry.tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() != addr_wire)
+                    .map(|o| o.value)
+                    .sum();
+                PendingTxSummary {
+                    tx_id: entry.tx_id,
+                    outputs_to_self,
+                    outputs_to_others,
+                    fee: entry.fee,
+                    net_debit: outputs_to_others.saturating_add(entry.fee),
+                }
+            })
+            .collect()
     }
 
     /// Iterate transactions in descending fee order (highest fee first).

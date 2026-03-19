@@ -84,10 +84,28 @@ export function init(root, ctx) {
         if (!address) return;
 
         try {
-            const [balance, history] = await Promise.all([
-                Bridge.call('noble_api', 'getBalance', { address }),
-                Bridge.call('noble_api', 'getTransactionHistory', { address, page: historyPage, limit: historyLimit })
-            ]);
+            let balance, history;
+            try {
+                // Primary path: Bridge (Swift hydrates full tx objects)
+                [balance, history] = await Promise.all([
+                    Bridge.call('noble_api', 'getBalance', { address }),
+                    Bridge.call('noble_api', 'getTransactionHistory', { address, page: historyPage, limit: historyLimit })
+                ]);
+            } catch {
+                // Fallback: direct RPC (returns tx_id strings, fetch details)
+                const [bal, hist] = await Promise.all([
+                    Bridge.call('noble_api', 'getAddressBalance', { address }),
+                    Bridge.call('noble_api', 'getAddressHistory', { address, page: historyPage, limit: historyLimit }),
+                ]);
+                balance = bal;
+                const txIds = (hist && hist.transactions) || [];
+                const txDetails = await Promise.all(
+                    txIds.slice(0, 20).map(id =>
+                        Bridge.call('noble_api', 'getTransaction', { tx_id: id }).catch(() => null)
+                    )
+                );
+                history = { transactions: txDetails.filter(Boolean) };
+            }
             if (!alive) return;
             balanceData = balance;
             historyData = history;
@@ -410,12 +428,26 @@ export function init(root, ctx) {
             if (atomic > 0) preview.textContent = `${atomic.toLocaleString()} atomic units`;
             group.appendChild(preview);
 
+            // Balance warning element
+            const balWarn = document.createElement('div');
+            balWarn.className = 'form-hint';
+            balWarn.style.color = 'var(--error)';
+            balWarn.style.display = 'none';
+            group.appendChild(balWarn);
+
             input.addEventListener('input', () => {
                 const a = parseAmount(input.value.trim());
-                preview.textContent = a > 0 ? `${a.toLocaleString()} atomic units` : '';
+                preview.textContent = a > 0 ? `${a.toLocaleString()} groats` : '';
+                // Warn if amount exceeds available balance
+                if (balanceData && a > (balanceData.available || 0)) {
+                    balWarn.textContent = `Exceeds available balance (\u25C6 ${formatAmount(balanceData.available)})`;
+                    balWarn.style.display = '';
+                } else {
+                    balWarn.style.display = 'none';
+                }
             });
 
-            // Balance check
+            // Balance info
             if (balanceData) {
                 const avail = document.createElement('div');
                 avail.className = 'form-hint';

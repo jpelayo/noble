@@ -1730,9 +1730,17 @@ export function init(root, ctx) {
       integrityBtn.disabled = true;
       integrityResult.innerHTML = '<span style="color:var(--text-muted)">Checking...</span>';
       try {
-        const r = await rpc.call('noble_checkChainIntegrity');
+        const [r, nodeInfo] = await Promise.all([
+          rpc.call('noble_checkChainIntegrity'),
+          rpc.call('noble_getNodeInfo').catch(() => null),
+        ]);
+        const chainId = nodeInfo?.chain_id ? `0x${nodeInfo.chain_id.toString(16).toUpperCase()}` : null;
+        const chainBadge = chainId
+          ? `<span class="badge" style="background:var(--accent);color:#fff;font-size:var(--font-size-xs);margin-left:var(--gap-sm)">Chain ${chainId}</span>`
+          : '';
         if (r.is_clean) {
           integrityResult.innerHTML = `<span class="badge confirmed" style="font-size:var(--font-size-sm)">Chain OK</span>
+            ${chainBadge}
             <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.heights_checked} blocks verified</span>`;
         } else {
           let html = `<span class="badge" style="background:var(--error);color:#fff;font-size:var(--font-size-sm)">Integrity Failure</span>

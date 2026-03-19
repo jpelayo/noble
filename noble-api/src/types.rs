@@ -349,6 +349,27 @@ pub struct MempoolInfoResponse {
     pub max_fee_rate: u64,
     /// Average fee rate in mempool (groats/byte).
     pub avg_fee_rate: u64,
+    /// Recent mempool entries (top 50 by fee rate).
+    pub entries: Vec<MempoolEntryResponse>,
+    /// Fee rate histogram for chart display.
+    pub fee_histogram: Vec<FeeHistogramBucket>,
+}
+
+/// A single mempool entry for the live stream.
+#[derive(Debug, Clone, Serialize)]
+pub struct MempoolEntryResponse {
+    pub tx_id: String,
+    pub fee: u64,
+    pub fee_rate: u64,
+    pub size_bytes: usize,
+    pub received_at: u64,
+}
+
+/// Fee histogram bucket for the mempool chart.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeeHistogramBucket {
+    pub label: String,
+    pub count: usize,
 }
 
 /// Individual peer information.
@@ -510,16 +531,30 @@ pub struct CycleStatusResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct AddressBalanceResponse {
     pub public_key: String,
+    /// Total on-chain balance (all UTXOs, including immature).
     pub balance: u64,
+    /// Spendable right now: mature UTXOs minus net pending debits.
     pub available: u64,
+    /// Net pending debit: outputs leaving wallet + fees (NOT gross UTXO consumption).
     pub pending: u64,
+    /// Change outputs returning to this address from pending txs (available after confirmation).
+    pub pending_change: u64,
     pub tx_count: u64,
-    /// Number of mature (spendable) UTXOs.
     pub utxo_count: usize,
-    /// Number of immature coinbase UTXOs still maturing.
     pub immature_count: usize,
-    /// Total value locked in immature coinbase UTXOs (groats).
     pub immature_value: u64,
+    /// Per-transaction pending breakdown.
+    pub pending_transactions: Vec<PendingTxResponse>,
+}
+
+/// A single pending transaction's UTXO flow relative to an address.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingTxResponse {
+    pub tx_id: String,
+    pub sent: u64,
+    pub change: u64,
+    pub fee: u64,
+    pub net_debit: u64,
 }
 
 /// Response for `noble_getAddressUtxos`.

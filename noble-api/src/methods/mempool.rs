@@ -72,12 +72,49 @@ impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState
     async fn get_mempool_info(&self) -> Result<MempoolInfoResponse, ErrorObjectOwned> {
         let mempool = self.mempool.lock();
         let (min_fee_rate, max_fee_rate, avg_fee_rate) = mempool.fee_stats();
+
+        // Collect entries (top 50 by fee rate descending).
+        let entries: Vec<MempoolEntryResponse> = mempool
+            .iter_by_fee_rate_desc()
+            .take(50)
+            .map(|e| MempoolEntryResponse {
+                tx_id: hex::encode(e.tx_id.as_bytes()),
+                fee: e.fee,
+                fee_rate: e.fee_rate,
+                size_bytes: e.size_bytes,
+                received_at: e.received_at,
+            })
+            .collect();
+
+        // Build fee histogram (groats/byte buckets).
+        let mut histogram = vec![
+            FeeHistogramBucket { label: "1".into(), count: 0 },
+            FeeHistogramBucket { label: "2".into(), count: 0 },
+            FeeHistogramBucket { label: "5".into(), count: 0 },
+            FeeHistogramBucket { label: "10".into(), count: 0 },
+            FeeHistogramBucket { label: "20".into(), count: 0 },
+            FeeHistogramBucket { label: "50".into(), count: 0 },
+            FeeHistogramBucket { label: "100+".into(), count: 0 },
+        ];
+        for e in mempool.iter_by_fee_rate_desc() {
+            let idx = if e.fee_rate >= 100 { 6 }
+                else if e.fee_rate >= 50 { 5 }
+                else if e.fee_rate >= 20 { 4 }
+                else if e.fee_rate >= 10 { 3 }
+                else if e.fee_rate >= 5 { 2 }
+                else if e.fee_rate >= 2 { 1 }
+                else { 0 };
+            histogram[idx].count += 1;
+        }
+
         Ok(MempoolInfoResponse {
             count: mempool.len(),
             total_bytes: mempool.total_size(),
             min_fee_rate,
             max_fee_rate,
             avg_fee_rate,
+            entries,
+            fee_histogram: histogram,
         })
     }
 }

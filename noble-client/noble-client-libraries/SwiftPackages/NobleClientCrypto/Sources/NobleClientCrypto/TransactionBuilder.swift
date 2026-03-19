@@ -276,7 +276,12 @@ public enum CoinSelectionError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .insufficientFunds(let available, let required):
-            return "Insufficient funds: have \(available) atomic, need \(required) [NE-605]"
+            let groatsPerNoble: Double = 100_000_000.0
+            let haveNoble = String(format: "%.8f", Double(available) / groatsPerNoble)
+            let needNoble = String(format: "%.8f", Double(required) / groatsPerNoble)
+            let shortfall = required > available ? required - available : 0
+            let shortNoble = String(format: "%.8f", Double(shortfall) / groatsPerNoble)
+            return "Insufficient funds. Available: \(haveNoble) NOBLE, needed: \(needNoble) NOBLE (short by \(shortNoble) NOBLE). [NE-605]"
         }
     }
 }

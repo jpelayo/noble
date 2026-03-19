@@ -2798,11 +2798,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 })) {
                     tracing::debug!(task = "broadcast", "tx_announced event dropped: {e}");
                 }
-                if let Err(e) = new_tx_tx.send(serde_json::json!({
-                    "tx_id": hex::encode(tx_id),
-                })) {
-                    tracing::debug!(task = "broadcast", "new_tx event dropped: {e}");
-                }
+                // new_tx WS event is sent from TransactionReceived (after admission),
+                // not here — TxAnnounce only has the tx_id, no metadata.
             }
             NetworkEvent::TransactionReceived { peer_id, transaction } => {
                 // Admit the relayed transaction to our local mempool.
@@ -2816,12 +2813,27 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 let tip_h = self.consensus.read().chain_tip().0;
                 let mut mempool = self.mempool.lock();
                 match mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None) {
-                    Ok(_) => {
+                    Ok(tx_id) => {
+                        // Read entry metadata while lock is held
+                        let (fee, fee_rate, size_bytes) = mempool.get(&tx_id)
+                            .map(|e| (e.fee, e.fee_rate, e.size_bytes))
+                            .unwrap_or((0, 0, 0));
+                        drop(mempool);
                         tracing::debug!(
                             task = "tx_relay",
                             "admitted relayed tx from peer {}",
                             hex::encode(&peer_id),
                         );
+                        // Enriched WS event for mempool live stream
+                        if let Err(e) = new_tx_tx.send(serde_json::json!({
+                            "tx_id": hex::encode(tx_id.as_bytes()),
+                            "fee": fee,
+                            "fee_rate": fee_rate,
+                            "size_bytes": size_bytes,
+                            "received_at": now,
+                        })) {
+                            tracing::debug!(task = "broadcast", "new_tx event dropped: {e}");
+                        }
                     }
                     Err(e) => {
                         tracing::trace!(
