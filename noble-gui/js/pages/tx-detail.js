@@ -2,7 +2,7 @@
  * NOBLE Dashboard — Transaction Detail Page
  */
 
-import { formatTimestamp, formatFee, formatScheme, bytesToHex, truncateHash } from '../utils.js';
+import { formatTimestamp, formatFee, formatNumber, formatScheme, bytesToHex, truncateHash } from '../utils.js';
 import { renderMetadataWithSchema } from '../schema-parser.js';
 
 export function init(root, ctx) {
@@ -47,14 +47,12 @@ export function init(root, ctx) {
     const txId = receipt.tx_id || tx.tx_id || txid;
     const isZeroChecksum = /^0+$/.test(tx.checksum);
 
-    // ── Checksum hero block ──
+    // ── Checksum hero block (only for notarization transactions) ──
     const heroEl = document.createElement('div');
     heroEl.className = 'checksum-hero';
     if (isZeroChecksum) {
-      heroEl.innerHTML = `
-        <div class="checksum-hero__label" style="opacity:0.5">Document Checksum</div>
-        <div class="checksum-hero__muted">No document checksum (non-notarization transaction)</div>
-      `;
+      // Non-notarization: skip the hero entirely — show type badge instead.
+      heroEl.style.display = 'none';
     } else {
       heroEl.innerHTML = `
         <div class="checksum-hero__label">Document Checksum</div>
@@ -79,8 +77,9 @@ export function init(root, ctx) {
     }
 
     // ── Version badge (from metadata) ──
-    const versionMeta = tx.metadata.find(m => m.key === 'doc:version');
-    const prevChecksumMeta = tx.metadata.find(m => m.key === 'doc:prev_checksum');
+    const metadata = tx.metadata || [];
+    const versionMeta = metadata.find(m => m.key === 'doc:version');
+    const prevChecksumMeta = metadata.find(m => m.key === 'doc:prev_checksum');
     if (versionMeta || prevChecksumMeta) {
       const versionEl = document.createElement('div');
       versionEl.className = 'checksum-hero__version';
