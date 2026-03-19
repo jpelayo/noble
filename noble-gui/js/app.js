@@ -474,6 +474,9 @@ ws.subscribe('peerUpdates', (data) => {
   rpc.call('noble_getNetworkInfo').then(info => {
     state.peerCount = info.peer_count;
   }).catch(() => {});
+  // Refresh alignment bar on peer connect/disconnect — peer count change
+  // can transition between Isolated ↔ Aligned without a phase change.
+  updateForkStatus();
   // Accumulate connectivity events globally so they're never lost.
   // Filter out non-connectivity events (status updates belong in Protocol Activity, not here).
   const _connEvents = new Set(['disconnected', 'banned', 'rejected']);

@@ -1677,6 +1677,15 @@ export class MockRpcClient {
           ],
         };
 
+      case 'noble_checkChainIntegrity':
+        return {
+          heights_checked: 44,
+          is_clean: true,
+          findings_count: 0,
+          first_corrupt_height: null,
+          findings: [],
+        };
+
       case 'noble_getStorageConfig':
         return this.#storageConfig || {
           data_dir: '~/.noble/data',

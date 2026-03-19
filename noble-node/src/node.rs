@@ -1190,6 +1190,42 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             );
         }
 
+        // --- Boot integrity check (last 1000 blocks) ---
+        {
+            let tip = self.chain_height();
+            if tip > 0 {
+                let scan_count = tip.min(1000) + 1;
+                tracing::info!(task = "integrity", "boot integrity check ({scan_count} blocks)");
+                let report = self.verify_recent_blocks(scan_count);
+                if report.is_clean() {
+                    tracing::info!(
+                        task = "integrity",
+                        "chain integrity OK — {} blocks verified",
+                        report.heights_checked,
+                    );
+                } else {
+                    tracing::error!(
+                        task = "integrity",
+                        "CHAIN INTEGRITY FAILED — {} finding(s), first at height {}",
+                        report.findings.len(),
+                        report.first_corrupt_height.unwrap_or(0),
+                    );
+                    for f in &report.findings {
+                        tracing::error!(
+                            task = "integrity",
+                            "  height {}: {:?} — {}",
+                            f.height, f.kind, f.detail,
+                        );
+                    }
+                    self.startup_events.push(serde_json::json!({
+                        "event": "integrity_failure",
+                        "findings": report.findings.len(),
+                        "first_corrupt_height": report.first_corrupt_height,
+                    }));
+                }
+            }
+        }
+
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone(), self.mempool.clone()));
@@ -2184,11 +2220,18 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             // arm a 3-second delayed re-announce.  The immediate publish
                             // may be lost if the gossipsub mesh hasn't formed yet (needs
                             // a heartbeat).  The delayed re-publish ensures delivery.
+                            let is_peer_disconnected = matches!(net_event, NetworkEvent::PeerDisconnected { .. });
                             if is_peer_connected {
                                 self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
                                 initial_announce_sent = true;
                                 announce_delay.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(3));
                                 announce_delay_armed = true;
+                            }
+                            // Recompute alignment immediately on peer connect/disconnect
+                            // so the GUI transitions out of ISOLATED without waiting for
+                            // the next 5-second tick.
+                            if is_peer_connected || is_peer_disconnected {
+                                self.healing.compute_alignment();
                             }
                         }
                         None => {
@@ -3322,6 +3365,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             let mut engine = self.consensus.write();
                             engine.update_tip(prev_tip.0, prev_tip_hash);
                             continue;
+                        }
+                    }
+
+                    // Post-commit integrity spot-check (single block).
+                    {
+                        let storage = self.storage.read();
+                        let spot = noble_storage::verify_chain_integrity(
+                            &*storage, self.get_chain_id(),
+                            block.header.height, block.header.height,
+                        );
+                        if !spot.is_clean() {
+                            tracing::error!(
+                                task = "integrity",
+                                "POST-COMMIT INTEGRITY FAILURE at height {}: {}",
+                                block.header.height,
+                                spot.findings.iter()
+                                    .map(|f| format!("{:?}: {}", f.kind, f.detail))
+                                    .collect::<Vec<_>>()
+                                    .join("; "),
+                            );
                         }
                     }
 

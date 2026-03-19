@@ -53,12 +53,19 @@ export function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-// Fee is in atomic units; 1 NOBLE = 1,000,000 atomic units
+// Amount in atomic units (groats); 1 NOBLE = 100,000,000 groats (8 decimals).
+// Always show all 8 decimal places — truncation hides fees and misleads users.
 export function formatFee(atomicUnits) {
+  if (atomicUnits === 0) return '0 NOBLE';
   const noble = atomicUnits / 100_000_000;
-  if (noble >= 1) return `${noble.toFixed(4)} NOBLE`;
-  if (noble >= 0.001) return `${noble.toFixed(6)} NOBLE`;
-  return `${atomicUnits} atomic`;
+  // Strip trailing zeros but keep at least 2 decimals for readability.
+  const full = noble.toFixed(8);
+  const trimmed = full.replace(/0+$/, '').replace(/\.$/, '.00');
+  // Ensure at least 2 decimal places.
+  const dot = trimmed.indexOf('.');
+  const decimals = dot >= 0 ? trimmed.length - dot - 1 : 0;
+  const display = decimals < 2 ? noble.toFixed(2) : trimmed;
+  return `${display} NOBLE`;
 }
 
 export function formatScheme(schemeId) {

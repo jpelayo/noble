@@ -1514,29 +1514,33 @@ body {
     font-size: 2.5rem;
   }
 
-  /* ── Modal: near full-screen on mobile ── */
-  /* Override height to 100lvh (large viewport) so the overlay does NOT
-     shrink when the iOS virtual keyboard opens.  Without this,
-     position:fixed + inset:0 tracks the visual viewport, the overlay
-     shrinks, and the flex-end modal rides up — displacing the input. */
+  /* ── Modal: adaptive to keyboard on mobile ── */
+  /* Let inset:0 track the visual viewport naturally. When the keyboard
+     opens, the overlay shrinks and the panel adapts via dvh + scroll.
+     No fighting the viewport — design for the space that's left. */
   .modal-overlay {
     align-items: flex-end;
-    height: 100lvh;
-    height: 100vh; /* fallback for browsers without lvh */
-    height: 100lvh;
   }
 
   .modal-panel {
     width: 100%;
     max-width: 100%;
-    max-height: 92vh;
-    max-height: 92dvh;
+    max-height: 96vh;
+    max-height: 96dvh;
     border-radius: var(--radius) var(--radius) 0 0;
     border-bottom: none;
   }
 
   .modal-panel-wizard {
     max-width: 100%;
+  }
+
+  .modal-header {
+    padding: 10px 12px;
+  }
+
+  .modal-body {
+    padding: 10px 12px;
   }
 
   /* ── Contact avatar: slightly larger ── */
@@ -1645,6 +1649,94 @@ body {
   .modal-panel {
     max-height: 95vh;
     max-height: 95dvh;
+  }
+}
+
+/* ── Short viewport (keyboard visible on mobile) ── */
+@media (max-height: 500px) {
+  .modal-overlay {
+    align-items: flex-start;
+  }
+
+  .modal-panel {
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+
+  .modal-header {
+    padding: 6px 10px;
+    font-size: 0.8rem;
+  }
+
+  .modal-body {
+    padding: 6px 10px;
+    gap: 4px;
+  }
+
+  .modal-body label {
+    margin-bottom: 2px;
+    font-size: 0.8rem;
+  }
+
+  .modal-body .form-input {
+    height: 36px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+  }
+
+  .modal-footer {
+    padding: 6px 10px;
+    gap: 6px;
+  }
+
+  .modal-footer .btn {
+    padding: 8px 12px;
+    font-size: 0.85rem;
+  }
+
+  .wizard-steps {
+    margin: 2px 0;
+    padding: 2px 10px !important;
+    gap: 4px;
+  }
+
+  .wizard-nav {
+    padding: 4px 10px 6px !important;
+  }
+
+  .wizard-nav .btn {
+    padding: 8px 12px;
+    font-size: 0.85rem;
+  }
+
+  .form-group {
+    margin-bottom: 6px;
+  }
+
+  .form-group label {
+    margin-bottom: 2px;
+    font-size: 0.8rem;
+  }
+
+  .form-input {
+    height: 36px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+  }
+
+  .form-hint {
+    margin-top: 2px;
+    font-size: 0.75rem;
+  }
+
+  .fee-option {
+    padding: 6px 8px;
+  }
+
+  .modal-close-btn {
+    width: 24px;
+    height: 24px;
   }
 }
 

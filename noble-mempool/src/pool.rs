@@ -411,7 +411,8 @@ impl Mempool {
             // Check for in-mempool double-spend
             if self.spent_by_mempool.contains(outpoint) {
                 return Err(MempoolError::StructuralValidation(
-                    format!("input {}:{} already spent by mempool tx", outpoint.txid, outpoint.vout),
+                    "Double spend detected. One of the inputs in this transaction is already \
+                    being used by another pending transaction in the mempool.".into(),
                 ));
             }
 
@@ -420,12 +421,17 @@ impl Mempool {
                 Some((value, is_coinbase, creation_height)) => {
                     // Coinbase maturity check
                     if is_coinbase && chain_height < creation_height + noble_core::COINBASE_MATURITY {
+                        let blocks_remaining = (creation_height + noble_core::COINBASE_MATURITY).saturating_sub(chain_height);
                         return Err(MempoolError::StructuralValidation(
                             format!(
-                                "coinbase UTXO {}:{} not mature (created at {}, current {}, need {})",
-                                outpoint.txid, outpoint.vout,
-                                creation_height, chain_height,
-                                creation_height + noble_core::COINBASE_MATURITY
+                                "Block reward not yet spendable. Mining rewards require {} confirmations \
+                                before they can be used. This reward was earned at block {} and will be \
+                                available at block {} ({} block{} remaining).",
+                                noble_core::COINBASE_MATURITY,
+                                creation_height,
+                                creation_height + noble_core::COINBASE_MATURITY,
+                                blocks_remaining,
+                                if blocks_remaining == 1 { "" } else { "s" },
                             ),
                         ));
                     }
@@ -433,7 +439,8 @@ impl Mempool {
                 }
                 None => {
                     return Err(MempoolError::StructuralValidation(
-                        format!("input {}:{} references unknown or spent UTXO", outpoint.txid, outpoint.vout),
+                        "Input references a coin that does not exist or has already been spent. \
+                        This usually means the funds were used in another transaction.".into(),
                     ));
                 }
             }
@@ -443,7 +450,10 @@ impl Mempool {
         let output_value_sum = tx.total_output_value();
         let fee = input_value_sum.checked_sub(output_value_sum).ok_or_else(|| {
             MempoolError::StructuralValidation(format!(
-                "outputs ({output_value_sum}) exceed inputs ({input_value_sum})"
+                "Insufficient funds. The transaction sends {} groats but only {} groats are available \
+                in the selected inputs (short by {} groats).",
+                output_value_sum, input_value_sum,
+                output_value_sum.saturating_sub(input_value_sum),
             ))
         })?;
 
@@ -451,9 +461,10 @@ impl Mempool {
         // Step 6b: Transaction expiry check.
         if let Some(expires_at) = tx.expires_at {
             if current_time > expires_at {
-                return Err(MempoolError::StructuralValidation(format!(
-                    "transaction expired: expires_at={expires_at}, now={current_time}"
-                )));
+                return Err(MempoolError::StructuralValidation(
+                    "Transaction has expired. It was valid until a specific time that has now passed. \
+                    Please create a new transaction.".into(),
+                ));
             }
         }
 
@@ -1209,7 +1220,7 @@ mod tests {
         let tx = make_signed_transfer_with_outpoint(&sk, &pk, &recip, outpoint, 500_000, 499_000);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &EmptyUtxoLookup, 0);
         assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("unknown or spent UTXO")),
+            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("does not exist or has already been spent")),
             "expected unknown UTXO error, got {:?}",
             result
         );
@@ -1244,7 +1255,7 @@ mod tests {
             .unwrap();
         let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
         assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("already spent by mempool")),
+            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("Double spend")),
             "double spend should be rejected, got {:?}",
             result
         );

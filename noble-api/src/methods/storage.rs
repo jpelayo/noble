@@ -43,6 +43,16 @@ pub trait StorageApi {
         keep_blocks: u64,
         max_db_size_gb: u64,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
+
+    /// Run a chain integrity check over a range of blocks.
+    /// Verifies block hashes, merkle roots, prev_hash linkage, and height continuity.
+    /// Defaults to the full chain if no range is specified. Capped at 10,000 blocks per call.
+    #[method(name = "checkChainIntegrity")]
+    async fn check_chain_integrity(
+        &self,
+        from_height: Option<u64>,
+        to_height: Option<u64>,
+    ) -> Result<ChainIntegrityResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -176,6 +186,47 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
         Ok(SetConfigValueResponse {
             success: true,
             restart_required: true,
+        })
+    }
+
+    async fn check_chain_integrity(
+        &self,
+        from_height: Option<u64>,
+        to_height: Option<u64>,
+    ) -> Result<ChainIntegrityResponse, ErrorObjectOwned> {
+        let storage = self.storage.read();
+        let tip = storage
+            .get_chain_tip()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map(|t| t.height)
+            .unwrap_or(0);
+
+        let start = from_height.unwrap_or(0);
+        let end = to_height.unwrap_or(tip);
+
+        if end < start {
+            return Err(ApiError::InvalidParam("to_height must be >= from_height".into()).into());
+        }
+        let range = end.saturating_sub(start) + 1;
+        if range > 10_000 {
+            return Err(ApiError::InvalidParam(
+                format!("range too large ({range} blocks, max 10,000). Use from_height/to_height to paginate."),
+            ).into());
+        }
+
+        let chain_id = self.chain_id.load(std::sync::atomic::Ordering::Relaxed);
+        let report = noble_storage::verify_chain_integrity(&*storage, chain_id, start, end);
+
+        Ok(ChainIntegrityResponse {
+            heights_checked: report.heights_checked,
+            is_clean: report.is_clean(),
+            findings_count: report.findings.len(),
+            first_corrupt_height: report.first_corrupt_height,
+            findings: report.findings.iter().map(|f| ChainIntegrityFinding {
+                height: f.height,
+                kind: format!("{:?}", f.kind),
+                detail: f.detail.clone(),
+            }).collect(),
         })
     }
 }

@@ -113,7 +113,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             let mut mempool = self.mempool.lock();
             mempool
                 .admit_with_size(&tx, now, &chain_lookup, &utxo_lookup, chain_height, Some(tx_bytes.len()))
-                .map_err(|e| ApiError::TxRejected(e.to_string()))?
+                .map_err(|e| -> ErrorObjectOwned { ApiError::from(e).into() })?
         };
 
         // Broadcast to network (best-effort, log if channel is full).
@@ -136,21 +136,46 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
     ) -> Result<TransactionResponse, ErrorObjectOwned> {
         let tx_id_hash = parse_hash(&tx_id)?;
 
-        // Check mempool first
+        // Check mempool first — fee is pre-computed in the mempool entry.
         {
             let mempool = self.mempool.lock();
             if let Some(entry) = mempool.get(&tx_id_hash) {
-                return Ok(tx_to_response(&entry.tx, &tx_id));
+                let mut resp = tx_to_response(&entry.tx, &tx_id);
+                resp.fee = Some(entry.fee);
+                return Ok(resp);
             }
         }
 
-        // Check on-chain storage
+        // Check on-chain storage — compute fee from UTXO inputs.
         let storage = self.storage.read();
         let tx = storage
             .get_transaction(&tx_id_hash)
             .map_err(ApiError::from)?;
 
-        Ok(tx_to_response(&tx, &tx_id))
+        let mut resp = tx_to_response(&tx, &tx_id);
+        // Coinbase txs have no fee.
+        if !tx.is_coinbase() {
+            // Look up input values from the previous transactions' outputs.
+            // UTXOs are already spent, so we trace back to the source tx.
+            let mut input_total: u64 = 0;
+            let mut all_resolved = true;
+            for inp in &tx.inputs {
+                match storage.get_transaction(&inp.prev_output.txid) {
+                    Ok(prev_tx) => {
+                        if let Some(out) = prev_tx.outputs.get(inp.prev_output.vout as usize) {
+                            input_total += out.value;
+                        } else {
+                            all_resolved = false;
+                        }
+                    }
+                    Err(_) => { all_resolved = false; }
+                }
+            }
+            if all_resolved && input_total > 0 {
+                resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
+            }
+        }
+        Ok(resp)
     }
 
     async fn get_transaction_status(

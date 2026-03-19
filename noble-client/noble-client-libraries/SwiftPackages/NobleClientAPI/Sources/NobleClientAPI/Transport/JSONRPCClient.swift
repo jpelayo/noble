@@ -35,7 +35,20 @@ public struct JSONRPCError: Decodable, Sendable, LocalizedError {
         case -32601:          return "NE-703" // Method not found
         case -32602:          return "NE-702" // Invalid params
         case -32603:          return "NE-704" // Internal error
-        case -32000:          return "NE-603" // TX rejected
+        case -32000:          return "NE-603" // TX rejected (generic)
+        case -32020:          return "NE-610" // TX too large
+        case -32021:          return "NE-611" // TX duplicate
+        case -32022:          return "NE-612" // TX bad version
+        case -32023:          return "NE-613" // TX structural validation
+        case -32024:          return "NE-614" // TX bad signature
+        case -32025:          return "NE-615" // TX fee too low
+        case -32026:          return "NE-616" // TX sender rate limit
+        case -32027:          return "NE-617" // TX mempool full
+        case -32028:          return "NE-618" // TX immature coinbase
+        case -32029:          return "NE-619" // TX double spend
+        case -32030:          return "NE-620" // TX missing input (spent/unknown)
+        case -32031:          return "NE-621" // TX insufficient input value
+        case -32032:          return "NE-622" // TX expired
         case -32004:          return "NE-404" // Auth required → notConnected
         case -32007:          return "NE-306" // Wallet locked → noPrivateKey
         case -32009:          return "NE-605" // Insufficient balance

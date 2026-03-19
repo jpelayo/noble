@@ -124,6 +124,34 @@ public enum NE {
     /// Fee estimation failed.
     public static let feeEstimationFailed   = "NE-609"
 
+    // Granular transaction rejection codes (server-side -320xx)
+    /// Transaction exceeds maximum size.
+    public static let txTooLarge            = "NE-610"
+    /// Transaction already exists in mempool or on-chain.
+    public static let txDuplicate           = "NE-611"
+    /// Unrecognized protocol version.
+    public static let txBadVersion          = "NE-612"
+    /// Structural validation failed (malformed fields, metadata, etc.).
+    public static let txStructural          = "NE-613"
+    /// Signature verification failed.
+    public static let txBadSignature        = "NE-614"
+    /// Fee too low — below minimum relay fee rate.
+    public static let txFeeTooLow           = "NE-615"
+    /// Too many pending transactions from this sender.
+    public static let txSenderLimit         = "NE-616"
+    /// Mempool is full — try again later or increase fee.
+    public static let txMempoolFull         = "NE-617"
+    /// Block reward not yet spendable — needs more confirmations.
+    public static let txImmatureCoinbase    = "NE-618"
+    /// Double spend — input already used by another pending transaction.
+    public static let txDoubleSpend         = "NE-619"
+    /// Input references a coin that doesn't exist or was already spent.
+    public static let txMissingInput        = "NE-620"
+    /// Insufficient input value — outputs exceed available inputs.
+    public static let txInsufficientInput   = "NE-621"
+    /// Transaction has expired.
+    public static let txExpired             = "NE-622"
+
     // MARK: - 7xx JSON-RPC Server Errors
 
     /// JSON-RPC server returned an application error.

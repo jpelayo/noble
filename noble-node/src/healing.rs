@@ -2230,6 +2230,26 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             }
         }
 
+        // Post-commit integrity spot-check (single block).
+        {
+            let storage = self.storage.read();
+            let spot = noble_storage::verify_chain_integrity(
+                &*storage, chain_id,
+                block.header.height, block.header.height,
+            );
+            if !spot.is_clean() {
+                tracing::error!(
+                    task = "integrity",
+                    "SYNC-IMPORT INTEGRITY FAILURE at height {}: {}",
+                    block.header.height,
+                    spot.findings.iter()
+                        .map(|f| format!("{:?}: {}", f.kind, f.detail))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
+        }
+
         // Update consensus tip.
         self.consensus.write().update_tip_with_header(block.header.clone());
 

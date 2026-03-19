@@ -344,6 +344,15 @@ export function init(root, ctx) {
             <p style="font-size:var(--font-size-xs);color:var(--text-muted)">None discovered yet</p>
           </div>
         </div>
+
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Chain Integrity</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Verify block hashes, merkle roots, and chain linkage across the entire blockchain.
+          </p>
+          <button class="btn btn-secondary btn-sm" id="s-integrity-check">Run Integrity Check</button>
+          <div id="s-integrity-result" style="margin-top:var(--gap-sm)"></div>
+        </div>
       </div>
     </div>
 
@@ -1704,6 +1713,36 @@ export function init(root, ctx) {
       chainModalReset.disabled = false;
     }
   });
+
+  // ── Chain integrity check ──
+  const integrityBtn = root.querySelector('#s-integrity-check');
+  const integrityResult = root.querySelector('#s-integrity-result');
+  if (integrityBtn) {
+    integrityBtn.addEventListener('click', async () => {
+      integrityBtn.disabled = true;
+      integrityResult.innerHTML = '<span style="color:var(--text-muted)">Checking...</span>';
+      try {
+        const r = await rpc.call('noble_checkChainIntegrity');
+        if (r.is_clean) {
+          integrityResult.innerHTML = `<span class="badge confirmed" style="font-size:var(--font-size-sm)">Chain OK</span>
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.heights_checked} blocks verified</span>`;
+        } else {
+          let html = `<span class="badge" style="background:var(--error);color:#fff;font-size:var(--font-size-sm)">Integrity Failure</span>
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.findings_count} finding(s), first at block ${r.first_corrupt_height}</span>`;
+          html += '<div style="margin-top:var(--gap-sm);max-height:200px;overflow-y:auto">';
+          for (const f of r.findings) {
+            html += `<div style="font-size:var(--font-size-xs);color:var(--error);padding:2px 0">Block ${f.height}: <strong>${f.kind}</strong> — ${f.detail}</div>`;
+          }
+          html += '</div>';
+          integrityResult.innerHTML = html;
+        }
+      } catch (e) {
+        integrityResult.innerHTML = `<span style="color:var(--error);font-size:var(--font-size-xs)">${e.message || 'Check failed'}</span>`;
+      } finally {
+        integrityBtn.disabled = false;
+      }
+    });
+  }
 
   // WS reconnect: refresh fork + discovered chains + settings
   function onWsReconnect() { loadForks(); loadForkResolution(); loadCheckpoints(); loadDiscoveredChains(); loadSettings(); }

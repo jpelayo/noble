@@ -143,6 +143,7 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         checksum: hash_to_hex(&tx.checksum),
         timestamp: tx.timestamp,
         total_output: tx.total_output_value(),
+        fee: None, // Set by caller when UTXO data is available
         inputs: tx.inputs.iter().map(|i| TxInputResponse {
             txid: hash_to_hex(&i.prev_output.txid),
             vout: i.prev_output.vout,
@@ -230,6 +231,10 @@ pub struct TransactionResponse {
     pub timestamp: u64,
     /// Total output value.
     pub total_output: u64,
+    /// Implicit fee: sum(input UTXO values) - sum(output values).
+    /// `None` for coinbase transactions or if input UTXOs are unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee: Option<u64>,
     /// Inputs: references to spent UTXOs.
     pub inputs: Vec<TxInputResponse>,
     /// Outputs: new UTXOs created.
@@ -898,6 +903,24 @@ pub struct VoteTalliesResponse {
 pub struct BanReasonResponse {
     pub category: String,
     pub subject: String,
+}
+
+/// Response for `noble_checkChainIntegrity`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainIntegrityResponse {
+    pub heights_checked: u64,
+    pub is_clean: bool,
+    pub findings_count: usize,
+    pub first_corrupt_height: Option<u64>,
+    pub findings: Vec<ChainIntegrityFinding>,
+}
+
+/// A single finding from the chain integrity check.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainIntegrityFinding {
+    pub height: u64,
+    pub kind: String,
+    pub detail: String,
 }
 
 /// A single cycle history entry in the getCycleHistory response.

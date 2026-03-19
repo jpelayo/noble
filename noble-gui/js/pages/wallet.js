@@ -575,12 +575,14 @@ export function init(root, ctx) {
 // ── Helpers ──
 
 function formatNoble(atomicUnits) {
-  const noble = atomicUnits / 100_000_000;
-  if (noble >= 100) return `${noble.toFixed(2)} NOBLE`;
-  if (noble >= 1) return `${noble.toFixed(4)} NOBLE`;
-  if (noble >= 0.001) return `${noble.toFixed(6)} NOBLE`;
   if (atomicUnits === 0) return '0.00 NOBLE';
-  return `${atomicUnits} atomic`;
+  const noble = atomicUnits / 100_000_000;
+  const full = noble.toFixed(8);
+  const trimmed = full.replace(/0+$/, '').replace(/\.$/, '.00');
+  const dot = trimmed.indexOf('.');
+  const decimals = dot >= 0 ? trimmed.length - dot - 1 : 0;
+  const display = decimals < 2 ? noble.toFixed(2) : trimmed;
+  return `${display} NOBLE`;
 }
 
 function typeIcon(type) {

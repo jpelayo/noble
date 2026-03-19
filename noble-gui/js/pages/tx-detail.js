@@ -145,8 +145,8 @@ export function init(root, ctx) {
       <dt>Transaction ID</dt><dd class="mono" style="word-break:break-all">${esc(txId)}</dd>
       <dt>Type</dt><dd>${tx.tx_type != null ? formatTxType(tx.tx_type) : (tx.version || '&mdash;')}</dd>
       <dt>Timestamp</dt><dd>${formatTimestamp(tx.timestamp)}</dd>
-      <dt>Total Output</dt><dd>${formatFee(tx.total_output)} (${tx.total_output} atomic)</dd>
-      <dt>Fee</dt><dd title="Fee is implicit in UTXO model (sum of inputs - sum of outputs)">&mdash;</dd>
+      <dt>Total Output</dt><dd>${formatFee(tx.total_output)} (${formatNumber(tx.total_output)} groats)</dd>
+      <dt>Fee</dt><dd>${tx.fee != null ? `${formatFee(tx.fee)} (${formatNumber(tx.fee)} groats)` : '&mdash;'}</dd>
       ${(tx.gateway_address || null) ? `
       <dt>Gateway</dt><dd class="mono" title="This node receives 50% of the fee">${truncateHash(tx.gateway_address, 12)}</dd>
       ` : ''}
