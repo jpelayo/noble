@@ -286,12 +286,34 @@ impl Mempool {
         utxos: &U,
         chain_height: u64,
     ) -> Result<Hash256, MempoolError> {
+        self.admit_with_size(tx, current_time, chain, utxos, chain_height, None)
+    }
+
+    /// Admit a transaction with an explicit CBOR byte size.
+    ///
+    /// When `submitted_size` is `Some(len)`, fee validation uses that length
+    /// instead of re-encoding via serde. This ensures the fee rate check
+    /// matches the exact bytes the client produced — no encoder divergence.
+    pub fn admit_with_size<C: ChainLookup, U: UtxoLookup>(
+        &mut self,
+        tx: &Transaction,
+        current_time: u64,
+        chain: &C,
+        utxos: &U,
+        chain_height: u64,
+        submitted_size: Option<usize>,
+    ) -> Result<Hash256, MempoolError> {
         // Step 1: Size check
+        // Uses the submitted byte count when available (RPC path), or the
+        // canonical C encoder size (gossip/internal path). Both produce the
+        // same CBOR encoding — noble-tx-core is the single source of truth.
         tracing::trace!("mempool step 1: size check");
-        let tx_bytes = tx
-            .to_cbor()
-            .map_err(|e| MempoolError::Internal(e.to_string()))?;
-        let size_bytes = tx_bytes.len();
+        let size_bytes = if let Some(sz) = submitted_size {
+            sz
+        } else {
+            noble_tx_core::transaction_cbor_size(tx)
+                .map_err(|e| MempoolError::Internal(format!("C encoder size: {e}")))?
+        };
         if size_bytes > MAX_TX_SIZE {
             return Err(MempoolError::TxTooLarge {
                 size: size_bytes,

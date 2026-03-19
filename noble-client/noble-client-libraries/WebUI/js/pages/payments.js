@@ -433,10 +433,26 @@ export function init(root, ctx) {
                 loading.style.color = 'var(--text-muted)';
                 el.appendChild(loading);
                 Bridge.call('noble_api', 'estimateFee').then(f => {
-                    feeData = f;
+                    // Store fee rates (groats/byte). The C library computes the
+                    // exact fee from the actual transaction size via two-pass encoding.
+                    const minRate = f.lowFeeRate || f.networkMinFeeRate || f.low_fee_rate || f.network_min_fee_rate || 1;
+                    const recRate = f.recommendedFeeRate || f.networkMedianFeeRate || f.recommended_fee_rate || f.network_median_fee_rate || 2;
+                    const highRate = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+                    // Display estimates (800 bytes typical transfer) for the UI.
+                    // The actual fee will be computed exactly by noble-tx-core.
+                    feeData = {
+                        minFee: minRate * 800,
+                        recommendedFee: recRate * 800,
+                        highPriorityFee: highRate * 800,
+                        // Store rates so submitTransaction can pass fee_rate to the signer.
+                        minFeeRate: minRate,
+                        recommendedFeeRate: recRate,
+                        highPriorityFeeRate: highRate,
+                    };
                     wizard.renderStep();
                 }).catch(() => {
-                    feeData = { minFee: 1 * 300, recommendedFee: 2 * 300, highPriorityFee: 5 * 300 };
+                    feeData = { minFee: 800, recommendedFee: 1600, highPriorityFee: 4000,
+                                minFeeRate: 1, recommendedFeeRate: 2, highPriorityFeeRate: 5 };
                     wizard.renderStep();
                 });
                 return;
@@ -496,8 +512,9 @@ export function init(root, ctx) {
                     value: u.value,
                 }));
 
+                const feeRate = getSelectedFeeRate();
                 const signResult = await Bridge.call('noble_crypto', 'signTransfer', {
-                    recipient, amount: amountAtomic, fee, utxos
+                    recipient, amount: amountAtomic, fee, fee_rate: feeRate, utxos
                 });
                 const submit = await Bridge.call('noble_api', 'submitTransaction', { txHex: signResult.txHex });
                 submitResult = submit;
@@ -545,6 +562,13 @@ export function init(root, ctx) {
             if (feeLevel === 'min') return feeData.minFee;
             if (feeLevel === 'high') return feeData.highPriorityFee;
             return feeData.recommendedFee;
+        }
+
+        function getSelectedFeeRate() {
+            if (!feeData) return 2;
+            if (feeLevel === 'min') return feeData.minFeeRate || 1;
+            if (feeLevel === 'high') return feeData.highPriorityFeeRate || 5;
+            return feeData.recommendedFeeRate || 2;
         }
 
         function isValidAmount() {

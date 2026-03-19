@@ -70,14 +70,17 @@ struct MainView: View {
             .background(Color(.systemBackground))
         }
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { navigateTo(.settings) } label: {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Settings")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 toolbarStatus
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button { navigateTo(.settings) } label: {
-                        Label("Settings", systemImage: "gearshape")
-                    }
                     Button { navigateTo(.drafts) } label: {
                         Label("Drafts", systemImage: "tray")
                     }
@@ -101,16 +104,13 @@ struct MainView: View {
                 )
             }
         } label: {
-            VStack(spacing: 2) {
-                Image(systemName: icon)
-                    .font(.system(size: 18))
-                Text(title)
-                    .font(.system(size: 10))
-            }
-            .foregroundStyle(selectedTab == route ? Color.accentColor : Color(.secondaryLabel))
-            .frame(maxWidth: .infinity)
+            Image(systemName: icon)
+                .font(.system(size: 22))
+                .foregroundStyle(selectedTab == route ? Color.accentColor : Color(.secondaryLabel))
+                .frame(maxWidth: .infinity, minHeight: 32)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 
     // MARK: - iPad Layout (NavigationSplitView)

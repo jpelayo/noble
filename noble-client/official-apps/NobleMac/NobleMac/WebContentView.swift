@@ -42,12 +42,18 @@ final class WebUISchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         let mimeType = Self.mimeType(for: fileURL.pathExtension)
-        let response = URLResponse(
+        let headers: [String: String] = [
+            "Content-Type": mimeType + (mimeType.hasPrefix("text/") || mimeType.contains("javascript") ? "; charset=utf-8" : ""),
+            "Content-Length": "\(data.count)",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        ]
+        let response = HTTPURLResponse(
             url: requestURL,
-            mimeType: mimeType,
-            expectedContentLength: data.count,
-            textEncodingName: mimeType.hasPrefix("text/") || mimeType.contains("javascript") ? "utf-8" : nil
-        )
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
         urlSchemeTask.didReceive(response)
         urlSchemeTask.didReceive(data)
         urlSchemeTask.didFinish()
@@ -157,6 +163,7 @@ struct WebContentView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
 
         // Register the custom URL scheme handler for bundled WebUI files
         if let webUIDir = Bundle.main.url(forResource: "WebUI", withExtension: nil)

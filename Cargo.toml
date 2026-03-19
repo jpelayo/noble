@@ -17,6 +17,7 @@ members = [
     "noble-tool",
     "noble-faucet",
     "noble-wire",
+    "noble-client/noble-client-libraries/noble-tx-core",
 ]
 resolver = "2"
 
@@ -40,6 +41,7 @@ noble-network = { path = "noble-network" }
 noble-api = { path = "noble-api" }
 noble-wallet = { path = "noble-wallet" }
 noble-test-utils = { path = "noble-test-utils" }
+noble-tx-core = { path = "noble-client/noble-client-libraries/noble-tx-core" }
 
 # External dependencies (added as implementation progresses)
 serde = { version = "1", features = ["derive"] }

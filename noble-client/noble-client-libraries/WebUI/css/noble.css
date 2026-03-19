@@ -125,8 +125,6 @@ body {
   font-weight: 600;
   letter-spacing: 0.03em;
   user-select: all;
-  position: sticky;
-  top: 0;
   z-index: 100;
 }
 .chain-bar[hidden] { display: none; }
@@ -633,12 +631,17 @@ input, textarea, select, button {
 
 .form-input {
   width: 100%;
-  padding: 12px;
+  height: 44px;
+  padding: 11px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-primary);
+  font-family: inherit;
   font-size: 16px;
+  line-height: 20px;
+  box-sizing: border-box;
+  display: block;
   -webkit-appearance: none;
   appearance: none;
 }
@@ -1115,12 +1118,6 @@ input, textarea, select, button {
   max-height: 80dvh;
   display: flex;
   flex-direction: column;
-  transform: translateY(12px);
-  transition: transform 0.2s ease;
-}
-
-.modal-overlay.visible .modal-panel {
-  transform: translateY(0);
 }
 
 .modal-panel-wizard {

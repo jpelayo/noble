@@ -16,6 +16,7 @@ public protocol TransactionSigning: Sendable {
         to: NobleAddress,
         amount: NobleAmount,
         fee: NobleAmount,
+        feeRate: UInt64,
         utxos: [UtxoOutpoint],
         changeAddress: [UInt8],
         privateKey: Data,

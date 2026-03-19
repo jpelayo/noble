@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import SwiftUI
+import WebKit
 
 @main
 struct NobleMacApp: App {
     @State private var appState = AppState()
+
+    init() {
+        let dataStore = WKWebsiteDataStore.default()
+        let allTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        dataStore.removeData(ofTypes: allTypes, modifiedSince: .distantPast) { }
+        URLCache.shared.removeAllCachedResponses()
+    }
 
     var body: some Scene {
         WindowGroup {

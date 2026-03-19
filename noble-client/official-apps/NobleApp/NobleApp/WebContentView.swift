@@ -42,12 +42,18 @@ final class WebUISchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         let mimeType = Self.mimeType(for: fileURL.pathExtension)
-        let response = URLResponse(
+        let headers: [String: String] = [
+            "Content-Type": mimeType + (mimeType.hasPrefix("text/") || mimeType.contains("javascript") ? "; charset=utf-8" : ""),
+            "Content-Length": "\(data.count)",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        ]
+        let response = HTTPURLResponse(
             url: requestURL,
-            mimeType: mimeType,
-            expectedContentLength: data.count,
-            textEncodingName: mimeType.hasPrefix("text/") || mimeType.contains("javascript") ? "utf-8" : nil
-        )
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        )!
         urlSchemeTask.didReceive(response)
         urlSchemeTask.didReceive(data)
         urlSchemeTask.didFinish()
@@ -94,6 +100,10 @@ struct WebContentView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
 
+        // Non-persistent data store: never caches to disk.
+        // Ensures updated JS/CSS from new builds are always loaded fresh.
+        config.websiteDataStore = .nonPersistent()
+
         // Register the custom URL scheme handler for bundled WebUI files.
         // iOS bundles individual folder references (js/, css/, index.html) at the bundle root,
         // so we fall back to resourceURL if no WebUI directory exists.
@@ -121,7 +131,7 @@ struct WebContentView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
         webView.scrollView.bounces = false
 
         #if DEBUG

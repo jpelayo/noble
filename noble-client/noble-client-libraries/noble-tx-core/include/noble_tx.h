@@ -33,6 +33,12 @@ char *noble_sign_notarization(const char *params_json);
 // Output JSON: { "selected": [...], "total": <u64>, "change": <u64> }
 char *noble_select_utxos(const char *params_json);
 
+// Encode a pre-built transaction to CBOR (no signing).
+// Input JSON: full transaction fields including issuer_sig.
+// Output JSON: { "tx_hex": "<cbor_hex>", "size": <uint> }
+//         or:  { "error": "<message>" }
+char *noble_tx_encode(const char *tx_json);
+
 // Free a string returned by any noble_* function.
 void noble_free(char *ptr);
 

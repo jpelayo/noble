@@ -116,33 +116,66 @@ char *noble_sign_transfer(const char *params_json) {
     tx.outputs[0].value = amount;
     tx.output_count = 1;
 
-    // Compute total input value for change.
+    // Parse change address.
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
+    }
+
+    // Compute total input value.
     uint64_t input_total = 0;
     for (uint8_t i = 0; i < tx.input_count; i++) {
-        // Input values come from the utxos array.
         const json_value_t *u = &utxos->array.items[i];
         input_total += json_get_uint(u, "value");
     }
-    uint64_t change = input_total - amount - fee;
-    if (change > 0) {
-        noble_address_t change_addr;
-        if (parse_address_wire(change_hex, &change_addr) != 0) {
-            json_free(params);
-            return json_emit_error("invalid change_address");
-        }
-        tx.outputs[tx.output_count].address = change_addr;
-        tx.outputs[tx.output_count].value = change;
-        tx.output_count++;
-    }
 
-    // Checksum is zero for transfers.
+    tx.timestamp = json_get_uint(params, "timestamp");
     memset(tx.checksum, 0, HASH256_LEN);
 
-    // Timestamp = now (seconds since epoch).
-    // Note: caller should set this via param if needed; default to 0 for determinism.
-    tx.timestamp = json_get_uint(params, "timestamp");
+    // Two-pass fee computation: build once to get exact CBOR size,
+    // compute fee = size × fee_rate, then rebuild with correct fee.
+    // The caller passes fee as either an absolute amount or a fee_rate.
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
 
-    // Sign and encode.
+    if (fee_rate > 0) {
+        // Pass 1: build with fee=0 to measure exact tx size.
+        uint64_t change0 = input_total - amount;
+        if (change0 > 0) {
+            tx.outputs[1].address = change_addr;
+            tx.outputs[1].value = change0;
+            tx.output_count = 2;
+        } else {
+            tx.output_count = 1;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    // Final build with the correct fee.
+    // Guard against unsigned underflow: if fee exceeds available funds,
+    // return an error instead of wrapping to UINT64_MAX.
+    if (actual_fee > input_total - amount) {
+        json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+    uint64_t change = input_total - amount - actual_fee;
+    tx.outputs[0].value = amount;
+    if (change > 0) {
+        tx.outputs[1].address = change_addr;
+        tx.outputs[1].value = change;
+        tx.output_count = 2;
+    } else {
+        tx.output_count = 1;
+    }
+
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
     if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
@@ -322,6 +355,155 @@ char *noble_select_utxos(const char *params_json) {
 
     json_free(params);
     return out;
+}
+
+// ── noble_tx_encode ─────────────────────────────────────────────────────
+// Encode a pre-built transaction to CBOR without signing.
+// Input: JSON with all transaction fields including issuer_sig.
+// Output: { "tx_hex": "...", "size": N }
+
+char *noble_tx_encode(const char *tx_json) {
+    json_value_t *params = json_parse(tx_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+
+    tx.version = (uint16_t)json_get_uint(params, "version");
+    tx.tx_type = (uint8_t)json_get_uint(params, "tx_type");
+    tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Checksum
+    const char *checksum_hex = json_get_string(params, "checksum");
+    if (checksum_hex) {
+        hex_decode(checksum_hex, strlen(checksum_hex), tx.checksum, HASH256_LEN);
+    }
+
+    // Inputs
+    const json_value_t *inputs = json_get(params, "inputs");
+    if (inputs && inputs->type == JSON_ARRAY) {
+        size_t n = inputs->array.count;
+        if (n > MAX_INPUTS) n = MAX_INPUTS;
+        for (size_t i = 0; i < n; i++) {
+            const json_value_t *inp = &inputs->array.items[i];
+            const json_value_t *prev = json_get(inp, "prev_output");
+            if (prev) {
+                const char *txid_hex = json_get_string(prev, "txid");
+                if (txid_hex) {
+                    hex_decode(txid_hex, strlen(txid_hex),
+                               tx.inputs[i].prev_output.txid, HASH256_LEN);
+                }
+                tx.inputs[i].prev_output.vout = json_get_uint32(prev, "vout");
+            }
+        }
+        tx.input_count = (uint8_t)n;
+    }
+
+    // Outputs
+    const json_value_t *outputs = json_get(params, "outputs");
+    if (outputs && outputs->type == JSON_ARRAY) {
+        size_t n = outputs->array.count;
+        if (n > MAX_OUTPUTS) n = MAX_OUTPUTS;
+        for (size_t i = 0; i < n; i++) {
+            const json_value_t *out = &outputs->array.items[i];
+            tx.outputs[i].value = json_get_uint(out, "value");
+            const char *addr_hex = json_get_string(out, "address");
+            if (addr_hex) {
+                parse_address_wire(addr_hex, &tx.outputs[i].address);
+            }
+        }
+        tx.output_count = (uint8_t)n;
+    }
+
+    // Issuer signature
+    const json_value_t *sig = json_get(params, "issuer_sig");
+    if (sig) {
+        tx.issuer_sig.scheme_id = (uint8_t)json_get_uint(sig, "scheme_id");
+        const char *pk_hex = json_get_string(sig, "public_key");
+        if (pk_hex) {
+            tx.issuer_sig.public_key_len = (uint8_t)hex_decode(
+                pk_hex, strlen(pk_hex), tx.issuer_sig.public_key, PUBKEY_LEN);
+        }
+        const char *sig_hex = json_get_string(sig, "signature");
+        if (sig_hex) {
+            tx.issuer_sig.signature_len = (uint8_t)hex_decode(
+                sig_hex, strlen(sig_hex), tx.issuer_sig.signature, SIG_LEN);
+        }
+    }
+
+    // Metadata
+    const json_value_t *meta = json_get(params, "metadata");
+    if (meta && meta->type == JSON_ARRAY) {
+        size_t mc = meta->array.count;
+        if (mc > MAX_METADATA) mc = MAX_METADATA;
+        for (size_t i = 0; i < mc; i++) {
+            const json_value_t *m = &meta->array.items[i];
+            const char *k = json_get_string(m, "key");
+            const char *v = json_get_string(m, "value");
+            if (k && v) {
+                strncpy(tx.metadata[i].key, k, 64);
+                tx.metadata[i].key[64] = '\0';
+                size_t vlen = strlen(v);
+                if (vlen > 256) vlen = 256;
+                memcpy(tx.metadata[i].value, v, vlen);
+                tx.metadata[i].value_len = (uint16_t)vlen;
+                tx.metadata_count++;
+            }
+        }
+    }
+
+    // Additional signatures
+    const json_value_t *add_sigs = json_get(params, "additional_sigs");
+    if (add_sigs && add_sigs->type == JSON_ARRAY) {
+        size_t sc = add_sigs->array.count;
+        if (sc > MAX_SIGS) sc = MAX_SIGS;
+        for (size_t i = 0; i < sc; i++) {
+            const json_value_t *s = &add_sigs->array.items[i];
+            tx.additional_sigs[i].scheme_id = (uint8_t)json_get_uint(s, "scheme_id");
+            const char *pk = json_get_string(s, "public_key");
+            if (pk) {
+                tx.additional_sigs[i].public_key_len = (uint8_t)hex_decode(
+                    pk, strlen(pk), tx.additional_sigs[i].public_key, PUBKEY_LEN);
+            }
+            const char *sg = json_get_string(s, "signature");
+            if (sg) {
+                tx.additional_sigs[i].signature_len = (uint8_t)hex_decode(
+                    sg, strlen(sg), tx.additional_sigs[i].signature, SIG_LEN);
+            }
+            tx.additional_sig_count++;
+        }
+    }
+
+    // Optional: gateway_address
+    const char *gw_hex = json_get_string(params, "gateway_address");
+    if (gw_hex && strlen(gw_hex) > 0) {
+        tx.gateway_address_len = (uint8_t)hex_decode(
+            gw_hex, strlen(gw_hex), tx.gateway_address, 34);
+    }
+
+    // Optional: expires_at
+    uint64_t expires = json_get_uint(params, "expires_at");
+    if (expires > 0) {
+        tx.expires_at = expires;
+    }
+
+    // Encode to CBOR
+    noble_buf_t cbor;
+    noble_buf_init(&cbor, 512);
+    tx_encode_full(&cbor, &tx);
+
+    // Emit result
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+
+    size_t bufsize = 64 + cbor.len * 2;
+    char *result = (char *)malloc(bufsize);
+    snprintf(result, bufsize, "{\"tx_hex\":\"%s\",\"size\":%zu}", tx_hex, cbor.len);
+
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
 }
 
 // ── noble_free ──────────────────────────────────────────────────────────

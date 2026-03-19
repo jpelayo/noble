@@ -52,13 +52,12 @@ pub fn propose_block(
     let mut gateway_shares: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
 
     for tx in mempool_txs {
-        let tx_bytes = tx
-            .to_cbor()
-            .map_err(|e| format!("failed to serialize tx: {e}"))?;
-        if total_size + tx_bytes.len() > max_size {
+        let tx_size = noble_tx_core::transaction_cbor_size(tx)
+            .map_err(|e| format!("failed to measure tx size: {e}"))?;
+        if total_size + tx_size > max_size {
             break;
         }
-        total_size += tx_bytes.len();
+        total_size += tx_size;
 
         // Compute fee for this tx: sum(input values) - sum(output values)
         let input_total: u64 = tx.inputs.iter().map(|i| {
@@ -309,7 +308,7 @@ mod tests {
         let txs = vec![tx1.clone(), tx2];
 
         // Set max_size to only fit one transaction
-        let tx1_size = tx1.to_cbor().unwrap().len();
+        let tx1_size = noble_tx_core::transaction_cbor_size(&tx1).unwrap();
         let block = propose_block(
             &txs,
             Hash256::ZERO,

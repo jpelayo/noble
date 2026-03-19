@@ -21,7 +21,15 @@ void compute_signing_message(
     noble_buf_t buf;
     noble_buf_init(&buf, 512);
     tx_encode_signing_payload(&buf, tx, chain_id);
-    sha256(buf.data, buf.len, out);
+
+    // Double-hash to match Rust k256's Signer::sign() which internally
+    // hashes the message with SHA-256 before ECDSA. Since libsecp256k1's
+    // secp256k1_ecdsa_sign treats its input as the final digest (no internal
+    // hashing), we must pre-apply the second hash here.
+    uint8_t intermediate[SHA256_DIGEST_SIZE];
+    sha256(buf.data, buf.len, intermediate);
+    sha256(intermediate, SHA256_DIGEST_SIZE, out);
+
     noble_buf_free(&buf);
 }
 

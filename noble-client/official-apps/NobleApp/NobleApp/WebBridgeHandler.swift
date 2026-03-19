@@ -437,13 +437,15 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            guard let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value else {
-                throw BridgeError.missingParam("fee")
-            }
+            let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
+            let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
 
             // Parse available UTXOs from JS, then run coin selection.
+            // Use a generous estimate for coin selection target; the C library
+            // computes the exact fee from actual tx size via two-pass encoding.
             let allUtxos = try parseUtxoParams(params)
-            let target = amountAtomic + feeAtomic
+            let feeEstimate = feeRate > 0 ? feeRate * 800 : feeAtomic
+            let target = amountAtomic + feeEstimate
             let selected = try CoinSelector.select(from: allUtxos, target: target)
 
             let changeAddress = walletChangeAddress()
@@ -453,6 +455,7 @@ final class WebBridgeHandler {
                 to: to,
                 amount: NobleAmount(atomic: amountAtomic),
                 fee: NobleAmount(atomic: feeAtomic),
+                feeRate: feeRate,
                 utxos: selected,
                 changeAddress: changeAddress,
                 privateKey: privateKey,

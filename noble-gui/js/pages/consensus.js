@@ -1094,6 +1094,48 @@ export function init(root, ctx) {
 
   const TIMELINE_LIMIT = 4;
 
+  /**
+   * Verify and correct winner information in timeline entries against
+   * committed block data (the second source of truth).
+   *
+   * Block data from noble_getBlockRange is chain truth — identical on
+   * every synced node. Local cycle history (noble_getCycleHistory) records
+   * this node's ENGINE view, which may differ when the node voted for a
+   * candidate that lost.
+   *
+   * For each entry that has a committed block, the block's validator
+   * replaces whatever the cycle history recorded as winner.
+   *
+   * @param {Array} entries - Timeline entries (mutated in place)
+   * @param {Map} cycleBlockMap - cycle_number → block from noble_getBlockRange
+   */
+  function verifyWinnersAgainstBlocks(entries, cycleBlockMap) {
+    for (const entry of entries) {
+      if (entry.status === 'active' || entry._gap) continue;
+      const block = cycleBlockMap.get(entry.cycle_number);
+      if (!block) continue;
+
+      const blockValidator = block.validator_name || block.validator_id || '';
+      if (!blockValidator) continue;
+
+      // Chain truth overrides local history unconditionally.
+      if (entry.winner && entry.winner !== blockValidator) {
+        tracing_debug(
+          `[consensus] Winner corrected for cycle ${entry.cycle_number}: ` +
+          `history="${entry.winner}" → chain="${blockValidator}"`
+        );
+      }
+      entry.winner = blockValidator;
+      entry.winning_hash = block.hash || entry.winning_hash || '';
+      entry.status = 'finalized';
+    }
+  }
+
+  /** Debug logger — only in dev mode (console available). */
+  function tracing_debug(msg) {
+    if (typeof console !== 'undefined' && console.debug) console.debug(msg);
+  }
+
   async function loadTimeline() {
     try {
       // ── Build timeline from CHAIN DATA (committed blocks), not local history ──
@@ -1204,12 +1246,13 @@ export function init(root, ctx) {
           // force winner/winning_hash from the block.
           const hist = historyMap.get(c);
           if (hist) {
-            if (!hist.winner && block) {
-              hist.winner = block.validator_name || block.validator_id || '';
-              hist.winning_hash = block.hash || '';
-              hist.status = 'finalized';
-              hist.finalized_at = hist.finalized_at || block.timestamp || null;
-            }
+            // Chain truth: block's validator is the real winner.
+            // Local cycle history may record a different winner if this
+            // node's engine voted for a different candidate.
+            hist.winner = block.validator_name || block.validator_id || hist.winner || '';
+            hist.winning_hash = block.hash || hist.winning_hash || '';
+            hist.status = 'finalized';
+            hist.finalized_at = hist.finalized_at || block.timestamp || null;
             allEntries.push(hist);
           } else {
             // No local history — synthesize minimal entry from block data.
@@ -1239,6 +1282,11 @@ export function init(root, ctx) {
         csTimeline.innerHTML = '<div class="empty-state">No consensus cycles yet</div>';
         return;
       }
+
+      // ── Verify winners against block data (chain truth) ──
+      // Corrects any cycle where local engine history recorded a different
+      // winner than the actual committed block validator.
+      verifyWinnersAgainstBlocks(allEntries, cycleBlockMap);
 
       // Insert gap placeholders between consecutive entries (newest-first).
       const filled = [];

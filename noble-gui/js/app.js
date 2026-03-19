@@ -461,6 +461,8 @@ ws.subscribe('cyclePhaseChange', (data) => {
   if (data.phase) state.cyclePhase = data.phase;
   // Centralized alignment state change.
   if (data && data.event === 'alignment_changed') onAlignmentChanged(data);
+  // Refresh alignment on every phase change (4× per cycle) as fallback.
+  updateForkStatus();
 });
 
 // ── Global connectivity log (survives page navigation) ──

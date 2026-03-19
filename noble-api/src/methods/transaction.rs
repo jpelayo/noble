@@ -112,7 +112,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
             let mut mempool = self.mempool.lock();
             mempool
-                .admit(&tx, now, &chain_lookup, &utxo_lookup, chain_height)
+                .admit_with_size(&tx, now, &chain_lookup, &utxo_lookup, chain_height, Some(tx_bytes.len()))
                 .map_err(|e| ApiError::TxRejected(e.to_string()))?
         };
 

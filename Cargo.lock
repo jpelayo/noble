@@ -2987,6 +2987,7 @@ dependencies = [
  "noble-core",
  "noble-crypto",
  "noble-test-utils",
+ "noble-tx-core",
  "parking_lot",
  "proptest",
  "serde",
@@ -3073,6 +3074,7 @@ dependencies = [
  "noble-core",
  "noble-crypto",
  "noble-test-utils",
+ "noble-tx-core",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -3204,6 +3206,16 @@ dependencies = [
  "toml",
  "ureq",
  "zeroize",
+]
+
+[[package]]
+name = "noble-tx-core"
+version = "0.62.0"
+dependencies = [
+ "cc",
+ "hex",
+ "noble-core",
+ "serde_json",
 ]
 
 [[package]]

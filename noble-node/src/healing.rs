@@ -685,11 +685,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             cycles_remaining,
         };
 
-        // 7. Detect state transition and emit WS event.
-        let prev_state = self.alignment.read().state;
+        // 7. Detect state or height change and emit WS event.
+        let prev = self.alignment.read().clone();
         *self.alignment.write() = snapshot;
 
-        if state != prev_state {
+        if state != prev.state || height != prev.height {
             self.broadcast_event(serde_json::json!({
                 "event": "alignment_changed",
                 "state": state.label(),
@@ -699,7 +699,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 "highest_known": highest_known,
                 "progress": progress,
                 "cycles_remaining": cycles_remaining,
-                "previous_state": prev_state.label(),
+                "previous_state": prev.state.label(),
             }));
         }
     }

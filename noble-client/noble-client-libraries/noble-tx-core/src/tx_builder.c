@@ -37,11 +37,25 @@ static void encode_address_wire(noble_buf_t *buf, const noble_address_t *addr) {
     cbor_write_bytes(buf, addr->wire, addr->wire_len);
 }
 
-// TxOut: map(2) { "address": bytes, "value": uint }
+// TxOut for signing payload: map(2) { "address": wire_bytes, "value": uint }
+// Uses raw wire bytes — matches noble-core wire/v1.rs signing payload.
 static void encode_txout(noble_buf_t *buf, const noble_txout_t *out) {
     cbor_write_map(buf, 2);
     cbor_write_text(buf, "address", 7);
     encode_address_wire(buf, &out->address);
+    cbor_write_text(buf, "value", 5);
+    cbor_write_uint(buf, out->value);
+}
+
+// TxOut for full transaction: map(2) { "address": serde_enum, "value": uint }
+// Uses serde enum encoding — matches Rust's #[derive(Deserialize)] on Transaction.
+// The node deserializes submitted tx bytes with Transaction::from_cbor() which
+// expects NobleAddress as a serde enum ({"Noble": {"Secp256k1": ...}} etc.),
+// NOT raw wire bytes.
+static void encode_txout_serde(noble_buf_t *buf, const noble_txout_t *out) {
+    cbor_write_map(buf, 2);
+    cbor_write_text(buf, "address", 7);
+    tx_encode_address_serde(buf, &out->address);
     cbor_write_text(buf, "value", 5);
     cbor_write_uint(buf, out->value);
 }
@@ -55,21 +69,24 @@ static void encode_metadata(noble_buf_t *buf, const noble_metadata_t *m) {
     cbor_write_bytes(buf, m->value, m->value_len);
 }
 
-// SignatureEnvelope: CBOR byte string [scheme_id(1) || pubkey_len(1) || pubkey || sig]
+// SignatureEnvelope: serde-compatible CBOR map matching Rust's
+// #[derive(Serialize, Deserialize)] on SignatureEnvelope struct.
+// Field order matches Rust struct DECLARATION order (serde preserves it):
+//   scheme_id, public_key, signature
 void tx_encode_sig_envelope(noble_buf_t *buf, const noble_sig_envelope_t *sig) {
-    uint8_t wire[1 + 1 + PUBKEY_LEN + SIG_LEN];
-    size_t pos = 0;
-    wire[pos++] = sig->scheme_id;
-    wire[pos++] = sig->public_key_len;
-    memcpy(wire + pos, sig->public_key, sig->public_key_len);
-    pos += sig->public_key_len;
-    memcpy(wire + pos, sig->signature, sig->signature_len);
-    pos += sig->signature_len;
-    cbor_write_bytes(buf, wire, pos);
+    cbor_write_map(buf, 3);
+    cbor_write_text(buf, "scheme_id", 9);
+    cbor_write_uint(buf, (uint64_t)sig->scheme_id);
+    cbor_write_text(buf, "public_key", 10);
+    cbor_write_bytes(buf, sig->public_key, sig->public_key_len);
+    cbor_write_text(buf, "signature", 9);
+    cbor_write_bytes(buf, sig->signature, sig->signature_len);
 }
 
 // ── Full Transaction encoder ────────────────────────────────────────────
-// Matches noble-core/src/wire/v1.rs Transaction::encode_wire exactly.
+// Produces CBOR that Rust's Transaction::from_cbor() (serde) can deserialize.
+// Key difference from signing payload: addresses use serde enum encoding
+// ({"Noble": {"Secp256k1": ...}}) NOT raw wire bytes.
 
 void tx_encode_full(noble_buf_t *buf, const noble_tx_t *tx) {
     // Count fields: 9 base + optional
@@ -123,11 +140,11 @@ void tx_encode_full(noble_buf_t *buf, const noble_tx_t *tx) {
         encode_metadata(buf, &tx->metadata[i]);
     }
 
-    // "outputs"
+    // "outputs" — serde enum encoding for addresses.
     cbor_write_text(buf, "outputs", 7);
     cbor_write_array(buf, tx->output_count);
     for (uint8_t i = 0; i < tx->output_count; i++) {
-        encode_txout(buf, &tx->outputs[i]);
+        encode_txout_serde(buf, &tx->outputs[i]);
     }
 
     // "timestamp"

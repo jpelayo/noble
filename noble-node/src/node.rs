@@ -698,7 +698,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             network_stats,
             peer_info,
             chain_id: chain_id_arc,
-            network_name: if chain_id != 0 { format!("{:08X}", chain_id) } else { "pre-genesis".to_string() },
+            network_name: if chain_id != 0 { format!("{:08X}", chain_id) } else { "00000000".to_string() },
             start_time: std::time::Instant::now(),
             pki_attestation,
             ca_store,
@@ -1860,7 +1860,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
             max_db_size_gb: config.storage.max_db_size_gb,
-            network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "pre-genesis".to_string() } },
+            network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "00000000".to_string() } },
             genesis_hash: {
                 let s = self.storage.read();
                 s.get_block_hash_by_height(0)

@@ -1,10 +1,9 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import CryptoKit
 import Foundation
 import NobleClientCore
-import SwiftCBOR
+import NobleTxCore
 
 /// NOBLE protocol constants.
 public enum NobleProtocol {
@@ -32,7 +31,7 @@ public enum NobleProtocol {
 public struct UtxoOutpoint: Sendable {
     public let txid: [UInt8]  // 32 bytes
     public let vout: UInt32
-    public let value: UInt64  // Value of the referenced UTXO (for fee computation)
+    public let value: UInt64
 
     public init(txid: [UInt8], vout: UInt32, value: UInt64) {
         self.txid = txid
@@ -42,347 +41,9 @@ public struct UtxoOutpoint: Sendable {
 
     /// Create from hex txid string.
     public init(txidHex: String, vout: UInt32, value: UInt64) {
-        self.txid = TransactionBuilder.hexToBytes(txidHex)
+        self.txid = Self.hexToBytes(txidHex)
         self.vout = vout
         self.value = value
-    }
-}
-
-/// A transaction output for UTXO creation.
-public struct TxOutputSpec: Sendable {
-    public let value: UInt64
-    public let addressWire: [UInt8]  // NobleAddress wire bytes
-
-    public init(value: UInt64, addressWire: [UInt8]) {
-        self.value = value
-        self.addressWire = addressWire
-    }
-}
-
-/// Builds NOBLE transactions in CBOR wire format (UTXO model).
-///
-/// The builder constructs the signing payload with input outpoints + outputs,
-/// computes the SHA-256 signing message, signs with the provided key, and
-/// produces the final hex-encoded CBOR transaction for submission via
-/// `noble_submitTransaction`.
-///
-/// Wire format must match `noble-core/src/transaction.rs` exactly.
-public struct TransactionBuilder: Sendable {
-    public init() {}
-
-    /// Build a notarization transaction (type 0x00, UTXO model).
-    ///
-    /// - Parameters:
-    ///   - checksum: SHA-256 hash of the document to register
-    ///   - metadata: Key-value metadata entries (max 16)
-    ///   - fee: Desired fee in atomic units
-    ///   - utxos: Selected UTXOs to spend (must cover fee)
-    ///   - changeAddress: Wire-encoded address for change output
-    ///   - privateKey: 32-byte secp256k1 private key
-    ///   - chainId: Chain identifier for replay protection
-    /// - Returns: Hex-encoded CBOR transaction ready for submission
-    public func buildNotarization(
-        checksum: Hash256,
-        metadata: [MetadataItem],
-        fee: NobleAmount,
-        utxos: [UtxoOutpoint],
-        changeAddress: [UInt8],
-        privateKey: Data,
-        chainId: UInt32 = NobleProtocol.primaryChainId
-    ) throws -> String {
-        let timestamp = UInt64(Date().timeIntervalSince1970)
-        let publicKey = try Secp256k1Helper.compressedPublicKey(from: privateKey)
-
-        let sortedMetadata = metadata.sorted { $0.key < $1.key }
-
-        // Build inputs from UTXOs
-        let inputs = utxos.map { utxo in
-            TxInputCbor(txid: utxo.txid, vout: utxo.vout)
-        }
-
-        // Build outputs: change = sum(inputs) - fee
-        let totalInput = utxos.reduce(UInt64(0)) { $0 + $1.value }
-        let change = totalInput - fee.atomic
-        var outputs: [TxOutputCbor] = []
-        if change > 0 {
-            outputs.append(TxOutputCbor(value: change, addressWire: changeAddress))
-        }
-
-        let signingPayload = buildSigningPayload(
-            version: NobleProtocol.protocolVersion,
-            txType: NobleProtocol.txTypeNotarization,
-            inputs: inputs,
-            outputs: outputs,
-            checksum: checksum,
-            timestamp: timestamp,
-            metadata: sortedMetadata,
-            gatewayAddress: nil,
-            chainId: chainId
-        )
-
-        let payloadBytes = canonicalCbor(signingPayload)
-        let signingMessage = sha256(payloadBytes)
-        let signature = try Secp256k1Helper.sign(data: signingMessage, privateKey: privateKey)
-
-        let txCbor = buildTransactionCbor(
-            version: NobleProtocol.protocolVersion,
-            txType: NobleProtocol.txTypeNotarization,
-            inputs: inputs,
-            outputs: outputs,
-            checksum: checksum,
-            timestamp: timestamp,
-            issuerSig: SignatureData(
-                schemeId: NobleProtocol.schemeSecp256k1,
-                publicKey: publicKey,
-                signature: signature
-            ),
-            additionalSigs: [],
-            metadata: sortedMetadata,
-            gatewayAddress: nil
-        )
-
-        let txBytes = canonicalCbor(txCbor)
-        return txBytes.map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Build a transfer transaction (type 0x01, UTXO model).
-    ///
-    /// - Parameters:
-    ///   - to: Recipient address
-    ///   - amount: Transfer amount in atomic units
-    ///   - fee: Fee in atomic units
-    ///   - utxos: Selected UTXOs to spend (must cover amount + fee)
-    ///   - changeAddress: Wire-encoded address for change output
-    ///   - privateKey: 32-byte secp256k1 private key
-    ///   - chainId: Chain identifier
-    ///   - sourceAddress: Ignored (UTXO model — debit source is implicit from inputs)
-    /// - Returns: Hex-encoded CBOR transaction
-    public func buildTransfer(
-        to: NobleAddress,
-        amount: NobleAmount,
-        fee: NobleAmount,
-        utxos: [UtxoOutpoint],
-        changeAddress: [UInt8],
-        privateKey: Data,
-        chainId: UInt32 = NobleProtocol.primaryChainId,
-        sourceAddress: Data? = nil
-    ) throws -> String {
-        let timestamp = UInt64(Date().timeIntervalSince1970)
-        let publicKey = try Secp256k1Helper.compressedPublicKey(from: privateKey)
-        let recipientWire = Self.hexToBytes(to.wireHex)
-
-        let inputs = utxos.map { TxInputCbor(txid: $0.txid, vout: $0.vout) }
-
-        // Build outputs: [0] recipient, [1] change (if any)
-        var outputs: [TxOutputCbor] = [
-            TxOutputCbor(value: amount.atomic, addressWire: recipientWire)
-        ]
-        let totalInput = utxos.reduce(UInt64(0)) { $0 + $1.value }
-        let change = totalInput - amount.atomic - fee.atomic
-        if change > 0 {
-            outputs.append(TxOutputCbor(value: change, addressWire: changeAddress))
-        }
-
-        let dummyChecksum = Hash256(hex: String(repeating: "0", count: 64))!
-
-        let signingPayload = buildSigningPayload(
-            version: NobleProtocol.protocolVersion,
-            txType: NobleProtocol.txTypeTransfer,
-            inputs: inputs,
-            outputs: outputs,
-            checksum: dummyChecksum,
-            timestamp: timestamp,
-            metadata: [],
-            gatewayAddress: nil,
-            chainId: chainId
-        )
-
-        let payloadBytes = canonicalCbor(signingPayload)
-        let signingMessage = sha256(payloadBytes)
-        let signature = try Secp256k1Helper.sign(data: signingMessage, privateKey: privateKey)
-
-        let txCbor = buildTransactionCbor(
-            version: NobleProtocol.protocolVersion,
-            txType: NobleProtocol.txTypeTransfer,
-            inputs: inputs,
-            outputs: outputs,
-            checksum: dummyChecksum,
-            timestamp: timestamp,
-            issuerSig: SignatureData(
-                schemeId: NobleProtocol.schemeSecp256k1,
-                publicKey: publicKey,
-                signature: signature
-            ),
-            additionalSigs: [],
-            metadata: [],
-            gatewayAddress: nil
-        )
-
-        let txBytes = canonicalCbor(txCbor)
-        return txBytes.map { String(format: "%02x", $0) }.joined()
-    }
-
-    // MARK: - Internal CBOR Types
-
-    struct TxInputCbor {
-        let txid: [UInt8]  // 32 bytes
-        let vout: UInt32
-    }
-
-    struct TxOutputCbor {
-        let value: UInt64
-        let addressWire: [UInt8]
-    }
-
-    // MARK: - CBOR Building
-
-    /// Build the signing payload as CBOR value (map with string keys).
-    ///
-    /// Must match Rust's `SigningPayload` struct serialized by serde/ciborium.
-    private func buildSigningPayload(
-        version: UInt16,
-        txType: UInt8,
-        inputs: [TxInputCbor],
-        outputs: [TxOutputCbor],
-        checksum: Hash256,
-        timestamp: UInt64,
-        metadata: [MetadataItem],
-        gatewayAddress: [UInt8]?,
-        chainId: UInt32
-    ) -> CBOR {
-        var entries: [CBOR: CBOR] = [:]
-
-        entries[.utf8String("version")] = .unsignedInt(UInt64(version))
-        entries[.utf8String("tx_type")] = .unsignedInt(UInt64(txType))
-
-        // input_outpoints: array of outpoint maps
-        let inputArr = inputs.map { inp -> CBOR in
-            .map([
-                .utf8String("txid"): .byteString(inp.txid),
-                .utf8String("vout"): .unsignedInt(UInt64(inp.vout)),
-            ])
-        }
-        entries[.utf8String("input_outpoints")] = .array(inputArr)
-
-        // outputs: array of output maps
-        let outputArr = outputs.map { out -> CBOR in
-            .map([
-                .utf8String("value"): .unsignedInt(out.value),
-                .utf8String("address"): .byteString(out.addressWire),
-            ])
-        }
-        entries[.utf8String("outputs")] = .array(outputArr)
-
-        entries[.utf8String("checksum")] = .byteString(Self.hexToBytes(checksum.hex))
-        entries[.utf8String("timestamp")] = .unsignedInt(timestamp)
-
-        let metadataArr = metadata.map { item -> CBOR in
-            .map([
-                .utf8String("key"): .utf8String(item.key),
-                .utf8String("value"): .byteString([UInt8](item.value.utf8)),
-            ])
-        }
-        entries[.utf8String("metadata")] = .array(metadataArr)
-
-        if let gatewayAddress {
-            entries[.utf8String("gateway_address")] = .byteString(gatewayAddress)
-        }
-
-        entries[.utf8String("chain_id")] = .unsignedInt(UInt64(chainId))
-
-        return .map(entries)
-    }
-
-    /// Build the full transaction as CBOR value.
-    private func buildTransactionCbor(
-        version: UInt16,
-        txType: UInt8,
-        inputs: [TxInputCbor],
-        outputs: [TxOutputCbor],
-        checksum: Hash256,
-        timestamp: UInt64,
-        issuerSig: SignatureData,
-        additionalSigs: [SignatureData],
-        metadata: [MetadataItem],
-        gatewayAddress: [UInt8]?
-    ) -> CBOR {
-        var entries: [CBOR: CBOR] = [:]
-
-        entries[.utf8String("version")] = .unsignedInt(UInt64(version))
-        entries[.utf8String("tx_type")] = .unsignedInt(UInt64(txType))
-
-        // inputs: array of TxIn maps
-        let inputArr = inputs.map { inp -> CBOR in
-            .map([
-                .utf8String("prev_output"): .map([
-                    .utf8String("txid"): .byteString(inp.txid),
-                    .utf8String("vout"): .unsignedInt(UInt64(inp.vout)),
-                ]),
-            ])
-        }
-        entries[.utf8String("inputs")] = .array(inputArr)
-
-        // outputs: array of TxOut maps
-        // address must be serde-encoded enum: {"Noble": {"Secp256k1": <bytes>}}
-        let outputArr = outputs.map { out -> CBOR in
-            .map([
-                .utf8String("value"): .unsignedInt(out.value),
-                .utf8String("address"): Self.encodeAddressSerde(out.addressWire),
-            ])
-        }
-        entries[.utf8String("outputs")] = .array(outputArr)
-
-        entries[.utf8String("checksum")] = .byteString(Self.hexToBytes(checksum.hex))
-        entries[.utf8String("timestamp")] = .unsignedInt(timestamp)
-
-        entries[.utf8String("issuer_sig")] = encodeSig(issuerSig)
-
-        let addSigs = additionalSigs.map { encodeSig($0) }
-        entries[.utf8String("additional_sigs")] = .array(addSigs)
-
-        let metadataArr = metadata.map { item -> CBOR in
-            .map([
-                .utf8String("key"): .utf8String(item.key),
-                .utf8String("value"): .byteString([UInt8](item.value.utf8)),
-            ])
-        }
-        entries[.utf8String("metadata")] = .array(metadataArr)
-
-        if let gatewayAddress {
-            entries[.utf8String("gateway_address")] = .byteString(gatewayAddress)
-        }
-
-        return .map(entries)
-    }
-
-    private func encodeSig(_ sig: SignatureData) -> CBOR {
-        .map([
-            .utf8String("scheme_id"): .unsignedInt(UInt64(sig.schemeId)),
-            .utf8String("public_key"): .byteString([UInt8](sig.publicKey)),
-            .utf8String("signature"): .byteString([UInt8](sig.signature)),
-        ])
-    }
-
-    // MARK: - Utilities
-
-    /// Encode a NobleAddress wire bytes as serde-compatible CBOR enum.
-    /// Wire format: [prefix(1) || key_bytes]
-    /// Serde CBOR: {"Noble": {"Secp256k1": <bytes>}}
-    ///             or {"BitcoinHash160": <20_bytes>} or {"BitcoinTaproot": <32_bytes>}
-    static func encodeAddressSerde(_ wire: [UInt8]) -> CBOR {
-        guard !wire.isEmpty else { return .byteString(wire) }
-        let prefix = wire[0]
-        let keyBytes = Array(wire.dropFirst())
-        switch prefix {
-        case 0x02: // Secp256k1
-            return .map([.utf8String("Noble"): .map([.utf8String("Secp256k1"): .byteString(keyBytes)])])
-        case 0x80: // BitcoinHash160
-            return .map([.utf8String("BitcoinHash160"): .byteString(keyBytes)])
-        case 0x81: // BitcoinTaproot
-            return .map([.utf8String("BitcoinTaproot"): .byteString(keyBytes)])
-        default:
-            return .byteString(wire)
-        }
     }
 
     static func hexToBytes(_ hex: String) -> [UInt8] {
@@ -397,143 +58,214 @@ public struct TransactionBuilder: Sendable {
         }
         return bytes
     }
+}
 
-    func sha256(_ data: [UInt8]) -> [UInt8] {
-        let hash = SHA256.hash(data: data)
-        return Array(hash)
-    }
+/// A transaction output for UTXO creation.
+public struct TxOutputSpec: Sendable {
+    public let value: UInt64
+    public let addressWire: [UInt8]
 
-    func canonicalCbor(_ value: CBOR) -> [UInt8] {
-        // SwiftCBOR's encode produces canonical deterministic CBOR
-        value.encode()
+    public init(value: UInt64, addressWire: [UInt8]) {
+        self.value = value
+        self.addressWire = addressWire
     }
 }
 
-/// Signature data for CBOR encoding.
-public struct SignatureData: Sendable {
-    let schemeId: UInt8
-    let publicKey: Data
-    let signature: Data
+/// Builds NOBLE transactions by delegating to the shared C library (`noble-tx-core`).
+///
+/// The C library produces byte-identical CBOR and signing payloads to the Rust node,
+/// ensuring cross-platform transaction compatibility. All transaction building, signing,
+/// and CBOR encoding happens in the C library — this struct is a thin Swift wrapper
+/// that marshals parameters as JSON and parses the result.
+public struct TransactionBuilder: Sendable {
+    public init() {}
 
-    public init(schemeId: UInt8, publicKey: Data, signature: Data) {
-        self.schemeId = schemeId
-        self.publicKey = publicKey
-        self.signature = signature
+    /// Build a notarization transaction (type 0x00, UTXO model).
+    public func buildNotarization(
+        checksum: Hash256,
+        metadata: [MetadataItem],
+        fee: NobleAmount,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
+        privateKey: Data,
+        chainId: UInt32 = NobleProtocol.primaryChainId
+    ) throws -> String {
+        let metadataArr = metadata.sorted { $0.key < $1.key }.map { item in
+            ["key": item.key, "value": item.value] as [String: String]
+        }
+
+        let utxoArr = utxos.map { u in
+            [
+                "txid": u.txid.map { String(format: "%02x", $0) }.joined(),
+                "vout": u.vout,
+                "value": u.value,
+            ] as [String: Any]
+        }
+
+        let params: [String: Any] = [
+            "checksum": checksum.hex,
+            "metadata": metadataArr,
+            "fee": fee.atomic,
+            "utxos": utxoArr,
+            "change_address": changeAddress.map { String(format: "%02x", $0) }.joined(),
+            "private_key": privateKey.map { String(format: "%02x", $0) }.joined(),
+            "chain_id": chainId,
+            "timestamp": UInt64(Date().timeIntervalSince1970),
+        ]
+
+        return try callNobleTxCore(noble_sign_notarization, params: params)
+    }
+
+    /// Build a transfer transaction (type 0x01, UTXO model).
+    ///
+    /// If `feeRate` > 0, the C library computes the exact fee from the actual
+    /// transaction size (two-pass encoding). Otherwise `fee` is used as-is.
+    public func buildTransfer(
+        to: NobleAddress,
+        amount: NobleAmount,
+        fee: NobleAmount,
+        feeRate: UInt64 = 0,
+        utxos: [UtxoOutpoint],
+        changeAddress: [UInt8],
+        privateKey: Data,
+        chainId: UInt32 = NobleProtocol.primaryChainId,
+        sourceAddress: Data? = nil
+    ) throws -> String {
+        let recipientWireHex = to.wireHex
+
+        let utxoArr = utxos.map { u in
+            [
+                "txid": u.txid.map { String(format: "%02x", $0) }.joined(),
+                "vout": u.vout,
+                "value": u.value,
+            ] as [String: Any]
+        }
+
+        var params: [String: Any] = [
+            "recipient": recipientWireHex,
+            "amount": amount.atomic,
+            "fee": fee.atomic,
+            "utxos": utxoArr,
+            "change_address": changeAddress.map { String(format: "%02x", $0) }.joined(),
+            "private_key": privateKey.map { String(format: "%02x", $0) }.joined(),
+            "chain_id": chainId,
+            "timestamp": UInt64(Date().timeIntervalSince1970),
+        ]
+        if feeRate > 0 {
+            params["fee_rate"] = feeRate
+        }
+
+        return try callNobleTxCore(noble_sign_transfer, params: params)
+    }
+
+    // MARK: - C Library Bridge
+
+    /// Call a noble-tx-core C function with JSON params, parse the JSON result.
+    /// Returns the hex-encoded transaction CBOR string.
+    private func callNobleTxCore(
+        _ fn: @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?,
+        params: [String: Any]
+    ) throws -> String {
+        let jsonData = try JSONSerialization.data(withJSONObject: params)
+        guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
+            throw TxBuilderError.serializationFailed("failed to encode params as UTF-8")
+        }
+
+        guard let resultPtr = jsonStr.withCString({ fn($0) }) else {
+            throw TxBuilderError.signingFailed("noble-tx-core returned null")
+        }
+
+        let resultStr = String(cString: resultPtr)
+        noble_free(resultPtr)
+
+        guard let resultData = resultStr.data(using: .utf8),
+              let result = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any] else {
+            throw TxBuilderError.signingFailed("failed to parse noble-tx-core result")
+        }
+
+        if let error = result["error"] as? String {
+            throw TxBuilderError.signingFailed(error)
+        }
+
+        guard let txHex = result["tx_hex"] as? String else {
+            throw TxBuilderError.signingFailed("missing tx_hex in result")
+        }
+
+        return txHex
+    }
+}
+
+/// Errors from the transaction builder.
+public enum TxBuilderError: Error, LocalizedError, @unchecked Sendable {
+    case serializationFailed(String)
+    case signingFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .serializationFailed(let msg): "Serialization error: \(msg) [NE-601]"
+        case .signingFailed(let msg): "Signing error: \(msg) [NE-603]"
+        }
     }
 }
 
 // MARK: - Coin Selection
 
-/// UTXO coin selection — three-pass algorithm.
-///
-/// 1. **Changeless**: Find a subset of 1–3 UTXOs that exactly matches the target (no change output).
-/// 2. **Smallest-first**: Sort ascending, accumulate until target met. Reduces dust.
-/// 3. **Largest-first**: Sort descending, accumulate. Guaranteed success if funds exist.
+/// UTXO coin selection — delegates to noble-tx-core C library.
 public enum CoinSelector {
 
     /// Minimum value below which a change output is not worth creating.
-    public static let dustThreshold: UInt64 = 500_000 // 0.005 NOBLE (10^8 atomic)
+    public static let dustThreshold: UInt64 = 500_000
 
     /// Select UTXOs to cover `target` (amount + fee).
-    /// Returns the selected subset, or throws if insufficient funds.
     public static func select(
         from available: [UtxoOutpoint],
         target: UInt64
     ) throws -> [UtxoOutpoint] {
-        let total = available.reduce(UInt64(0)) { $0 + $1.value }
-        guard total >= target else {
+        let utxoArr = available.map { u in
+            [
+                "txid": u.txid.map { String(format: "%02x", $0) }.joined(),
+                "vout": u.vout,
+                "value": u.value,
+            ] as [String: Any]
+        }
+
+        let params: [String: Any] = [
+            "utxos": utxoArr,
+            "target": target,
+        ]
+
+        let jsonData = try JSONSerialization.data(withJSONObject: params)
+        guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
+            throw CoinSelectionError.insufficientFunds(available: 0, required: target)
+        }
+
+        guard let resultPtr = jsonStr.withCString({ noble_select_utxos($0) }) else {
+            throw CoinSelectionError.insufficientFunds(available: 0, required: target)
+        }
+
+        let resultStr = String(cString: resultPtr)
+        noble_free(resultPtr)
+
+        guard let resultData = resultStr.data(using: .utf8),
+              let result = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any] else {
+            throw CoinSelectionError.insufficientFunds(available: 0, required: target)
+        }
+
+        if result["error"] != nil {
+            let total = available.reduce(UInt64(0)) { $0 + $1.value }
             throw CoinSelectionError.insufficientFunds(available: total, required: target)
         }
 
-        // Pass 1: Changeless — exact match with 1, 2, or 3 UTXOs.
-        if let exact = findExactMatch(available, target: target) {
-            return exact
+        guard let selectedArr = result["selected"] as? [[String: Any]] else {
+            throw CoinSelectionError.insufficientFunds(available: 0, required: target)
         }
 
-        // Pass 1b: Near-changeless — match where change < dust threshold.
-        if let nearExact = findExactMatch(available, target: target, tolerance: dustThreshold) {
-            return nearExact
+        return selectedArr.map { item in
+            let txidHex = item["txid"] as? String ?? ""
+            let vout = (item["vout"] as? NSNumber)?.uint32Value ?? 0
+            let value = (item["value"] as? NSNumber)?.uint64Value ?? 0
+            return UtxoOutpoint(txidHex: txidHex, vout: vout, value: value)
         }
-
-        // Pass 2: Single best fit — smallest single UTXO that covers the target.
-        let bestFit = available.filter { $0.value >= target }.min(by: { $0.value < $1.value })
-        if let best = bestFit {
-            return [best]
-        }
-
-        // Pass 3: Smallest-first — spend small UTXOs to reduce dust.
-        let ascending = available.sorted { $0.value < $1.value }
-        if let result = accumulate(ascending, target: target) {
-            return result
-        }
-
-        // Pass 3: Largest-first — guaranteed if total >= target.
-        let descending = available.sorted { $0.value > $1.value }
-        if let result = accumulate(descending, target: target) {
-            return result
-        }
-
-        throw CoinSelectionError.insufficientFunds(available: total, required: target)
-    }
-
-    /// Try to find 1–3 UTXOs whose total equals target exactly (within tolerance).
-    private static func findExactMatch(
-        _ utxos: [UtxoOutpoint],
-        target: UInt64,
-        tolerance: UInt64 = 0
-    ) -> [UtxoOutpoint]? {
-        let n = utxos.count
-
-        // Single UTXO.
-        for i in 0..<n {
-            let sum = utxos[i].value
-            if sum >= target && sum <= target + tolerance {
-                return [utxos[i]]
-            }
-        }
-
-        // Pair of UTXOs.
-        if n >= 2 {
-            for i in 0..<(n - 1) {
-                for j in (i + 1)..<n {
-                    let sum = utxos[i].value + utxos[j].value
-                    if sum >= target && sum <= target + tolerance {
-                        return [utxos[i], utxos[j]]
-                    }
-                }
-            }
-        }
-
-        // Triple.
-        if n >= 3 {
-            for i in 0..<(n - 2) {
-                for j in (i + 1)..<(n - 1) {
-                    for k in (j + 1)..<n {
-                        let sum = utxos[i].value + utxos[j].value + utxos[k].value
-                        if sum >= target && sum <= target + tolerance {
-                            return [utxos[i], utxos[j], utxos[k]]
-                        }
-                    }
-                }
-            }
-        }
-
-        return nil
-    }
-
-    /// Accumulate UTXOs in order until target is met.
-    private static func accumulate(
-        _ sorted: [UtxoOutpoint],
-        target: UInt64
-    ) -> [UtxoOutpoint]? {
-        var selected: [UtxoOutpoint] = []
-        var sum: UInt64 = 0
-        for utxo in sorted {
-            selected.append(utxo)
-            sum += utxo.value
-            if sum >= target { return selected }
-        }
-        return nil
     }
 }
 
@@ -546,5 +278,18 @@ public enum CoinSelectionError: Error, LocalizedError {
         case .insufficientFunds(let available, let required):
             return "Insufficient funds: have \(available) atomic, need \(required) [NE-605]"
         }
+    }
+}
+
+/// Signature data (kept for API compatibility with LiveTransactionSigner).
+public struct SignatureData: Sendable {
+    let schemeId: UInt8
+    let publicKey: Data
+    let signature: Data
+
+    public init(schemeId: UInt8, publicKey: Data, signature: Data) {
+        self.schemeId = schemeId
+        self.publicKey = publicKey
+        self.signature = signature
     }
 }
