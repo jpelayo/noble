@@ -68,9 +68,6 @@ const HEADER_LEN: usize = 4 + 1 + FINGERPRINT_LEN + ARGON2_SALT_LEN + AES_NONCE_
 /// Minimum valid file size (header + 16-byte GCM auth tag on empty plaintext).
 const MIN_FILE_LEN: usize = HEADER_LEN + 16;
 
-/// Minimum passphrase length (characters).
-const MIN_PASSPHRASE_LEN: usize = 12;
-
 /// Maximum consecutive failed unlock attempts before lockout.
 const MAX_UNLOCK_ATTEMPTS: usize = 5;
 
