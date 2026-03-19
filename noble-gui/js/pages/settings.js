@@ -3,7 +3,7 @@
  * IP access control management and system configuration.
  */
 
-import { formatChainLabel } from '../utils.js';
+import { formatChainLabel, formatFee } from '../utils.js';
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -1269,19 +1269,27 @@ export function init(root, ctx) {
 
       // Faucet is enabled and has an address — check balance.
       let balance = 0;
+      let balanceTotal = 0;
+      let immatureInfo = '';
       try {
         const bal = await rpc.call('noble_getAddressBalance', { address: addr });
         balance = bal.available || bal.balance || 0;
-      } catch { /* not funded yet */ }
+        balanceTotal = bal.balance || 0;
+        if (bal.immature_count > 0) {
+          immatureInfo = ` (${formatFee(bal.immature_value)} maturing in ${bal.immature_count} UTXO${bal.immature_count > 1 ? 's' : ''})`;
+        }
+      } catch (e) {
+        console.warn('faucet balance query failed:', e);
+      }
 
-      const balFmt = (balance / 100_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const balFmt = formatFee(balance);
 
       faucetBadge.textContent = balance > 0 ? 'Running' : 'Empty';
       faucetBadge.style.background = balance > 0 ? 'var(--success)' : 'var(--warning)';
       faucetInfo.innerHTML = `
         <dt>Address</dt><dd class="mono" style="word-break:break-all">${addr} <button class="btn-copy" data-copy="${addr}" title="Copy faucet address">&#128203;</button></dd>
-        <dt>Balance</dt><dd>${balFmt} NOBLE</dd>
-        <dt>Status</dt><dd>${balance > 0 ? 'Ready to distribute' : 'Needs funding — send tokens to the address above'}</dd>
+        <dt>Balance</dt><dd>${balFmt}${immatureInfo}</dd>
+        <dt>Status</dt><dd>${balance > 0 ? 'Ready to distribute' : (balanceTotal > 0 ? 'Funds maturing — wait for confirmations' : 'Needs funding — send tokens to the address above')}</dd>
       `;
       faucetInfo.querySelectorAll('.btn-copy').forEach(btn => {
         btn.addEventListener('click', (e) => {

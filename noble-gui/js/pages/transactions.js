@@ -97,35 +97,43 @@ export function init(root, ctx) {
       `;
 
       // history.transactions is Vec<String> — just tx_id hex strings.
-      // Fetch details for each to show type/amount/time.
+      // Fetch full details for each. Show "details unavailable" for failures.
       const txIds = (history.transactions || []).filter(id => id && id.length > 0);
       if (txIds.length > 0) {
-        const txDetails = await Promise.all(
+        const txResults = await Promise.all(
           txIds.slice(0, 20).map(id =>
-            rpc.call('noble_getTransaction', { tx_id: id }).catch(() => null)
+            rpc.call('noble_getTransaction', { tx_id: id })
+              .then(tx => ({ id, tx, ok: true }))
+              .catch(() => ({ id, tx: null, ok: false }))
           )
         );
-        const validTxs = txDetails.filter(Boolean);
 
         html += `
           <div class="panel" style="margin-top:var(--gap)">
-            <div class="panel-header">Transaction History (${history.total ?? txIds.length})</div>
+            <div class="panel-header">Transaction History (${txIds.length})</div>
             <div class="panel-body" style="padding:0">
               <table class="data-table">
                 <thead><tr><th>Tx ID</th><th>Type</th><th>Amount</th><th>Time</th></tr></thead>
                 <tbody>
         `;
-        for (const tx of validTxs) {
-          const txId = tx.tx_id || '';
-          const amount = tx.total_output != null ? formatFee(tx.total_output) : '—';
-          const type = tx.tx_type != null ? formatTxType(tx.tx_type) : '—';
-          const time = tx.timestamp ? timeAgo(tx.timestamp) : '—';
-          html += `<tr class="clickable" onclick="location.hash='#/tx/${txId}'">
-            <td class="mono">${truncateHash(txId)}</td>
-            <td>${type}</td>
-            <td>${amount}</td>
-            <td>${time}</td>
-          </tr>`;
+        for (const r of txResults) {
+          if (r.ok && r.tx) {
+            const txId = r.tx.tx_id || r.id;
+            const amount = r.tx.total_output != null ? formatFee(r.tx.total_output) : '—';
+            const type = r.tx.tx_type != null ? formatTxType(r.tx.tx_type) : '—';
+            const time = r.tx.timestamp ? timeAgo(r.tx.timestamp) : '—';
+            html += `<tr class="clickable" onclick="location.hash='#/tx/${txId}'">
+              <td class="mono">${truncateHash(txId)}</td>
+              <td>${type}</td>
+              <td>${amount}</td>
+              <td>${time}</td>
+            </tr>`;
+          } else {
+            html += `<tr class="clickable" onclick="location.hash='#/tx/${r.id}'">
+              <td class="mono">${truncateHash(r.id)}</td>
+              <td colspan="3" style="color:var(--text-muted)">Details unavailable</td>
+            </tr>`;
+          }
         }
         html += '</tbody></table></div></div>';
       } else {

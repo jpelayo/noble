@@ -383,7 +383,7 @@ export function init(root, ctx) {
             input.className = 'form-input';
             input.type = 'text';
             input.inputMode = 'decimal';
-            input.placeholder = '0.000000';
+            input.placeholder = '0.00000000';
             input.value = amount;
             input.addEventListener('input', () => { amount = input.value.trim(); wizard.updateNav(); });
 

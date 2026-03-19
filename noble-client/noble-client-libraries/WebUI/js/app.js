@@ -154,3 +154,14 @@ async function boot() {
 }
 
 boot();
+
+// ── iOS caret ghost fix ──
+// When an input gains focus on iOS, the keyboard push displaces the viewport
+// but the caret renders at the original position for a split second.
+// Hide the caret for 200ms after focus, then reveal it once the viewport settles.
+document.addEventListener('focusin', (e) => {
+    if (e.target.classList && e.target.classList.contains('form-input')) {
+        e.target.classList.add('caret-hidden');
+        setTimeout(() => e.target.classList.remove('caret-hidden'), 200);
+    }
+});

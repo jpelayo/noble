@@ -82,6 +82,12 @@ pub fn verify_chain_integrity(
         let stored_hash = match storage.get_block_hash_by_height(height) {
             Ok(h) => h,
             Err(_) => {
+                // Height 0 may not have a block — Noble chains start at height 1.
+                // This is expected, not a gap.
+                if height == 0 {
+                    prev_hash = Some(Hash256::ZERO);
+                    continue;
+                }
                 add_finding(
                     &mut report,
                     height,
@@ -120,10 +126,15 @@ pub fn verify_chain_integrity(
         }
 
         // Check 3: merkle root
+        // Block 1 was always proposed with chain_id=0 (the chain has no identity
+        // yet at proposal time — chain_id is derived from block 1's hash AFTER
+        // commit). Using the derived chain_id here would produce different tx_ids
+        // and a false MerkleRootMismatch.
+        let effective_chain_id = if height == 1 { 0 } else { chain_id };
         let tx_ids: Vec<Hash256> = block
             .transactions
             .iter()
-            .filter_map(|tx| tx.compute_tx_id(chain_id).ok())
+            .filter_map(|tx| tx.compute_tx_id(effective_chain_id).ok())
             .collect();
         let recomputed_merkle = compute_merkle_root(&tx_ids);
         if recomputed_merkle != block.header.merkle_root {

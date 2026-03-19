@@ -61,27 +61,32 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         let storage = self.storage.read();
         let balance = storage.get_balance(&addr).map_err(ApiError::from)?;
 
-        // Subtract immature coinbase UTXOs from available balance.
+        // Scan UTXOs for maturity info.
         let chain_height = storage
             .get_chain_tip()
             .ok()
             .flatten()
             .map(|t| t.height)
             .unwrap_or(0);
-        let immature: u64 = storage
-            .get_address_utxos(&addr)
-            .unwrap_or_default()
-            .iter()
-            .filter(|(_, e)| e.is_coinbase && !e.is_mature(chain_height))
-            .map(|(_, e)| e.value)
-            .sum();
+        let all_utxos = storage.get_address_utxos(&addr).unwrap_or_default();
+        let mut immature_count: usize = 0;
+        let mut immature_value: u64 = 0;
+        let mut utxo_count: usize = 0;
+        for (_, entry) in &all_utxos {
+            if entry.is_mature(chain_height) {
+                utxo_count += 1;
+            } else {
+                immature_count += 1;
+                immature_value += entry.value;
+            }
+        }
 
         // pending = mempool debits targeting this address bucket
         let pending = {
             let mempool = self.mempool.lock();
             mempool.pending_debit_for_address(&addr)
         };
-        let available = balance.saturating_sub(pending).saturating_sub(immature);
+        let available = balance.saturating_sub(pending).saturating_sub(immature_value);
 
         // Count address history entries
         let tx_count = storage
@@ -94,6 +99,9 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             available,
             pending,
             tx_count,
+            utxo_count,
+            immature_count,
+            immature_value,
         })
     }
 

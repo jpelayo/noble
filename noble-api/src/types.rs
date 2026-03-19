@@ -514,6 +514,12 @@ pub struct AddressBalanceResponse {
     pub available: u64,
     pub pending: u64,
     pub tx_count: u64,
+    /// Number of mature (spendable) UTXOs.
+    pub utxo_count: usize,
+    /// Number of immature coinbase UTXOs still maturing.
+    pub immature_count: usize,
+    /// Total value locked in immature coinbase UTXOs (groats).
+    pub immature_value: u64,
 }
 
 /// Response for `noble_getAddressUtxos`.
