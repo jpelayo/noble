@@ -303,6 +303,8 @@ pub enum NetworkEvent {
     },
     /// A transaction was announced by a peer via gossip.
     TransactionAnnounced { peer_id: Vec<u8>, tx_id: [u8; 32] },
+    /// A full transaction was received (via tx request-response after TxAnnounce).
+    TransactionReceived { peer_id: Vec<u8>, transaction: Transaction },
     /// A PoR vote was received from the network.
     VoteReceived {
         /// Transport-layer peer identity (libp2p PeerId bytes).

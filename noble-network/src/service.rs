@@ -880,6 +880,7 @@ async fn handle_swarm_event(
                             tx_rate_limiter,
                             peer_manager,
                             &event_tx,
+                            swarm,
                         ),
                         GossipMessage::PorVote {
                             cycle,
@@ -1309,6 +1310,37 @@ async fn handle_swarm_event(
             handle_tx_rpc_request(tx_provider, request, channel, swarm);
         }
 
+        // TxRpc response: we requested a tx after receiving TxAnnounce.
+        SwarmEvent::Behaviour(NobleBehaviourEvent::TxRpc(request_response::Event::Message {
+            peer,
+            message: request_response::Message::Response { response, .. },
+            ..
+        })) => {
+            match response.transaction {
+                Some(tx) => {
+                    if event_tx
+                        .try_send(NetworkEvent::TransactionReceived {
+                            peer_id: peer.to_bytes().to_vec(),
+                            transaction: tx,
+                        })
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            task = "network",
+                            "event channel full: TransactionReceived dropped"
+                        );
+                    }
+                }
+                None => {
+                    tracing::trace!(
+                        task = "tx_relay",
+                        "peer {} responded with empty TxResponse (tx not found)",
+                        peer,
+                    );
+                }
+            }
+        }
+
         SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {
             peer,
             result: Ok(rtt),
@@ -1451,6 +1483,10 @@ fn handle_block_announce(
 }
 
 /// Handle a transaction announce gossip message.
+///
+/// After dedup + rate limiting, requests the full transaction from the
+/// announcing peer via the `/noble/tx/1.0.0` request-response protocol
+/// (same pattern as `handle_block_announce` → `GetBlocks`).
 fn handle_tx_announce(
     tx_id: [u8; 32],
     source: &PeerId,
@@ -1459,6 +1495,7 @@ fn handle_tx_announce(
     tx_rate_limiter: &mut TxRateLimiter,
     peer_manager: &mut PeerManager,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+    swarm: &mut Swarm<NobleBehaviour>,
 ) -> Option<NetworkEvent> {
     if !tx_rate_limiter.try_consume(source) {
         let reason = "tx relay rate limit exceeded".to_string();
@@ -1471,6 +1508,11 @@ fn handle_tx_announce(
     } else if !seen_txs.insert_if_new(tx_id) {
         None
     } else {
+        // Fetch the full transaction body from the announcing peer.
+        swarm
+            .behaviour_mut()
+            .tx_rpc
+            .send_request(source, TxRequest { tx_id });
         Some(NetworkEvent::TransactionAnnounced {
             peer_id: peer_bytes,
             tx_id,

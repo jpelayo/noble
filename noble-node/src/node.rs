@@ -2743,15 +2743,47 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             NetworkEvent::TransactionAnnounced { tx_id, peer_id } => {
                 let hex_pid = hex::encode(&peer_id);
                 let tx_peer_name = self.peer_info.read().get(&hex_pid).and_then(|e| e.node_name.clone()).unwrap_or_default();
-                let _ = cycle_phase_tx.send(serde_json::json!({
+                if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                     "event": "tx_announced",
                     "tx_id": hex::encode(tx_id),
                     "peer_id": hex_pid,
                     "node_name": tx_peer_name,
-                }));
-                let _ = new_tx_tx.send(serde_json::json!({
+                })) {
+                    tracing::debug!(task = "broadcast", "tx_announced event dropped: {e}");
+                }
+                if let Err(e) = new_tx_tx.send(serde_json::json!({
                     "tx_id": hex::encode(tx_id),
-                }));
+                })) {
+                    tracing::debug!(task = "broadcast", "new_tx event dropped: {e}");
+                }
+            }
+            NetworkEvent::TransactionReceived { peer_id, transaction } => {
+                // Admit the relayed transaction to our local mempool.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let storage = self.storage.read();
+                let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
+                let utxo_lookup = StorageUtxoLookupAdapter { storage: &*storage };
+                let tip_h = self.consensus.read().chain_tip().0;
+                let mut mempool = self.mempool.lock();
+                match mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            task = "tx_relay",
+                            "admitted relayed tx from peer {}",
+                            hex::encode(&peer_id),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::trace!(
+                            task = "tx_relay",
+                            "rejected relayed tx from peer {}: {e}",
+                            hex::encode(&peer_id),
+                        );
+                    }
+                }
             }
             NetworkEvent::NodeAnnounceReceived { peer_id, announce } => {
                 // Always set chain_id on PeerInfoEntry, even for cross-chain peers.
