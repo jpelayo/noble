@@ -92,6 +92,13 @@ impl SeenCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Remove all entries. Used on chain reset to prevent stale dedup keys
+    /// from blocking re-relay of transactions valid on the new chain.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.insertion_order.clear();
+    }
 }
 
 /// Compute a deterministic dedup key for a PoR vote.

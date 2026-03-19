@@ -23,7 +23,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use noble_codec::NobleCbor;
 use noble_core::{
     OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
 };

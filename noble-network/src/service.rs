@@ -457,7 +457,14 @@ async fn run_event_loop(
 
             // --- Commands from the node ---
             Some(cmd) = command_rx.recv() => {
-                if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer).await {
+                // ClearGossipCaches is handled here (not in handle_command)
+                // because seen caches are local to the event loop scope.
+                if matches!(cmd, NetworkCommand::ClearGossipCaches) {
+                    seen_txs.clear();
+                    seen_blocks.clear();
+                    seen_votes.clear();
+                    tracing::info!(task = "network", "gossip dedup caches cleared (chain reset)");
+                } else if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -2350,6 +2357,10 @@ async fn handle_command(
         NetworkCommand::ClearPendingProposals => {
             pending_proposals.clear();
         }
+
+        // Handled in the main event loop (before handle_command) where seen
+        // caches are in scope. This arm is unreachable but required for exhaustiveness.
+        NetworkCommand::ClearGossipCaches => {}
 
         NetworkCommand::Shutdown => {
             return true;

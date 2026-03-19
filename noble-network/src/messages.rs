@@ -274,6 +274,9 @@ pub enum NetworkCommand {
     },
     /// Clear the pending_proposals cache (used during fork resolution/chain adoption).
     ClearPendingProposals,
+    /// Clear gossip dedup caches (seen_txs, seen_blocks, seen_votes).
+    /// Sent on chain reset so stale entries from the old chain don't block relay.
+    ClearGossipCaches,
     /// Shut down the network service.
     Shutdown,
 }

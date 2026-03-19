@@ -13,13 +13,14 @@
 
 mod harness;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use noble_codec::NobleCbor;
 use noble_consensus::PorVote;
 use noble_core::node_announce::{NodeRole, OrgType};
-use noble_core::{Block, BlockHeader, NodeAnnounce};
+use noble_core::{Block, BlockHeader, NodeAnnounce, Transaction};
 use noble_test_utils::fixtures::test_chain_id;
 use noble_crypto::{secp256k1, Hash256, NoblePrivateKey, NoblePublicKey};
 use noble_network::config::NetworkConfig;
@@ -417,6 +418,130 @@ async fn gossip_vote_end_to_end() {
         );
     } else {
         panic!("expected VoteReceived");
+    }
+
+    shutdown(&node_a).await;
+    shutdown(&node_b).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Transaction relay test
+// ---------------------------------------------------------------------------
+
+/// In-memory TxProvider that can hold pending transactions (simulates mempool).
+struct MemoryTxProvider {
+    txs: parking_lot::Mutex<HashMap<[u8; 32], Transaction>>,
+}
+
+impl MemoryTxProvider {
+    fn new() -> Self {
+        Self {
+            txs: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn insert(&self, tx_id: [u8; 32], tx: Transaction) {
+        self.txs.lock().insert(tx_id, tx);
+    }
+}
+
+impl TxProvider for MemoryTxProvider {
+    fn get_transaction(&self, tx_id: &[u8; 32]) -> Option<Transaction> {
+        self.txs.lock().get(tx_id).cloned()
+    }
+    fn has_transaction(&self, tx_id: &[u8; 32]) -> bool {
+        self.txs.lock().contains_key(tx_id)
+    }
+}
+
+/// Start a gossip node that uses a MemoryTxProvider (can serve pending txs).
+async fn start_gossip_node_with_tx_provider(
+    tx_provider: Arc<dyn TxProvider>,
+) -> NetworkHandle {
+    let bp: Arc<dyn BlockProvider> = Arc::new(NullBlockProvider);
+    start_network(gossip_test_config(), bp, tx_provider)
+        .await
+        .expect("network should start")
+}
+
+/// Transaction published on A arrives as TransactionReceived on B via the full
+/// TxAnnounce → TxRequest → TxResponse pipeline.
+#[tokio::test]
+async fn gossip_tx_relay_end_to_end() {
+    use noble_core::{OutPoint, SignatureEnvelope, TxIn, TxOut, NobleAddress, PROTOCOL_VERSION};
+    use noble_crypto::NobleSigner;
+
+    // Node A: has a MemoryTxProvider so it can serve the tx when B requests it.
+    let tx_provider_a = Arc::new(MemoryTxProvider::new());
+    let node_a = start_gossip_node_with_tx_provider(tx_provider_a.clone() as Arc<dyn TxProvider>).await;
+
+    // Node B: NullTxProvider (B is the receiver, not the server).
+    let mut node_b = start_gossip_node().await;
+
+    dial_and_connect(&node_a, &node_b).await;
+    wait_for_mesh().await;
+
+    // Build a minimal signed test transaction.
+    let (sk, pk) = make_keypair();
+    let addr = NobleAddress::Noble(pk.clone());
+    let checksum = noble_crypto::sha256(b"test-doc-for-tx-relay");
+    let prev_outpoint = OutPoint {
+        txid: noble_crypto::sha256(&pk.key_bytes()),
+        vout: 0,
+    };
+    let mut tx = Transaction {
+        version: PROTOCOL_VERSION,
+        tx_type: 0,
+        inputs: vec![TxIn { prev_output: prev_outpoint }],
+        outputs: vec![TxOut { value: 100_000_000, address: addr }],
+        checksum,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        issuer_sig: SignatureEnvelope {
+            scheme_id: pk.scheme_id(),
+            public_key: pk.key_bytes().to_vec(),
+            signature: vec![],
+        },
+        additional_sigs: vec![],
+        metadata: vec![],
+        encrypted_locator: None,
+        external_attestations: vec![],
+        gateway_address: None,
+        contract_data: None,
+        expires_at: None,
+    };
+    let msg = tx
+        .compute_signing_message_for_chain(test_chain_id())
+        .unwrap();
+    tx.issuer_sig = sk.sign(&msg).unwrap();
+
+    // Compute tx_id and insert into Node A's provider.
+    let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+    tx_provider_a.insert(*tx_id.as_bytes(), tx.clone());
+
+    // Publish the transaction on Node A.
+    node_a
+        .command_sender()
+        .send(NetworkCommand::PublishTransaction(tx))
+        .await
+        .unwrap();
+
+    // Node B should receive TransactionReceived (full tx body via TxRequest/TxResponse).
+    let event = drain_until(
+        &mut node_b,
+        |e| matches!(e, NetworkEvent::TransactionReceived { .. }),
+        10,
+    )
+    .await;
+
+    if let NetworkEvent::TransactionReceived { transaction, .. } = event {
+        let received_id = transaction.compute_tx_id(test_chain_id()).unwrap();
+        assert_eq!(received_id, tx_id, "relayed tx_id must match original");
+    } else {
+        panic!("expected TransactionReceived");
     }
 
     shutdown(&node_a).await;

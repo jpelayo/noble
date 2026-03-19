@@ -9,10 +9,11 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::Hash256;
+use noble_mempool::Mempool;
 use noble_network::{BlockProvider, TxProvider};
 use noble_storage::StorageEngine;
 
@@ -86,27 +87,47 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
     }
 }
 
-/// Implements [`TxProvider`] using an `Arc<RwLock<S>>` storage backend.
+/// Implements [`TxProvider`] using storage + mempool.
+///
+/// Searches the mempool first (pending txs), then committed storage.
+/// This is critical for transaction relay: when a peer requests a tx
+/// after receiving a `TxAnnounce`, the tx is typically still in the
+/// mempool (not yet committed to a block).
 pub struct StorageTxProvider<S: StorageEngine> {
     storage: Arc<RwLock<S>>,
+    mempool: Arc<Mutex<Mempool>>,
 }
 
 impl<S: StorageEngine> StorageTxProvider<S> {
-    /// Create a new transaction provider wrapping the given storage.
-    pub fn new(storage: Arc<RwLock<S>>) -> Self {
-        Self { storage }
+    /// Create a new transaction provider wrapping storage and mempool.
+    pub fn new(storage: Arc<RwLock<S>>, mempool: Arc<Mutex<Mempool>>) -> Self {
+        Self { storage, mempool }
     }
 }
 
 impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
     fn get_transaction(&self, tx_id: &[u8; 32]) -> Option<Transaction> {
         let h = Hash256(*tx_id);
+        // Check mempool first (pending txs not yet in a block).
+        {
+            let pool = self.mempool.lock();
+            if let Some(entry) = pool.get(&h) {
+                return Some(entry.tx.clone());
+            }
+        }
+        // Fall back to committed storage.
         let storage = self.storage.read();
         storage.get_transaction(&h).ok()
     }
 
     fn has_transaction(&self, tx_id: &[u8; 32]) -> bool {
         let h = Hash256(*tx_id);
+        {
+            let pool = self.mempool.lock();
+            if pool.contains(&h) {
+                return true;
+            }
+        }
         let storage = self.storage.read();
         storage.has_transaction(&h).unwrap_or(false)
     }
@@ -115,7 +136,12 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_mempool::MempoolConfig;
     use noble_storage::MemoryStorage;
+
+    fn test_mempool() -> Arc<Mutex<Mempool>> {
+        Arc::new(Mutex::new(Mempool::new(MempoolConfig::default())))
+    }
 
     #[test]
     fn block_provider_empty_chain_tip() {
@@ -150,14 +176,14 @@ mod tests {
     #[test]
     fn tx_provider_get_transaction_not_found() {
         let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-        let tp = StorageTxProvider::new(storage);
+        let tp = StorageTxProvider::new(storage, test_mempool());
         assert!(tp.get_transaction(&[0xFF; 32]).is_none());
     }
 
     #[test]
     fn tx_provider_has_transaction_not_found() {
         let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-        let tp = StorageTxProvider::new(storage);
+        let tp = StorageTxProvider::new(storage, test_mempool());
         assert!(!tp.has_transaction(&[0xFF; 32]));
     }
 

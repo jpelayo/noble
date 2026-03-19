@@ -1192,7 +1192,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
-        let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone()));
+        let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone(), self.mempool.clone()));
 
         let mut net_config = noble_network::NetworkConfig::default();
         // Use identity's preferred port when identity.json exists; otherwise use config default.

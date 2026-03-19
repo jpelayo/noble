@@ -1515,8 +1515,15 @@ body {
   }
 
   /* ── Modal: near full-screen on mobile ── */
+  /* Override height to 100lvh (large viewport) so the overlay does NOT
+     shrink when the iOS virtual keyboard opens.  Without this,
+     position:fixed + inset:0 tracks the visual viewport, the overlay
+     shrinks, and the flex-end modal rides up — displacing the input. */
   .modal-overlay {
     align-items: flex-end;
+    height: 100lvh;
+    height: 100vh; /* fallback for browsers without lvh */
+    height: 100lvh;
   }
 
   .modal-panel {

@@ -3,7 +3,6 @@
 
 //! Block proposal: select transactions from mempool and build a valid block.
 
-use noble_codec::NobleCbor;
 use noble_core::{
     compute_merkle_root, Block, BlockHeader, NobleAddress, OutPoint, Transaction, TxIn, TxOut,
     PROTOCOL_VERSION, TX_TYPE_COINBASE, subsidy_at_height,

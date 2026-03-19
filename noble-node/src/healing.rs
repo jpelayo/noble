@@ -769,6 +769,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.send_network(NetworkCommand::ClearPendingProposals);
     }
 
+    /// Clear gossip dedup caches so stale entries from the old chain
+    /// don't block relay of transactions/blocks valid on the new chain.
+    fn clear_gossip_caches(&self) {
+        self.send_network(NetworkCommand::ClearGossipCaches);
+    }
+
     fn request_sync(&self) {
         self.send_network(NetworkCommand::RequestSync);
     }
@@ -1597,6 +1603,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.send_network(NetworkCommand::UpdateChainId(0));
             self.update_tip_height(0);
             self.clear_pending_proposals();
+            self.clear_gossip_caches();
 
             // Clear stale caches that reference the wiped chain (stale-cache-#4/#5/#7).
             self.announce_cache.lock().clear();
@@ -1685,8 +1692,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // Clear stale chain state from peer_info (stale-cache-#3).
         self.clear_peer_chain_state();
 
-        // Clear pending proposals.
+        // Clear pending proposals and gossip dedup caches.
         self.clear_pending_proposals();
+        self.clear_gossip_caches();
 
         // Reset fork resolver and stale caches when rolling back to genesis.
         if rollback_height == 0 {
@@ -1770,8 +1778,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // sync_progress_total all to 0 when state is Idle. No separate reset needed.
         self.reset_sync_idle();
 
-        // 6. Clear stale proposals.
+        // 6. Clear stale proposals and gossip dedup caches.
         self.clear_pending_proposals();
+        self.clear_gossip_caches();
 
         self.broadcast_event(serde_json::json!({
             "event": "chain_adoption_started",
