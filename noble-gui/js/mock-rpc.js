@@ -871,6 +871,27 @@ export class MockRpcClient {
         };
       }
 
+      case 'noble_getBlockVotes': {
+        const height = params[0] || 1;
+        return {
+          height,
+          cycle_number: Math.max(0, height - 1),
+          voter_count: 2,
+          strength: 'Unanimous',
+          r1_voters: this.#validators.slice(0, 2).map(v => ({
+            validator_key: v.public_key,
+            name: v.name,
+          })),
+          r2_voters: this.#validators.slice(0, 1).map(v => ({
+            validator_key: v.public_key,
+            name: v.name,
+          })),
+          unique_witness_count: 2,
+          dual_witness_required: height === 1,
+          dual_witness_met: true,
+        };
+      }
+
       case 'noble_getCycleHistory': {
         const now = Math.floor(Date.now() / 1000);
         const currentCycle = Math.floor(now / CYCLE_DURATION_SECS);

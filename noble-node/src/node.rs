@@ -3130,12 +3130,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 } else if self.healing.is_sync_block(block.header.height)
                     || (self.healing.is_syncing() && block.header.height == tip_height + 1)
-                    || (block.header.height > tip_height && block.header.height <= tip_height + 256)
+                    || (self.healing.is_syncing() && block.header.height > tip_height && block.header.height <= tip_height + 256)
                 {
                     // Sync import: block is in the manifest, is the next expected block,
-                    // or is in the catch-up range (≤256 blocks ahead). This catches
-                    // late-arriving sync responses after manifest reset, preventing
-                    // the consensus engine from banning the peer for stale blocks.
+                    // or is in the catch-up range (≤256 blocks ahead, only when actively
+                    // syncing). The is_syncing() guard on the catch-up range prevents
+                    // live proposals (height == tip+1) from being misrouted to sync
+                    // import during normal operation, which would bypass the consensus
+                    // engine (no vote tracking, no reputation, hardcoded voter_count=1).
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -3196,7 +3198,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         };
                         (vn, cn)
                     };
-                    let _ = cycle_phase_tx.send(serde_json::json!({
+                    if let Err(e) = cycle_phase_tx.send(serde_json::json!({
                         "event": "vote_received",
                         "voter_id": hex::encode(voter_id),
                         "voter_name": voter_name,
@@ -3204,7 +3206,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         "candidate_hash": hex::encode(candidate_hash),
                         "candidate_name": candidate_name,
                         "round": round,
-                    }));
+                    })) {
+                        tracing::debug!(task = "broadcast", "vote_received event dropped (no subscribers): {e}");
+                    }
                 }
                 // Route remaining events to consensus engine
                 if let Some(cycle_event) = bridge::network_event_to_cycle_event(event) {
@@ -3459,20 +3463,28 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         let new = noble_consensus::decay_vote_weight(old, votes.voter_count as u64);
                         self.healing.chain_vote_weight().store(new, std::sync::atomic::Ordering::Relaxed);
                     }
-                    if let Ok(bytes) = noble_codec::NobleCbor::to_cbor(&*votes) {
-                        let storage = self.storage.read();
-                        if let Err(e) = storage.store_block_votes(height, &bytes) {
-                            tracing::warn!(
+                    match noble_codec::NobleCbor::to_cbor(&*votes) {
+                        Ok(bytes) => {
+                            let storage = self.storage.read();
+                            if let Err(e) = storage.store_block_votes(height, &bytes) {
+                                tracing::warn!(
+                                    task = "consensus",
+                                    "Failed to store block votes for height {height}: {e}"
+                                );
+                            } else {
+                                tracing::info!(
+                                    task = "consensus",
+                                    "Stored vote witness for block {height}: {} R1 + {} R2 voter(s), strength={}",
+                                    votes.r1_voters.len(),
+                                    votes.r2_voters.len(),
+                                    votes.strength,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
                                 task = "consensus",
-                                "Failed to store block votes for height {height}: {e}"
-                            );
-                        } else {
-                            tracing::info!(
-                                task = "consensus",
-                                "Stored vote witness for block {height}: {} R1 + {} R2 voter(s), strength={}",
-                                votes.r1_voters.len(),
-                                votes.r2_voters.len(),
-                                votes.strength,
+                                "Failed to CBOR-encode block votes for height {height}: {e} — vote data lost"
                             );
                         }
                     }
@@ -3733,7 +3745,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::PublishEvidence(evidence) => {
                     // Store evidence locally.
-                    let cbor = noble_codec::NobleCbor::to_cbor(&*evidence).unwrap_or_default();
+                    let cbor = match noble_codec::NobleCbor::to_cbor(&*evidence) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::error!(task = "evidence", "failed to CBOR-encode evidence: {e} — skipping");
+                            continue;
+                        }
+                    };
                     let evidence_hash = noble_crypto::sha256(&cbor);
                     if let Err(e) = self.storage.read().store_evidence(evidence_hash.as_bytes(), &cbor) {
                         tracing::warn!(task = "evidence", "failed to store evidence: {e}");

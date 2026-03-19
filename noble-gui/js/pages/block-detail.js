@@ -64,7 +64,15 @@ export function init(root, ctx) {
       root.appendChild(grid);
 
       // Voting witnesses panel
-      if (votes && (votes.r1_voters.length > 0 || votes.r2_voters.length > 0)) {
+      if (!votes || (!votes.r1_voters.length && !votes.r2_voters.length)) {
+        const noVotePanel = document.createElement('div');
+        noVotePanel.className = 'panel';
+        noVotePanel.innerHTML = `
+          <div class="panel-header">Voting Witnesses</div>
+          <div class="panel-body"><p class="text-muted">Vote data unavailable for this block.</p></div>
+        `;
+        root.appendChild(noVotePanel);
+      } else if (votes && (votes.r1_voters.length > 0 || votes.r2_voters.length > 0)) {
         const votePanel = document.createElement('div');
         votePanel.className = 'panel';
         const totalWitnesses = votes.unique_witness_count;

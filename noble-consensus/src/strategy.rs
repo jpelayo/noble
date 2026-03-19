@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use noble_crypto::Hash256;
 use serde::{Deserialize, Serialize};
+use tracing;
 
 use crate::candidate::CandidateTracker;
 use crate::registry::ValidatorSnapshot;
@@ -102,14 +103,24 @@ pub fn select_candidate(
         VotingStrategy::FirstValid => first_validator(&all),
 
         VotingStrategy::FixedValidator { validator_key } => {
-            let target_bytes = hex::decode(validator_key).ok()?;
-            for entry in &all {
-                let val_wire = entry.block.header.validator_id.to_wire_bytes();
-                if val_wire == target_bytes {
-                    return Some(entry.block_hash);
+            match hex::decode(validator_key) {
+                Ok(target_bytes) => {
+                    for entry in &all {
+                        let val_wire = entry.block.header.validator_id.to_wire_bytes();
+                        if val_wire == target_bytes {
+                            return Some(entry.block_hash);
+                        }
+                    }
+                    fallback(&all, vote_tallies, current_cycle)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        task = "voting",
+                        "FixedValidator key is not valid hex: {validator_key} — falling back"
+                    );
+                    fallback(&all, vote_tallies, current_cycle)
                 }
             }
-            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::RoundRobin => {
@@ -133,14 +144,25 @@ pub fn select_candidate(
                 return fallback(&all, vote_tallies, current_cycle);
             }
             let idx = (current_cycle as usize) % validators.len();
-            let target_bytes = hex::decode(&validators[idx]).ok()?;
-            for entry in &all {
-                let val_wire = entry.block.header.validator_id.to_wire_bytes();
-                if val_wire == target_bytes {
-                    return Some(entry.block_hash);
+            match hex::decode(&validators[idx]) {
+                Ok(target_bytes) => {
+                    for entry in &all {
+                        let val_wire = entry.block.header.validator_id.to_wire_bytes();
+                        if val_wire == target_bytes {
+                            return Some(entry.block_hash);
+                        }
+                    }
+                    fallback(&all, vote_tallies, current_cycle)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        task = "voting",
+                        "SubsetRotation key at index {idx} is not valid hex: {} — falling back",
+                        &validators[idx]
+                    );
+                    fallback(&all, vote_tallies, current_cycle)
                 }
             }
-            fallback(&all, vote_tallies, current_cycle)
         }
 
         VotingStrategy::Random => {
