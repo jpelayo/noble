@@ -1954,6 +1954,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             alignment: self.healing.alignment().clone(),
             faucet_cache: self.faucet_cache.clone(),
             faucet_address: parking_lot::RwLock::new(config.faucet.address.clone()),
+            faucet_listen: parking_lot::RwLock::new(
+                format!("0.0.0.0:{}", config.faucet.server_port)
+            ),
             faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
             min_fee_rate: self.min_fee_rate.clone(),
         });

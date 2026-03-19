@@ -270,14 +270,15 @@ final class WebBridgeHandler {
     private func faucetBaseURL() -> URL? {
         guard let nodeURL = URL(string: appState.nodeURL),
               let host = nodeURL.host else { return nil }
-        return URL(string: "http://\(host):8786")
+        return URL(string: "https://\(host):8786")
     }
 
-    /// URLSession that accepts self-signed certs (faucet may be local).
+    /// URLSession that accepts self-signed certs (faucet uses node's TLS cert).
     private static let faucetSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
-        return URLSession(configuration: config)
+        let delegate = FaucetTLSDelegate()
+        return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }()
 
     private func handleFaucetStatus() async throws -> Any {
@@ -285,7 +286,9 @@ final class WebBridgeHandler {
             throw BridgeError.faucetUnavailable
         }
         let url = base.appendingPathComponent("api/faucet/status")
-        let (data, response) = try await Self.faucetSession.data(from: url)
+        var req = URLRequest(url: url)
+        req.setValue("noble", forHTTPHeaderField: "Gatekeeper")
+        let (data, response) = try await Self.faucetSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw BridgeError.faucetUnavailable
         }
@@ -303,6 +306,7 @@ final class WebBridgeHandler {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
         let body = try JSONSerialization.data(withJSONObject: ["address": address])
         request.httpBody = body
 
@@ -840,6 +844,22 @@ enum BridgeError: LocalizedError {
         case .noPrivateKey: "No private key available [\(NE.noPrivateKey)]"
         case .faucetUnavailable: "Faucet service is not available [\(NE.faucetUnavailable)]"
         case .faucetError(let msg): "\(msg) [\(NE.faucetError)]"
+        }
+    }
+}
+
+/// Accepts any server certificate (self-signed) for faucet HTTPS connections.
+private final class FaucetTLSDelegate: NSObject, URLSessionDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
         }
     }
 }

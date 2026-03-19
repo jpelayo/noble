@@ -714,6 +714,9 @@ pub struct NodeInfoResponse {
     pub faucet_address: Option<String>,
     /// Whether the faucet server is enabled in config.
     pub faucet_enabled: bool,
+    /// Faucet listen address (e.g. "0.0.0.0:8786"), if configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faucet_listen: Option<String>,
     /// Validator's personal minimum fee rate (groats/byte) for block proposal.
     pub min_fee_rate: u64,
 }

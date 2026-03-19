@@ -145,7 +145,7 @@ class Noble < Formula
 
     # Warn if Noble ports are already occupied by a non-Noble process.
     blocked = []
-    {8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket", 8785 => "Dashboard GUI"}.each do |port, label|
+    {8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket", 8785 => "Dashboard GUI", 8786 => "Faucet"}.each do |port, label|
       pid = `lsof -ti :#{port} 2>/dev/null`.strip
       unless pid.empty?
         proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
@@ -203,6 +203,7 @@ class Noble < Formula
 
         8780  P2P (open to internet for full connectivity)
         8783  JSON-RPC HTTP-only (HTTPS) — open for client/wallet access
+        8786  Faucet (HTTPS) — open for client token requests
 
       Paths:
         Config:    #{etc}/noble/noble.toml

@@ -340,6 +340,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Faucet wallet address (bech32m). Read from config, updated by storeFaucetSecret.
     pub faucet_address: parking_lot::RwLock<String>,
 
+    /// Faucet listen address (e.g. "0.0.0.0:8786"). Set from config.
+    pub faucet_listen: parking_lot::RwLock<String>,
+
     /// Whether the faucet server is enabled.
     pub faucet_enabled: std::sync::atomic::AtomicBool,
 

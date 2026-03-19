@@ -80,6 +80,38 @@ pub struct FaucetState {
     pub wallet: Option<wallet::FaucetWallet>,
 }
 
+/// Gatekeeper middleware: requires `Gatekeeper: noble` header.
+/// OPTIONS (CORS preflight) is exempt — browsers can't send custom headers in preflight.
+async fn gatekeeper_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Allow CORS preflight through without gatekeeper header.
+    if req.method() == axum::http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let has_header = req
+        .headers()
+        .get("gatekeeper")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "noble")
+        .unwrap_or(false);
+    if !has_header {
+        tracing::trace!(
+            task = "gatekeeper",
+            "rejected request without Gatekeeper: noble header"
+        );
+        return axum::response::Response::builder()
+            .status(403)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"error":"Missing Gatekeeper: noble header"}"#,
+            ))
+            .unwrap();
+    }
+    next.run(req).await
+}
+
 /// NOBLE Faucet — token dispenser for chain onboarding.
 #[derive(Parser)]
 #[command(
@@ -311,10 +343,19 @@ async fn main() {
     // CORS: allow any origin for the faucet (public service).
     let cors = tower_http::cors::CorsLayer::permissive();
 
+    // Gatekeeper: require `Gatekeeper: noble` header on all requests.
+    // Drops drive-by scanners before they touch application logic.
+    let gatekeeper = axum::middleware::from_fn(gatekeeper_middleware);
+
+    // Layer order: outermost runs first.
+    // 1. Gatekeeper (reject scanners) — but allows OPTIONS preflight through
+    // 2. CORS (add Access-Control headers for browser clients)
+    // 3. Router (handlers)
     let mut app = Router::new()
         .route("/api/faucet", post(handlers::handle_faucet))
         .route("/api/faucet/status", get(handlers::handle_status))
         .with_state(state)
+        .layer(gatekeeper)
         .layer(cors);
 
     // Optionally serve static web files.
@@ -398,14 +439,8 @@ async fn main() {
             });
         }
     } else {
-        // No TLS cert provided — serve plain HTTP (development/localhost only).
-        tracing::warn!("Faucet server listening on {} (HTTP — no TLS cert)", cli.listen);
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .expect("Server error");
+        tracing::error!("Faucet requires TLS. Provide --tls-cert and --tls-key. Plain HTTP is forbidden.");
+        std::process::exit(1);
     }
 }
 
@@ -439,7 +474,7 @@ mod tests {
     fn cli_parse_defaults() {
         use clap::Parser;
         let cli = Cli::try_parse_from(["noble-faucet", "--faucet-address", "abcd1234"]).unwrap();
-        assert_eq!(cli.listen, "127.0.0.1:8786");
+        assert_eq!(cli.listen, "0.0.0.0:8786");
         assert_eq!(cli.rpc_url, "http://127.0.0.1:8783");
         assert_eq!(cli.faucet_address, Some("abcd1234".to_string()));
         assert_eq!(cli.drip_amount, 100_000_000);
