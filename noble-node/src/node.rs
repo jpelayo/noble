@@ -1190,13 +1190,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             );
         }
 
-        // --- Boot integrity check (last 1000 blocks) ---
+        // --- Boot integrity check (full chain, pruning-aware) ---
         {
             let tip = self.chain_height();
             if tip > 0 {
-                let scan_count = tip.min(1000) + 1;
-                tracing::info!(task = "integrity", "boot integrity check ({scan_count} blocks)");
-                let report = self.verify_recent_blocks(scan_count);
+                let pruned_up_to = self.storage.read().get_pruning_marker().unwrap_or(0);
+                let start = if pruned_up_to > 0 { pruned_up_to + 1 } else { 0 };
+                tracing::info!(task = "integrity", "full chain integrity check ({start}..{tip})");
+                let guard = self.storage.read();
+                let report = noble_storage::verify_chain_integrity(
+                    &*guard, self.get_chain_id(), start, tip,
+                );
                 if report.is_clean() {
                     tracing::info!(
                         task = "integrity",

@@ -201,7 +201,9 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
             .map(|t| t.height)
             .unwrap_or(0);
 
-        let start = from_height.unwrap_or(0);
+        let pruned_up_to = storage.get_pruning_marker().unwrap_or(0);
+        let lowest_full = if pruned_up_to > 0 { pruned_up_to + 1 } else { 0 };
+        let start = from_height.unwrap_or(lowest_full).max(lowest_full);
         let end = to_height.unwrap_or(tip);
 
         if end < start {
