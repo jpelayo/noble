@@ -1270,7 +1270,7 @@ export function init(root, ctx) {
       // Faucet is enabled and has an address — check balance.
       let balance = 0;
       try {
-        const bal = await rpc.call('noble_getAddressBalance', { public_key: addr });
+        const bal = await rpc.call('noble_getAddressBalance', { address: addr });
         balance = bal.available || bal.balance || 0;
       } catch { /* not funded yet */ }
 

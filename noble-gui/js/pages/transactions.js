@@ -96,17 +96,27 @@ export function init(root, ctx) {
         </div>
       `;
 
-      if (history.transactions && history.transactions.length > 0) {
+      // history.transactions is Vec<String> — just tx_id hex strings.
+      // Fetch details for each to show type/amount/time.
+      const txIds = (history.transactions || []).filter(id => id && id.length > 0);
+      if (txIds.length > 0) {
+        const txDetails = await Promise.all(
+          txIds.slice(0, 20).map(id =>
+            rpc.call('noble_getTransaction', { tx_id: id }).catch(() => null)
+          )
+        );
+        const validTxs = txDetails.filter(Boolean);
+
         html += `
           <div class="panel" style="margin-top:var(--gap)">
-            <div class="panel-header">Transaction History (${history.total ?? history.transactions.length})</div>
+            <div class="panel-header">Transaction History (${history.total ?? txIds.length})</div>
             <div class="panel-body" style="padding:0">
               <table class="data-table">
                 <thead><tr><th>Tx ID</th><th>Type</th><th>Amount</th><th>Time</th></tr></thead>
                 <tbody>
         `;
-        for (const tx of history.transactions) {
-          const txId = tx.tx_id || tx.txid || '';
+        for (const tx of validTxs) {
+          const txId = tx.tx_id || '';
           const amount = tx.total_output != null ? formatFee(tx.total_output) : '—';
           const type = tx.tx_type != null ? formatTxType(tx.tx_type) : '—';
           const time = tx.timestamp ? timeAgo(tx.timestamp) : '—';

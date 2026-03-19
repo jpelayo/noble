@@ -521,6 +521,10 @@ pub struct AddressBalanceResponse {
 pub struct AddressUtxosResponse {
     pub address: String,
     pub utxos: Vec<UtxoResponse>,
+    /// Number of UTXOs excluded because they are immature coinbase outputs.
+    pub immature_count: usize,
+    /// Total value locked in immature coinbase UTXOs (groats).
+    pub immature_value: u64,
 }
 
 /// A single UTXO in the address UTXO response.

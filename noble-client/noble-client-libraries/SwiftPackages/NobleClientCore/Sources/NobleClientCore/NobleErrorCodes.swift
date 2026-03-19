@@ -119,6 +119,10 @@ public enum NE {
     public static let utxoFetchFailed       = "NE-606"
     /// Coin selection failed — no valid UTXO combination found.
     public static let coinSelectionFailed   = "NE-607"
+    /// All UTXOs are immature — mining rewards need more confirmations before spending.
+    public static let allUtxosImmature      = "NE-623"
+    /// Not enough mature UTXOs to cover the amount — some funds are still maturing.
+    public static let insufficientMature    = "NE-624"
     /// Address validation failed — recipient address is invalid.
     public static let invalidAddress        = "NE-608"
     /// Fee estimation failed.

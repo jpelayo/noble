@@ -1051,7 +1051,19 @@ export function init(root, ctx) {
     // If already has phases (mock data), pass through.
     if (entry.phases) return entry;
     const hasWinner = !!entry.winner;
+    const hasProposals = (entry.proposals || []).length > 0;
+    const hasVotes = (entry.votes || []).length > 0;
     const indeterminate = entry.status === 'indeterminate' || (!hasWinner && !isCurrent);
+
+    // Empty active cycle: no proposals, no votes — show as gray collapsed row.
+    if (isCurrent && !hasProposals && !hasVotes && !hasWinner) {
+      return {
+        cycle_number: entry.cycle_number,
+        is_current: true,
+        _empty: true,
+      };
+    }
+
     // Sort proposals by validator key for deterministic display across nodes
     const sortedProposals = [...(entry.proposals || [])].sort((a, b) => a.validator.localeCompare(b.validator));
 
@@ -1391,6 +1403,19 @@ export function init(root, ctx) {
           const color = 'var(--text-muted)';
           row.innerHTML = `<span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span> <span style="font-size:var(--font-size-xs);color:${color};font-weight:600">${label}</span>`;
         }
+        csTimeline.appendChild(row);
+        continue;
+      }
+
+      // ── Empty active cycle (no proposals, no votes) ──
+      if (cycle._empty) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:var(--gap-xs);padding:6px 0;opacity:0.5';
+        row.innerHTML = `
+          <span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span>
+          <span style="font-size:var(--font-size-xs);color:var(--text-muted);font-weight:600">WAITING</span>
+          <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">no proposals yet</span>
+        `;
         csTimeline.appendChild(row);
         continue;
       }
