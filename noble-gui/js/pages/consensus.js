@@ -217,7 +217,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th id="cs-strategy-col-header" style="width:52px"></th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Block acceptance rate (weight 0.4)">Acceptance</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th title="Connection stability: stability (reconnections), uptime, and latency">Connectivity</th><th></th></tr></thead>
+          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th id="cs-strategy-col-header" style="width:52px"></th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Minimum fee rate (groats/byte)">Min Fee</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th title="Connection stability: stability (reconnections), uptime, and latency">Connectivity</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Drag rows to set priority order &mdash; used by Round Robin and Weighted Probability strategies.</p>
@@ -241,7 +241,7 @@ export function init(root, ctx) {
       </div>
       <div style="overflow-x:auto">
         <table class="data-table">
-          <thead><tr><th>Node Name</th><th>IP</th><th>Country</th><th>Org Type</th><th>Role</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
+          <thead><tr><th>Node Name</th><th>IP</th><th>Country</th><th>Min Fee</th><th>Org Type</th><th>Role</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
           <tbody id="cs-candidates"></tbody>
         </table>
       </div>
@@ -2059,7 +2059,7 @@ export function init(root, ctx) {
               <span class="mono" style="font-size:var(--font-size-xs)">${v.reputation_score.toFixed(3)}</span>
             </div>
           </td>
-          <td class="mono" style="font-size:var(--font-size-xs)">${(br.block_acceptance_rate * 100).toFixed(1)}%</td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${v.min_fee_rate != null ? v.min_fee_rate + ' g/B' : '—'}</td>
           <td class="mono" style="font-size:var(--font-size-xs)">${(br.uptime * 100).toFixed(1)}%</td>
           <td class="mono" style="font-size:var(--font-size-xs)">${br.trust_score.toFixed(3)}</td>
           <td>${formatNumber(v.blocks_produced)}</td>
@@ -2533,6 +2533,7 @@ export function init(root, ctx) {
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}${(peer.last_addr || peer.host_address) ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(peer.last_addr || peer.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>
           <td style="font-size:var(--font-size-xs)">${peer.country_code || '--'}</td>
+          <td class="mono" style="font-size:var(--font-size-xs)">${peer.min_fee_rate != null ? peer.min_fee_rate + ' g/B' : '—'}</td>
           <td style="font-size:var(--font-size-xs)">${peer.org_type || '—'}</td>
           <td>
             <span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:var(--font-size-xs);font-weight:600;border:1px solid ${part.color};color:${part.color}">${part.label}</span>

@@ -129,7 +129,7 @@ export function init(root, ctx) {
           <div class="panel-header">Transactions (${block.transactions.length})</div>
           <div class="panel-body" style="padding:0">
             <table class="data-table">
-              <thead><tr><th>#</th><th>Tx ID</th><th>Total Output</th><th>Type</th><th>Inputs / Outputs</th></tr></thead>
+              <thead><tr><th>#</th><th>Tx ID</th><th>Amount</th><th>Type</th><th>Inputs / Outputs</th></tr></thead>
               <tbody id="block-txs"></tbody>
             </table>
           </div>
@@ -146,7 +146,7 @@ export function init(root, ctx) {
           tr.innerHTML = `
             <td>${i}</td>
             <td class="mono">${truncateHash(tx.tx_id)}</td>
-            <td>${formatFee(tx.total_output)}</td>
+            <td>${formatFee(tx.transfer_value != null ? tx.transfer_value : tx.total_output)}</td>
             <td>${typeLabel}</td>
             <td>${(tx.inputs || []).length} in / ${(tx.outputs || []).length} out</td>
           `;

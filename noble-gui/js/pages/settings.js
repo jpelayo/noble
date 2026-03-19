@@ -137,6 +137,23 @@ export function init(root, ctx) {
     </div>
     <div id="s-wk-modal"></div>
 
+    <!-- Minimum Fee Rate -->
+    <div class="panel">
+      <div class="panel-header">Minimum Fee Rate</div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+          Transactions below this fee rate (groats/byte) will be rejected from your mempool and excluded from block proposals. Gossiped to peers via NodeAnnounce.
+        </p>
+        <div style="display:flex;gap:var(--gap-sm);align-items:center">
+          <input id="s-fee-rate-input" type="number" min="1" step="1" placeholder="1"
+            style="width:120px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
+          <span style="font-size:var(--font-size-sm);color:var(--text-muted)">groats/byte</span>
+          <button id="s-fee-rate-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+        </div>
+        <span id="s-fee-rate-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
+      </div>
+    </div>
+
     <!-- Faucet -->
     <div class="panel">
       <div class="panel-header">
@@ -151,6 +168,15 @@ export function init(root, ctx) {
         <dl class="detail-grid" id="s-faucet-info">
           <dt style="grid-column:1/-1;color:var(--text-muted)">Detecting faucet...</dt>
         </dl>
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-xs);font-weight:600;margin:0 0 var(--gap-xs)">Faucet Listen Address</p>
+          <div style="display:flex;gap:var(--gap-sm);align-items:center">
+            <input id="s-faucet-listen" type="text" placeholder="0.0.0.0:8786"
+              style="width:200px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            <button id="s-faucet-listen-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+          </div>
+          <span id="s-faucet-listen-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
+        </div>
       </div>
     </div>
 
@@ -1332,6 +1358,33 @@ export function init(root, ctx) {
     }
   });
 
+  // ── Faucet listen address ──
+  const faucetListenInput = root.querySelector('#s-faucet-listen');
+  const faucetListenSave = root.querySelector('#s-faucet-listen-save');
+  const faucetListenMsg = root.querySelector('#s-faucet-listen-msg');
+  // Load current value from TOML
+  rpc.call('noble_getNodeInfo').then(info => {
+    if (info.faucet_listen) faucetListenInput.value = info.faucet_listen;
+    else faucetListenInput.value = '0.0.0.0:8786';
+  }).catch(() => {});
+  faucetListenSave.addEventListener('click', async () => {
+    const val = faucetListenInput.value.trim();
+    if (!val) return;
+    faucetListenSave.disabled = true;
+    faucetListenMsg.style.color = 'var(--text-muted)';
+    faucetListenMsg.textContent = 'Saving...';
+    try {
+      await rpc.call('noble_setConfigValue', { section: 'faucet', key: 'listen_addr', value: val });
+      faucetListenMsg.style.color = 'var(--success)';
+      faucetListenMsg.textContent = 'Saved. Restart faucet to apply.';
+    } catch (e) {
+      faucetListenMsg.style.color = 'var(--error)';
+      faucetListenMsg.textContent = e.message || 'Failed';
+    } finally {
+      faucetListenSave.disabled = false;
+    }
+  });
+
   // Auto-poll faucet balance every 30s.
   const faucetPollInterval = setInterval(loadFaucet, 30_000);
 
@@ -1730,18 +1783,28 @@ export function init(root, ctx) {
       integrityBtn.disabled = true;
       integrityResult.innerHTML = '<span style="color:var(--text-muted)">Checking...</span>';
       try {
-        const [r, nodeInfo] = await Promise.all([
+        const [r, nodeInfo, syncStatus] = await Promise.all([
           rpc.call('noble_checkChainIntegrity'),
           rpc.call('noble_getNodeInfo').catch(() => null),
+          rpc.call('noble_getSyncStatus').catch(() => null),
         ]);
         const chainId = nodeInfo?.chain_id ? `0x${nodeInfo.chain_id.toString(16).toUpperCase()}` : null;
         const chainBadge = chainId
           ? `<span class="badge" style="background:var(--accent);color:#fff;font-size:var(--font-size-xs);margin-left:var(--gap-sm)">Chain ${chainId}</span>`
           : '';
+        // Alignment badge (same state as sidebar)
+        const ALIGN_COLORS = { Isolated: 'var(--error)', Bootstrapping: 'var(--warning)', Creating: 'var(--warning)', Syncing: 'var(--accent)', Aligned: 'var(--success)', Diverged: 'var(--error)' };
+        const st = syncStatus?.state || '';
+        const stColor = ALIGN_COLORS[st] || 'var(--text-muted)';
+        const alignBadge = st
+          ? `<span class="badge" style="background:${stColor};color:#fff;font-size:var(--font-size-xs);margin-left:var(--gap-sm)">${st.toUpperCase()}</span>`
+          : '';
+        const peerInfo = syncStatus ? `<span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">height ${syncStatus.current_height} · ${syncStatus.peer_count || 0} peer${(syncStatus.peer_count || 0) !== 1 ? 's' : ''}</span>` : '';
         if (r.is_clean) {
           integrityResult.innerHTML = `<span class="badge confirmed" style="font-size:var(--font-size-sm)">Chain OK</span>
-            ${chainBadge}
-            <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.heights_checked} blocks verified</span>`;
+            ${chainBadge}${alignBadge}
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.heights_checked} blocks verified</span>
+            ${peerInfo}`;
         } else {
           let html = `<span class="badge" style="background:var(--error);color:#fff;font-size:var(--font-size-sm)">Integrity Failure</span>
             <span style="font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-sm)">${r.findings_count} finding(s), first at block ${r.first_corrupt_height}</span>`;
@@ -1759,6 +1822,36 @@ export function init(root, ctx) {
       }
     });
   }
+
+  // ── Minimum fee rate ──
+  const feeRateInput = root.querySelector('#s-fee-rate-input');
+  const feeRateSave = root.querySelector('#s-fee-rate-save');
+  const feeRateMsg = root.querySelector('#s-fee-rate-msg');
+  // Load current value
+  rpc.call('noble_getNodeInfo').then(info => {
+    if (info.min_fee_rate != null) feeRateInput.value = info.min_fee_rate;
+  }).catch(() => {});
+  feeRateSave.addEventListener('click', async () => {
+    const val = feeRateInput.value.trim();
+    if (!val || parseInt(val) < 1) {
+      feeRateMsg.style.color = 'var(--error)';
+      feeRateMsg.textContent = 'Fee rate must be at least 1 groat/byte';
+      return;
+    }
+    feeRateSave.disabled = true;
+    feeRateMsg.style.color = 'var(--text-muted)';
+    feeRateMsg.textContent = 'Saving...';
+    try {
+      await rpc.call('noble_setConfigValue', { section: 'consensus', key: 'min_fee_rate', value: val });
+      feeRateMsg.style.color = 'var(--success)';
+      feeRateMsg.textContent = 'Saved. Active immediately — gossiped to peers on next NodeAnnounce.';
+    } catch (e) {
+      feeRateMsg.style.color = 'var(--error)';
+      feeRateMsg.textContent = e.message || 'Failed to save';
+    } finally {
+      feeRateSave.disabled = false;
+    }
+  });
 
   // WS reconnect: refresh fork + discovered chains + settings
   function onWsReconnect() { loadForks(); loadForkResolution(); loadCheckpoints(); loadDiscoveredChains(); loadSettings(); }

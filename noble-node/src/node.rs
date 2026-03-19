@@ -1230,6 +1230,44 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
+        // --- Reputation backfill from chain data ---
+        // Scan all committed blocks and credit each validator's blocks_accepted.
+        // This ensures blocks_produced is accurate even if they were imported via
+        // sync (which bypasses the consensus engine's reputation tracking).
+        {
+            let tip = self.chain_height();
+            if tip > 0 {
+                let storage = self.storage.read();
+                let pruned_up_to = storage.get_pruning_marker().unwrap_or(0);
+                let start = if pruned_up_to > 0 { pruned_up_to + 1 } else { 1 };
+                let mut counts: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
+                for h in start..=tip {
+                    if let Ok(hash) = storage.get_block_hash_by_height(h) {
+                        if let Ok(header) = storage.get_block_header(&hash) {
+                            *counts.entry(header.validator_id.to_wire_bytes()).or_default() += 1;
+                        }
+                    }
+                }
+                drop(storage);
+                let mut engine = self.consensus.write();
+                let rep = engine.reputation_mut();
+                for (wire, count) in &counts {
+                    let current = rep.get(wire).map(|d| d.blocks_accepted).unwrap_or(0);
+                    if *count > current {
+                        // Backfill the difference
+                        for _ in current..*count {
+                            rep.record_block_accepted(wire);
+                        }
+                    }
+                }
+                tracing::info!(
+                    task = "reputation",
+                    "backfilled block counts for {} validator(s) from chain data",
+                    counts.len(),
+                );
+            }
+        }
+
         // --- Start network service ---
         let block_provider = Arc::new(StorageBlockProvider::new(self.storage.clone()));
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone(), self.mempool.clone()));
@@ -2815,9 +2853,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 match mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None) {
                     Ok(tx_id) => {
                         // Read entry metadata while lock is held
-                        let (fee, fee_rate, size_bytes) = mempool.get(&tx_id)
-                            .map(|e| (e.fee, e.fee_rate, e.size_bytes))
-                            .unwrap_or((0, 0, 0));
+                        let (fee, fee_rate, size_bytes, tx_type, total_output) = mempool.get(&tx_id)
+                            .map(|e| (e.fee, e.fee_rate, e.size_bytes, e.tx.tx_type, e.tx.total_output_value()))
+                            .unwrap_or((0, 0, 0, 0, 0));
                         drop(mempool);
                         tracing::debug!(
                             task = "tx_relay",
@@ -2827,6 +2865,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         // Enriched WS event for mempool live stream
                         if let Err(e) = new_tx_tx.send(serde_json::json!({
                             "tx_id": hex::encode(tx_id.as_bytes()),
+                            "tx_type": tx_type,
+                            "total_output": total_output,
                             "fee": fee,
                             "fee_rate": fee_rate,
                             "size_bytes": size_bytes,

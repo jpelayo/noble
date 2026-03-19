@@ -89,7 +89,7 @@ pub struct FaucetState {
 )]
 struct Cli {
     /// Listen address (e.g. "0.0.0.0:8786").
-    #[arg(long, default_value = "127.0.0.1:8786")]
+    #[arg(long, default_value = "0.0.0.0:8786")]
     listen: String,
 
     /// NOBLE node JSON-RPC URL.

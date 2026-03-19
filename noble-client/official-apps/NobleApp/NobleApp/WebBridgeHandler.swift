@@ -553,6 +553,23 @@ final class WebBridgeHandler {
                 throw BridgeError.missingParam("section")
             }
             appState.selectedSection = target
+            // Also navigate the WebView content (native tab sets state but
+            // doesn't tell the WebView to switch pages).
+            appState.webViewCoordinator?.evaluateJS(
+                "App.navigateTo('\(target.webRoute)')"
+            )
+            return ["ok": true]
+
+        case "share":
+            guard let text = params["text"] as? String else {
+                throw BridgeError.missingParam("text")
+            }
+            let activityVC = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let root = scene.keyWindow?.rootViewController {
+                activityVC.popoverPresentationController?.sourceView = root.view
+                root.present(activityVC, animated: true)
+            }
             return ["ok": true]
 
         case "copyToClipboard":

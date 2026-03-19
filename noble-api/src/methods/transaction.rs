@@ -142,6 +142,8 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             if let Some(entry) = mempool.get(&tx_id_hash) {
                 let mut resp = tx_to_response(&entry.tx, &tx_id);
                 resp.fee = Some(entry.fee);
+                resp.confirmation_status = Some("pending".to_string());
+                resp.confirmations = None;
                 return Ok(resp);
             }
         }
@@ -174,6 +176,13 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             if all_resolved && input_total > 0 {
                 resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
             }
+        }
+        // Compute confirmation status from tx location
+        if let Ok((tx_height, _)) = storage.get_transaction_location(&tx_id_hash) {
+            let tip = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
+            let confs = tip.saturating_sub(tx_height);
+            resp.confirmations = Some(confs);
+            resp.confirmation_status = Some(confirmation_status_label(Some(confs)));
         }
         Ok(resp)
     }
@@ -220,9 +229,13 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         {
             let mempool = self.mempool.lock();
             if let Some(entry) = mempool.get(&tx_id_hash) {
+                let mut tx_resp = tx_to_response(&entry.tx, &tx_id);
+                tx_resp.fee = Some(entry.fee);
+                tx_resp.confirmation_status = Some("pending".to_string());
+                tx_resp.confirmations = None;
                 return Ok(TransactionReceiptResponse {
                     tx_id: tx_id.clone(),
-                    transaction: tx_to_response(&entry.tx, &tx_id),
+                    transaction: tx_resp,
                     status: "pending".to_string(),
                     block_height: None,
                     block_hash: None,
@@ -247,10 +260,14 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
 
         let confirmations = tip.map(|t| t.height - height + 1);
 
+        let mut tx_resp = tx_to_response(&tx, &tx_id);
+        tx_resp.confirmations = confirmations;
+        tx_resp.confirmation_status = Some(confirmation_status_label(confirmations));
+
         Ok(TransactionReceiptResponse {
             tx_id: tx_id.clone(),
-            transaction: tx_to_response(&tx, &tx_id),
-            status: "confirmed".to_string(),
+            transaction: tx_resp,
+            status: confirmation_status_label(confirmations),
             block_height: Some(height),
             block_hash: Some(hash_to_hex(&block_hash)),
             tx_index: Some(offset),

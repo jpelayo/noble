@@ -236,15 +236,29 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             std::collections::HashMap::new();
         let mut last_seen_map: std::collections::HashMap<Vec<u8>, u64> =
             std::collections::HashMap::new();
+        let mut fee_rate_map: std::collections::HashMap<Vec<u8>, Option<u64>> =
+            std::collections::HashMap::new();
         for rec in &peer_records {
             if let Some(ref ann) = rec.last_announce {
                 announce_map.insert(
                     rec.identity_key.clone(),
                     (ann.host_address.clone(), ann.country_code.clone()),
                 );
+                fee_rate_map.insert(rec.identity_key.clone(), ann.min_fee_rate);
             }
             if rec.last_seen > 0 {
                 last_seen_map.insert(rec.identity_key.clone(), rec.last_seen);
+            }
+        }
+        // Also pull min_fee_rate from live peer_info (fresher than peer_records).
+        {
+            let info = self.peer_info.read();
+            for entry in info.values() {
+                if let Some(ref ik) = entry.identity_key {
+                    if entry.min_fee_rate.is_some() {
+                        fee_rate_map.insert(ik.clone(), entry.min_fee_rate);
+                    }
+                }
             }
         }
 
@@ -413,6 +427,7 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     host_address: host_addr,
                     country_code: country,
                     listers_count: alive_count,
+                    min_fee_rate: fee_rate_map.get(&wire.to_vec()).copied().flatten(),
                     proposed_this_cycle: candidate_tracker.has_proposed(&wire),
                     wants_to_validate: wants_validate,
                 }
@@ -816,27 +831,29 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     noble_codec::NobleCbor::from_cbor(&bytes).map_err(|e| {
                         ApiError::Internal(format!("decode block votes: {e}"))
                     })?;
+                // Re-resolve voter names from current data (stored names may be
+                // stale hex from commits before the node knew peer names).
+                let resolve_voter_name = |v: noble_consensus::history::BlockVoter| {
+                    let name = if v.name.is_empty() {
+                        // Stored name is empty — try to resolve from hex wire bytes
+                        hex::decode(&v.validator_key).ok()
+                            .and_then(|wire| self.resolve_friendly_name(&wire))
+                    } else {
+                        Some(v.name.clone())
+                    };
+                    crate::types::BlockVoterResponse {
+                        validator_key: v.validator_key.clone(),
+                        name: name.unwrap_or(v.name),
+                    }
+                };
+
                 let resp = crate::types::BlockVotesResponse {
                     height,
                     cycle_number: votes.cycle_number,
                     voter_count: votes.voter_count,
                     strength: votes.strength,
-                    r1_voters: votes
-                        .r1_voters
-                        .into_iter()
-                        .map(|v| crate::types::BlockVoterResponse {
-                            validator_key: v.validator_key,
-                            name: v.name,
-                        })
-                        .collect(),
-                    r2_voters: votes
-                        .r2_voters
-                        .into_iter()
-                        .map(|v| crate::types::BlockVoterResponse {
-                            validator_key: v.validator_key,
-                            name: v.name,
-                        })
-                        .collect(),
+                    r1_voters: votes.r1_voters.into_iter().map(&resolve_voter_name).collect(),
+                    r2_voters: votes.r2_voters.into_iter().map(resolve_voter_name).collect(),
                     unique_witness_count: votes.unique_witness_count,
                     dual_witness_required: votes.dual_witness_required,
                     dual_witness_met: votes.dual_witness_met,

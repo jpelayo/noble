@@ -48,6 +48,14 @@ pub trait AddressApi {
         &self,
         address: String,
     ) -> Result<ValidateAddressResponse, ErrorObjectOwned>;
+
+    /// Get pending (mempool) transactions for an address.
+    /// Separate from confirmed history — call both for a complete view.
+    #[method(name = "getAddressPending")]
+    async fn get_address_pending(
+        &self,
+        address: String,
+    ) -> Result<AddressPendingResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -94,6 +102,7 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
                     change: s.outputs_to_self,
                     fee: s.fee,
                     net_debit: s.net_debit,
+                    confirmation_status: "pending".to_string(),
                 })
                 .collect();
             (net, change, summaries)
@@ -133,7 +142,6 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             .get_address_history(&addr, page, clamped_limit)
             .map_err(ApiError::from)?;
 
-        // Get total count
         let total = storage
             .count_address_history(&addr)
             .unwrap_or(0);
@@ -144,6 +152,28 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             total,
             page,
             limit: clamped_limit,
+        })
+    }
+
+    async fn get_address_pending(
+        &self,
+        address: String,
+    ) -> Result<AddressPendingResponse, ErrorObjectOwned> {
+        let addr = parse_address(&address)?;
+        let mempool = self.mempool.lock();
+        let summaries = mempool.pending_tx_summaries(&addr);
+        let entries: Vec<PendingTxResponse> = summaries.iter().map(|s| PendingTxResponse {
+            tx_id: hex::encode(s.tx_id.as_bytes()),
+            sent: s.outputs_to_others,
+            change: s.outputs_to_self,
+            fee: s.fee,
+            net_debit: s.net_debit,
+            confirmation_status: "pending".to_string(),
+        }).collect();
+        Ok(AddressPendingResponse {
+            address,
+            count: entries.len(),
+            transactions: entries,
         })
     }
 

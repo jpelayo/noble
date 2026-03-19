@@ -317,7 +317,7 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
                 if (!ok) { nextBtn.disabled = false; nextBtn.textContent = label; }
             });
 
-            nav.appendChild(backBtn);
+            if (!stepObj.hideBack) nav.appendChild(backBtn);
             nav.appendChild(nextBtn);
         }
 

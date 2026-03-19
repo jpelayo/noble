@@ -79,6 +79,8 @@ impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState
             .take(50)
             .map(|e| MempoolEntryResponse {
                 tx_id: hex::encode(e.tx_id.as_bytes()),
+                tx_type: e.tx.tx_type,
+                total_output: e.tx.total_output_value(),
                 fee: e.fee,
                 fee_rate: e.fee_rate,
                 size_bytes: e.size_bytes,

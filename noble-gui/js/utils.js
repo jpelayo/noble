@@ -2,6 +2,29 @@
  * NOBLE Dashboard — Formatting Utilities
  */
 
+/**
+ * Transaction status badge with pie-chart icon.
+ * @param {number|null} confirmations — null = pending (mempool)
+ * @param {number} maturity — COINBASE_MATURITY (default 6)
+ * @returns {string} HTML span with icon + label
+ */
+export function txStatusBadge(confirmations, maturity = 6) {
+  if (confirmations == null || confirmations < 0) {
+    // Pending — in mempool, not yet in a block
+    return '<span title="Pending (in mempool)" style="color:var(--warning)">◔ Pending</span>';
+  }
+  if (confirmations === 0) {
+    // Admitted — in a block, 0 confirmations
+    return '<span title="Admitted (in block, 0 confirmations)" style="color:var(--accent)">◑ Admitted</span>';
+  }
+  if (confirmations < maturity) {
+    // Maturing — 1 to maturity-1 confirmations
+    return `<span title="Maturing (${confirmations}/${maturity} confirmations)" style="color:var(--accent)">◕ Maturing</span>`;
+  }
+  // Complete — maturity+ confirmations
+  return `<span title="Complete (${confirmations} confirmations)" style="color:var(--success)">● Complete</span>`;
+}
+
 const fullDateFmt = new Intl.DateTimeFormat('en-US', {
   year: 'numeric', month: 'short', day: 'numeric',
   hour: '2-digit', minute: '2-digit', second: '2-digit',

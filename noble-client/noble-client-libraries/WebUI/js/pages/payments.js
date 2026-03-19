@@ -303,7 +303,7 @@ export function init(root, ctx) {
                 { label: 'Amount', render: renderAmountStep, canAdvance: () => isValidAmount(), onNext: null },
                 { label: 'Fee', render: renderFeeStep, canAdvance: () => feeData !== null, onNext: null },
                 { label: 'Review', render: renderReviewStep, canAdvance: () => true, submitLabel: 'Slide to Send', slideConfirm: true, onNext: submitTransaction },
-                { label: 'Result', render: renderResultStep, canAdvance: () => true, submitLabel: 'Done' },
+                { label: 'Result', render: renderResultStep, canAdvance: () => true, submitLabel: 'Close', hideBack: true },
             ],
             onComplete: () => { closeModal(); render(); },
             onCancel: () => {}
@@ -577,15 +577,33 @@ export function init(root, ctx) {
                 <div class="receipt-hash">${esc(submitResult?.txId || '')}</div>
             `;
 
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:var(--gap-sm);margin-top:var(--gap-sm);justify-content:center';
+
             const copyBtn = document.createElement('button');
-            copyBtn.className = 'btn btn-sm';
+            copyBtn.className = 'btn btn-sm btn-secondary';
             copyBtn.textContent = 'Copy TX ID';
-            copyBtn.style.marginTop = 'var(--gap-sm)';
             copyBtn.addEventListener('click', () => {
                 Bridge.call('noble_app', 'copyToClipboard', { text: submitResult?.txId || '' });
                 showCopyFeedback(copyBtn, 'Copy TX ID');
             });
-            card.appendChild(copyBtn);
+
+            const shareBtn = document.createElement('button');
+            shareBtn.className = 'btn btn-sm btn-primary';
+            shareBtn.textContent = '\u{1F4E4} Share';
+            shareBtn.addEventListener('click', () => {
+                const txId = submitResult?.txId || '';
+                const shareText = `NOBLE Transaction Locator: ${txId}`;
+                Bridge.call('noble_app', 'share', { text: shareText }).catch(() => {
+                    // Fallback: copy to clipboard
+                    Bridge.call('noble_app', 'copyToClipboard', { text: shareText });
+                    showCopyFeedback(shareBtn, '\u{1F4E4} Share');
+                });
+            });
+
+            btnRow.appendChild(copyBtn);
+            btnRow.appendChild(shareBtn);
+            card.appendChild(btnRow);
             el.appendChild(card);
         }
 

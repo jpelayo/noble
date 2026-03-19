@@ -155,9 +155,10 @@ async function boot() {
 
 boot();
 
-// ── iOS ghost cursor fix (visualViewport-driven) ──
-// Hide caret on focus. Show it only after visualViewport stops resizing
-// (keyboard animation finished). Prevents ghost cursor at old position.
+// ── iOS ghost cursor fix ──
+// Hide caret on focus. Poll visualViewport geometry (height + offsetTop)
+// via rAF until it stops moving. Only then show the caret.
+// resize alone misses offsetTop/scroll changes from keyboard animation.
 (function() {
     document.addEventListener('focusin', (e) => {
         const el = e.target;
@@ -165,36 +166,44 @@ boot();
 
         el.classList.add('caret-hidden');
 
-        if (!window.visualViewport) {
-            setTimeout(() => el.classList.remove('caret-hidden'), 300);
+        const vv = window.visualViewport;
+        if (!vv) {
+            setTimeout(() => el.classList.remove('caret-hidden'), 350);
             return;
         }
 
-        const vv = window.visualViewport;
-        const startHeight = vv.height;
-        let settled = false;
-        let settleTimer = null;
+        let lastH = vv.height;
+        let lastOT = vv.offsetTop;
+        let stableFrames = 0;
+        let done = false;
+        const STABLE_THRESHOLD = 6; // ~100ms at 60fps
 
-        const show = () => {
-            if (settled) return;
-            settled = true;
-            el.classList.remove('caret-hidden');
-            vv.removeEventListener('resize', onResize);
-        };
+        function poll() {
+            if (done) return;
+            const h = vv.height;
+            const ot = vv.offsetTop;
+            if (h === lastH && ot === lastOT) {
+                stableFrames++;
+            } else {
+                stableFrames = 0;
+                lastH = h;
+                lastOT = ot;
+            }
+            if (stableFrames >= STABLE_THRESHOLD) {
+                done = true;
+                el.classList.remove('caret-hidden');
+                return;
+            }
+            requestAnimationFrame(poll);
+        }
+        requestAnimationFrame(poll);
 
-        const onResize = () => {
-            clearTimeout(settleTimer);
-            settleTimer = setTimeout(show, 100);
-        };
-
-        vv.addEventListener('resize', onResize);
-
-        // Keyboard already open (field switch): no resize → show after 50ms
+        // Ultimate safety: if rAF loop doesn't converge in 800ms, show anyway
         setTimeout(() => {
-            if (!settled && vv.height === startHeight) show();
-        }, 50);
-
-        // Ultimate safety fallback
-        setTimeout(() => { if (!settled) show(); }, 600);
+            if (!done) {
+                done = true;
+                el.classList.remove('caret-hidden');
+            }
+        }, 800);
     });
 })();

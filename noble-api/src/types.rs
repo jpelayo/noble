@@ -129,6 +129,17 @@ pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> 
     }
 }
 
+/// Compute confirmation status from confirmation count.
+/// Returns ("pending"|"admitted"|"maturing"|"complete", icon).
+pub fn confirmation_status_label(confirmations: Option<u64>) -> String {
+    match confirmations {
+        None => "pending".to_string(),
+        Some(0) => "admitted".to_string(),
+        Some(c) if c < noble_core::COINBASE_MATURITY => "maturing".to_string(),
+        Some(_) => "complete".to_string(),
+    }
+}
+
 /// Convert a `Transaction` to a `TransactionResponse`.
 pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
     let has_locator = tx.encrypted_locator.is_some();
@@ -137,12 +148,28 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         .as_ref()
         .map_or(0, |l| l.recipients.len());
 
+    // Compute transfer_value: outputs NOT going to the signer.
+    // For coinbase (no signer match possible), use total_output.
+    let signer_wire: Option<Vec<u8>> = tx.issuer_sig.to_noble_public_key()
+        .ok()
+        .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+    let transfer_value = match &signer_wire {
+        Some(sw) if !tx.is_coinbase() => {
+            tx.outputs.iter()
+                .filter(|o| o.address.to_wire_bytes() != *sw)
+                .map(|o| o.value)
+                .sum()
+        }
+        _ => tx.total_output_value(),
+    };
+
     TransactionResponse {
         tx_id: tx_id.to_string(),
         tx_type: tx.tx_type,
         checksum: hash_to_hex(&tx.checksum),
         timestamp: tx.timestamp,
         total_output: tx.total_output_value(),
+        transfer_value,
         fee: None, // Set by caller when UTXO data is available
         inputs: tx.inputs.iter().map(|i| TxInputResponse {
             txid: hash_to_hex(&i.prev_output.txid),
@@ -166,6 +193,8 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         has_encrypted_locator: has_locator,
         locator_recipient_count: locator_recipients,
         attestation_count: tx.external_attestations.len(),
+        confirmation_status: None, // Set by caller based on context
+        confirmations: None,       // Set by caller based on chain tip
         attestations: tx
             .external_attestations
             .iter()
@@ -229,8 +258,11 @@ pub struct TransactionResponse {
     pub tx_type: u8,
     pub checksum: String,
     pub timestamp: u64,
-    /// Total output value.
+    /// Total output value (sum of ALL outputs including change).
     pub total_output: u64,
+    /// Net transfer value: outputs NOT going back to the signer.
+    /// For coinbase: same as total_output. For transfers: excludes change.
+    pub transfer_value: u64,
     /// Implicit fee: sum(input UTXO values) - sum(output values).
     /// `None` for coinbase transactions or if input UTXOs are unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,6 +279,13 @@ pub struct TransactionResponse {
     pub locator_recipient_count: usize,
     pub attestation_count: usize,
     pub attestations: Vec<AttestationResponse>,
+    /// Lifecycle status: "pending" (mempool), "admitted" (in block, 0 conf),
+    /// "maturing" (1-5 conf), "complete" (6+ conf).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_status: Option<String>,
+    /// Number of confirmations (None = pending/mempool).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmations: Option<u64>,
 }
 
 /// Transaction input response.
@@ -359,6 +398,8 @@ pub struct MempoolInfoResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct MempoolEntryResponse {
     pub tx_id: String,
+    pub tx_type: u8,
+    pub total_output: u64,
     pub fee: u64,
     pub fee_rate: u64,
     pub size_bytes: usize,
@@ -496,6 +537,9 @@ pub struct ValidatorEntry {
     pub country_code: Option<String>,
     /// Number of alive validators in the list (trust metric).
     pub listers_count: usize,
+    /// Minimum fee rate (groats/byte) from NodeAnnounce gossip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_fee_rate: Option<u64>,
     /// Whether this validator has proposed a block in the current cycle.
     pub proposed_this_cycle: bool,
     /// Whether this peer announced `wants_to_validate = true`.
@@ -555,6 +599,16 @@ pub struct PendingTxResponse {
     pub change: u64,
     pub fee: u64,
     pub net_debit: u64,
+    /// Always "pending" for mempool transactions.
+    pub confirmation_status: String,
+}
+
+/// Response for `noble_getAddressPending`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddressPendingResponse {
+    pub address: String,
+    pub count: usize,
+    pub transactions: Vec<PendingTxResponse>,
 }
 
 /// Response for `noble_getAddressUtxos`.
