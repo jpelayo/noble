@@ -700,11 +700,27 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
     async fn get_vote_tallies(&self) -> Result<VoteTalliesResponse, ErrorObjectOwned> {
         // Extract data from consensus engine, then drop the lock before
         // calling resolve_name (which acquires Storage(2) + Registry(3)).
-        let (cycle, phase, tally_data) = {
+        let (cycle, phase, tally_data, r2_tallies_map, candidate_data): (
+            u64, _, Vec<(noble_crypto::Hash256, usize, Option<Vec<u8>>)>,
+            std::collections::HashMap<noble_crypto::Hash256, usize>,
+            Vec<(noble_crypto::Hash256, Vec<u8>, u32)>,
+        ) = {
             let consensus = self.consensus.read(); // Lock order: 4
             let cycle = consensus.current_cycle();
             let phase = consensus.current_phase();
             let tallies = consensus.vote_tallies();
+            let r2_tallies_map = consensus.r2_tallies();
+            // Collect ALL candidates (including those with 0 votes) so the
+            // GUI shows proposals immediately during Block Proposal phase.
+            let candidates: Vec<_> = consensus.candidate_tracker().all_candidates()
+                .into_iter()
+                .map(|c| {
+                    let hash = c.block_hash;
+                    let proposer = c.block.header.validator_id.to_wire_bytes();
+                    let tx_count = c.block.transactions.len() as u32;
+                    (hash, proposer, tx_count)
+                })
+                .collect();
             let data: Vec<_> = tallies
                 .into_iter()
                 .map(|(h, c)| {
@@ -712,22 +728,48 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     (h, c, proposer)
                 })
                 .collect();
-            (cycle, phase, data)
+            (cycle, phase, data, r2_tallies_map, candidates)
         }; // consensus lock dropped
 
-        let mut entries: Vec<VoteTallyEntry> = tally_data
-            .into_iter()
-            .map(|(h, c, proposer_wire): (noble_crypto::Hash256, usize, Option<Vec<u8>>)| {
-                let validator_key = proposer_wire.as_ref().map(|wire| hex::encode(wire));
-                let validator = proposer_wire.as_ref().map(|wire| self.resolve_name(wire));
-                VoteTallyEntry {
-                    block_hash: hash_to_hex(&h),
-                    vote_count: c,
-                    validator,
-                    validator_key,
-                }
-            })
-            .collect();
+        // Build entries from vote tallies (candidates with ≥1 vote)
+        let mut seen_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut entries: Vec<VoteTallyEntry> = Vec::new();
+        for (h, c, proposer_wire) in tally_data {
+            let hash_hex = hash_to_hex(&h);
+            seen_hashes.insert(hash_hex.clone());
+            let validator_key = proposer_wire.as_ref().map(|wire| hex::encode(wire));
+            let validator = proposer_wire.as_ref().map(|wire| self.resolve_name(wire));
+            // Look up tx_count and r2 votes from candidate/r2 data
+            let tx_count: Option<u32> = candidate_data.iter()
+                .find(|(ch, _, _)| *ch == h)
+                .map(|(_, _, tc)| *tc);
+            let r2_count: Option<usize> = r2_tallies_map.get(&h).copied();
+            entries.push(VoteTallyEntry {
+                block_hash: hash_hex,
+                vote_count: c,
+                validator,
+                validator_key,
+                tx_count,
+                r2_vote_count: r2_count,
+            });
+        }
+
+        // Add candidates with 0 votes (proposed but not yet voted on)
+        for (hash, proposer_wire, tx_count) in &candidate_data {
+            let hash_hex = hash_to_hex(hash);
+            if seen_hashes.contains(&hash_hex) { continue; }
+            let validator_key = Some(hex::encode(proposer_wire));
+            let validator = Some(self.resolve_name(proposer_wire));
+            entries.push(VoteTallyEntry {
+                block_hash: hash_hex,
+                vote_count: 0,
+                validator,
+                validator_key,
+                tx_count: Some(*tx_count),
+                r2_vote_count: None,
+            });
+        }
+
         entries.sort_by(|a, b| b.vote_count.cmp(&a.vote_count));
 
         Ok(VoteTalliesResponse {

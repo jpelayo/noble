@@ -997,6 +997,12 @@ pub struct VoteTallyEntry {
     /// Validator identity key (hex wire bytes), if the block is in the candidate tracker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator_key: Option<String>,
+    /// Number of transactions in the proposed block (from candidate tracker).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_count: Option<u32>,
+    /// R2 (confirmation) vote count, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r2_vote_count: Option<usize>,
 }
 
 /// Response for `noble_getVoteTallies`.

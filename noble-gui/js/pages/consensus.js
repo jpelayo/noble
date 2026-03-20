@@ -1104,7 +1104,7 @@ export function init(root, ctx) {
     };
   }
 
-  const TIMELINE_LIMIT = 4;
+  const TIMELINE_LIMIT = 2; // 2 finalized + 1 active = 3 visible
 
   /**
    * Verify and correct winner information in timeline entries against
@@ -1219,9 +1219,9 @@ export function init(root, ctx) {
         const liveProposals = (tallies?.tallies || []).map(t => ({
           validator: t.validator || t.block_hash,
           block_hash: t.block_hash,
-          tx_count: 0,
+          tx_count: t.tx_count || 0,
         }));
-        const liveVotes = (tallies?.tallies || []).map(t => ({
+        const liveVotes = (tallies?.tallies || []).filter(t => t.vote_count > 0).map(t => ({
           block_hash: t.block_hash,
           validator: t.validator || '',
           vote_count: t.vote_count || 0,
@@ -1447,6 +1447,21 @@ export function init(root, ctx) {
         <span style="font-weight:700;font-size:var(--font-size-sm)">Cycle #${formatNumber(cycle.cycle_number)}</span>
         <span style="font-size:var(--font-size-xs);color:${statusColor};font-weight:600">${statusLabel}</span>
         ${disambigBadge}
+        ${(() => {
+          const proposals = cycle.phases[0]?.proposals || [];
+          if (proposals.length === 0) return '';
+          const counts = proposals.map(p => p.tx_count || 0);
+          const txMin = Math.min(...counts);
+          const txMax = Math.max(...counts);
+          let txLabel;
+          if (cycle.winner) {
+            const wp = proposals.find(p => p.validator === cycle.winner);
+            txLabel = `${wp ? wp.tx_count : '?'} transactions`;
+          } else {
+            txLabel = txMin === txMax ? `${txMin} transactions` : `${txMin} to ${txMax} transactions`;
+          }
+          return `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">${txLabel}</span>`;
+        })()}
         ${cycle.winner ? `<span style="margin-left:auto;font-size:var(--font-size-xs);color:var(--text-secondary)">Winner: <strong title="${cycle.winner}">${escapeHtml(cycle.winner)}</strong></span>` : ''}
         ${timeLabel ? `<span style="${cycle.winner ? '' : 'margin-left:auto;'}font-size:var(--font-size-xs);color:var(--text-muted)">${timeLabel}</span>` : ''}
       `;
@@ -1565,18 +1580,17 @@ export function init(root, ctx) {
 
       // ── Proposal detail strip (below bar) ──
       if (cycle.phases[0].proposals && cycle.phases[0].proposals.length > 0) {
+        const proposals = cycle.phases[0].proposals;
+        const useCoverflow = proposals.length > 2;
         const strip = document.createElement('div');
-        strip.style.cssText = 'display:flex;gap:var(--gap);margin-top:var(--gap-xs);flex-wrap:wrap';
 
-        for (const p of cycle.phases[0].proposals) {
+        // Build card HTML for each proposal
+        function buildProposalCard(p) {
           const isWinner = cycle.winner === p.validator;
           const borderColor = isWinner ? 'var(--success)' : cycle.disambiguation ? 'var(--error)' : 'var(--border)';
           const icon = isWinner ? '<span style="color:var(--success)">&#10003;</span>' : cycle.disambiguation ? '<span style="color:var(--error)">&#10007;</span>' : '';
-
-          const card = document.createElement('div');
-          card.style.cssText = `flex:1;min-width:180px;padding:var(--gap-sm);border:1px solid ${borderColor};border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)`;
           const vName = escapeHtml(p.validator || truncateHash(p.block_hash, 6));
-          card.innerHTML = `
+          let html = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
               <strong>${vName}</strong>
               ${icon}
@@ -1585,8 +1599,6 @@ export function init(root, ctx) {
               ${p.tx_count} txs &middot; <span class="mono">${truncateHash(p.block_hash, 4)}</span>
             </div>
           `;
-
-          // Show vote count from voting phase (index 1)
           const votingPhase = cycle.phases[1];
           if (votingPhase.votes && votingPhase.votes.length > 0) {
             const voteEntry = votingPhase.votes.find(v => v.block_hash === p.block_hash);
@@ -1595,11 +1607,10 @@ export function init(root, ctx) {
               const r2 = voteEntry.r2_vote_count || 0;
               const displayVotes = r2 > 0 ? r2 : r1;
               const pct = votingPhase.total_voters > 0 ? Math.min(100, Math.round(displayVotes / votingPhase.total_voters * 100)) : 0;
-              // Only show R1/R2 breakdown when R2 changed the outcome (R2 != R1).
               const roundLabel = (r2 > 0 && r2 !== r1)
                 ? ` <span style="color:var(--text-muted);font-weight:400">(R1:${r1} R2:${r2})</span>`
                 : '';
-              card.innerHTML += `
+              html += `
                 <div style="margin-top:4px">
                   <div style="display:flex;justify-content:space-between;margin-bottom:2px">
                     <span style="color:var(--text-secondary)">Votes</span>
@@ -1612,8 +1623,72 @@ export function init(root, ctx) {
               `;
             }
           }
+          return { html, borderColor, isWinner };
+        }
 
-          strip.appendChild(card);
+        if (useCoverflow) {
+          // ── Coverflow layout for ≥3 proposals ──
+          strip.className = 'coverflow-container';
+          const track = document.createElement('div');
+          track.className = 'coverflow-track';
+
+          // Auto-focus winner, or first proposal
+          let focusIdx = proposals.findIndex(p => p.validator === cycle.winner);
+          if (focusIdx < 0) focusIdx = 0;
+
+          const cards = proposals.map((p, i) => {
+            const { html, borderColor } = buildProposalCard(p);
+            const card = document.createElement('div');
+            card.className = 'coverflow-card';
+            card.style.border = `1px solid ${borderColor}`;
+            card.innerHTML = html;
+            card.addEventListener('click', () => {
+              focusIdx = i;
+              updatePositions();
+            });
+            track.appendChild(card);
+            return card;
+          });
+
+          function updatePositions() {
+            cards.forEach((card, i) => {
+              const pos = i - focusIdx;
+              if (Math.abs(pos) > 2) card.setAttribute('data-pos', 'hidden');
+              else card.setAttribute('data-pos', String(pos));
+            });
+          }
+
+          // Navigation arrows
+          const leftNav = document.createElement('button');
+          leftNav.className = 'coverflow-nav coverflow-nav--left';
+          leftNav.innerHTML = '&#x276E;';
+          leftNav.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (focusIdx > 0) { focusIdx--; updatePositions(); }
+          });
+
+          const rightNav = document.createElement('button');
+          rightNav.className = 'coverflow-nav coverflow-nav--right';
+          rightNav.innerHTML = '&#x276F;';
+          rightNav.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (focusIdx < proposals.length - 1) { focusIdx++; updatePositions(); }
+          });
+
+          strip.appendChild(track);
+          strip.appendChild(leftNav);
+          strip.appendChild(rightNav);
+          updatePositions();
+        } else {
+          // ── Simple flex layout for 1-2 proposals ──
+          strip.style.cssText = 'display:flex;gap:var(--gap);margin-top:var(--gap-xs);flex-wrap:wrap';
+          for (const p of proposals) {
+            const { html, borderColor } = buildProposalCard(p);
+            const card = document.createElement('div');
+            card.style.cssText = `flex:1;min-width:180px;padding:var(--gap-sm);border:1px solid ${borderColor};border-radius:var(--radius-sm);background:var(--bg-secondary);font-size:var(--font-size-xs)`;
+            card.innerHTML = html;
+            strip.appendChild(card);
+          }
         }
 
         // Per-block vote witness strip (below proposal cards)

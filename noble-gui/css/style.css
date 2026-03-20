@@ -1199,6 +1199,85 @@ body {
 }
 .btn-copy:hover { opacity: 1; }
 
+/* ── Coverflow proposal cards ── */
+.coverflow-container {
+  position: relative;
+  overflow: hidden;
+  height: 160px;
+  margin-top: var(--gap-xs);
+}
+.coverflow-track {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  perspective: 800px;
+  position: relative;
+}
+.coverflow-card {
+  position: absolute;
+  width: 220px;
+  padding: var(--gap-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  font-size: var(--font-size-xs);
+  transition: transform 0.4s ease, opacity 0.4s ease, z-index 0s;
+  transform-style: preserve-3d;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.coverflow-card[data-pos="0"] {
+  transform: translateX(0) rotateY(0deg) scale(1);
+  opacity: 1;
+  z-index: 10;
+}
+.coverflow-card[data-pos="-1"] {
+  transform: translateX(-180px) rotateY(35deg) scale(0.85);
+  opacity: 0.7;
+  z-index: 5;
+}
+.coverflow-card[data-pos="1"] {
+  transform: translateX(180px) rotateY(-35deg) scale(0.85);
+  opacity: 0.7;
+  z-index: 5;
+}
+.coverflow-card[data-pos="-2"] {
+  transform: translateX(-300px) rotateY(45deg) scale(0.7);
+  opacity: 0.4;
+  z-index: 2;
+}
+.coverflow-card[data-pos="2"] {
+  transform: translateX(300px) rotateY(-45deg) scale(0.7);
+  opacity: 0.4;
+  z-index: 2;
+}
+.coverflow-card[data-pos="hidden"] {
+  transform: scale(0.5);
+  opacity: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.coverflow-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 20;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.coverflow-nav:hover { background: var(--bg-tertiary); }
+.coverflow-nav--left { left: 4px; }
+.coverflow-nav--right { right: 4px; }
+
 /* Coinbase badge */
 .badge.coinbase,
 .badge-coinbase {
