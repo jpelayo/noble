@@ -89,6 +89,8 @@ public enum NE {
     public static let bridgeTimeout         = "NE-405"
     /// Bridge response could not be parsed.
     public static let bridgeParseError      = "NE-406"
+    /// A bridge operation failed (generic, with details in message).
+    public static let operationFailed       = "NE-407"
 
     // MARK: - 5xx Services
 

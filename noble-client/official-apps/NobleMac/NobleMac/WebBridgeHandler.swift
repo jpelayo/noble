@@ -418,7 +418,7 @@ final class WebBridgeHandler {
             let allUtxos = try parseUtxoParams(params)
             let selected = try CoinSelector.select(from: allUtxos, target: feeAtomic)
 
-            let changeAddress = walletChangeAddress()
+            let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
 
             let txHex = try appState.transactionSigner.signNotarization(
@@ -454,7 +454,7 @@ final class WebBridgeHandler {
             let target = amountAtomic + feeEstimate
             let selected = try CoinSelector.select(from: allUtxos, target: target)
 
-            let changeAddress = walletChangeAddress()
+            let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
 
             let txHex = try appState.transactionSigner.signTransfer(
@@ -692,9 +692,7 @@ final class WebBridgeHandler {
             guard let identityRef = firstItem[kSecImportItemIdentity as String] else {
                 throw BridgeError.operationFailed("No identity found in PKCS#12")
             }
-            guard let identity = identityRef as? SecIdentity else {
-                throw BridgeError.operationFailed("Invalid identity type in PKCS#12")
-            }
+            let identity = identityRef as! SecIdentity
 
             var privateKeyRef: SecKey?
             let privStatus = SecIdentityCopyPrivateKey(identity, &privateKeyRef)
@@ -779,9 +777,13 @@ final class WebBridgeHandler {
             return signingKeyToDict(keyEntry)
 
         case "generateSigningKey":
-            // Generate a secp256k1 keypair using NobleClientCrypto
-            let privKeyBytes = NobleClientCrypto.generatePrivateKey()
-            let pubKeyBytes = try NobleClientCrypto.derivePublicKey(from: privKeyBytes)
+            // Generate a secp256k1 keypair
+            var privKeyBytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, 32, &privKeyBytes) == errSecSuccess else {
+                throw BridgeError.operationFailed("Failed to generate random key")
+            }
+            let privKeyData = Data(privKeyBytes)
+            let pubKeyBytes = try appState.mnemonicProvider.derivePublicKey(privateKey: privKeyData)
             let compressedHex = pubKeyBytes.map { String(format: "%02x", $0) }.joined()
             let skiData = Insecure.SHA1.hash(data: pubKeyBytes)
             let skiHex = skiData.map { String(format: "%02x", $0) }.joined()
@@ -794,7 +796,7 @@ final class WebBridgeHandler {
                 subjectKeyIdentifier: skiHex
             )
 
-            try appState.keychainService.storeKey(Data(privKeyBytes), label: "signing-key-\(keyEntry.id.uuidString)")
+            try appState.keychainService.storeKey(privKeyData, label: "signing-key-\(keyEntry.id.uuidString)")
 
             if let idx = appState.contacts.firstIndex(where: { $0.isMyCard }) {
                 appState.contacts[idx].signingKeys.append(keyEntry)

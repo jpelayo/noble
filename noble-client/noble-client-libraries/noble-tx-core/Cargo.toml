@@ -15,21 +15,6 @@ noble-core.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json = "1"
-rand.workspace = true
-
-# CMS/PKCS#7 per-field signing
-p256.workspace = true
-k256.workspace = true
-sha2.workspace = true
-sha1.workspace = true
-cms.workspace = true
-x509-cert.workspace = true
-pkcs12.workspace = true
-der.workspace = true
-const-oid.workspace = true
-spki.workspace = true
-signature.workspace = true
-ecdsa.workspace = true
 
 [build-dependencies]
 cc = "1"

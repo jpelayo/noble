@@ -3048,6 +3048,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "noble-cms-core"
+version = "0.70.0"
+dependencies = [
+ "cms",
+ "const-oid",
+ "der",
+ "ecdsa",
+ "hex",
+ "k256",
+ "p256",
+ "pkcs12",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "signature",
+ "spki",
+ "x509-cert",
+]
+
+[[package]]
 name = "noble-codec"
 version = "0.70.0"
 dependencies = [
@@ -3293,23 +3315,10 @@ name = "noble-tx-core"
 version = "0.70.0"
 dependencies = [
  "cc",
- "cms",
- "const-oid",
- "der",
- "ecdsa",
  "hex",
- "k256",
  "noble-core",
- "p256",
- "pkcs12",
- "rand 0.8.5",
  "serde",
  "serde_json",
- "sha1",
- "sha2",
- "signature",
- "spki",
- "x509-cert",
 ]
 
 [[package]]

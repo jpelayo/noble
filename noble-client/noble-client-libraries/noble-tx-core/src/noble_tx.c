@@ -506,6 +506,23 @@ char *noble_tx_encode(const char *tx_json) {
     return result;
 }
 
+// ── CMS stubs (temporary — replaced by noble-cms-core binary module) ───
+
+char *noble_sign_cms_ffi(const char *params_json) {
+    (void)params_json;
+    return strdup("{\"error\":\"CMS signing requires noble-cms-core module (not yet linked)\"}");
+}
+
+char *noble_verify_cms_ffi(const char *params_json) {
+    (void)params_json;
+    return strdup("{\"error\":\"CMS verification requires noble-cms-core module (not yet linked)\"}");
+}
+
+char *noble_import_pkcs12_ffi(const char *params_json) {
+    (void)params_json;
+    return strdup("{\"error\":\"PKCS#12 import requires noble-cms-core module (not yet linked)\"}");
+}
+
 // ── noble_free ──────────────────────────────────────────────────────────
 
 void noble_free(char *ptr) {
