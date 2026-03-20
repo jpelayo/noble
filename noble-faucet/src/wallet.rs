@@ -6,7 +6,6 @@
 //! The faucet maintains its own keystore (separate from the node's) so it can
 //! build and sign transfer transactions without delegating to `walletSendTransfer`.
 
-use noble_codec::NobleCbor;
 use noble_crypto::keys::NoblePublicKey;
 use noble_crypto::SCHEME_SECP256K1;
 use noble_wallet::builder::{SelectedUtxo, TransactionBuilder};
