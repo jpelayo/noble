@@ -3048,6 +3048,7 @@ dependencies = [
  "noble-codec",
  "noble-core",
  "noble-crypto",
+ "noble-tx-core",
  "noble-wallet",
  "rusqlite",
  "rustls",

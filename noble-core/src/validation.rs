@@ -126,7 +126,9 @@ fn validate_tx_size_and_counts(tx: &Transaction) -> Result<(), ValidationError> 
     }
     tracing::trace!("T8b: metadata entries count check passed");
 
-    // T1: Size check
+    // T1: Size check (serde CBOR — conservative ceiling; C encoder produces
+    // slightly smaller output, so passing this check guarantees passing C-based
+    // size checks. Cannot use noble-tx-core here due to cyclic dependency.)
     let serialized = tx.to_cbor().map_err(|e| {
         tracing::debug!("transaction serialization failed: {e}");
         ValidationError::Internal("transaction serialization failed".into())

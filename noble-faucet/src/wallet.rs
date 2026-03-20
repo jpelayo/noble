@@ -162,7 +162,8 @@ impl FaucetWallet {
         )
         .map_err(|e| format!("build transfer: {e}"))?;
 
-        let cbor = tx.to_cbor().map_err(|e| format!("cbor encode: {e}"))?;
+        let cbor = noble_tx_core::encode_transaction(&tx)
+            .map_err(|e| format!("C encoder: {e}"))?;
         Ok(hex::encode(cbor))
     }
 }
