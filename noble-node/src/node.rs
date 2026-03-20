@@ -2856,9 +2856,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 match mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None) {
                     Ok(tx_id) => {
                         // Read entry metadata while lock is held
-                        let (fee, fee_rate, size_bytes, tx_type, total_output) = mempool.get(&tx_id)
-                            .map(|e| (e.fee, e.fee_rate, e.size_bytes, e.tx.tx_type, e.tx.total_output_value()))
-                            .unwrap_or((0, 0, 0, 0, 0));
+                        let (fee, fee_rate, size_bytes, tx_type, total_output, transfer_value) = mempool.get(&tx_id)
+                            .map(|e| {
+                                let signer_wire = e.tx.issuer_sig.to_noble_public_key().ok()
+                                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+                                let tv = match &signer_wire {
+                                    Some(sw) if !e.tx.is_coinbase() => {
+                                        e.tx.outputs.iter()
+                                            .filter(|o| o.address.to_wire_bytes() != *sw)
+                                            .map(|o| o.value)
+                                            .sum()
+                                    }
+                                    _ => e.tx.total_output_value(),
+                                };
+                                (e.fee, e.fee_rate, e.size_bytes, e.tx.tx_type, e.tx.total_output_value(), tv)
+                            })
+                            .unwrap_or((0, 0, 0, 0, 0, 0));
                         drop(mempool);
                         tracing::debug!(
                             task = "tx_relay",
@@ -2870,6 +2883,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             "tx_id": hex::encode(tx_id.as_bytes()),
                             "tx_type": tx_type,
                             "total_output": total_output,
+                            "transfer_value": transfer_value,
                             "fee": fee,
                             "fee_rate": fee_rate,
                             "size_bytes": size_bytes,

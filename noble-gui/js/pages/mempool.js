@@ -117,7 +117,7 @@ export function init(root, ctx) {
     item.className = 'tx-stream-item';
     const typeLabel = entry.tx_type != null ? (TX_TYPE_LABELS[entry.tx_type] || `Type ${entry.tx_type}`) : '';
     const typeBadge = typeLabel ? `<span class="badge" style="font-size:0.65rem;padding:1px 5px">${typeLabel}</span>` : '';
-    const amount = entry.total_output != null ? formatFee(entry.total_output) : '';
+    const amount = entry.transfer_value != null ? formatFee(entry.transfer_value) : (entry.total_output != null ? formatFee(entry.total_output) : '');
     const fee = entry.fee != null ? `fee ${formatFee(entry.fee)}` : '';
     item.innerHTML = `
       <span class="mono">${truncateHash(entry.tx_id)}</span>

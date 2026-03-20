@@ -400,6 +400,8 @@ pub struct MempoolEntryResponse {
     pub tx_id: String,
     pub tx_type: u8,
     pub total_output: u64,
+    /// Net transfer value: outputs NOT going to the signer (excludes change).
+    pub transfer_value: u64,
     pub fee: u64,
     pub fee_rate: u64,
     pub size_bytes: usize,

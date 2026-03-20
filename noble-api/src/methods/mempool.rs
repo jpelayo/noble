@@ -77,14 +77,28 @@ impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState
         let entries: Vec<MempoolEntryResponse> = mempool
             .iter_by_fee_rate_desc()
             .take(50)
-            .map(|e| MempoolEntryResponse {
-                tx_id: hex::encode(e.tx_id.as_bytes()),
-                tx_type: e.tx.tx_type,
-                total_output: e.tx.total_output_value(),
-                fee: e.fee,
-                fee_rate: e.fee_rate,
-                size_bytes: e.size_bytes,
-                received_at: e.received_at,
+            .map(|e| {
+                let signer_wire = e.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+                let transfer_value = match &signer_wire {
+                    Some(sw) if !e.tx.is_coinbase() => {
+                        e.tx.outputs.iter()
+                            .filter(|o| o.address.to_wire_bytes() != *sw)
+                            .map(|o| o.value)
+                            .sum()
+                    }
+                    _ => e.tx.total_output_value(),
+                };
+                MempoolEntryResponse {
+                    tx_id: hex::encode(e.tx_id.as_bytes()),
+                    tx_type: e.tx.tx_type,
+                    total_output: e.tx.total_output_value(),
+                    transfer_value,
+                    fee: e.fee,
+                    fee_rate: e.fee_rate,
+                    size_bytes: e.size_bytes,
+                    received_at: e.received_at,
+                }
             })
             .collect();
 
