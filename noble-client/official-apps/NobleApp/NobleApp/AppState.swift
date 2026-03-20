@@ -425,13 +425,13 @@ final class AppState {
 
         } catch {
             pollFailureCount += 1
-            if pollFailureCount >= 3 && isConnected {
+            if pollFailureCount >= 2 && isConnected {
                 // Mark as disconnected but keep polling — auto-reconnect on success.
                 isConnected = false
                 pushStateToWebView(["isConnected": false])
             }
-            // If already disconnected, try to reconnect on each poll tick.
-            if !isConnected, pollFailureCount % 3 == 0 {
+            // If already disconnected, try to reconnect every 2 ticks.
+            if !isConnected, pollFailureCount % 2 == 0 {
                 // Attempt reconnection silently.
                 do {
                     let nodeInfo = try await service.getNodeInfo()

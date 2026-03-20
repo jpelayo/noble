@@ -135,6 +135,10 @@ body {
   flex-shrink: 0;
   box-shadow: 0 0 4px #6ee7b7;
 }
+.chain-bar .chain-dot-offline {
+  background: var(--error);
+  box-shadow: 0 0 4px var(--error);
+}
 .chain-bar .chain-label {
   font-family: var(--font-sans);
   font-weight: 500;
@@ -1993,17 +1997,13 @@ body {
 
 /* ── Metadata Dropdown ── */
 .metadata-dropdown {
-  position: absolute;
-  top: 56px;
-  left: 50%;
-  transform: translateX(-50%);
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-  z-index: 100;
+  z-index: 9999;
   min-width: 260px;
-  max-height: 320px;
+  max-height: 480px;
   overflow-y: auto;
 }
 

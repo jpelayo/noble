@@ -9,16 +9,14 @@ import { esc, timeAgo, showCopyFeedback } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
+    let loadRetries = 0;
     const state = ctx.state;
 
-    if (!state.isConnected) {
+    if (!state.isConnected && state._confirmedDisconnected) {
+        // Only show welcome screen when we have CONFIRMED the node is offline
+        // (set by heartbeat after 2+ failures, never at boot)
         root.classList.add('page-content');
         const defaultSeed = 'https://node.infinitecontext.com:8783';
-
-        // Build the welcome screen but keep it hidden initially.
-        // The native app may push isConnected=true within milliseconds of page load
-        // (auto-reconnect). Showing the welcome screen immediately causes a flash.
-        // Instead, show nothing for a brief moment, then render if still disconnected.
         const welcome = document.createElement('div');
         welcome.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:var(--gap)';
         welcome.innerHTML = `
@@ -152,12 +150,25 @@ export function init(root, ctx) {
             renderRecentTxs(txsContainer, history.transactions);
         } catch (err) {
             if (!alive) return;
+            const msg = err.message.toLowerCase();
+            const isOffline = msg.includes('timeout') || msg.includes('not connected') || msg.includes('ne-404');
+            if (isOffline && loadRetries < 5) {
+                // Node not ready yet — auto-retry silently (keep loading skeletons)
+                loadRetries++;
+                setTimeout(() => { if (alive) loadDashboard(); }, 3000);
+                return;
+            }
+            // Genuine error or retries exhausted — show error card
+            loadRetries = 0;
             balanceContainer.innerHTML = '';
             const errDiv = document.createElement('div');
             errDiv.className = 'error-card';
             errDiv.setAttribute('role', 'alert');
-            errDiv.innerHTML = `<p>${err.message}</p><button type="button">Retry</button>`;
+            errDiv.innerHTML = isOffline
+                ? `<p>Node offline. Check that your Noble node is running and reachable.</p><button type="button">Retry</button>`
+                : `<p>${err.message}</p><button type="button">Retry</button>`;
             errDiv.querySelector('button').addEventListener('click', () => {
+                loadRetries = 0;
                 balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
                 docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
                 txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';

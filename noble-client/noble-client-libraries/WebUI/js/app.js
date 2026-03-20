@@ -24,33 +24,54 @@ const pages = {
 let currentPage = null;
 let currentRoute = null;
 let appState = {};
+let bootComplete = false;
+
+// Persistent page cache: each page is mounted once and hidden/shown on navigation.
+// This preserves wizard state, form inputs, scroll positions across page switches.
+const mountedPages = {};  // section → { root: HTMLElement, page: pageInstance }
 
 const App = {
-    /** Navigate to a section, destroying the current page and mounting the new one. */
+    /** Navigate to a section. Pages are mounted once and hidden/shown, never destroyed. */
     navigateTo(section) {
-        if (section === currentRoute && currentPage) return;
-        const root = document.getElementById('app-content');
-        if (!root) return;
+        if (section === currentRoute) return;
+        const container = document.getElementById('app-content');
+        if (!container) return;
 
-        // Destroy current page
-        if (currentPage && currentPage.destroy) {
-            currentPage.destroy();
+        // Hide current page
+        if (currentRoute && mountedPages[currentRoute]) {
+            mountedPages[currentRoute].root.style.display = 'none';
         }
-        currentPage = null;
-        currentRoute = section;
-        root.className = '';
-        root.innerHTML = '';
 
-        const initFn = pages[section];
-        if (initFn) {
-            currentPage = initFn(root, { state: appState, Bridge });
+        currentRoute = section;
+
+        // Reuse existing page or create new one
+        if (mountedPages[section]) {
+            // Show cached page
+            mountedPages[section].root.style.display = '';
+            currentPage = mountedPages[section].page;
+            // Refresh with latest state
+            if (currentPage && currentPage.refresh) {
+                currentPage.refresh(appState);
+            }
         } else {
-            // Unimplemented page — coming soon
-            root.appendChild(emptyState({
-                icon: '\u{1F6A7}',
-                title: 'Coming Soon',
-                subtitle: `The ${section} section is under development.`
-            }));
+            // First visit — create page root and mount
+            const root = document.createElement('div');
+            root.className = '';
+            container.appendChild(root);
+
+            const initFn = pages[section];
+            let page = null;
+            if (initFn) {
+                page = initFn(root, { state: appState, Bridge });
+            } else {
+                root.appendChild(emptyState({
+                    icon: '\u{1F6A7}',
+                    title: 'Coming Soon',
+                    subtitle: `The ${section} section is under development.`
+                }));
+            }
+            mountedPages[section] = { root, page };
+            currentPage = page;
         }
     },
 
@@ -61,12 +82,17 @@ const App = {
         Object.assign(appState, patch);
         App._updateChainBar();
 
-        // If connection or wallet state changed, re-mount the page so it re-renders
-        // from scratch (pages check isConnected on init and bail early if false).
-        if (wasConnected !== appState.isConnected || hadWallet !== appState.hasWallet) {
+        // If connection or wallet state changed AFTER boot, invalidate ALL cached pages
+        // so they re-mount fresh on next visit (pages check isConnected on init).
+        if (bootComplete && (wasConnected !== appState.isConnected || hadWallet !== appState.hasWallet)) {
+            for (const [key, entry] of Object.entries(mountedPages)) {
+                if (entry.page && entry.page.destroy) entry.page.destroy();
+                entry.root.remove();
+            }
+            for (const key of Object.keys(mountedPages)) delete mountedPages[key];
             if (currentRoute) {
                 const route = currentRoute;
-                currentRoute = null; // force navigateTo to re-mount
+                currentRoute = null;
                 App.navigateTo(route);
             }
             return;
@@ -85,11 +111,15 @@ const App = {
     /** Handle an event pushed from Swift (poll timer, state change). */
     handleEvent(type, data) {
         if (type === 'stateUpdate') {
+            // During boot, ignore disconnected pushes — let boot() finish first
+            if (!bootComplete && data.isConnected === false) return;
             const wasConnected = appState.isConnected;
             App.updateState(data);
             if (data.isConnected === false && wasConnected !== false) {
+                appState._confirmedDisconnected = true;
                 App._showDisconnectedBanner();
             } else if (data.isConnected === true) {
+                appState._confirmedDisconnected = false;
                 App._hideDisconnectedBanner();
             }
         }
@@ -101,9 +131,10 @@ const App = {
         banner = document.createElement('div');
         banner.id = 'disconnected-banner';
         banner.setAttribute('role', 'alert');
-        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:var(--gap-sm) var(--gap);background:var(--error);color:#fff;text-align:center;font-size:var(--font-size-sm);z-index:2000;';
-        banner.textContent = 'Connection lost. Reconnecting...';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:var(--gap-sm) var(--gap);background:var(--error);color:#fff;text-align:center;font-size:var(--font-size-sm);z-index:2000;display:flex;align-items:center;justify-content:center;gap:var(--gap-sm)';
+        banner.innerHTML = '<span>Node offline. Reconnecting...</span><button id="disconnected-retry" style="background:#fff3;border:1px solid #fff6;color:#fff;padding:2px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Retry Now</button>';
         document.body.appendChild(banner);
+        document.getElementById('disconnected-retry').addEventListener('click', () => App._checkConnectivity());
     },
 
     _hideDisconnectedBanner() {
@@ -115,15 +146,45 @@ const App = {
     _updateChainBar() {
         const bar = document.getElementById('chain-bar');
         if (!bar) return;
-        if (appState.isConnected && appState.chainId) {
+        if (appState.chainId) {
             bar.hidden = false;
-            bar.innerHTML = `<span class="chain-dot"></span><span class="chain-label">Chain</span> ${appState.chainId}`;
+            const dotClass = appState.isConnected ? 'chain-dot' : 'chain-dot chain-dot-offline';
+            bar.innerHTML = `<span class="${dotClass}"></span><span class="chain-label">${appState.isConnected ? 'Chain' : 'Offline'}</span> ${appState.chainId}`;
         } else {
             bar.hidden = true;
             bar.innerHTML = '';
         }
+    },
+
+    /** Called by bridge.js when a bridge call times out or errors. */
+    onBridgeError(handler, action, error) {
+        // Ignore timeouts on getState itself (heartbeat handles that)
+        if (action === 'getState') return;
+        // Bridge timeout is strong evidence the node is down
+        if (error.message.includes('timeout') && appState.isConnected) {
+            // Don't set disconnected immediately on one timeout — verify with getState
+            App._checkConnectivity();
+        }
+    },
+
+    /** Quick connectivity check — call getState to verify connection. */
+    async _checkConnectivity() {
+        try {
+            const state = await Bridge.call('noble_app', 'getState');
+            Object.assign(appState, state);
+            App._updateChainBar();
+            if (state.isConnected) {
+                App._hideDisconnectedBanner();
+                App._heartbeatFailures = 0;
+            }
+        } catch {
+            // getState failed — don't panic on one failure, heartbeat will catch sustained outage
+        }
     }
 };
+
+// Expose current page for cross-page calls (e.g. contacts → payments.openSendWizard)
+Object.defineProperty(App, '_currentPage', { get: () => currentPage });
 
 // Expose globally for Swift evaluateJavaScript calls
 window.App = App;
@@ -140,10 +201,13 @@ async function boot() {
         const state = await Bridge.call('noble_app', 'getState');
         Object.assign(appState, state);
     } catch {
-        // NativeConfig already provides the basics; fill in any missing defaults
-        if (appState.isConnected === undefined) appState.isConnected = false;
-        if (appState.hasWallet === undefined) appState.hasWallet = false;
+        // Bridge not ready — use NativeConfig defaults
     }
+    // NEVER start disconnected. Period.
+    // Swift may report isConnected=false because its poll hasn't run yet.
+    // The heartbeat will correct to offline later if the node is truly down.
+    appState.isConnected = true;
+    if (!appState.hasWallet) appState.hasWallet = true;
 
     // Show chain bar if connected
     App._updateChainBar();
@@ -151,6 +215,43 @@ async function boot() {
     // Use NativeConfig initial route if available, otherwise default to home
     const initialRoute = appState.initialRoute || appState.selectedSection || 'home';
     App.navigateTo(initialRoute);
+    bootComplete = true;
+
+    // ── Heartbeat: 15s connectivity check ──
+    // Polls getState to detect node offline/online. Does NOT invalidate pages —
+    // only updates the chain bar and banner. Page invalidation only happens
+    // on genuine connection/wallet state transitions via updateState.
+    setInterval(async () => {
+        try {
+            const state = await Bridge.call('noble_app', 'getState');
+            // Silently update state fields WITHOUT triggering page invalidation
+            const connChanged = appState.isConnected !== state.isConnected;
+            Object.assign(appState, state);
+            App._updateChainBar();
+            if (state.isConnected) {
+                App._hideDisconnectedBanner();
+                App._heartbeatFailures = 0;
+                appState._confirmedDisconnected = false;
+                // If we just reconnected, refresh the current page
+                if (connChanged && currentPage && currentPage.refresh) {
+                    currentPage.refresh(appState);
+                }
+            } else if (connChanged) {
+                App._showDisconnectedBanner();
+            }
+        } catch {
+            // getState bridge call failed — Swift side may be busy, don't panic
+            // Only show offline after 2 consecutive heartbeat failures
+            if (!App._heartbeatFailures) App._heartbeatFailures = 0;
+            App._heartbeatFailures++;
+            if (App._heartbeatFailures >= 2 && appState.isConnected) {
+                appState.isConnected = false;
+                appState._confirmedDisconnected = true;
+                App._updateChainBar();
+                App._showDisconnectedBanner();
+            }
+        }
+    }, 15_000);
 }
 
 boot();

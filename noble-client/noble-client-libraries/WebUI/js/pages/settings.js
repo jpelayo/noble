@@ -194,18 +194,21 @@ export function init(root, ctx) {
                     <span class="settings-label">Scheme</span>
                     <span>secp256k1</span>
                 </div>
-                <div class="settings-row">
-                    <span class="settings-label">Public Key</span>
-                    <span id="settings-wallet-addr"></span>
+                <div class="settings-row" style="flex-wrap:wrap">
+                    <span class="settings-label">Noble Address</span>
+                    <span class="mono" style="font-size:var(--font-size-xs);word-break:break-all;flex:1;text-align:right" id="settings-noble-addr"></span>
+                    <button class="btn-icon" id="settings-copy-noble" title="Copy Noble address" style="margin-left:4px;cursor:pointer;background:none;border:none;color:var(--text-muted);font-size:1rem">\u{1F4CB}</button>
+                </div>
+                <div class="settings-row" style="flex-wrap:wrap" id="settings-btc-row" style="display:none">
+                    <span class="settings-label">Bitcoin Address</span>
+                    <span class="mono" style="font-size:var(--font-size-xs);word-break:break-all;flex:1;text-align:right" id="settings-btc-addr"></span>
+                    <button class="btn-icon" id="settings-copy-btc" title="Copy Bitcoin address" style="margin-left:4px;cursor:pointer;background:none;border:none;color:var(--text-muted);font-size:1rem">\u{1F4CB}</button>
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Storage</span>
                     <span>\u{1F512} Stored in macOS Keychain</span>
                 </div>
                 <div id="settings-wallet-qr" style="text-align: center; margin-top: var(--gap-sm)"></div>
-                <div class="settings-actions">
-                    <button class="btn btn-secondary" id="settings-copy-pubkey">Copy Public Key</button>
-                </div>
             `;
         }
 
@@ -216,23 +219,42 @@ export function init(root, ctx) {
         root.appendChild(card);
 
         if (hasWallet && addr) {
-            // Insert hashText element
-            const addrSlot = card.querySelector('#settings-wallet-addr');
-            if (addrSlot) addrSlot.appendChild(hashText(addr, { chars: 12 }));
+            // Noble address — full, no trimming
+            const nobleSlot = card.querySelector('#settings-noble-addr');
+            if (nobleSlot) nobleSlot.textContent = addr;
+
+            // Copy Noble address
+            const copyNoble = card.querySelector('#settings-copy-noble');
+            if (copyNoble) {
+                copyNoble.addEventListener('click', () => {
+                    Bridge.call('noble_app', 'copyToClipboard', { text: addr });
+                    copyNoble.textContent = '\u2713';
+                    setTimeout(() => { copyNoble.textContent = '\u{1F4CB}'; }, 1200);
+                });
+            }
+
+            // Bitcoin address (if available in state)
+            const btcAddr = state.bitcoinAddress || '';
+            const btcRow = card.querySelector('#settings-btc-row');
+            if (btcAddr && btcRow) {
+                btcRow.style.display = '';
+                const btcSlot = card.querySelector('#settings-btc-addr');
+                if (btcSlot) btcSlot.textContent = btcAddr;
+                const copyBtc = card.querySelector('#settings-copy-btc');
+                if (copyBtc) {
+                    copyBtc.addEventListener('click', () => {
+                        Bridge.call('noble_app', 'copyToClipboard', { text: btcAddr });
+                        copyBtc.textContent = '\u2713';
+                        setTimeout(() => { copyBtc.textContent = '\u{1F4CB}'; }, 1200);
+                    });
+                }
+            } else if (btcRow) {
+                btcRow.style.display = 'none';
+            }
 
             // QR code
             const qrSlot = card.querySelector('#settings-wallet-qr');
             if (qrSlot) renderQR(qrSlot, addr, 180);
-
-            // Copy button
-            const copyBtn = card.querySelector('#settings-copy-pubkey');
-            if (copyBtn) {
-                copyBtn.addEventListener('click', () => {
-                    Bridge.call('noble_app', 'copyToClipboard', { text: addr });
-                    copyBtn.textContent = 'Copied!';
-                    setTimeout(() => { copyBtn.textContent = 'Copy Public Key'; }, 1200);
-                });
-            }
         }
     }
 

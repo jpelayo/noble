@@ -24,7 +24,12 @@ class NativeBridge {
             const id = 'cb_' + (++_callbackId);
             const timer = setTimeout(() => {
                 delete _callbacks[id];
-                reject(new Error(`Bridge timeout: ${handler}.${action} exceeded ${timeoutMs}ms`));
+                const err = new Error(`Bridge timeout: ${handler}.${action} exceeded ${timeoutMs}ms`);
+                // Notify App of bridge failure — triggers connectivity check
+                if (window.App && window.App.onBridgeError) {
+                    window.App.onBridgeError(handler, action, err);
+                }
+                reject(err);
             }, timeoutMs);
             _callbacks[id] = {
                 resolve: v => { clearTimeout(timer); resolve(v); },

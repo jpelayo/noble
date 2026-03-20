@@ -6,7 +6,7 @@ import { formatAmount } from '../components/amount-text.js';
 import { emptyState } from '../components/empty-state.js';
 import { esc, formatBytes } from '../utils.js';
 
-const STEP_NAMES = ['Files', 'Checksum', 'Metadata', 'Version', 'Fee', 'Review', 'Submit'];
+const STEP_NAMES = ['Files', 'Metadata', 'Version', 'Locking', 'Fee', 'Review', 'Submit'];
 
 export function init(root, ctx) {
     let alive = true;
@@ -24,6 +24,9 @@ export function init(root, ctx) {
     let metadata = [];
     let selectedSigningKeyId = null; // default signing key for all signed fields
     let myCardKeys = [];             // signing keys from My Card
+    let wantsLocking = false;
+    let lockingPassword = '';
+    let lockingPasswordConfirm = '';
     let feeLevel = 'recommended';
     let feeData = null;
     let results = [];
@@ -52,7 +55,7 @@ export function init(root, ctx) {
     function getWizardState() {
         return {
             files, hashes, previousChecksum, isNewVersion, versionMode,
-            wantsMetadata, metadata, selectedSigningKeyId, feeLevel, step
+            wantsMetadata, metadata, selectedSigningKeyId, wantsLocking, feeLevel, step
         };
     }
 
@@ -65,6 +68,9 @@ export function init(root, ctx) {
         wantsMetadata = d.wantsMetadata || false;
         metadata = d.metadata || [];
         selectedSigningKeyId = d.selectedSigningKeyId || null;
+        wantsLocking = d.wantsLocking || false;
+        lockingPassword = '';
+        lockingPasswordConfirm = '';
         feeLevel = d.feeLevel || 'recommended';
         step = d.step || 0;
         versionFile = null;
@@ -101,6 +107,9 @@ export function init(root, ctx) {
         metadata = [];
         selectedSigningKeyId = null;
         myCardKeys = [];
+        wantsLocking = false;
+        lockingPassword = '';
+        lockingPasswordConfirm = '';
         feeLevel = 'recommended';
         feeData = null;
         results = [];
@@ -202,9 +211,9 @@ export function init(root, ctx) {
 
         switch (step) {
             case 0: renderStepFiles(content); break;
-            case 1: renderStepChecksum(content); break;
-            case 2: renderStepMetadata(content); break;
-            case 3: renderStepVersion(content); break;
+            case 1: renderStepMetadata(content); break;
+            case 2: renderStepVersion(content); break;
+            case 3: renderStepLocking(content); break;
             case 4: renderStepFee(content); break;
             case 5: renderStepReview(content); break;
             case 6: renderStepSubmit(content); break;
@@ -254,10 +263,13 @@ export function init(root, ctx) {
     }
 
     function canAdvance() {
-        if (step === 0) return files.length > 0;
-        if (step === 1) return Object.keys(hashes).length === files.length;
-        if (step === 2) return true; // metadata optional
-        if (step === 3) return true; // version optional
+        if (step === 0) return files.length > 0 && Object.keys(hashes).length === files.length;
+        if (step === 1) return true; // metadata optional
+        if (step === 2) return true; // version optional
+        if (step === 3) {            // locking: if enabled, passwords must match and be non-empty
+            if (!wantsLocking) return true;
+            return lockingPassword.length >= 8 && lockingPassword === lockingPasswordConfirm;
+        }
         if (step === 4) return feeData !== null;
         if (step === 5) {
             // Block submit if balance is known and insufficient
@@ -341,9 +353,16 @@ export function init(root, ctx) {
             for (const f of files) {
                 const li = document.createElement('li');
                 li.className = 'file-item';
+                const hash = hashes[f.path];
+                const hashDisplay = hash
+                    ? (hash.startsWith('ERROR') ? `<span style="color:var(--error)">${esc(hash)}</span>` : `<span class="mono" style="font-size:var(--font-size-xs);color:var(--text-secondary)">\u2713 ${esc(hash)}</span>`)
+                    : '<span style="color:var(--text-muted);font-size:var(--font-size-xs)">Computing...</span>';
                 li.innerHTML = `
-                    <span class="file-name">${esc(f.name)}</span>
-                    <span class="file-size">${formatBytes(f.size)}</span>
+                    <div style="display:flex;align-items:center;gap:var(--gap-sm);flex:1;min-width:0">
+                        <span class="file-name">${esc(f.name)}</span>
+                        <span class="file-size">${formatBytes(f.size)}</span>
+                    </div>
+                    <div style="font-size:var(--font-size-xs);word-break:break-all">${hashDisplay}</div>
                 `;
                 const rm = document.createElement('span');
                 rm.className = 'file-remove';
@@ -357,6 +376,21 @@ export function init(root, ctx) {
                 list.appendChild(li);
             }
             container.appendChild(list);
+
+            // Auto-compute checksums for files that don't have one yet
+            for (const f of files) {
+                if (!hashes[f.path]) {
+                    Bridge.call('noble_security', 'hashFile', { filePath: f.path }).then(result => {
+                        if (!alive) return;
+                        hashes[f.path] = result.hash;
+                        render();
+                    }).catch(err => {
+                        if (!alive) return;
+                        hashes[f.path] = 'ERROR: ' + (err.message || 'hash failed');
+                        render();
+                    });
+                }
+            }
         }
     }
 
@@ -893,7 +927,7 @@ export function init(root, ctx) {
         if (!m.signed) m.signed = false;
         if (!m.signingKeyId) m.signingKeyId = selectedSigningKeyId;
 
-        if (myCardKeys.length > 0) {
+        {
             const sigSection = document.createElement('div');
             sigSection.className = 'metadata-visibility';
 
@@ -904,6 +938,7 @@ export function init(root, ctx) {
 
             const budget = computeSlotBudget();
             const canSign = m.signed || budget.remaining >= 1;
+            const hasKeys = myCardKeys.length > 0;
 
             const sigSeg = document.createElement('div');
             sigSeg.className = 'segmented-control segmented-control-sm';
@@ -914,22 +949,35 @@ export function init(root, ctx) {
                 const btn = document.createElement('button');
                 btn.className = m.signed === opt.key ? 'active' : '';
                 btn.textContent = opt.label;
-                if (opt.key === true && !canSign) {
-                    btn.disabled = true;
-                    btn.title = 'No slots available for signature';
-                }
                 btn.addEventListener('click', () => {
+                    if (opt.key === true && !hasKeys) {
+                        // Show inline warning instead of silently doing nothing
+                        let warn = row.querySelector('.sig-no-keys-warn');
+                        if (!warn) {
+                            warn = document.createElement('div');
+                            warn.className = 'sig-no-keys-warn';
+                            warn.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning);margin-top:var(--gap-xs);padding:4px 8px;background:color-mix(in srgb,var(--warning) 10%,transparent);border-radius:var(--radius-sm)';
+                            warn.textContent = 'No signing keys available. Import a .p12 certificate in Contacts \u2192 My Card first.';
+                            row.appendChild(warn);
+                        }
+                        return;
+                    }
+                    if (opt.key === true && !canSign) return;
                     m.signed = opt.key;
                     if (!opt.key) m.signingKeyId = null;
                     else m.signingKeyId = selectedSigningKeyId;
                     render();
                 });
+                if (opt.key === true && !canSign && hasKeys) {
+                    btn.disabled = true;
+                    btn.title = 'No slots available for signature';
+                }
                 sigSeg.appendChild(btn);
             }
             sigSection.appendChild(sigSeg);
             row.appendChild(sigSection);
 
-            if (m.signed) {
+            if (m.signed && hasKeys) {
                 const sigNote = document.createElement('div');
                 sigNote.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs);padding:4px 8px';
                 const keyName = myCardKeys.find(k => k.id === m.signingKeyId);
@@ -1070,18 +1118,20 @@ export function init(root, ctx) {
 
         addBtn.addEventListener('click', () => {
             dropdownOpen = !dropdownOpen;
-            const existing = wrapper.querySelector('.metadata-dropdown');
+            const existing = document.querySelector('.metadata-dropdown');
             if (existing) { existing.remove(); dropdownOpen = false; return; }
 
             const dropdown = document.createElement('div');
             dropdown.className = 'metadata-dropdown';
+            // Position fixed to avoid overflow clipping by parent containers
+            const btnRect = addBtn.getBoundingClientRect();
+            dropdown.style.position = 'fixed';
+            dropdown.style.top = (btnRect.bottom + 4) + 'px';
+            dropdown.style.left = (btnRect.left + btnRect.width / 2) + 'px';
+            dropdown.style.transform = 'translateX(-50%)';
 
-            // Filter out already-added single-use fields (allow multiple url/signatures/custom)
-            const multiUse = new Set(['url', 'signatures', 'custom']);
-            const usedKeys = new Set(metadata.map(m => m.fieldKey));
-
+            // All fields can be added multiple times (user may need several URLs, emails, etc.)
             for (const field of METADATA_FIELDS) {
-                if (usedKeys.has(field.key) && !multiUse.has(field.key)) continue;
 
                 const item = document.createElement('button');
                 item.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);width:100%;padding:var(--gap-sm) var(--gap);border:none;background:none;color:var(--text-primary);font-size:var(--font-size-sm);cursor:pointer;text-align:left;';
@@ -1113,7 +1163,7 @@ export function init(root, ctx) {
 
             // Close on outside click
             const closeHandler = (e) => {
-                if (!wrapper.contains(e.target)) {
+                if (!dropdown.contains(e.target) && !addBtn.contains(e.target)) {
                     dropdown.remove();
                     dropdownOpen = false;
                     document.removeEventListener('click', closeHandler, true);
@@ -1121,7 +1171,7 @@ export function init(root, ctx) {
             };
             setTimeout(() => document.addEventListener('click', closeHandler, true), 0);
 
-            wrapper.appendChild(dropdown);
+            document.body.appendChild(dropdown);
         });
 
         wrapper.appendChild(addBtn);
@@ -1161,6 +1211,110 @@ export function init(root, ctx) {
         overlay.appendChild(panel);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         document.body.appendChild(overlay);
+    }
+
+    // ── Step 3: Locking ──
+
+    function renderStepLocking(container) {
+        const question = document.createElement('p');
+        question.style.cssText = 'font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)';
+        question.textContent = 'Do you want to lock (encrypt) this registration on-chain?';
+        container.appendChild(question);
+
+        const explain = document.createElement('p');
+        explain.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)';
+        explain.textContent = 'A locked transaction encrypts the checksum and all metadata with a password. The data remains hidden on-chain until you send an unlocking transaction with the same password. Only the original signer can unlock.';
+        container.appendChild(explain);
+
+        // Yes / No toggle
+        const toggle = document.createElement('div');
+        toggle.className = 'segmented-control';
+        toggle.style.marginBottom = 'var(--gap)';
+        for (const opt of [{ key: false, label: 'No' }, { key: true, label: 'Yes' }]) {
+            const btn = document.createElement('button');
+            btn.className = wantsLocking === opt.key ? 'active' : '';
+            btn.textContent = opt.label;
+            btn.addEventListener('click', () => {
+                wantsLocking = opt.key;
+                if (!wantsLocking) { lockingPassword = ''; lockingPasswordConfirm = ''; }
+                render();
+            });
+            toggle.appendChild(btn);
+        }
+        container.appendChild(toggle);
+
+        if (!wantsLocking) return;
+
+        // Password fields
+        const pwGroup = document.createElement('div');
+        pwGroup.style.cssText = 'display:flex;flex-direction:column;gap:var(--gap-sm);max-width:400px';
+
+        const pw1Label = document.createElement('label');
+        pw1Label.textContent = 'Locking password';
+        pw1Label.style.cssText = 'font-size:var(--font-size-sm);font-weight:500';
+        pwGroup.appendChild(pw1Label);
+
+        function buildPasswordField(value, placeholder, onInput) {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'position:relative;display:flex;align-items:center';
+            const inp = document.createElement('input');
+            inp.type = 'password';
+            inp.className = 'form-input';
+            inp.style.cssText = 'flex:1;padding-right:40px';
+            inp.placeholder = placeholder;
+            inp.value = value;
+            inp.addEventListener('input', () => onInput(inp.value));
+            wrap.appendChild(inp);
+            const eye = document.createElement('button');
+            eye.type = 'button';
+            eye.style.cssText = 'position:absolute;right:8px;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:1.1rem;padding:2px';
+            eye.textContent = '\u{1F441}';
+            eye.title = 'Show password';
+            eye.addEventListener('click', () => {
+                const visible = inp.type === 'text';
+                inp.type = visible ? 'password' : 'text';
+                eye.textContent = visible ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}';
+                eye.title = visible ? 'Show password' : 'Hide password';
+            });
+            wrap.appendChild(eye);
+            return wrap;
+        }
+
+        pwGroup.appendChild(buildPasswordField(lockingPassword, 'Minimum 8 characters', v => { lockingPassword = v; render(); }));
+
+        const pw2Label = document.createElement('label');
+        pw2Label.textContent = 'Confirm password';
+        pw2Label.style.cssText = 'font-size:var(--font-size-sm);font-weight:500;margin-top:var(--gap-xs)';
+        pwGroup.appendChild(pw2Label);
+
+        pwGroup.appendChild(buildPasswordField(lockingPasswordConfirm, 'Re-enter password', v => { lockingPasswordConfirm = v; render(); }));
+
+        // Validation feedback
+        if (lockingPassword.length > 0 && lockingPassword.length < 8) {
+            const warn = document.createElement('div');
+            warn.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning)';
+            warn.textContent = 'Password must be at least 8 characters.';
+            pwGroup.appendChild(warn);
+        } else if (lockingPassword.length >= 8 && lockingPasswordConfirm.length > 0 && lockingPassword !== lockingPasswordConfirm) {
+            const warn = document.createElement('div');
+            warn.style.cssText = 'font-size:var(--font-size-xs);color:var(--error)';
+            warn.textContent = 'Passwords do not match.';
+            pwGroup.appendChild(warn);
+        } else if (lockingPassword.length >= 8 && lockingPassword === lockingPasswordConfirm) {
+            const ok = document.createElement('div');
+            ok.style.cssText = 'font-size:var(--font-size-xs);color:var(--success)';
+            ok.textContent = '\u2713 Passwords match. This transaction will be encrypted on-chain.';
+            pwGroup.appendChild(ok);
+        }
+
+        container.appendChild(pwGroup);
+
+        // Warning box
+        const warnBox = document.createElement('div');
+        warnBox.className = 'warning-box';
+        warnBox.style.marginTop = 'var(--gap)';
+        warnBox.textContent = '\u26A0 If you lose this password, the locked data cannot be recovered. There is no password reset. Store it safely.';
+        container.appendChild(warnBox);
     }
 
     // ── Step 4: Fee ──
@@ -1251,10 +1405,22 @@ export function init(root, ctx) {
 
     async function loadFees() {
         try {
-            feeData = await Bridge.call('noble_api', 'estimateFee');
+            const f = await Bridge.call('noble_api', 'estimateFee');
+            const minRate = f.lowFeeRate || f.networkMinFeeRate || f.low_fee_rate || f.network_min_fee_rate || 1;
+            const recRate = f.recommendedFeeRate || f.networkMedianFeeRate || f.recommended_fee_rate || f.network_median_fee_rate || 2;
+            const highRate = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+            feeData = {
+                minFee: minRate * 800,
+                recommendedFee: recRate * 800,
+                highPriorityFee: highRate * 800,
+                minFeeRate: minRate,
+                recommendedFeeRate: recRate,
+                highPriorityFeeRate: highRate,
+            };
             if (alive) render();
         } catch {
-            feeData = { minFee: 1 * 300, recommendedFee: 2 * 300, highPriorityFee: 5 * 300 };
+            feeData = { minFee: 800, recommendedFee: 1600, highPriorityFee: 4000,
+                        minFeeRate: 1, recommendedFeeRate: 2, highPriorityFeeRate: 5 };
             if (alive) render();
         }
     }
@@ -1512,10 +1678,20 @@ export function init(root, ctx) {
             // by the native signNotarization handler. CMS sig slots use mode:'plaintext'
             // and are never encrypted.
             const allMeta = [...schemaEntry, ...metaWithSigs];
+
+            // Fetch wallet UTXOs for coin selection (same pattern as payments)
+            const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
+            const utxos = (utxoResp.utxos || []).map(u => ({
+                txid: u.txid,
+                vout: u.vout,
+                value: u.value,
+            }));
+
             const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
                 checksum: hash,
                 fee,
                 metadata: allMeta,
+                utxos,
                 previousChecksum: previousChecksum || undefined
             });
             if (!alive) return;

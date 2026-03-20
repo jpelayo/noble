@@ -169,7 +169,7 @@ struct WebContentView: UIViewRepresentable {
         let config: [String: Any] = [
             "platform": "ios",
             "version": version,
-            "isConnected": connected,
+            "isConnected": true,     // Always start optimistic — heartbeat/poll corrects if offline
             "hasWallet": hasWallet,
             "walletAddress": address,
             "chainId": chainId,
