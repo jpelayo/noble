@@ -6,6 +6,7 @@ import { amountText, formatAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { esc, timeAgo, showCopyFeedback } from '../utils.js';
+import { txDisplayAmount } from '../tx-display.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -282,7 +283,7 @@ export function init(root, ctx) {
             const ago = timeAgo(tx.timestamp);
             html += `<tr>
                 <td>${dir} ${typeLabel}</td>
-                <td class="mono">\u25C6 ${formatAmount(tx.total_output || tx.outputs?.[0]?.value || 0)}</td>
+                <td class="mono">\u25C6 ${formatAmount(txDisplayAmount(tx).amount)}</td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;
         }

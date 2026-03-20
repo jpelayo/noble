@@ -148,3 +148,30 @@ int sign_and_encode_tx(
 
     return 0;
 }
+
+// ── Signature verification ────────────────────────────────────────────
+
+int secp256k1_verify_signature(
+    const uint8_t pubkey[33],
+    const uint8_t message[32],
+    const uint8_t signature[64]
+) {
+    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+    if (!ctx) return -1;
+
+    secp256k1_pubkey pk;
+    if (!secp256k1_ec_pubkey_parse(ctx, &pk, pubkey, 33)) {
+        secp256k1_context_destroy(ctx);
+        return -1;
+    }
+
+    secp256k1_ecdsa_signature sig;
+    if (!secp256k1_ecdsa_signature_parse_compact(ctx, &sig, signature)) {
+        secp256k1_context_destroy(ctx);
+        return -1;
+    }
+
+    int valid = secp256k1_ecdsa_verify(ctx, &sig, message, &pk);
+    secp256k1_context_destroy(ctx);
+    return valid ? 0 : -1;
+}

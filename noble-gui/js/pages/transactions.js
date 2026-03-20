@@ -3,6 +3,7 @@
  */
 
 import { truncateHash, formatFee, timeAgo, isHex64 } from '../utils.js';
+import { txDisplayAmount, formatTxType } from '../tx-display.js';
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -119,7 +120,7 @@ export function init(root, ctx) {
         for (const r of txResults) {
           if (r.ok && r.tx) {
             const txId = r.tx.tx_id || r.id;
-            const amount = r.tx.total_output != null ? formatFee(r.tx.total_output) : '—';
+            const amount = formatFee(txDisplayAmount(r.tx).amount);
             const type = r.tx.tx_type != null ? formatTxType(r.tx.tx_type) : '—';
             const time = r.tx.timestamp ? timeAgo(r.tx.timestamp) : '—';
             html += `<tr class="clickable" onclick="location.hash='#/tx/${txId}'">
@@ -146,11 +147,7 @@ export function init(root, ctx) {
     }
   }
 
-  function formatTxType(t) {
-    const types = { 0: 'Notarization', 1: 'Transfer', 2: 'Key Rotation', 3: 'Badge Proposal',
-      4: 'Badge Vote', 5: 'Badge Revocation', 6: 'Locked', 7: 'Unlocking', 16: 'Coinbase' };
-    return types[t] || `Type ${t}`;
-  }
+  // formatTxType removed — use formatTxType from ../tx-display.js instead
 
   function renderTxResult(txResult) {
     results.innerHTML = `
@@ -158,12 +155,12 @@ export function init(root, ctx) {
         <div class="panel-header">Transaction Found</div>
         <div class="panel-body" style="padding:0">
           <table class="data-table">
-            <thead><tr><th>Tx ID</th><th>Block</th><th>Total Output</th><th>Status</th><th>Confirmations</th></tr></thead>
+            <thead><tr><th>Tx ID</th><th>Block</th><th>Amount</th><th>Status</th><th>Confirmations</th></tr></thead>
             <tbody>
               <tr class="clickable" id="tx-result-row">
                 <td class="mono">${truncateHash(txResult.tx_id)}</td>
                 <td>${txResult.block_height}</td>
-                <td>${formatFee(txResult.tx.total_output)}</td>
+                <td>${formatFee(txDisplayAmount(txResult.tx).amount)}</td>
                 <td><span class="badge confirmed">${txResult.status}</span></td>
                 <td>${txResult.confirmations}</td>
               </tr>

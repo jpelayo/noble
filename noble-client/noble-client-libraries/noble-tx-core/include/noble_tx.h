@@ -39,6 +39,65 @@ char *noble_select_utxos(const char *params_json);
 //         or:  { "error": "<message>" }
 char *noble_tx_encode(const char *tx_json);
 
+// Build, sign, and CBOR-encode a key rotation transaction (tx_type 0x02).
+// Input JSON: { "new_pubkey_hex": "<hex>", "fee": <u64>, "utxos": [...],
+//               "change_address": "<wire_hex>", "private_key": "<hex32>",
+//               "chain_id": <u32> }
+// Output JSON: { "tx_hex": "<cbor_hex>", "tx_id": "<hash_hex>" }
+char *noble_sign_key_rotation(const char *params_json);
+
+// Build, sign, and CBOR-encode a badge proposal transaction (tx_type 0x03).
+// Input JSON: { "target_pubkey": "<hex>", "proposal_type": "<string>",
+//               "reason": "<string>", "fee": <u64>, "utxos": [...],
+//               "change_address": "<wire_hex>", "private_key": "<hex32>",
+//               "chain_id": <u32> }
+char *noble_sign_badge_proposal(const char *params_json);
+
+// Build, sign, and CBOR-encode a badge vote transaction (tx_type 0x04).
+// Input JSON: { "proposal_hash": "<hex64>", "vote": "approve"|"reject",
+//               "fee": <u64>, "utxos": [...], "change_address": "<wire_hex>",
+//               "private_key": "<hex32>", "chain_id": <u32> }
+char *noble_sign_badge_vote(const char *params_json);
+
+// Build, sign, and CBOR-encode a badge revocation transaction (tx_type 0x05).
+// Input JSON: { "badge_id": "<string>", "fee": <u64>, "utxos": [...],
+//               "change_address": "<wire_hex>", "private_key": "<hex32>",
+//               "chain_id": <u32> }
+char *noble_sign_badge_revocation(const char *params_json);
+
+// Build, sign, and CBOR-encode a locked notarization transaction (tx_type 0x06).
+// Encrypts checksum and metadata values with AES-256-GCM using the password.
+// Input JSON: { "checksum": "<hex64>", "password": "<string>",
+//               "metadata": [{"key":"...","value":"..."},...],
+//               "fee": <u64>, "utxos": [...], "change_address": "<wire_hex>",
+//               "private_key": "<hex32>", "chain_id": <u32> }
+char *noble_sign_locked(const char *params_json);
+
+// Build, sign, and CBOR-encode an unlocking transaction (tx_type 0x07).
+// Input JSON: { "locked_tx_id": "<hex64>", "password": "<string>",
+//               "checksum": "<hex64>", "fee": <u64>, "utxos": [...],
+//               "change_address": "<wire_hex>", "private_key": "<hex32>",
+//               "chain_id": <u32> }
+char *noble_sign_unlocking(const char *params_json);
+
+// Decode a CBOR-encoded transaction back to JSON.
+// Input JSON: { "tx_hex": "<cbor_hex>" }
+// Output JSON: { "version", "tx_type", "inputs", "outputs", "checksum",
+//                "metadata", "issuer_sig", "additional_sigs", "timestamp", ... }
+char *noble_tx_decode(const char *params_json);
+
+// Decode a locked transaction and decrypt metadata with the given password.
+// Input JSON: { "tx_hex": "<cbor_hex>", "password": "<string>" }
+// Output JSON: same as noble_tx_decode plus "decrypted_checksum" and
+//              "decrypted_metadata" with plaintext values.
+char *noble_tx_decode_locked(const char *params_json);
+
+// Verify the issuer_sig on a CBOR-encoded transaction.
+// Input JSON: { "tx_hex": "<cbor_hex>", "chain_id": <u32> }
+// Output JSON: { "valid": true/false, "signer": "<pubkey_hex>",
+//                "tx_id": "<hash_hex>" }
+char *noble_verify_tx(const char *params_json);
+
 // CMS stubs (temporary — replaced by noble-cms-core XCFramework).
 // Returns JSON error until noble-cms-core binary module is linked.
 char *noble_sign_cms_ffi(const char *params_json);

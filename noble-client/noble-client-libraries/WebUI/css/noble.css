@@ -2024,3 +2024,133 @@ body {
 .sig-badge-unknown { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
 .sig-badge-invalid { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
 .sig-badge-malformed { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
+
+/* ── Transaction Detail Component ── */
+
+.tx-detail-hero {
+  text-align: center;
+  padding: var(--gap-lg) var(--gap);
+  margin-bottom: var(--gap);
+  background: var(--surface-alt, var(--bg-secondary));
+  border-radius: var(--radius);
+}
+.tx-detail-hero__label {
+  font-size: var(--font-size-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin-bottom: var(--gap-xs);
+}
+.tx-detail-hero__hash {
+  font-size: var(--font-size-lg, 1.1rem);
+  word-break: break-all;
+  margin-bottom: var(--gap-sm);
+}
+.tx-detail-hero__actions {
+  display: flex;
+  gap: var(--gap-sm);
+  justify-content: center;
+  margin-top: var(--gap-sm);
+}
+.tx-detail-hero__icon {
+  font-size: 2rem;
+  margin-bottom: var(--gap-xs);
+}
+.tx-detail-hero__sub {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+.tx-detail-hero__amount {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+.tx-detail-hero__version {
+  margin-top: var(--gap-sm);
+}
+.tx-detail-hero--locked .tx-detail-hero__label {
+  color: var(--warning, #f59e0b);
+}
+.tx-detail-hero--unlocking .tx-detail-hero__label {
+  color: var(--success, #22c55e);
+}
+.tx-detail-hero--coinbase .tx-detail-hero__label {
+  color: var(--accent, #3b82f6);
+}
+
+.tx-detail-grid {
+  margin-bottom: var(--gap);
+}
+
+/* Type-specific panels */
+.tx-section-encryption {
+  border-left: 3px solid var(--warning, #f59e0b);
+}
+.tx-section-unlock {
+  border-left: 3px solid var(--success, #22c55e);
+}
+
+/* Metadata status badges */
+.meta-badge-encrypted {
+  display: inline-block;
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--warning, #f59e0b);
+  color: #000;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.meta-badge-signed {
+  display: inline-block;
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm, 3px);
+  background: var(--success, #22c55e);
+  color: #fff;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+/* Decrypt / reveal buttons */
+.btn-decrypt {
+  font-size: var(--font-size-sm);
+}
+.btn-xs {
+  font-size: var(--font-size-xs);
+  padding: 1px 6px;
+}
+.btn-reveal {
+  font-size: var(--font-size-xs);
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+/* Password mask */
+.password-mask {
+  letter-spacing: 0.1em;
+}
+
+/* Decrypted result */
+.decrypted-result {
+  border-top: 1px solid var(--border);
+  padding-top: var(--gap-sm);
+  margin-top: var(--gap-sm);
+}
+
+/* Coinbase badge */
+.badge-coinbase {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 15%, transparent);
+  color: var(--accent, #3b82f6);
+}
+.badge-confirmed {
+  background: color-mix(in srgb, var(--success, #22c55e) 15%, transparent);
+  color: var(--success, #22c55e);
+}
+.badge-error {
+  background: color-mix(in srgb, var(--error, #ef4444) 15%, transparent);
+  color: var(--error, #ef4444);
+}
+.badge-version {
+  background: color-mix(in srgb, var(--info, #6366f1) 15%, transparent);
+  color: var(--info, #6366f1);
+}

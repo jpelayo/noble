@@ -13,8 +13,17 @@ use std::os::raw::c_char;
 extern "C" {
     fn noble_sign_transfer(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_notarization(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_key_rotation(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_badge_proposal(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_badge_vote(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_badge_revocation(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_locked(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_unlocking(params_json: *const c_char) -> *mut c_char;
     fn noble_select_utxos(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_encode(tx_json: *const c_char) -> *mut c_char;
+    fn noble_tx_decode(params_json: *const c_char) -> *mut c_char;
+    fn noble_tx_decode_locked(params_json: *const c_char) -> *mut c_char;
+    fn noble_verify_tx(params_json: *const c_char) -> *mut c_char;
     fn noble_free(ptr: *mut c_char);
 }
 
@@ -45,9 +54,54 @@ pub fn sign_notarization(params_json: &str) -> Result<String, String> {
     call_ffi(noble_sign_notarization, params_json)
 }
 
+/// Build, sign, and CBOR-encode a key rotation transaction (0x02).
+pub fn sign_key_rotation(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_key_rotation, params_json)
+}
+
+/// Build, sign, and CBOR-encode a badge proposal transaction (0x03).
+pub fn sign_badge_proposal(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_badge_proposal, params_json)
+}
+
+/// Build, sign, and CBOR-encode a badge vote transaction (0x04).
+pub fn sign_badge_vote(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_badge_vote, params_json)
+}
+
+/// Build, sign, and CBOR-encode a badge revocation transaction (0x05).
+pub fn sign_badge_revocation(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_badge_revocation, params_json)
+}
+
+/// Build, sign, and CBOR-encode a locked notarization transaction (0x06).
+pub fn sign_locked(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_locked, params_json)
+}
+
+/// Build, sign, and CBOR-encode an unlocking transaction (0x07).
+pub fn sign_unlocking(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_unlocking, params_json)
+}
+
 /// Run 5-pass coin selection on UTXOs.
 pub fn select_utxos(params_json: &str) -> Result<String, String> {
     call_ffi(noble_select_utxos, params_json)
+}
+
+/// Decode a CBOR-encoded transaction back to JSON.
+pub fn tx_decode(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_tx_decode, params_json)
+}
+
+/// Decode a locked transaction and decrypt metadata with password.
+pub fn tx_decode_locked(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_tx_decode_locked, params_json)
+}
+
+/// Verify the issuer_sig on a CBOR-encoded transaction.
+pub fn verify_tx(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_verify_tx, params_json)
 }
 
 /// Encode a Transaction to CBOR bytes using the canonical C encoder.

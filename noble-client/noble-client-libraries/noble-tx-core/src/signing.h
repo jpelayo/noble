@@ -58,4 +58,15 @@ int sign_and_encode_tx(
     uint8_t tx_id_out[SHA256_DIGEST_SIZE]
 );
 
+// Verify a secp256k1 signature over a 32-byte message.
+// pubkey: 33-byte compressed public key.
+// message: 32-byte digest.
+// signature: 64-byte compact (r || s).
+// Returns 0 if valid, -1 if invalid or error.
+int secp256k1_verify_signature(
+    const uint8_t pubkey[33],
+    const uint8_t message[32],
+    const uint8_t signature[64]
+);
+
 #endif // NOBLE_SIGNING_H

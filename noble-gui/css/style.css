@@ -1198,3 +1198,17 @@ body {
   margin-left: 4px;
 }
 .btn-copy:hover { opacity: 1; }
+
+/* Coinbase badge */
+.badge.coinbase,
+.badge-coinbase {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+/* Confirmed badge (matches API status "complete") */
+.badge-confirmed,
+.badge.confirmed {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}

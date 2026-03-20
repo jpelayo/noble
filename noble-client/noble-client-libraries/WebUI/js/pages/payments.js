@@ -8,6 +8,7 @@ import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
 import { renderQR } from '../components/qr-code.js';
 import { esc, timeAgo, truncate, initials, showCopyFeedback } from '../utils.js';
+import { txDisplayAmount } from '../tx-display.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -177,7 +178,8 @@ export function init(root, ctx) {
         for (const tx of txs) {
             const dir = txDirection(tx);
             const counterparty = tx.counterparty ? truncate(tx.counterparty, 8) : '\u2014';
-            const amount = tx.total_output ? formatAmount(tx.total_output) : (tx.outputs?.[0]?.value ? formatAmount(tx.outputs[0].value) : '\u2014');
+            const disp = txDisplayAmount(tx);
+            const amount = formatAmount(disp.amount);
             const status = tx.confirmations >= 6 ? 'confirmed' : (tx.confirmations > 0 ? 'pending' : 'pending');
             const ago = timeAgo(tx.timestamp);
             const isExpanded = expandedTx === tx.txId;
@@ -266,12 +268,13 @@ export function init(root, ctx) {
         const inputsHtml = (tx.inputs || []).map((inp, i) =>
             `<dt>Input #${i}</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(inp.txid)}:${inp.vout}</dd>`
         ).join('');
+        const txDisp = txDisplayAmount(tx);
         return `<div class="detail-grid" style="padding:var(--gap-sm) 0">
             <dt>TX ID</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.txId)}</dd>
             <dt>Block Height</dt><dd>${tx.blockHeight || '\u2014'}</dd>
             <dt>Confirmations</dt><dd>${tx.confirmations}</dd>
             <dt>Type</dt><dd>${esc(tx.type)}</dd>
-            <dt>Total Output</dt><dd class="mono">\u25C6 ${formatAmount(tx.total_output || 0)}</dd>
+            <dt>${txDisp.label}</dt><dd class="mono">\u25C6 ${formatAmount(txDisp.amount)}</dd>
             ${outputsHtml}
             ${inputsHtml}
             ${tx.counterparty ? `<dt>Counterparty</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.counterparty)}</dd>` : ''}

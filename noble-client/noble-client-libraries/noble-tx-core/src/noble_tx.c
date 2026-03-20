@@ -10,14 +10,22 @@
 #include "signing.h"
 #include "coin_select.h"
 #include "tx_builder.h"
+#include "aes_gcm.h"
+#include "cbor_decode.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-#define TX_TYPE_NOTARIZATION 0x00
-#define TX_TYPE_TRANSFER     0x01
-#define PROTOCOL_VERSION     1
+#define TX_TYPE_NOTARIZATION    0x00
+#define TX_TYPE_TRANSFER        0x01
+#define TX_TYPE_KEY_ROTATION    0x02
+#define TX_TYPE_BADGE_PROPOSAL  0x03
+#define TX_TYPE_BADGE_VOTE      0x04
+#define TX_TYPE_BADGE_REVOCATION 0x05
+#define TX_TYPE_LOCKED          0x06
+#define TX_TYPE_UNLOCKING       0x07
+#define PROTOCOL_VERSION        1
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -502,6 +510,1071 @@ char *noble_tx_encode(const char *tx_json) {
 
     free(tx_hex);
     noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
+// ── Shared helper: build a metadata-only tx (0x02–0x05) ─────────────
+
+static char *sign_metadata_tx(
+    const char *params_json,
+    uint8_t tx_type,
+    const char *meta_keys[],
+    const char *meta_values[],
+    size_t meta_count
+) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    uint64_t fee              = json_get_uint(params, "fee");
+    const char *change_hex    = json_get_string(params, "change_address");
+    const char *privkey_hex   = json_get_string(params, "private_key");
+    uint32_t chain_id         = json_get_uint32(params, "chain_id");
+    const json_value_t *utxos = json_get(params, "utxos");
+
+    if (!change_hex || !privkey_hex || !utxos) {
+        json_free(params);
+        return json_emit_error("missing required field");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = tx_type;
+    // checksum = ZERO for these types
+    memset(tx.checksum, 0, HASH256_LEN);
+
+    // Metadata
+    for (size_t i = 0; i < meta_count && i < MAX_METADATA; i++) {
+        strncpy(tx.metadata[i].key, meta_keys[i], 64);
+        tx.metadata[i].key[64] = '\0';
+        size_t vlen = strlen(meta_values[i]);
+        if (vlen > 256) vlen = 256;
+        memcpy(tx.metadata[i].value, meta_values[i], vlen);
+        tx.metadata[i].value_len = (uint16_t)vlen;
+        tx.metadata_count++;
+    }
+
+    // Inputs
+    if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
+        json_free(params);
+        return json_emit_error("invalid utxos");
+    }
+
+    // Compute input total
+    uint64_t input_total = 0;
+    for (uint8_t i = 0; i < tx.input_count; i++) {
+        const json_value_t *u = &utxos->array.items[i];
+        input_total += json_get_uint(u, "value");
+    }
+
+    // Output: change only
+    if (input_total > fee) {
+        noble_address_t change_addr;
+        if (parse_address_wire(change_hex, &change_addr) != 0) {
+            json_free(params);
+            return json_emit_error("invalid change_address");
+        }
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = input_total - fee;
+        tx.output_count = 1;
+    }
+
+    tx.timestamp = json_get_uint(params, "timestamp");
+
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("signing failed");
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    char *result = json_emit_result(tx_hex, tx_id_hex);
+
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_key_rotation (0x02) ──────────────────────────────────
+
+char *noble_sign_key_rotation(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *new_pubkey = json_get_string(params, "new_pubkey_hex");
+    if (!new_pubkey) { json_free(params); return json_emit_error("missing new_pubkey_hex"); }
+    const char *keys[] = { "new_pubkey" };
+    const char *vals[] = { new_pubkey };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_KEY_ROTATION, keys, vals, 1);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_badge_proposal (0x03) ────────────────────────────────
+
+char *noble_sign_badge_proposal(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *target = json_get_string(params, "target_pubkey");
+    const char *ptype  = json_get_string(params, "proposal_type");
+    const char *reason = json_get_string(params, "reason");
+    if (!target || !ptype) { json_free(params); return json_emit_error("missing target_pubkey or proposal_type"); }
+    const char *keys[3] = { "proposal_type", "reason", "target_pubkey" };
+    const char *vals[3] = { ptype, reason ? reason : "", target };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_BADGE_PROPOSAL, keys, vals, 3);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_badge_vote (0x04) ────────────────────────────────────
+
+char *noble_sign_badge_vote(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *phash = json_get_string(params, "proposal_hash");
+    const char *vote  = json_get_string(params, "vote");
+    if (!phash || !vote) { json_free(params); return json_emit_error("missing proposal_hash or vote"); }
+    const char *keys[2] = { "proposal_hash", "vote" };
+    const char *vals[2] = { phash, vote };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_BADGE_VOTE, keys, vals, 2);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_badge_revocation (0x05) ──────────────────────────────
+
+char *noble_sign_badge_revocation(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *badge_id = json_get_string(params, "badge_id");
+    if (!badge_id) { json_free(params); return json_emit_error("missing badge_id"); }
+    const char *keys[1] = { "badge_id" };
+    const char *vals[1] = { badge_id };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_BADGE_REVOCATION, keys, vals, 1);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_locked (0x06) ────────────────────────────────────────
+
+char *noble_sign_locked(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *checksum_hex  = json_get_string(params, "checksum");
+    const char *password_str  = json_get_string(params, "password");
+    uint64_t fee              = json_get_uint(params, "fee");
+    const char *change_hex    = json_get_string(params, "change_address");
+    const char *privkey_hex   = json_get_string(params, "private_key");
+    uint32_t chain_id         = json_get_uint32(params, "chain_id");
+    const json_value_t *utxos = json_get(params, "utxos");
+    const json_value_t *meta  = json_get(params, "metadata");
+
+    if (!checksum_hex || !password_str || !change_hex || !privkey_hex || !utxos) {
+        json_free(params);
+        return json_emit_error("missing required field");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    // Generate random salt (16 bytes) and nonce (12 bytes)
+    uint8_t salt[16], nonce[12];
+    if (noble_random_bytes(salt, 16) != 0 || noble_random_bytes(nonce, 12) != 0) {
+        json_free(params);
+        return json_emit_error("random generation failed");
+    }
+
+    // Derive encryption key
+    uint8_t enc_key[32];
+    noble_derive_lock_key((const uint8_t *)password_str, strlen(password_str),
+                          salt, 16, enc_key);
+
+    // Encrypt the checksum (hex string → encrypted → hex encoded ciphertext)
+    size_t cksum_len = strlen(checksum_hex);
+    uint8_t *cksum_ct = (uint8_t *)malloc(cksum_len + 16);
+    uint8_t cksum_tag[16];
+    noble_aes_gcm_encrypt(enc_key, nonce,
+                          (const uint8_t *)checksum_hex, cksum_len,
+                          cksum_ct, cksum_tag);
+    // Combine ciphertext + tag (matches Rust aes_gcm crate output format)
+    uint8_t *cksum_combined = (uint8_t *)malloc(cksum_len + 16);
+    memcpy(cksum_combined, cksum_ct, cksum_len);
+    memcpy(cksum_combined + cksum_len, cksum_tag, 16);
+    char *cksum_ct_hex = (char *)malloc((cksum_len + 16) * 2 + 1);
+    hex_encode(cksum_combined, cksum_len + 16, cksum_ct_hex);
+    free(cksum_ct);
+    free(cksum_combined);
+
+    // Hex-encode salt and nonce
+    char salt_hex[33], nonce_hex[25];
+    hex_encode(salt, 16, salt_hex);
+    hex_encode(nonce, 12, nonce_hex);
+
+    // Build the transaction
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = TX_TYPE_LOCKED;
+    memset(tx.checksum, 0, HASH256_LEN); // ZERO checksum on-chain
+
+    // Collect user metadata keys+values, sort them alphabetically for encryption
+    // (nonce counter alignment with Rust decryption)
+    typedef struct { const char *key; const char *value; } kv_pair_t;
+    kv_pair_t user_meta[MAX_METADATA];
+    size_t user_meta_count = 0;
+
+    if (meta && meta->type == JSON_ARRAY) {
+        for (size_t i = 0; i < meta->array.count && user_meta_count < MAX_METADATA - 3; i++) {
+            const json_value_t *m = &meta->array.items[i];
+            const char *k = json_get_string(m, "key");
+            const char *v = json_get_string(m, "value");
+            if (k && v) {
+                user_meta[user_meta_count].key = k;
+                user_meta[user_meta_count].value = v;
+                user_meta_count++;
+            }
+        }
+    }
+
+    // Sort user metadata by key (alphabetical) for nonce counter alignment
+    for (size_t i = 0; i < user_meta_count; i++) {
+        for (size_t j = i + 1; j < user_meta_count; j++) {
+            if (strcmp(user_meta[i].key, user_meta[j].key) > 0) {
+                kv_pair_t tmp = user_meta[i];
+                user_meta[i] = user_meta[j];
+                user_meta[j] = tmp;
+            }
+        }
+    }
+
+    // Validate: encrypted hex must fit in 256-byte metadata value buffer.
+    // Max plaintext = (256 / 2) - 16 = 112 bytes.
+    for (size_t i = 0; i < user_meta_count; i++) {
+        if (strlen(user_meta[i].value) > 112) {
+            json_free(params);
+            return json_emit_error("metadata value too long for locked encryption (max 112 bytes)");
+        }
+    }
+
+    // Encrypt each user metadata value with per-field nonce
+    // Nonce counter: 0 = checksum (base nonce), 1+ = metadata entries (alphabetical)
+    char *encrypted_meta_hex[MAX_METADATA];
+    for (size_t i = 0; i < user_meta_count; i++) {
+        uint32_t counter = (uint32_t)(i + 1);
+        uint8_t field_nonce[12];
+        memcpy(field_nonce, nonce, 12);
+        uint8_t counter_bytes[4];
+        counter_bytes[0] = (uint8_t)(counter >> 24);
+        counter_bytes[1] = (uint8_t)(counter >> 16);
+        counter_bytes[2] = (uint8_t)(counter >> 8);
+        counter_bytes[3] = (uint8_t)(counter);
+        for (int b = 0; b < 4; b++) field_nonce[8 + b] ^= counter_bytes[b];
+
+        size_t vlen = strlen(user_meta[i].value);
+        uint8_t *ct = (uint8_t *)malloc(vlen + 16);
+        uint8_t tag[16];
+        noble_aes_gcm_encrypt(enc_key, field_nonce,
+                              (const uint8_t *)user_meta[i].value, vlen,
+                              ct, tag);
+        // Combine ct + tag
+        uint8_t *combined = (uint8_t *)malloc(vlen + 16);
+        memcpy(combined, ct, vlen);
+        memcpy(combined + vlen, tag, 16);
+        encrypted_meta_hex[i] = (char *)malloc((vlen + 16) * 2 + 1);
+        hex_encode(combined, vlen + 16, encrypted_meta_hex[i]);
+        free(ct);
+        free(combined);
+    }
+
+    // Build metadata array: locked:* entries + encrypted user entries
+    size_t mi = 0;
+    // locked:checksum
+    strncpy(tx.metadata[mi].key, "locked:checksum", 64);
+    size_t hlen = strlen(cksum_ct_hex);
+    if (hlen > 256) hlen = 256;
+    memcpy(tx.metadata[mi].value, cksum_ct_hex, hlen);
+    tx.metadata[mi].value_len = (uint16_t)hlen;
+    mi++;
+    // locked:nonce
+    strncpy(tx.metadata[mi].key, "locked:nonce", 64);
+    memcpy(tx.metadata[mi].value, nonce_hex, strlen(nonce_hex));
+    tx.metadata[mi].value_len = (uint16_t)strlen(nonce_hex);
+    mi++;
+    // locked:salt
+    strncpy(tx.metadata[mi].key, "locked:salt", 64);
+    memcpy(tx.metadata[mi].value, salt_hex, strlen(salt_hex));
+    tx.metadata[mi].value_len = (uint16_t)strlen(salt_hex);
+    mi++;
+    // User metadata (encrypted values, original keys)
+    for (size_t i = 0; i < user_meta_count; i++) {
+        strncpy(tx.metadata[mi].key, user_meta[i].key, 64);
+        tx.metadata[mi].key[64] = '\0';
+        size_t evlen = strlen(encrypted_meta_hex[i]);
+        if (evlen > 256) evlen = 256;
+        memcpy(tx.metadata[mi].value, encrypted_meta_hex[i], evlen);
+        tx.metadata[mi].value_len = (uint16_t)evlen;
+        mi++;
+    }
+    tx.metadata_count = (uint8_t)mi;
+
+    // Free encrypted hex strings
+    free(cksum_ct_hex);
+    for (size_t i = 0; i < user_meta_count; i++) free(encrypted_meta_hex[i]);
+
+    // Inputs
+    if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
+        json_free(params);
+        return json_emit_error("invalid utxos");
+    }
+
+    // Input total
+    uint64_t input_total = 0;
+    for (uint8_t i = 0; i < tx.input_count; i++) {
+        const json_value_t *u = &utxos->array.items[i];
+        input_total += json_get_uint(u, "value");
+    }
+
+    // Output: change
+    if (input_total > fee) {
+        noble_address_t change_addr;
+        if (parse_address_wire(change_hex, &change_addr) != 0) {
+            json_free(params);
+            return json_emit_error("invalid change_address");
+        }
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = input_total - fee;
+        tx.output_count = 1;
+    }
+
+    tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Sign and encode
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("signing failed");
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    char *result = json_emit_result(tx_hex, tx_id_hex);
+
+    memset(enc_key, 0, sizeof(enc_key));
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_unlocking (0x07) ─────────────────────────────────────
+
+char *noble_sign_unlocking(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *locked_txid  = json_get_string(params, "locked_tx_id");
+    const char *password     = json_get_string(params, "password");
+    const char *checksum_hex = json_get_string(params, "checksum");
+    uint64_t fee             = json_get_uint(params, "fee");
+    const char *change_hex   = json_get_string(params, "change_address");
+    const char *privkey_hex  = json_get_string(params, "private_key");
+    uint32_t chain_id        = json_get_uint32(params, "chain_id");
+    const json_value_t *utxos = json_get(params, "utxos");
+
+    if (!locked_txid || !password || !checksum_hex || !change_hex || !privkey_hex || !utxos) {
+        json_free(params);
+        return json_emit_error("missing required field");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = TX_TYPE_UNLOCKING;
+
+    // Checksum = real document checksum (non-zero)
+    if (hex_decode(checksum_hex, strlen(checksum_hex), tx.checksum, HASH256_LEN) != HASH256_LEN) {
+        json_free(params);
+        return json_emit_error("invalid checksum hex");
+    }
+
+    // Metadata: unlock:password, unlock:txid (alphabetical)
+    strncpy(tx.metadata[0].key, "unlock:password", 64);
+    size_t pwlen = strlen(password);
+    if (pwlen > 256) pwlen = 256;
+    memcpy(tx.metadata[0].value, password, pwlen);
+    tx.metadata[0].value_len = (uint16_t)pwlen;
+
+    strncpy(tx.metadata[1].key, "unlock:txid", 64);
+    size_t txidlen = strlen(locked_txid);
+    if (txidlen > 256) txidlen = 256;
+    memcpy(tx.metadata[1].value, locked_txid, txidlen);
+    tx.metadata[1].value_len = (uint16_t)txidlen;
+    tx.metadata_count = 2;
+
+    // Inputs
+    if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
+        json_free(params);
+        return json_emit_error("invalid utxos");
+    }
+
+    // Input total
+    uint64_t input_total = 0;
+    for (uint8_t i = 0; i < tx.input_count; i++) {
+        const json_value_t *u = &utxos->array.items[i];
+        input_total += json_get_uint(u, "value");
+    }
+
+    // Output: change
+    if (input_total > fee) {
+        noble_address_t change_addr;
+        if (parse_address_wire(change_hex, &change_addr) != 0) {
+            json_free(params);
+            return json_emit_error("invalid change_address");
+        }
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = input_total - fee;
+        tx.output_count = 1;
+    }
+
+    tx.timestamp = json_get_uint(params, "timestamp");
+
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("signing failed");
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    char *result = json_emit_result(tx_hex, tx_id_hex);
+
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
+// ── CBOR decoder helpers ────────────────────────────────────────────
+
+// Match a CBOR text key against a C string.
+static int text_matches(const char *cbor_str, size_t cbor_len, const char *expected) {
+    size_t elen = strlen(expected);
+    return cbor_len == elen && memcmp(cbor_str, expected, elen) == 0;
+}
+
+// Decode a SignatureEnvelope from CBOR: map(3) { scheme_id, public_key, signature }
+static int decode_sig_envelope(cbor_reader_t *r, noble_sig_envelope_t *sig) {
+    size_t count;
+    if (cbor_read_map(r, &count) != 0) return -1;
+    for (size_t i = 0; i < count; i++) {
+        const char *key; size_t klen;
+        if (cbor_read_text(r, &key, &klen) != 0) return -1;
+        if (text_matches(key, klen, "scheme_id")) {
+            uint64_t v; if (cbor_read_uint(r, &v) != 0) return -1;
+            sig->scheme_id = (uint8_t)v;
+        } else if (text_matches(key, klen, "public_key")) {
+            const uint8_t *data; size_t dlen;
+            if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
+            if (dlen > PUBKEY_LEN) dlen = PUBKEY_LEN;
+            memcpy(sig->public_key, data, dlen);
+            sig->public_key_len = (uint8_t)dlen;
+        } else if (text_matches(key, klen, "signature")) {
+            const uint8_t *data; size_t dlen;
+            if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
+            if (dlen > SIG_LEN) dlen = SIG_LEN;
+            memcpy(sig->signature, data, dlen);
+            sig->signature_len = (uint8_t)dlen;
+        } else {
+            if (cbor_skip(r) != 0) return -1;
+        }
+    }
+    return 0;
+}
+
+// Decode a serde NobleAddress from CBOR:
+//   {"Noble": {"Secp256k1": <bytes>}} → 0x02 + 33 bytes
+//   {"BitcoinHash160": <bytes>}       → 0x80 + 20 bytes
+//   {"BitcoinTaproot": <bytes>}       → 0x81 + 32 bytes
+static int decode_address_serde(cbor_reader_t *r, noble_address_t *addr) {
+    size_t count;
+    if (cbor_read_map(r, &count) != 0 || count != 1) return -1;
+    const char *key; size_t klen;
+    if (cbor_read_text(r, &key, &klen) != 0) return -1;
+
+    if (text_matches(key, klen, "Noble")) {
+        // Nested map: {"Secp256k1": <bytes>} or {"Ed25519": <bytes>}
+        size_t inner;
+        if (cbor_read_map(r, &inner) != 0 || inner != 1) return -1;
+        const char *ikey; size_t iklen;
+        if (cbor_read_text(r, &ikey, &iklen) != 0) return -1;
+        const uint8_t *data; size_t dlen;
+        if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
+        if (text_matches(ikey, iklen, "Ed25519")) {
+            addr->wire[0] = 0x01; // Ed25519 prefix
+        } else {
+            addr->wire[0] = 0x02; // Secp256k1 prefix
+        }
+        if (dlen > 33) dlen = 33;
+        memcpy(&addr->wire[1], data, dlen);
+        addr->wire_len = (uint8_t)(1 + dlen);
+    } else if (text_matches(key, klen, "BitcoinHash160")) {
+        const uint8_t *data; size_t dlen;
+        if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
+        addr->wire[0] = 0x80;
+        if (dlen > 20) dlen = 20;
+        memcpy(&addr->wire[1], data, dlen);
+        addr->wire_len = (uint8_t)(1 + dlen);
+    } else if (text_matches(key, klen, "BitcoinTaproot")) {
+        const uint8_t *data; size_t dlen;
+        if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
+        addr->wire[0] = 0x81;
+        if (dlen > 32) dlen = 32;
+        memcpy(&addr->wire[1], data, dlen);
+        addr->wire_len = (uint8_t)(1 + dlen);
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+// Decode a full transaction from CBOR bytes into noble_tx_t.
+static int tx_from_cbor(const uint8_t *data, size_t len, noble_tx_t *tx) {
+    cbor_reader_t r;
+    cbor_reader_init(&r, data, len);
+    memset(tx, 0, sizeof(noble_tx_t));
+
+    size_t field_count;
+    if (cbor_read_map(&r, &field_count) != 0) return -1;
+
+    for (size_t f = 0; f < field_count; f++) {
+        const char *key; size_t klen;
+        if (cbor_read_text(&r, &key, &klen) != 0) return -1;
+
+        if (text_matches(key, klen, "version")) {
+            uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+            tx->version = (uint16_t)v;
+        } else if (text_matches(key, klen, "tx_type")) {
+            uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+            tx->tx_type = (uint8_t)v;
+        } else if (text_matches(key, klen, "timestamp")) {
+            uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+            tx->timestamp = v;
+        } else if (text_matches(key, klen, "checksum")) {
+            const uint8_t *d; size_t dlen;
+            if (cbor_read_bytes(&r, &d, &dlen) != 0) return -1;
+            if (dlen == HASH256_LEN) memcpy(tx->checksum, d, HASH256_LEN);
+        } else if (text_matches(key, klen, "inputs")) {
+            size_t arr_len;
+            if (cbor_read_array(&r, &arr_len) != 0) return -1;
+            if (arr_len > MAX_INPUTS) arr_len = MAX_INPUTS;
+            for (size_t i = 0; i < arr_len; i++) {
+                // TxIn: map(1) { "prev_output": OutPoint }
+                size_t txin_fields;
+                if (cbor_read_map(&r, &txin_fields) != 0) return -1;
+                for (size_t j = 0; j < txin_fields; j++) {
+                    const char *ik; size_t ikl;
+                    if (cbor_read_text(&r, &ik, &ikl) != 0) return -1;
+                    if (text_matches(ik, ikl, "prev_output")) {
+                        // OutPoint: map(2) { "txid": bytes, "vout": uint }
+                        size_t op_fields;
+                        if (cbor_read_map(&r, &op_fields) != 0) return -1;
+                        for (size_t k = 0; k < op_fields; k++) {
+                            const char *ok; size_t okl;
+                            if (cbor_read_text(&r, &ok, &okl) != 0) return -1;
+                            if (text_matches(ok, okl, "txid")) {
+                                const uint8_t *td; size_t tl;
+                                if (cbor_read_bytes(&r, &td, &tl) != 0) return -1;
+                                if (tl == HASH256_LEN) memcpy(tx->inputs[i].prev_output.txid, td, HASH256_LEN);
+                            } else if (text_matches(ok, okl, "vout")) {
+                                uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+                                tx->inputs[i].prev_output.vout = (uint32_t)v;
+                            } else { cbor_skip(&r); }
+                        }
+                    } else { cbor_skip(&r); }
+                }
+            }
+            tx->input_count = (uint8_t)arr_len;
+        } else if (text_matches(key, klen, "outputs")) {
+            size_t arr_len;
+            if (cbor_read_array(&r, &arr_len) != 0) return -1;
+            if (arr_len > MAX_OUTPUTS) arr_len = MAX_OUTPUTS;
+            for (size_t i = 0; i < arr_len; i++) {
+                // TxOut: map(2) { "address": serde_enum, "value": uint }
+                size_t txo_fields;
+                if (cbor_read_map(&r, &txo_fields) != 0) return -1;
+                for (size_t j = 0; j < txo_fields; j++) {
+                    const char *ok; size_t okl;
+                    if (cbor_read_text(&r, &ok, &okl) != 0) return -1;
+                    if (text_matches(ok, okl, "address")) {
+                        decode_address_serde(&r, &tx->outputs[i].address);
+                    } else if (text_matches(ok, okl, "value")) {
+                        uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+                        tx->outputs[i].value = v;
+                    } else { cbor_skip(&r); }
+                }
+            }
+            tx->output_count = (uint8_t)arr_len;
+        } else if (text_matches(key, klen, "issuer_sig")) {
+            if (decode_sig_envelope(&r, &tx->issuer_sig) != 0) return -1;
+        } else if (text_matches(key, klen, "additional_sigs")) {
+            size_t arr_len;
+            if (cbor_read_array(&r, &arr_len) != 0) return -1;
+            if (arr_len > MAX_SIGS) arr_len = MAX_SIGS;
+            for (size_t i = 0; i < arr_len; i++) {
+                if (decode_sig_envelope(&r, &tx->additional_sigs[i]) != 0) return -1;
+            }
+            tx->additional_sig_count = (uint8_t)arr_len;
+        } else if (text_matches(key, klen, "metadata")) {
+            size_t arr_len;
+            if (cbor_read_array(&r, &arr_len) != 0) return -1;
+            if (arr_len > MAX_METADATA) arr_len = MAX_METADATA;
+            for (size_t i = 0; i < arr_len; i++) {
+                // MetadataEntry: map(2) { "key": text, "value": bytes }
+                size_t me_fields;
+                if (cbor_read_map(&r, &me_fields) != 0) return -1;
+                for (size_t j = 0; j < me_fields; j++) {
+                    const char *mk; size_t mkl;
+                    if (cbor_read_text(&r, &mk, &mkl) != 0) return -1;
+                    if (text_matches(mk, mkl, "key")) {
+                        const char *s; size_t sl;
+                        if (cbor_read_text(&r, &s, &sl) != 0) return -1;
+                        if (sl > 64) sl = 64;
+                        memcpy(tx->metadata[i].key, s, sl);
+                        tx->metadata[i].key[sl] = '\0';
+                    } else if (text_matches(mk, mkl, "value")) {
+                        const uint8_t *d; size_t dl;
+                        if (cbor_read_bytes(&r, &d, &dl) != 0) return -1;
+                        if (dl > 256) dl = 256;
+                        memcpy(tx->metadata[i].value, d, dl);
+                        tx->metadata[i].value_len = (uint16_t)dl;
+                    } else { cbor_skip(&r); }
+                }
+            }
+            tx->metadata_count = (uint8_t)arr_len;
+        } else if (text_matches(key, klen, "gateway_address")) {
+            const uint8_t *d; size_t dl;
+            if (cbor_read_bytes(&r, &d, &dl) != 0) return -1;
+            if (dl > 34) dl = 34;
+            memcpy(tx->gateway_address, d, dl);
+            tx->gateway_address_len = (uint8_t)dl;
+        } else if (text_matches(key, klen, "expires_at")) {
+            uint64_t v; if (cbor_read_uint(&r, &v) != 0) return -1;
+            tx->expires_at = v;
+        } else {
+            // Skip unknown fields (forward compat)
+            if (cbor_skip(&r) != 0) return -1;
+        }
+    }
+    return 0;
+}
+
+// Serialize a decoded noble_tx_t to JSON string.
+static char *tx_to_json_string(const noble_tx_t *tx) {
+    // Estimate buffer size
+    size_t bufsize = 4096 + tx->input_count * 128 + tx->output_count * 128
+                   + tx->metadata_count * 600 + tx->additional_sig_count * 256;
+    char *out = (char *)malloc(bufsize);
+    if (!out) return json_emit_error("allocation failed");
+    size_t pos = 0;
+
+    pos += (size_t)snprintf(out + pos, bufsize - pos,
+        "{\"version\":%u,\"tx_type\":%u,\"timestamp\":%llu,\"checksum\":\"",
+        tx->version, tx->tx_type, (unsigned long long)tx->timestamp);
+
+    char cksum_hex[65];
+    hex_encode(tx->checksum, HASH256_LEN, cksum_hex);
+    pos += (size_t)snprintf(out + pos, bufsize - pos, "%s\"", cksum_hex);
+
+    // Inputs
+    pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"inputs\":[");
+    for (uint8_t i = 0; i < tx->input_count; i++) {
+        if (i > 0) out[pos++] = ',';
+        char txid_hex[65];
+        hex_encode(tx->inputs[i].prev_output.txid, HASH256_LEN, txid_hex);
+        pos += (size_t)snprintf(out + pos, bufsize - pos,
+            "{\"prev_output\":{\"txid\":\"%s\",\"vout\":%u}}",
+            txid_hex, tx->inputs[i].prev_output.vout);
+    }
+    out[pos++] = ']';
+
+    // Outputs
+    pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"outputs\":[");
+    for (uint8_t i = 0; i < tx->output_count; i++) {
+        if (i > 0) out[pos++] = ',';
+        char addr_hex[69];
+        hex_encode(tx->outputs[i].address.wire, tx->outputs[i].address.wire_len, addr_hex);
+        pos += (size_t)snprintf(out + pos, bufsize - pos,
+            "{\"address\":\"%s\",\"value\":%llu}",
+            addr_hex, (unsigned long long)tx->outputs[i].value);
+    }
+    out[pos++] = ']';
+
+    // Issuer sig
+    {
+        char pk_hex[67], sig_hex[129];
+        hex_encode(tx->issuer_sig.public_key, tx->issuer_sig.public_key_len, pk_hex);
+        hex_encode(tx->issuer_sig.signature, tx->issuer_sig.signature_len, sig_hex);
+        pos += (size_t)snprintf(out + pos, bufsize - pos,
+            ",\"issuer_sig\":{\"scheme_id\":%u,\"public_key\":\"%s\",\"signature\":\"%s\"}",
+            tx->issuer_sig.scheme_id, pk_hex, sig_hex);
+    }
+
+    // Additional sigs
+    pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"additional_sigs\":[");
+    for (uint8_t i = 0; i < tx->additional_sig_count; i++) {
+        if (i > 0) out[pos++] = ',';
+        char pk_hex[67], sig_hex[129];
+        hex_encode(tx->additional_sigs[i].public_key, tx->additional_sigs[i].public_key_len, pk_hex);
+        hex_encode(tx->additional_sigs[i].signature, tx->additional_sigs[i].signature_len, sig_hex);
+        pos += (size_t)snprintf(out + pos, bufsize - pos,
+            "{\"scheme_id\":%u,\"public_key\":\"%s\",\"signature\":\"%s\"}",
+            tx->additional_sigs[i].scheme_id, pk_hex, sig_hex);
+    }
+    out[pos++] = ']';
+
+    // Metadata
+    pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"metadata\":[");
+    for (uint8_t i = 0; i < tx->metadata_count; i++) {
+        if (i > 0) out[pos++] = ',';
+        // Try UTF-8 first, fall back to hex
+        int is_utf8 = 1;
+        for (uint16_t j = 0; j < tx->metadata[i].value_len; j++) {
+            if (tx->metadata[i].value[j] == 0 || tx->metadata[i].value[j] == '"' || tx->metadata[i].value[j] == '\\') {
+                is_utf8 = 0; break;
+            }
+        }
+        if (is_utf8) {
+            pos += (size_t)snprintf(out + pos, bufsize - pos, "{\"key\":\"%s\",\"value\":\"", tx->metadata[i].key);
+            memcpy(out + pos, tx->metadata[i].value, tx->metadata[i].value_len);
+            pos += tx->metadata[i].value_len;
+            pos += (size_t)snprintf(out + pos, bufsize - pos, "\"}");
+        } else {
+            char *val_hex = (char *)malloc(tx->metadata[i].value_len * 2 + 1);
+            hex_encode(tx->metadata[i].value, tx->metadata[i].value_len, val_hex);
+            pos += (size_t)snprintf(out + pos, bufsize - pos,
+                "{\"key\":\"%s\",\"value\":\"%s\",\"encoding\":\"hex\"}", tx->metadata[i].key, val_hex);
+            free(val_hex);
+        }
+    }
+    out[pos++] = ']';
+
+    // Optional fields
+    if (tx->gateway_address_len > 0) {
+        char gw_hex[69];
+        hex_encode(tx->gateway_address, tx->gateway_address_len, gw_hex);
+        pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"gateway_address\":\"%s\"", gw_hex);
+    }
+    if (tx->expires_at > 0) {
+        pos += (size_t)snprintf(out + pos, bufsize - pos, ",\"expires_at\":%llu", (unsigned long long)tx->expires_at);
+    }
+
+    out[pos++] = '}';
+    out[pos] = '\0';
+    return out;
+}
+
+// ── noble_tx_decode ─────────────────────────────────────────────────
+
+char *noble_tx_decode(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *tx_hex_str = json_get_string(params, "tx_hex");
+    if (!tx_hex_str) {
+        json_free(params);
+        return json_emit_error("missing tx_hex");
+    }
+
+    size_t hex_len = strlen(tx_hex_str);
+    size_t byte_len = hex_len / 2;
+    uint8_t *cbor_data = (uint8_t *)malloc(byte_len);
+    if (hex_decode(tx_hex_str, hex_len, cbor_data, byte_len) != (int)byte_len) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("invalid tx_hex");
+    }
+
+    noble_tx_t tx;
+    if (tx_from_cbor(cbor_data, byte_len, &tx) != 0) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("CBOR decode failed");
+    }
+
+    char *result = tx_to_json_string(&tx);
+
+    free(cbor_data);
+    json_free(params);
+    return result;
+}
+
+// ── noble_tx_decode_locked ──────────────────────────────────────────
+
+char *noble_tx_decode_locked(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *tx_hex_str  = json_get_string(params, "tx_hex");
+    const char *password    = json_get_string(params, "password");
+    if (!tx_hex_str || !password) {
+        json_free(params);
+        return json_emit_error("missing tx_hex or password");
+    }
+
+    size_t hex_len = strlen(tx_hex_str);
+    size_t byte_len = hex_len / 2;
+    uint8_t *cbor_data = (uint8_t *)malloc(byte_len);
+    if (hex_decode(tx_hex_str, hex_len, cbor_data, byte_len) != (int)byte_len) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("invalid tx_hex");
+    }
+
+    noble_tx_t tx;
+    if (tx_from_cbor(cbor_data, byte_len, &tx) != 0) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("CBOR decode failed");
+    }
+    free(cbor_data);
+
+    if (tx.tx_type != TX_TYPE_LOCKED) {
+        json_free(params);
+        return json_emit_error("not a locked transaction");
+    }
+
+    // Extract locked:salt, locked:nonce, locked:checksum
+    const char *salt_hex_str = NULL, *nonce_hex_str = NULL, *cksum_ct_hex = NULL;
+    for (uint8_t i = 0; i < tx.metadata_count; i++) {
+        if (strcmp(tx.metadata[i].key, "locked:salt") == 0)
+            salt_hex_str = (const char *)tx.metadata[i].value;
+        else if (strcmp(tx.metadata[i].key, "locked:nonce") == 0)
+            nonce_hex_str = (const char *)tx.metadata[i].value;
+        else if (strcmp(tx.metadata[i].key, "locked:checksum") == 0)
+            cksum_ct_hex = (const char *)tx.metadata[i].value;
+    }
+
+    if (!salt_hex_str || !nonce_hex_str || !cksum_ct_hex) {
+        json_free(params);
+        return json_emit_error("missing locked:* metadata");
+    }
+
+    // Decode salt and nonce
+    uint8_t salt[16], nonce_bytes[12];
+    if (hex_decode(salt_hex_str, strlen(salt_hex_str), salt, 16) != 16) {
+        json_free(params); return json_emit_error("invalid locked:salt");
+    }
+    if (hex_decode(nonce_hex_str, strlen(nonce_hex_str), nonce_bytes, 12) != 12) {
+        json_free(params); return json_emit_error("invalid locked:nonce");
+    }
+
+    // Derive key
+    uint8_t enc_key[32];
+    noble_derive_lock_key((const uint8_t *)password, strlen(password), salt, 16, enc_key);
+
+    // Decrypt checksum
+    size_t cksum_ct_hex_len = strlen(cksum_ct_hex);
+    size_t cksum_ct_bytes = cksum_ct_hex_len / 2;
+    uint8_t *cksum_ct = (uint8_t *)malloc(cksum_ct_bytes);
+    hex_decode(cksum_ct_hex, cksum_ct_hex_len, cksum_ct, cksum_ct_bytes);
+
+    if (cksum_ct_bytes < 16) {
+        free(cksum_ct); json_free(params);
+        return json_emit_error("checksum ciphertext too short");
+    }
+    size_t cksum_pt_len = cksum_ct_bytes - 16;
+    uint8_t *cksum_pt = (uint8_t *)malloc(cksum_pt_len + 1);
+    if (noble_aes_gcm_decrypt(enc_key, nonce_bytes,
+                               cksum_ct, cksum_pt_len,
+                               cksum_ct + cksum_pt_len, cksum_pt) != 0) {
+        free(cksum_ct); free(cksum_pt); json_free(params);
+        return json_emit_error("decryption failed (wrong password?)");
+    }
+    cksum_pt[cksum_pt_len] = '\0';
+    free(cksum_ct);
+
+    // Build base JSON
+    char *base_json = tx_to_json_string(&tx);
+
+    // Append decrypted fields
+    size_t base_len = strlen(base_json);
+    // Replace closing } with additional fields
+    size_t extra_size = 512 + cksum_pt_len + tx.metadata_count * 600;
+    char *result = (char *)malloc(base_len + extra_size);
+    memcpy(result, base_json, base_len - 1); // skip closing }
+    size_t pos = base_len - 1;
+
+    pos += (size_t)snprintf(result + pos, base_len + extra_size - pos,
+        ",\"decrypted_checksum\":\"%s\"", (char *)cksum_pt);
+    free(cksum_pt);
+
+    // Decrypt user metadata
+    pos += (size_t)snprintf(result + pos, base_len + extra_size - pos,
+        ",\"decrypted_metadata\":[");
+
+    // Collect and sort user metadata by key (same order as encryption)
+    typedef struct { uint8_t idx; } sorted_idx_t;
+    sorted_idx_t sorted[MAX_METADATA];
+    size_t user_count = 0;
+    for (uint8_t i = 0; i < tx.metadata_count; i++) {
+        if (strncmp(tx.metadata[i].key, "locked:", 7) != 0) {
+            sorted[user_count++].idx = i;
+        }
+    }
+    // Sort by key
+    for (size_t i = 0; i < user_count; i++) {
+        for (size_t j = i + 1; j < user_count; j++) {
+            if (strcmp(tx.metadata[sorted[i].idx].key, tx.metadata[sorted[j].idx].key) > 0) {
+                sorted_idx_t tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
+            }
+        }
+    }
+
+    int first = 1;
+    uint32_t nonce_counter = 1;
+    for (size_t i = 0; i < user_count; i++) {
+        uint8_t mi2 = sorted[i].idx;
+        // Compute field nonce
+        uint8_t field_nonce[12];
+        memcpy(field_nonce, nonce_bytes, 12);
+        uint8_t counter_bytes[4];
+        counter_bytes[0] = (uint8_t)(nonce_counter >> 24);
+        counter_bytes[1] = (uint8_t)(nonce_counter >> 16);
+        counter_bytes[2] = (uint8_t)(nonce_counter >> 8);
+        counter_bytes[3] = (uint8_t)(nonce_counter);
+        for (int b = 0; b < 4; b++) field_nonce[8 + b] ^= counter_bytes[b];
+        nonce_counter++;
+
+        // Decode hex ciphertext from metadata value
+        size_t val_hex_len = tx.metadata[mi2].value_len;
+        size_t val_ct_len = val_hex_len / 2;
+        uint8_t *val_ct = (uint8_t *)malloc(val_ct_len);
+        hex_decode((const char *)tx.metadata[mi2].value, val_hex_len, val_ct, val_ct_len);
+
+        if (val_ct_len >= 16) {
+            size_t pt_len = val_ct_len - 16;
+            uint8_t *pt = (uint8_t *)malloc(pt_len + 1);
+            if (noble_aes_gcm_decrypt(enc_key, field_nonce,
+                                       val_ct, pt_len,
+                                       val_ct + pt_len, pt) == 0) {
+                pt[pt_len] = '\0';
+                if (!first) result[pos++] = ',';
+                first = 0;
+                pos += (size_t)snprintf(result + pos, base_len + extra_size - pos,
+                    "{\"key\":\"%s\",\"value\":\"%s\"}", tx.metadata[mi2].key, (char *)pt);
+            }
+            free(pt);
+        }
+        free(val_ct);
+    }
+
+    pos += (size_t)snprintf(result + pos, base_len + extra_size - pos, "]}");
+    result[pos] = '\0';
+
+    memset(enc_key, 0, sizeof(enc_key));
+    free(base_json);
+    json_free(params);
+    return result;
+}
+
+// ── noble_verify_tx ─────────────────────────────────────────────────
+
+char *noble_verify_tx(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *tx_hex_str = json_get_string(params, "tx_hex");
+    uint32_t chain_id      = json_get_uint32(params, "chain_id");
+    if (!tx_hex_str) {
+        json_free(params);
+        return json_emit_error("missing tx_hex");
+    }
+
+    size_t hex_len = strlen(tx_hex_str);
+    size_t byte_len = hex_len / 2;
+    uint8_t *cbor_data = (uint8_t *)malloc(byte_len);
+    if (hex_decode(tx_hex_str, hex_len, cbor_data, byte_len) != (int)byte_len) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("invalid tx_hex");
+    }
+
+    noble_tx_t tx;
+    if (tx_from_cbor(cbor_data, byte_len, &tx) != 0) {
+        free(cbor_data);
+        json_free(params);
+        return json_emit_error("CBOR decode failed");
+    }
+
+    // Save the real signature, then zero it for signing message computation
+    uint8_t saved_sig[SIG_LEN];
+    memcpy(saved_sig, tx.issuer_sig.signature, tx.issuer_sig.signature_len);
+    memset(tx.issuer_sig.signature, 0, SIG_LEN);
+    // Keep signature_len at 64 (matches signing: empty sig is 64 zero bytes)
+
+    // Compute signing message
+    uint8_t signing_msg[SHA256_DIGEST_SIZE];
+    compute_signing_message(&tx, chain_id, signing_msg);
+
+    // Verify
+    int valid = secp256k1_verify_signature(
+        tx.issuer_sig.public_key,
+        signing_msg,
+        saved_sig
+    );
+
+    // Compute tx_id from the ORIGINAL tx (with real signature)
+    memcpy(tx.issuer_sig.signature, saved_sig, tx.issuer_sig.signature_len);
+    uint8_t tx_id[HASH256_LEN];
+    compute_tx_id(&tx, chain_id, tx_id);
+
+    // Build result
+    char signer_hex[67];
+    hex_encode(tx.issuer_sig.public_key, tx.issuer_sig.public_key_len, signer_hex);
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    size_t rsize = 256;
+    char *result = (char *)malloc(rsize);
+    snprintf(result, rsize,
+        "{\"valid\":%s,\"signer\":\"%s\",\"tx_id\":\"%s\"}",
+        valid == 0 ? "true" : "false",
+        signer_hex, tx_id_hex);
+
+    free(cbor_data);
     json_free(params);
     return result;
 }

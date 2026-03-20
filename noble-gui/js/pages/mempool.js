@@ -4,6 +4,7 @@
  */
 
 import { formatNumber, formatFee, formatBytes, truncateHash, timeAgo } from '../utils.js';
+import { txDisplayAmount, TX_TYPE_SHORT } from '../tx-display.js';
 
 export function init(root, ctx) {
   const { rpc, ws } = ctx;
@@ -107,23 +108,19 @@ export function init(root, ctx) {
     unsubs.push(() => { ro.disconnect(); feeChart?.dispose(); });
   }
 
-  const TX_TYPE_LABELS = {
-    0: 'Doc', 1: 'Transfer', 2: 'Key Rot.', 3: 'Badge',
-    4: 'Vote', 5: 'Revoke', 6: 'Locked', 7: 'Unlock', 16: 'Coinbase',
-  };
-
   function appendStreamItem(entry) {
     const item = document.createElement('div');
     item.className = 'tx-stream-item';
-    const typeLabel = entry.tx_type != null ? (TX_TYPE_LABELS[entry.tx_type] || `Type ${entry.tx_type}`) : '';
+    const typeLabel = entry.tx_type != null ? (TX_TYPE_SHORT[entry.tx_type] || `Type ${entry.tx_type}`) : '';
     const typeBadge = typeLabel ? `<span class="badge" style="font-size:0.65rem;padding:1px 5px">${typeLabel}</span>` : '';
-    const amount = entry.transfer_value != null ? formatFee(entry.transfer_value) : (entry.total_output != null ? formatFee(entry.total_output) : '');
-    const fee = entry.fee != null ? `fee ${formatFee(entry.fee)}` : '';
+    const disp = txDisplayAmount(entry);
+    const amountStr = formatFee(disp.amount);
+    const feeStr = disp.showFee && entry.fee != null ? `fee ${formatFee(entry.fee)}` : '';
     item.innerHTML = `
       <span class="mono">${truncateHash(entry.tx_id)}</span>
       <span>${typeBadge}</span>
-      <span>${amount}</span>
-      <span style="color:var(--text-muted)">${fee}</span>
+      <span>${amountStr}</span>
+      <span style="color:var(--text-muted)">${feeStr}</span>
       <span>${entry.received_at ? timeAgo(entry.received_at) : ''}</span>
     `;
     item.addEventListener('click', () => { location.hash = `#/tx/${entry.tx_id}`; });
