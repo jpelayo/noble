@@ -358,6 +358,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                     country_code: announce.and_then(|a| a.country_code.clone()),
                     wants_to_validate: announce.is_some_and(|a| a.wants_to_validate),
                     wants_to_vote: announce.is_some_and(|a| a.wants_to_vote),
+                    min_fee_rate: announce.and_then(|a| a.min_fee_rate),
                 }
             })
             .collect();
@@ -414,6 +415,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NetworkApiServer for Arc<ApiState
                 country_code: peer.country_code.clone(),
                 wants_to_validate: peer.wants_to_validate,
                 wants_to_vote: peer.wants_to_vote,
+                min_fee_rate: None, // CBOR-persistent peers don't carry fee rate
             });
         }
 

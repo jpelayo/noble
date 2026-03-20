@@ -427,7 +427,16 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     host_address: host_addr,
                     country_code: country,
                     listers_count: alive_count,
-                    min_fee_rate: fee_rate_map.get(&wire.to_vec()).copied().flatten(),
+                    min_fee_rate: fee_rate_map.get(&wire.to_vec()).copied().flatten()
+                        .or_else(|| {
+                            // Self validator: use own config fee rate
+                            if let Some(ref self_pk) = *self.validator_pubkey.read() {
+                                if key_hex == *self_pk {
+                                    return Some(self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed));
+                                }
+                            }
+                            None
+                        }),
                     proposed_this_cycle: candidate_tracker.has_proposed(&wire),
                     wants_to_validate: wants_validate,
                 }

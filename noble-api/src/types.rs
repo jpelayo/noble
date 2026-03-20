@@ -481,6 +481,9 @@ pub struct PeerRecordResponse {
     pub country_code: Option<String>,
     pub wants_to_validate: bool,
     pub wants_to_vote: bool,
+    /// Minimum fee rate (groats/byte) from NodeAnnounce gossip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_fee_rate: Option<u64>,
 }
 
 /// A discovered faucet on the network.

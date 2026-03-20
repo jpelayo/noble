@@ -86,15 +86,18 @@ impl FaucetWallet {
 
     /// Build a signed transfer transaction and return its hex-encoded CBOR.
     ///
-    /// Queries the node for available UTXOs via `getAddressUtxos` RPC,
-    /// selects enough to cover `amount + fee`, and creates a proper
-    /// UTXO-model transfer with change output.
+    /// Two-pass fee computation:
+    ///   1. Build with fee=0 to measure real CBOR size
+    ///   2. Compute exact fee = size × fee_rate, rebuild with precise fee
+    ///
+    /// No hardcoded size estimates — fee is always derived from the actual
+    /// transaction size as measured by the canonical C encoder.
     pub async fn build_transfer(
         &self,
         rpc: &NodeRpcClient,
         recipient_hex: &str,
         amount: u64,
-        fee: u64,
+        fee_rate: u64,
         chain_height: u64,
     ) -> Result<String, String> {
         let recipient = noble_core::NobleAddress::from_wire_bytes(
@@ -113,11 +116,7 @@ impl FaucetWallet {
             return Err("faucet has no UTXOs (dry)".into());
         }
 
-        // Select UTXOs (largest-first) until we have enough
-        let required = amount.saturating_add(fee);
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-        // Filter out immature coinbase UTXOs, then sort by value descending
+        // Filter out immature coinbase UTXOs, sort by value descending
         let mut sorted: Vec<_> = utxos.into_iter().filter(|u| {
             !u.is_coinbase || chain_height >= u.height + noble_core::COINBASE_MATURITY
         }).collect();
@@ -127,33 +126,39 @@ impl FaucetWallet {
             return Err("faucet has no mature UTXOs (all coinbase UTXOs are immature)".into());
         }
 
-        for utxo in &sorted {
-            selected.push(SelectedUtxo {
-                outpoint: noble_core::OutPoint {
-                    txid: noble_crypto::Hash256::from_hex(&utxo.txid)
-                        .map_err(|e| format!("bad utxo txid {}: {e}", utxo.txid))?,
-                    vout: utxo.vout,
-                },
-                value: utxo.value,
-            });
-            total = total.saturating_add(utxo.value);
-            if total >= required {
-                break;
-            }
-        }
+        // Pass 1: build with fee=0 to measure real CBOR size.
+        // Use generous coin selection (amount + fee_rate×1000) so we have
+        // enough UTXOs even before knowing the exact fee.
+        let generous = amount.saturating_add(fee_rate.saturating_mul(1000));
+        let selected = select_utxos(&sorted, generous)?;
 
-        if total < required {
-            return Err(format!(
-                "insufficient UTXOs: have {total}, need {required}"
-            ));
-        }
+        let draft = TransactionBuilder::build_transfer(
+            &self.keystore,
+            &self.signer,
+            recipient.clone(),
+            amount,
+            0,
+            None,
+            self.chain_id,
+            &selected,
+            &change_address,
+        )
+        .map_err(|e| format!("build draft: {e}"))?;
+
+        let tx_size = noble_tx_core::transaction_cbor_size(&draft)
+            .map_err(|e| format!("measure size: {e}"))?;
+
+        // Pass 2: rebuild with exact fee = size × fee_rate.
+        let exact_fee = (tx_size as u64).saturating_mul(fee_rate);
+        let required = amount.saturating_add(exact_fee);
+        let selected = select_utxos(&sorted, required)?;
 
         let tx = TransactionBuilder::build_transfer(
             &self.keystore,
             &self.signer,
             recipient,
             amount,
-            fee,
+            exact_fee,
             None,
             self.chain_id,
             &selected,
@@ -165,6 +170,30 @@ impl FaucetWallet {
             .map_err(|e| format!("C encoder: {e}"))?;
         Ok(hex::encode(cbor))
     }
+}
+
+/// Select UTXOs (largest-first) until `required` is covered.
+fn select_utxos(sorted: &[crate::rpc_client::UtxoResult], required: u64) -> Result<Vec<SelectedUtxo>, String> {
+    let mut selected = Vec::new();
+    let mut total = 0u64;
+    for utxo in sorted {
+        selected.push(SelectedUtxo {
+            outpoint: noble_core::OutPoint {
+                txid: noble_crypto::Hash256::from_hex(&utxo.txid)
+                    .map_err(|e| format!("bad utxo txid {}: {e}", utxo.txid))?,
+                vout: utxo.vout,
+            },
+            value: utxo.value,
+        });
+        total = total.saturating_add(utxo.value);
+        if total >= required {
+            break;
+        }
+    }
+    if total < required {
+        return Err(format!("insufficient UTXOs: have {total}, need {required}"));
+    }
+    Ok(selected)
 }
 
 #[cfg(test)]

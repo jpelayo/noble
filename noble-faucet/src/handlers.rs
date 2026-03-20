@@ -165,10 +165,10 @@ pub async fn handle_faucet(
             .await
             .map(|info| info.block_height)
             .unwrap_or(0);
-        // Build and sign locally, then submit raw transaction.
-        let fee = noble_core::MIN_TX_FEE;
+        // Build and sign locally — two-pass fee from real tx size.
+        let fee_rate = noble_core::MIN_RELAY_FEE_RATE;
         let tx_hex = wallet
-            .build_transfer(&state.rpc, &resolved_address, state.config.drip_amount, fee, chain_height)
+            .build_transfer(&state.rpc, &resolved_address, state.config.drip_amount, fee_rate, chain_height)
             .await
             .map_err(|e| internal_error(&format!("Build transfer: {e}")))?;
         state
