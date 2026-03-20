@@ -255,9 +255,17 @@ async fn main() {
         }
     };
 
+    // Get chain_id from node for correct signing message computation.
+    let chain_id = rpc.get_node_info().await
+        .map(|info| info.chain_id as u32)
+        .unwrap_or(0);
+    if chain_id != 0 {
+        tracing::info!("Chain ID from node: {:#010X}", chain_id);
+    }
+
     // Initialize independent faucet wallet (local signing).
     let faucet_wallet = if !passphrase.is_empty() {
-        match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, 0) {
+        match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, chain_id) {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
 
