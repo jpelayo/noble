@@ -147,7 +147,7 @@ export function init(root, ctx) {
       <dt>Total Output</dt><dd>${formatFee(tx.total_output)} (${formatNumber(tx.total_output)} groats)</dd>
       <dt>Fee</dt><dd>${tx.fee != null ? `${formatFee(tx.fee)} (${formatNumber(tx.fee)} groats)` : '&mdash;'}</dd>
       ${(tx.gateway_address || null) ? `
-      <dt>Gateway</dt><dd class="mono" title="This node receives 50% of the fee">${truncateHash(tx.gateway_address, 12)}</dd>
+      <dt>Gateway</dt><dd class="mono" style="word-break:break-all" title="This node receives 50% of the fee">${tx.gateway_address}</dd>
       ` : ''}
       <dt>Status</dt><dd><span class="badge ${status === 'confirmed' ? 'confirmed' : ''}">${esc(status)}</span></dd>
       ${blockHeight != null ? `<dt>Block Height</dt><dd><a href="#/block/${blockHeight}">${blockHeight}</a></dd>` : ''}
@@ -165,7 +165,7 @@ export function init(root, ctx) {
       inputs.forEach((inp, i) => {
         const txLink = isCoinbase
           ? '<span class="badge coinbase">Coinbase (new coins)</span>'
-          : `<a href="#/tx/${inp.txid}" class="mono">${truncateHash(inp.txid)}</a>`;
+          : `<a href="#/tx/${inp.txid}" class="mono" style="word-break:break-all">${inp.txid}</a>`;
         inputHtml += `<tr><td>${i}</td><td>${txLink}</td><td>${isCoinbase ? '&mdash;' : inp.vout}</td></tr>`;
       });
       inputHtml += '</tbody></table></div>';
@@ -180,7 +180,7 @@ export function init(root, ctx) {
       outputPanel.className = 'panel';
       let outputHtml = `<div class="panel-header">Outputs (${outputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Value</th><th>Address</th></tr></thead><tbody>`;
       outputs.forEach((out, i) => {
-        outputHtml += `<tr><td>${i}</td><td>${formatFee(out.value)}</td><td class="mono">${truncateHash(out.address, 16)}</td></tr>`;
+        outputHtml += `<tr><td>${i}</td><td>${formatFee(out.value)}</td><td class="mono" style="word-break:break-all">${out.address}</td></tr>`;
       });
       outputHtml += '</tbody></table></div>';
       outputPanel.innerHTML = outputHtml;

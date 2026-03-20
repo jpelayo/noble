@@ -32,8 +32,8 @@ export function init(root, ctx) {
       // Names pre-resolved by backend — no client-side name maps.
       const validatorName = block.validator_name;
       const validatorDisplay = validatorName
-        ? `<strong>${esc(validatorName)}</strong> <span class="mono" style="opacity:0.5">${truncateHash(block.validator_id, 12)}</span>`
-        : `<span class="mono">${truncateHash(block.validator_id, 16)}</span>`;
+        ? `<strong>${esc(validatorName)}</strong> <span class="mono" style="opacity:0.5">${block.validator_id}</span>`
+        : `<span class="mono">${block.validator_id}</span>`;
 
       // Header detail grid
       const grid = document.createElement('dl');
@@ -96,12 +96,12 @@ export function init(root, ctx) {
           const roundLabel = inR2
             ? '<span class="badge consensus-r1">R1</span> <span class="badge consensus-r2">R2</span>'
             : '<span class="badge consensus-r1">R1</span>';
-          const name = v.name || truncateHash(v.validator_key, 6);
+          const name = v.name || v.validator_key;
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${roundLabel}</td>
             <td>${esc(name)}</td>
-            <td class="mono">${truncateHash(v.validator_key)}</td>
+            <td class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${v.validator_key}</td>
           `;
           voteBody.appendChild(tr);
         });
@@ -110,12 +110,12 @@ export function init(root, ctx) {
         votes.r2_voters
           .filter(v => !r1Keys.has(v.validator_key))
           .forEach(v => {
-            const name = v.name || truncateHash(v.validator_key, 6);
+            const name = v.name || v.validator_key;
             const tr = document.createElement('tr');
             tr.innerHTML = `
               <td><span class="badge consensus-r2">R2</span></td>
               <td>${esc(name)}</td>
-              <td class="mono">${truncateHash(v.validator_key)}</td>
+              <td class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${v.validator_key}</td>
             `;
             voteBody.appendChild(tr);
           });
@@ -145,7 +145,7 @@ export function init(root, ctx) {
           tr.className = 'clickable';
           tr.innerHTML = `
             <td>${i}</td>
-            <td class="mono">${truncateHash(tx.tx_id)}</td>
+            <td class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${tx.tx_id}</td>
             <td>${formatFee(tx.transfer_value != null ? tx.transfer_value : tx.total_output)}</td>
             <td>${typeLabel}</td>
             <td>${(tx.inputs || []).length} in / ${(tx.outputs || []).length} out</td>

@@ -259,13 +259,11 @@ impl NodeRpcClient {
     pub async fn get_balance(&self, address: &str) -> Result<BalanceResult, FaucetError> {
         #[derive(Serialize)]
         struct Params<'a> {
-            public_key: &'a str,
+            address: &'a str,
         }
         self.call(
             "noble_getAddressBalance",
-            &Params {
-                public_key: address,
-            },
+            &Params { address },
         )
         .await
     }
