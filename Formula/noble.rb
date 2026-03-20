@@ -156,7 +156,7 @@ class Noble < Formula
     unless blocked.empty?
       puts
       puts "  " + "!" * 60
-      puts "  !!  BLOCKED PORTS — Noble cannot start until freed  !!"
+      puts "  !!  WARNING — Ports may be in use                   !!"
       puts "  " + "!" * 60
       blocked.each do |b|
         puts "  !!  Port #{b[:port]} (#{b[:label]}): PID #{b[:pid]} (#{b[:proc]})"
@@ -201,9 +201,9 @@ class Noble < Formula
 
       Ports that should be reachable:
 
-        8780  P2P (open to internet for full connectivity)
-        8783  JSON-RPC HTTP-only (HTTPS) — open for client/wallet access
-        8786  Faucet (HTTPS) — open for client token requests
+        8780  P2P         ↔ inbound+outbound (open to internet for full connectivity)
+        8783  JSON-RPC    ← inbound only (HTTPS — clients/wallets connect here)
+        8786  Faucet      ← inbound only (HTTPS — clients request tokens here)
 
       Paths:
         Config:    #{etc}/noble/noble.toml
