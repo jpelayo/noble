@@ -18,7 +18,7 @@ use noble_network::{NetworkCommand, NetworkEvent};
 /// (e.g., `PeerConnected`, `PeerDisconnected`, `BlockAnnounced`).
 pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> {
     match event {
-        NetworkEvent::BlockReceived { peer_id, block } => Some(CycleEvent::BlockProposed {
+        NetworkEvent::BlockReceived { peer_id, block, .. } => Some(CycleEvent::BlockProposed {
             block: Box::new(block.clone()),
             from_peer: peer_id.clone(),
         }),
@@ -279,6 +279,7 @@ mod tests {
         let event = NetworkEvent::BlockReceived {
             peer_id: vec![1, 2, 3],
             block: block.clone(),
+            vote_data: None,
         };
         let cycle_event = network_event_to_cycle_event(&event);
         assert!(cycle_event.is_some());

@@ -921,11 +921,51 @@ impl CycleEngine {
                         let new_height = block.header.height;
                         let new_hash = candidate_hash;
 
+                        // ── Always store vote witness when consensus reaches majority ──
+                        // This is independent of whether the block itself needs committing.
+                        // The vote witness is the permanent legitimacy proof for this block.
+                        let r1_voters: Vec<crate::history::BlockVoter> = self
+                            .vote_mgr
+                            .r1_voters_for(&candidate_hash)
+                            .iter()
+                            .map(|key| crate::history::BlockVoter {
+                                validator_key: hex::encode(key),
+                                name: self.snapshot_find_name(key),
+                            })
+                            .collect();
+                        let r2_voters: Vec<crate::history::BlockVoter> = self
+                            .vote_mgr
+                            .r2_voters_for(&candidate_hash)
+                            .iter()
+                            .map(|key| crate::history::BlockVoter {
+                                validator_key: hex::encode(key),
+                                name: self.snapshot_find_name(key),
+                            })
+                            .collect();
+                        let unique_witness =
+                            self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
+                        let dual_required = new_height == 1;
+                        let vote_cycle = if new_height == 1 { 0 } else { completed_cycle };
+                        outputs.push(CycleIo::StoreBlockVotes {
+                            height: new_height,
+                            votes: Box::new(crate::history::BlockVotes {
+                                cycle_number: vote_cycle,
+                                voter_count,
+                                strength: format!("{:?}", strength),
+                                r1_voters,
+                                r2_voters,
+                                unique_witness_count: unique_witness,
+                                dual_witness_required: dual_required,
+                                dual_witness_met: witness_ok,
+                            }),
+                        });
+
                         // Guard: sync may have advanced the tip while the cycle
-                        // was running — don't commit a stale candidate.
+                        // was running — don't double-commit a block already imported.
+                        // The vote witness above is stored regardless.
                         if new_height != self.tip_height + 1 {
                             debug!(
-                                "cycle {cl}: skipping stale candidate at height {} (tip is {})",
+                                "cycle {cl}: block already imported by sync at height {} (tip is {}), vote witness stored",
                                 new_height, self.tip_height
                             );
                         } else {
@@ -942,9 +982,6 @@ impl CycleEngine {
                             self.tip_hash = new_hash;
                             self.tip_timestamp = block.header.timestamp;
                             self.tip_header = Some(block.header.clone());
-                            // Block 1 committed — (re)set cycle epoch to the block's
-                            // real timestamp.  Bootstrap used wall-clock-aligned epoch;
-                            // this converges all nodes on the same real epoch.
                             if new_height == 1 {
                                 info!(
                                     "block 1 committed — cycle epoch set to {}",
@@ -954,17 +991,6 @@ impl CycleEngine {
                                     .set_genesis_timestamp(block.header.timestamp);
                                 self.vote_mgr.set_bootstrap_tolerance(false);
 
-                                // Re-initialize cycle tracking to the new epoch.
-                                // CRITICAL: do NOT use first_tick=true here. That
-                                // would set tracked_cycle on the next tick, which
-                                // could produce the SAME cycle number as the one
-                                // that just committed block 1. The node would then
-                                // re-propose and re-vote in that cycle — peers still
-                                // have the old vote, detect equivocation, and ban.
-                                //
-                                // Instead: compute the new cycle directly and mark
-                                // votes as already cast so the node stays silent
-                                // until the next cycle boundary.
                                 let now_ts = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -974,16 +1000,10 @@ impl CycleEngine {
                                 self.tracked_cycle = new_cycle;
                                 self.tracked_phase = new_phase;
                                 self.vote_mgr.set_current_cycle(new_cycle);
-                                // Suppress voting in the remainder of this cycle —
-                                // peers may still have votes from the old epoch's
-                                // cycle with the same number.
                                 self.r1_vote_cast = true;
                                 self.r2_vote_cast = true;
                                 self.r1_retry_logged = true;
                                 self.r2_retry_logged = true;
-                                // One-shot flag: prevents the generic cleanup at the
-                                // end of this handle_cycle_boundary from undoing the
-                                // suppression. Consumed after one use.
                                 self.epoch_reset_cycle = Some(completed_cycle);
 
                                 info!(
@@ -991,55 +1011,12 @@ impl CycleEngine {
                                     new_cycle, new_phase
                                 );
 
-                                // Cache chain owner for fork resolution.
                                 self.chain_owner_key = Some(
                                     block.header.validator_id.to_wire_bytes()
                                 );
-                                // Purge stale cycle history from the bootstrap epoch.
-                                // The cycle numbers from the old epoch are meaningless
-                                // after the epoch change.
                                 outputs.push(CycleIo::ClearCycleHistory);
                             }
-                            // Collect per-block vote witness before CommitBlock.
-                            let r1_voters: Vec<crate::history::BlockVoter> = self
-                                .vote_mgr
-                                .r1_voters_for(&candidate_hash)
-                                .iter()
-                                .map(|key| crate::history::BlockVoter {
-                                    validator_key: hex::encode(key),
-                                    name: self.snapshot_find_name(key),
-                                })
-                                .collect();
-                            let r2_voters: Vec<crate::history::BlockVoter> = self
-                                .vote_mgr
-                                .r2_voters_for(&candidate_hash)
-                                .iter()
-                                .map(|key| crate::history::BlockVoter {
-                                    validator_key: hex::encode(key),
-                                    name: self.snapshot_find_name(key),
-                                })
-                                .collect();
-                            let unique_witness =
-                                self.vote_mgr.unique_voter_count_for_candidate(&candidate_hash);
-                            let dual_required = new_height == 1;
-                            // For block 1, the bootstrap-era cycle number is meaningless
-                            // (it resets when the epoch changes). Store cycle 0 instead.
-                            let vote_cycle = if new_height == 1 { 0 } else { completed_cycle };
-                            outputs.push(CycleIo::StoreBlockVotes {
-                                height: new_height,
-                                votes: Box::new(crate::history::BlockVotes {
-                                    cycle_number: vote_cycle,
-                                    voter_count,
-                                    strength: format!("{:?}", strength),
-                                    r1_voters,
-                                    r2_voters,
-                                    unique_witness_count: unique_witness,
-                                    dual_witness_required: dual_required,
-                                    dual_witness_met: witness_ok,
-                                }),
-                            });
 
-                            // Process badge txs from the committed block.
                             self.process_badge_transactions(&block, completed_cycle);
                             outputs.push(CycleIo::CommitBlock(block));
                             outputs.push(CycleIo::EmitMetric {
@@ -1050,7 +1027,6 @@ impl CycleEngine {
                                 "cycle {cl}: committed block {} at height {} ({:?})",
                                 new_hash, new_height, strength
                             )));
-                            // Track finality: record this commit for finality counting.
                             self.finality_tracker.on_block_committed(new_height, new_hash, completed_cycle);
                             let fh = self.finality_tracker.finalized_height;
                             if fh > 0 {
@@ -1064,8 +1040,6 @@ impl CycleEngine {
                                     value: fh as f64,
                                 });
                             }
-                            // Sync fork resolver's finality floor.
-                            // Checkpoint: if height qualifies, create one.
                             if let Some(cp) = self.checkpoint_mgr.on_block_committed(
                                 new_height,
                                 new_hash,

@@ -14,19 +14,35 @@ export function init(root, ctx) {
     let selectedContact = null;
     let multiSelect = false;
     let selectedIds = new Set();
+    let loadingContacts = false;
 
     loadContacts();
 
     async function loadContacts() {
+        if (loadingContacts) return;
+        loadingContacts = true;
         try {
             const data = await Bridge.call('noble_storage', 'getContacts');
             if (!alive) return;
             contacts = data.contacts || [];
+            // Auto-create My Card if none exists
+            if (!contacts.some(c => c.isMyCard)) {
+                try {
+                    await Bridge.call('noble_storage', 'ensureMyCard');
+                    const data2 = await Bridge.call('noble_storage', 'getContacts');
+                    if (!alive) return;
+                    contacts = data2.contacts || [];
+                } catch (e) {
+                    console.warn('[Contacts] My Card creation failed:', e.message || e);
+                }
+            }
             render();
         } catch {
             if (!alive) return;
             contacts = [];
             render();
+        } finally {
+            loadingContacts = false;
         }
     }
 
@@ -152,8 +168,24 @@ export function init(root, ctx) {
 
         root.appendChild(toolbar);
 
-        // Filter contacts
+        // ── My Card (always at top) ──
+        const myCard = contacts.find(c => c.isMyCard);
+        if (myCard && !searchQuery) {
+            const myCardPanel = document.createElement('div');
+            myCardPanel.className = 'panel my-card-panel';
+            myCardPanel.style.marginBottom = 'var(--gap)';
+
+            const myCardHeader = document.createElement('div');
+            myCardHeader.className = 'panel-header';
+            myCardHeader.innerHTML = '<span class="my-card-badge">Your Identity</span>';
+            myCardPanel.appendChild(myCardHeader);
+            myCardPanel.appendChild(buildContactRow(myCard));
+            root.appendChild(myCardPanel);
+        }
+
+        // Filter contacts (exclude My Card from main list)
         const filtered = contacts.filter(c => {
+            if (c.isMyCard) return false;
             if (!searchQuery) return true;
             const q = searchQuery;
             return (c.displayName || '').toLowerCase().includes(q)
@@ -164,7 +196,7 @@ export function init(root, ctx) {
                 || (c.noblePubkey || '').toLowerCase().startsWith(q);
         });
 
-        if (filtered.length === 0) {
+        if (filtered.length === 0 && !myCard) {
             root.appendChild(emptyState({
                 icon: '\u{1F50D}',
                 title: 'No Results',
@@ -172,6 +204,8 @@ export function init(root, ctx) {
             }));
             return;
         }
+
+        if (filtered.length === 0) return; // My Card shown, no other results
 
         // Favorites section
         const favorites = filtered.filter(c => c.isFavorite);
@@ -280,7 +314,6 @@ export function init(root, ctx) {
         const card = contactCard(c, {
             onSend: (contact) => {
                 Bridge.call('noble_app', 'navigateTo', { section: 'payments' });
-                // Defer to allow page switch
                 setTimeout(() => {
                     if (window.App && window.App._currentPage && window.App._currentPage.openSendWizard) {
                         window.App._currentPage.openSendWizard(contact.noblePubkey);
@@ -295,9 +328,128 @@ export function init(root, ctx) {
                 } catch { /* user cancelled */ }
             },
             onEdit: () => openEditModal(c),
-            onDelete: () => confirmDelete(c)
+            onDelete: c.isMyCard ? null : () => confirmDelete(c)
         });
         root.appendChild(card);
+
+        // ── Signing Keys panel (My Card only) ──
+        if (c.isMyCard) {
+            renderSigningKeys(c);
+        }
+    }
+
+    function renderSigningKeys(contact) {
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.style.marginTop = 'var(--gap)';
+
+        const header = document.createElement('div');
+        header.className = 'panel-header';
+        header.textContent = 'Signing Keys';
+        panel.appendChild(header);
+
+        const body = document.createElement('div');
+        body.className = 'panel-body';
+
+        const keys = contact.signingKeys || [];
+        if (keys.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'padding:var(--gap);text-align:center;color:var(--text-muted)';
+            empty.textContent = 'No signing keys imported. Import a .p12 certificate to sign document metadata.';
+            body.appendChild(empty);
+        } else {
+            for (const sk of keys) {
+                const row = document.createElement('div');
+                row.className = 'signing-key-row';
+
+                const info = document.createElement('div');
+                info.style.flex = '1';
+
+                const nameRow = document.createElement('div');
+                nameRow.style.cssText = 'display:flex;align-items:center;gap:var(--gap-xs)';
+                const label = document.createElement('span');
+                label.style.fontWeight = '500';
+                label.textContent = sk.label || 'Unnamed Key';
+                nameRow.appendChild(label);
+
+                const algBadge = document.createElement('span');
+                algBadge.className = 'signing-key-badge';
+                algBadge.textContent = sk.algorithm === 'p256' ? 'P-256' : 'secp256k1';
+                nameRow.appendChild(algBadge);
+                info.appendChild(nameRow);
+
+                if (sk.certificateSubject) {
+                    const subj = document.createElement('div');
+                    subj.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-secondary)';
+                    subj.textContent = sk.certificateSubject;
+                    info.appendChild(subj);
+                }
+
+                const pkRow = document.createElement('div');
+                pkRow.className = 'mono';
+                pkRow.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted)';
+                pkRow.textContent = sk.publicKeyHex ? truncate(sk.publicKeyHex, 12) : '';
+                info.appendChild(pkRow);
+
+                row.appendChild(info);
+
+                const rmBtn = document.createElement('button');
+                rmBtn.className = 'btn btn-sm';
+                rmBtn.textContent = 'Remove';
+                rmBtn.style.cssText = 'color:var(--error);min-height:auto;padding:4px 8px';
+                rmBtn.addEventListener('click', async () => {
+                    rmBtn.disabled = true;
+                    try {
+                        await Bridge.call('noble_security', 'removeSigningKey', { keyId: sk.id });
+                        await loadContacts();
+                        selectedContact = contacts.find(c => c.id === contact.id) || null;
+                        render();
+                    } catch (err) { rmBtn.disabled = false; console.error('[Contacts] remove key failed:', err); }
+                });
+                row.appendChild(rmBtn);
+
+                body.appendChild(row);
+            }
+        }
+
+        panel.appendChild(body);
+
+        // Action buttons
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:var(--gap-sm);padding:var(--gap-sm) var(--gap)';
+
+        const importBtn = document.createElement('button');
+        importBtn.className = 'btn btn-primary btn-sm';
+        importBtn.textContent = 'Import .p12 Key';
+        importBtn.addEventListener('click', async () => {
+            try {
+                const result = await Bridge.call('noble_security', 'importPKCS12');
+                if (result && !result.error) {
+                    await loadContacts();
+                    selectedContact = contacts.find(c => c.id === contact.id) || null;
+                    render();
+                }
+            } catch { /* user cancelled or error */ }
+        });
+        actions.appendChild(importBtn);
+
+        const genBtn = document.createElement('button');
+        genBtn.className = 'btn btn-sm';
+        genBtn.textContent = 'Generate Key';
+        genBtn.addEventListener('click', async () => {
+            try {
+                const result = await Bridge.call('noble_security', 'generateSigningKey');
+                if (result && !result.error) {
+                    await loadContacts();
+                    selectedContact = contacts.find(c => c.id === contact.id) || null;
+                    render();
+                }
+            } catch (err) { console.error('[Contacts] key generation failed:', err); }
+        });
+        actions.appendChild(genBtn);
+
+        panel.appendChild(actions);
+        root.appendChild(panel);
     }
 
     // ── Add/Edit Modal ──
@@ -464,7 +616,11 @@ export function init(root, ctx) {
                 modal.close();
                 selectedContact = null;
                 await loadContacts();
-            } catch {}
+            } catch (err) {
+                deleteBtn.disabled = false;
+                deleteBtn.textContent = 'Delete';
+                console.error('[Contacts] delete failed:', err);
+            }
         });
 
         actions.appendChild(cancelBtn);

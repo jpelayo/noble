@@ -3216,7 +3216,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
             }
-            NetworkEvent::BlockReceived { peer_id, block } => {
+            NetworkEvent::BlockReceived { peer_id, block, vote_data } => {
                 // Determine whether this block is a manifest sync block or a
                 // live consensus proposal.
                 //
@@ -3267,6 +3267,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         &NetworkEvent::BlockReceived {
                             peer_id: peer_id.clone(),
                             block: block.clone(),
+                            vote_data: None,
                         },
                     );
                     if let Some(ce) = cycle_event {
@@ -3280,17 +3281,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     || (self.healing.is_syncing() && block.header.height == tip_height + 1)
                     || (self.healing.is_syncing() && block.header.height > tip_height && block.header.height <= tip_height + 256)
                 {
-                    // Sync import: block is in the manifest, is the next expected block,
-                    // or is in the catch-up range (≤256 blocks ahead, only when actively
-                    // syncing). The is_syncing() guard on the catch-up range prevents
-                    // live proposals (height == tip+1) from being misrouted to sync
-                    // import during normal operation, which would bypass the consensus
-                    // engine (no vote tracking, no reputation, hardcoded voter_count=1).
+                    // Sync import: block + vote witness from peer.
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let result = self.healing.try_sync_import(&block);
+                    let result = self.healing.try_sync_import(&block, vote_data.as_deref());
                     self.healing.advance_after_import(block.header.height, &result, now);
                 } else {
                     // Live proposal — route to consensus engine.
@@ -3298,6 +3294,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         &NetworkEvent::BlockReceived {
                             peer_id: peer_id.clone(),
                             block: block.clone(),
+                            vote_data: None,
                         },
                     );
                     if let Some(ce) = cycle_event {
@@ -3625,8 +3622,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::StoreBlockVotes { height, votes } => {
                     // Decay-weighted vote accumulation for chain legitimacy tracking.
-                    // Recent blocks' votes count more than older ones (exponential decay).
-                    {
+                    // Only apply decay if this block hasn't already been accounted for
+                    // (sync import already applied decay with voter_count=1).
+                    let tip = self.consensus.read().chain_tip().0;
+                    if height > tip || height == tip {
                         let old = self.healing.chain_vote_weight().load(std::sync::atomic::Ordering::Relaxed);
                         let new = noble_consensus::decay_vote_weight(old, votes.voter_count as u64);
                         self.healing.chain_vote_weight().store(new, std::sync::atomic::Ordering::Relaxed);

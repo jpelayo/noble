@@ -50,7 +50,7 @@ pub fn cycle_io_to_network_commands(io: CycleIo) -> Vec<NetworkCommand> {
 #[allow(dead_code)]
 pub fn network_event_to_cycle_event(event: &NetworkEvent) -> Option<CycleEvent> {
     match event {
-        NetworkEvent::BlockReceived { peer_id, block } => Some(CycleEvent::BlockProposed {
+        NetworkEvent::BlockReceived { peer_id, block, .. } => Some(CycleEvent::BlockProposed {
             block: Box::new(block.clone()),
             from_peer: peer_id.clone(),
         }),

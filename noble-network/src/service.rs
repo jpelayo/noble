@@ -1119,6 +1119,7 @@ async fn handle_swarm_event(
                             .try_send(NetworkEvent::BlockReceived {
                                 peer_id: peer_bytes.clone(),
                                 block,
+                                vote_data: None, // batch sync doesn't carry per-block votes
                             })
                             .is_err()
                         {
@@ -1130,7 +1131,7 @@ async fn handle_swarm_event(
                         }
                     }
                 }
-                SyncResponse::Block(Some(block)) => {
+                SyncResponse::Block { block: Some(block), vote_data } => {
                     // Cache for serving to other peers.
                     // Evict stale same-validator entries (see SyncResponse::Blocks).
                     if let Ok(bh) = block.header.compute_block_hash() {
@@ -1145,13 +1146,14 @@ async fn handle_swarm_event(
                         .try_send(NetworkEvent::BlockReceived {
                             peer_id: peer.to_bytes().to_vec(),
                             block,
+                            vote_data,
                         })
                         .is_err()
                     {
                         tracing::warn!(task = "sync", "event channel full: BlockReceived dropped");
                     }
                 }
-                SyncResponse::Block(None) => {
+                SyncResponse::Block { block: None, .. } => {
                     tracing::debug!(
                         task = "sync",
                         "peer {} responded with Block(None) — block not found",
@@ -1908,7 +1910,8 @@ fn handle_sync_request(
 
         SyncRequest::GetBlockByHeight { height } => {
             let block = block_provider.get_block_by_height(*height);
-            SyncResponse::Block(block)
+            let votes = block_provider.get_block_votes(*height);
+            SyncResponse::Block { block, vote_data: votes }
         }
 
         SyncRequest::GetStatus => {
@@ -2707,7 +2710,7 @@ mod tests {
         let response =
             handle_sync_request(&SyncRequest::GetBlockByHeight { height: 999 }, &bp, &config, &pp);
         match response {
-            SyncResponse::Block(None) => {}
+            SyncResponse::Block { block: None, .. } => {}
             _ => panic!("expected Block(None)"),
         }
     }

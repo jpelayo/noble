@@ -72,7 +72,10 @@ export function init(root, ctx) {
 
     <!-- Wallet identity -->
     <div class="panel">
-      <div class="panel-header">Wallet Identity</div>
+      <div class="panel-header">
+        <span>Wallet Identity</span>
+        <button id="w-refresh" class="btn btn-secondary btn-sm" style="padding:2px 10px;font-size:var(--font-size-xs)">Refresh</button>
+      </div>
       <div class="panel-body">
         <dl class="detail-grid" id="w-identity">
         </dl>
@@ -552,6 +555,16 @@ export function init(root, ctx) {
       },
     };
   });
+
+  // Refresh button
+  const refreshBtn = root.querySelector('#w-refresh');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => {
+      refreshBtn.textContent = 'Refreshing...';
+      refreshBtn.disabled = true;
+      loadWallet().finally(() => { refreshBtn.textContent = 'Refresh'; refreshBtn.disabled = false; });
+    });
+  }
 
   // WS: refresh on new block (might include new subsidy)
   unsubs.push(ws.subscribe('newBlocks', () => loadWallet()));

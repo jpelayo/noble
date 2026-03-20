@@ -1961,3 +1961,66 @@ body {
 .faucet-stat-row:last-child { border-bottom: none; }
 .faucet-stat-label { color: var(--text-muted); }
 .faucet-stat-value { font-family: var(--font-mono); color: var(--text-primary); font-size: var(--font-size-xs); }
+
+/* ── My Card + Signing Keys ── */
+.my-card-panel { border: 1px solid var(--accent); }
+.my-card-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.signing-key-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: var(--gap-sm) var(--gap);
+  border-bottom: 1px solid var(--border);
+}
+.signing-key-row:last-child { border-bottom: none; }
+.signing-key-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  color: var(--text-secondary);
+}
+
+/* ── Metadata Dropdown ── */
+.metadata-dropdown {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  z-index: 100;
+  min-width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* ── Signature Verification Badges ── */
+.sig-panel { margin-top: var(--gap); }
+.sig-entry { padding: var(--gap-sm) var(--gap); border-bottom: 1px solid var(--border); }
+.sig-entry:last-child { border-bottom: none; }
+.sig-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+.sig-badge-valid { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.sig-badge-unknown { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.sig-badge-invalid { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
+.sig-badge-malformed { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }

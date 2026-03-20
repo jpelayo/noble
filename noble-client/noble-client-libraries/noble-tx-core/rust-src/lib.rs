@@ -4,9 +4,13 @@
 // Rust wrapper for the noble-tx-core C library.
 // The C library is the SINGLE source of truth for transaction CBOR encoding.
 // Used by all clients (iOS, macOS, Windows, Linux) and the node itself.
+//
+// Also provides CMS/PKCS#7 per-field signing via the `cms` module (pure Rust).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+
+pub mod cms;
 
 extern "C" {
     fn noble_sign_transfer(params_json: *const c_char) -> *mut c_char;
@@ -115,9 +119,14 @@ fn tx_to_json(tx: &noble_core::Transaction) -> String {
         .metadata
         .iter()
         .map(|m| {
+            // UTF-8 metadata → string as-is; binary (e.g. encrypted) → hex fallback
+            let value_str = match String::from_utf8(m.value.clone()) {
+                Ok(s) => s,
+                Err(_) => hex::encode(&m.value),
+            };
             serde_json::json!({
                 "key": m.key,
-                "value": String::from_utf8_lossy(&m.value),
+                "value": value_str,
             })
         })
         .collect();
@@ -162,6 +171,70 @@ fn tx_to_json(tx: &noble_core::Transaction) -> String {
     }
 
     json.to_string()
+}
+
+// ── CMS/PKCS#7 FFI Exports ──
+
+/// Helper to call a CMS function and return the result as a C string.
+fn call_cms_ffi(
+    f: impl FnOnce(&str) -> Result<String, String>,
+    params_json: &str,
+) -> *mut c_char {
+    let json_result = match f(params_json) {
+        Ok(val) => val,
+        Err(e) => format!("{{\"error\":\"{}\"}}", e.replace('\"', "\\\"").replace('\n', " ")),
+    };
+    CString::new(json_result)
+        .map(|cs| cs.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Create a CMS/PKCS#7 detached signature over a field value.
+#[no_mangle]
+pub extern "C" fn noble_sign_cms_ffi(params_json: *const c_char) -> *mut c_char {
+    let input = match unsafe { CStr::from_ptr(params_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    call_cms_ffi(
+        |json| {
+            let r = cms::sign_cms(json)?;
+            serde_json::to_string(&r).map_err(|e| format!("serialize sign result: {e}"))
+        },
+        input,
+    )
+}
+
+/// Verify a CMS/PKCS#7 detached signature.
+#[no_mangle]
+pub extern "C" fn noble_verify_cms_ffi(params_json: *const c_char) -> *mut c_char {
+    let input = match unsafe { CStr::from_ptr(params_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    call_cms_ffi(
+        |json| {
+            let r = cms::verify_cms(json)?;
+            serde_json::to_string(&r).map_err(|e| format!("serialize verify result: {e}"))
+        },
+        input,
+    )
+}
+
+/// Parse a PKCS#12 container and extract the EC key + certificate.
+#[no_mangle]
+pub extern "C" fn noble_import_pkcs12_ffi(params_json: *const c_char) -> *mut c_char {
+    let input = match unsafe { CStr::from_ptr(params_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    call_cms_ffi(
+        |json| {
+            let r = cms::import_pkcs12(json)?;
+            serde_json::to_string(&r).map_err(|e| format!("serialize import result: {e}"))
+        },
+        input,
+    )
 }
 
 #[cfg(test)]

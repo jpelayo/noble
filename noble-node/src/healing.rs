@@ -2070,7 +2070,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Reads parent header and validator list from its own subsystem references.
     /// Executes all side-effects directly (storage commit, consensus update,
     /// mempool eviction, network commands, broadcast events).
-    pub fn try_sync_import(&self, block: &noble_core::Block) -> SyncImportResult {
+    pub fn try_sync_import(&self, block: &noble_core::Block, vote_data: Option<&[u8]>) -> SyncImportResult {
         let (tip_height, _) = self.consensus.read().chain_tip();
         let mut chain_id = self.get_chain_id();
 
@@ -2293,6 +2293,36 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             "tx_count": tx_ids.len(),
             "source": "sync",
         }));
+
+        // Store vote witness from sync peer (if available).
+        // Validate CBOR before storing: prevents corrupted/malicious data from propagating.
+        if let Some(vd) = vote_data {
+            match <noble_consensus::BlockVotes as noble_codec::NobleCbor>::from_cbor(vd) {
+                Ok(_parsed) => {
+                    let storage = self.storage.read();
+                    if let Err(e) = storage.store_block_votes(block.header.height, vd) {
+                        tracing::warn!(
+                            task = "sync",
+                            "failed to store synced vote witness for height {}: {e}",
+                            block.header.height
+                        );
+                    } else {
+                        tracing::debug!(
+                            task = "sync",
+                            "stored vote witness for synced block {}",
+                            block.header.height
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "sync",
+                        "discarding malformed vote witness for height {}: {e}",
+                        block.header.height
+                    );
+                }
+            }
+        }
 
         SyncImportResult::Accepted {
             new_chain_id,

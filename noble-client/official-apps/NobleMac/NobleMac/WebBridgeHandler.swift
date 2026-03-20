@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import AppKit
+import CryptoKit
 import Foundation
 import NobleClientAPI
 import NobleClientCore
 import NobleClientCrypto
 import NobleClientSecurity
+import NobleTxCore
 import UniformTypeIdentifiers
 
 /// Routes bridge messages from the web UI to Swift services.
@@ -467,6 +469,115 @@ final class WebBridgeHandler {
             )
             return ["txHex": txHex]
 
+        case "signMetadataField":
+            guard let keyIdStr = params["keyId"] as? String,
+                  let keyId = UUID(uuidString: keyIdStr) else {
+                throw BridgeError.missingParam("keyId")
+            }
+            guard let fieldValue = params["fieldValue"] as? String else {
+                throw BridgeError.missingParam("fieldValue")
+            }
+
+            // Find the signing key entry to determine algorithm
+            guard let myCard = appState.contacts.first(where: { $0.isMyCard }),
+                  let keyEntry = myCard.signingKeys.first(where: { $0.id == keyId }) else {
+                throw BridgeError.operationFailed("Signing key not found")
+            }
+
+            // Load private key + certificate from Keychain
+            guard let privKeyData = try appState.keychainService.loadKey(label: "signing-key-\(keyIdStr)") else {
+                throw BridgeError.operationFailed("Private key not found in keychain")
+            }
+            guard let certData = try appState.keychainService.loadKey(label: "signing-cert-\(keyIdStr)") else {
+                throw BridgeError.operationFailed("Certificate not found in keychain")
+            }
+
+            // Delegate CMS construction to Rust FFI
+            let privKeyHex = privKeyData.map { String(format: "%02x", $0) }.joined()
+            let certB64 = certData.base64EncodedString()
+            let cmsParams: [String: Any] = [
+                "private_key_hex": privKeyHex,
+                "certificate_der_b64": certB64,
+                "field_value": fieldValue,
+                "algorithm": keyEntry.algorithm,
+            ]
+            let cmsParamsJson = try serializeToJSON(cmsParams)
+            let cmsResultStr = callCmsFFI(noble_sign_cms_ffi, params: cmsParamsJson)
+            guard let resultDict = try? JSONSerialization.jsonObject(with: Data(cmsResultStr.utf8)) as? [String: Any],
+                  resultDict["error"] == nil,
+                  let cmsHex = resultDict["cms_hex"] as? String,
+                  let size = resultDict["size"] as? Int else {
+                let errMsg = (try? JSONSerialization.jsonObject(with: Data(cmsResultStr.utf8)) as? [String: Any])?["error"] as? String
+                throw BridgeError.operationFailed(errMsg ?? "CMS signing failed")
+            }
+
+            return ["signatureHex": cmsHex, "size": size] as [String: Any]
+
+        case "verifyMetadataField":
+            guard let sigHex = params["signatureHex"] as? String else {
+                throw BridgeError.missingParam("signatureHex")
+            }
+            guard let fieldValue = params["fieldValue"] as? String else {
+                throw BridgeError.missingParam("fieldValue")
+            }
+
+            // Step 1: Parse CMS to extract SKI (no certificate needed yet)
+            let parseParams: [String: Any] = [
+                "cms_hex": sigHex,
+                "field_value": fieldValue,
+            ]
+            let parseJson = try serializeToJSON(parseParams)
+            let parseResultStr = callCmsFFI(noble_verify_cms_ffi, params: parseJson)
+            guard let parsed = try? JSONSerialization.jsonObject(with: Data(parseResultStr.utf8)) as? [String: Any] else {
+                throw BridgeError.operationFailed("CMS parse failed")
+            }
+
+            let signerSKI = parsed["signer_ski_hex"] as? String ?? "unknown"
+            let algorithm = parsed["algorithm"] as? String ?? "unknown"
+
+            // Step 2: Find certificate by SKI in contacts
+            var certB64: String?
+            var signerName: String?
+            for contact in appState.contacts {
+                for sk in contact.signingKeys {
+                    if sk.subjectKeyIdentifier == signerSKI {
+                        certB64 = sk.certificateDER
+                        let keyLabel = sk.label.isEmpty ? "" : " (\(sk.label))"
+                        signerName = contact.displayName + keyLabel
+                        break
+                    }
+                }
+                if certB64 != nil { break }
+            }
+
+            // Step 3: If certificate found, verify signature via Rust
+            var valid = false
+            var error: String?
+            if let cert = certB64 {
+                let verifyParams: [String: Any] = [
+                    "cms_hex": sigHex,
+                    "field_value": fieldValue,
+                    "certificate_der_b64": cert,
+                ]
+                let verifyJson = try serializeToJSON(verifyParams)
+                let verifyResultStr = callCmsFFI(noble_verify_cms_ffi, params: verifyJson)
+                if let vDict = try? JSONSerialization.jsonObject(with: Data(verifyResultStr.utf8)) as? [String: Any] {
+                    valid = vDict["valid"] as? Bool ?? false
+                    error = vDict["error"] as? String
+                }
+            } else {
+                error = "no certificate found for signer (SKI: \(signerSKI.prefix(12))...)"
+            }
+
+            return [
+                "valid": valid,
+                "signerSKI": signerSKI,
+                "signerName": signerName as Any,
+                "hasCertificate": certB64 != nil,
+                "algorithm": algorithm,
+                "error": error as Any,
+            ] as [String: Any]
+
         default:
             throw BridgeError.unknownAction(action)
         }
@@ -498,9 +609,11 @@ final class WebBridgeHandler {
 
     /// Get the wallet's change address as wire bytes.
     /// Handles both nbl1 bech32 and hex wire format via NobleAddress.
-    private func walletChangeAddress() -> [UInt8] {
+    private func walletChangeAddress() throws -> [UInt8] {
         guard let addrStr = appState.walletAddress,
-              let addr = NobleAddress(wireHex: addrStr) else { return [] }
+              let addr = NobleAddress(wireHex: addrStr) else {
+            throw BridgeError.operationFailed("No wallet address available for change output")
+        }
         let hex = addr.wireHex
         var bytes = [UInt8]()
         var idx = hex.startIndex
@@ -530,6 +643,183 @@ final class WebBridgeHandler {
             // Security: never send the raw key to JS. Only report availability.
             let available = appState.loadPrivateKey() != nil
             return ["available": available]
+
+        case "getMyCard":
+            guard let myCard = appState.contacts.first(where: { $0.isMyCard }) else {
+                return ["signingKeys": []] as [String: Any]
+            }
+            return contactToDict(myCard)
+
+        case "importPKCS12":
+            // Open file dialog for .p12/.pfx
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [
+                UTType(filenameExtension: "p12") ?? .data,
+                UTType(filenameExtension: "pfx") ?? .data,
+            ]
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            let response = await panel.beginSheetModal(for: NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first!)
+            guard response == .OK, let url = panel.url else {
+                throw BridgeError.operationFailed("cancelled")
+            }
+            let p12Data = try Data(contentsOf: url)
+
+            // Prompt for password
+            let alert = NSAlert()
+            alert.messageText = "PKCS#12 Password"
+            alert.informativeText = "Enter the password for \(url.lastPathComponent):"
+            let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+            alert.accessoryView = input
+            alert.addButton(withTitle: "Import")
+            alert.addButton(withTitle: "Cancel")
+            let alertResponse = await alert.beginSheetModal(for: NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first!)
+            guard alertResponse == .alertFirstButtonReturn else {
+                throw BridgeError.operationFailed("cancelled")
+            }
+            let password = input.stringValue
+
+            // Import via Security.framework
+            var importedItems: CFArray?
+            let options = [kSecImportExportPassphrase: password] as NSDictionary
+            let status = SecPKCS12Import(p12Data as CFData, options, &importedItems)
+            guard status == errSecSuccess, let items = importedItems as? [[String: Any]],
+                  let firstItem = items.first else {
+                throw BridgeError.operationFailed("PKCS#12 import failed (wrong password or invalid file)")
+            }
+
+            // Extract identity (private key + certificate)
+            guard let identityRef = firstItem[kSecImportItemIdentity as String] else {
+                throw BridgeError.operationFailed("No identity found in PKCS#12")
+            }
+            guard let identity = identityRef as? SecIdentity else {
+                throw BridgeError.operationFailed("Invalid identity type in PKCS#12")
+            }
+
+            var privateKeyRef: SecKey?
+            let privStatus = SecIdentityCopyPrivateKey(identity, &privateKeyRef)
+            guard privStatus == errSecSuccess, let privKey = privateKeyRef else {
+                throw BridgeError.operationFailed("Cannot extract private key (OSStatus \(privStatus))")
+            }
+
+            var certRef: SecCertificate?
+            let certStatus = SecIdentityCopyCertificate(identity, &certRef)
+            guard certStatus == errSecSuccess, let cert = certRef else {
+                throw BridgeError.operationFailed("Cannot extract certificate (OSStatus \(certStatus))")
+            }
+
+            // Determine key type
+            guard let keyAttrs = SecKeyCopyAttributes(privKey) as? [String: Any],
+                  let keyType = keyAttrs[kSecAttrKeyType as String] as? String else {
+                throw BridgeError.operationFailed("Cannot determine key type")
+            }
+
+            // Only accept EC keys (P-256). Reject RSA.
+            guard keyType == (kSecAttrKeyTypeECSECPrimeRandom as String) else {
+                throw BridgeError.operationFailed("Only ECDSA (P-256) keys are supported. RSA signatures exceed the 256-byte metadata slot limit.")
+            }
+
+            // Extract raw private key bytes
+            guard let privKeyData = SecKeyCopyExternalRepresentation(privKey, nil) as? Data else {
+                throw BridgeError.operationFailed("Cannot export private key")
+            }
+
+            // Certificate DER
+            let certDER = SecCertificateCopyData(cert) as Data
+
+            // Certificate subject
+            let subjectSummary = SecCertificateCopySubjectSummary(cert) as? String ?? "Unknown"
+
+            // Compressed public key (extract from private key data)
+            // For EC keys, external representation is 04 || x || y (65 bytes for P-256)
+            let pubKeyUncompressed: Data
+            guard let pubKeyRef = SecKeyCopyPublicKey(privKey) else {
+                throw BridgeError.operationFailed("Cannot derive public key from private key")
+            }
+            var pubKeyError: Unmanaged<CFError>?
+            guard let pubKeyRaw = SecKeyCopyExternalRepresentation(pubKeyRef, &pubKeyError) as? Data else {
+                let errMsg = pubKeyError?.takeRetainedValue().localizedDescription ?? "unknown"
+                throw BridgeError.operationFailed("Cannot export public key: \(errMsg)")
+            }
+            pubKeyUncompressed = pubKeyRaw
+            // Compress: if starts with 0x04, take x (32 bytes), prefix 0x02 or 0x03 based on y parity
+            let compressedHex: String
+            if pubKeyUncompressed.count == 65 && pubKeyUncompressed[0] == 0x04 {
+                let x = pubKeyUncompressed[1...32]
+                let yParity: UInt8 = pubKeyUncompressed[64] & 1 == 0 ? 0x02 : 0x03
+                compressedHex = String(format: "%02x", yParity) + x.map { String(format: "%02x", $0) }.joined()
+            } else {
+                compressedHex = pubKeyUncompressed.map { String(format: "%02x", $0) }.joined()
+            }
+
+            // Compute SKI (SHA-1 of uncompressed public key)
+            let skiData = Insecure.SHA1.hash(data: pubKeyUncompressed)
+            let skiHex = skiData.map { String(format: "%02x", $0) }.joined()
+
+            // Store private key + cert in Keychain
+            let keyEntry = SigningKeyEntry(
+                label: url.deletingPathExtension().lastPathComponent,
+                algorithm: "p256",
+                publicKeyHex: compressedHex,
+                hasPrivateKey: true,
+                certificateSubject: subjectSummary,
+                certificateDER: certDER.base64EncodedString(),
+                subjectKeyIdentifier: skiHex
+            )
+
+            try appState.keychainService.storeKey(privKeyData, label: "signing-key-\(keyEntry.id.uuidString)")
+            try appState.keychainService.storeKey(certDER, label: "signing-cert-\(keyEntry.id.uuidString)")
+
+            // Add to My Card's signing keys
+            if let idx = appState.contacts.firstIndex(where: { $0.isMyCard }) {
+                appState.contacts[idx].signingKeys.append(keyEntry)
+                appState.saveContactsToDefaults()
+            }
+
+            return signingKeyToDict(keyEntry)
+
+        case "generateSigningKey":
+            // Generate a secp256k1 keypair using NobleClientCrypto
+            let privKeyBytes = NobleClientCrypto.generatePrivateKey()
+            let pubKeyBytes = try NobleClientCrypto.derivePublicKey(from: privKeyBytes)
+            let compressedHex = pubKeyBytes.map { String(format: "%02x", $0) }.joined()
+            let skiData = Insecure.SHA1.hash(data: pubKeyBytes)
+            let skiHex = skiData.map { String(format: "%02x", $0) }.joined()
+
+            let keyEntry = SigningKeyEntry(
+                label: "Noble Key",
+                algorithm: "secp256k1",
+                publicKeyHex: compressedHex,
+                hasPrivateKey: true,
+                subjectKeyIdentifier: skiHex
+            )
+
+            try appState.keychainService.storeKey(Data(privKeyBytes), label: "signing-key-\(keyEntry.id.uuidString)")
+
+            if let idx = appState.contacts.firstIndex(where: { $0.isMyCard }) {
+                appState.contacts[idx].signingKeys.append(keyEntry)
+                appState.saveContactsToDefaults()
+            }
+
+            return signingKeyToDict(keyEntry)
+
+        case "removeSigningKey":
+            guard let keyIdStr = params["keyId"] as? String,
+                  let keyId = UUID(uuidString: keyIdStr) else {
+                throw BridgeError.missingParam("keyId")
+            }
+            // Remove from Keychain — fail if key deletion fails (prevent key material leak)
+            try appState.keychainService.deleteKey(label: "signing-key-\(keyIdStr)")
+            // Certificate deletion is best-effort (key material is the critical one)
+            do { try appState.keychainService.deleteKey(label: "signing-cert-\(keyIdStr)") }
+            catch { print("[Bridge] warning: cert cleanup failed (key removed): \(error)") }
+
+            // Remove from contact's signing keys
+            for i in 0..<appState.contacts.count {
+                appState.contacts[i].signingKeys.removeAll { $0.id == keyId }
+            }
+            appState.saveContactsToDefaults()
+            return ["ok": true]
 
         default:
             throw BridgeError.unknownAction(action)
@@ -730,9 +1020,28 @@ final class WebBridgeHandler {
             guard let idStr = params["id"] as? String, let uuid = UUID(uuidString: idStr) else {
                 throw BridgeError.missingParam("id")
             }
+            // Prevent deleting My Card
+            if appState.contacts.first(where: { $0.id == uuid })?.isMyCard == true {
+                throw BridgeError.operationFailed("Cannot delete My Card")
+            }
             appState.contacts.removeAll { $0.id == uuid }
             appState.saveContactsToDefaults()
             return ["ok": true]
+
+        case "ensureMyCard":
+            if appState.contacts.contains(where: { $0.isMyCard }) {
+                return ["ok": true, "existed": true]
+            }
+            let walletAddr = appState.walletAddress ?? ""
+            let myCard = Contact(
+                firstName: "My",
+                lastName: "Card",
+                noblePubkey: walletAddr,
+                isMyCard: true
+            )
+            appState.contacts.insert(myCard, at: 0)
+            appState.saveContactsToDefaults()
+            return ["ok": true, "existed": false, "id": myCard.id.uuidString]
 
         case "exportContactsVCF":
             let ids = params["ids"] as? [String]
@@ -764,7 +1073,7 @@ final class WebBridgeHandler {
     // MARK: - Helpers
 
     private func contactToDict(_ c: Contact) -> [String: Any] {
-        [
+        var dict: [String: Any] = [
             "id": c.id.uuidString,
             "firstName": c.firstName,
             "lastName": c.lastName,
@@ -774,10 +1083,30 @@ final class WebBridgeHandler {
             "bitcoinKey": c.bitcoinKey,
             "notes": c.notes,
             "isFavorite": c.isFavorite,
+            "isMyCard": c.isMyCard,
             "displayName": c.displayName,
             "createdAt": c.createdAt.timeIntervalSince1970,
             "updatedAt": c.updatedAt.timeIntervalSince1970,
-        ] as [String: Any]
+        ]
+        if !c.signingKeys.isEmpty {
+            dict["signingKeys"] = c.signingKeys.map { signingKeyToDict($0) }
+        }
+        return dict
+    }
+
+    private func signingKeyToDict(_ sk: SigningKeyEntry) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": sk.id.uuidString,
+            "label": sk.label,
+            "algorithm": sk.algorithm,
+            "publicKeyHex": sk.publicKeyHex,
+            "hasPrivateKey": sk.hasPrivateKey,
+            "importedAt": sk.importedAt.timeIntervalSince1970,
+        ]
+        if let subj = sk.certificateSubject { d["certificateSubject"] = subj }
+        if let ski = sk.subjectKeyIdentifier { d["subjectKeyIdentifier"] = ski }
+        // certificateDER intentionally omitted from JS (too large) — kept in Swift only
+        return d
     }
 
     private func dictToContact(_ d: [String: Any]) -> Contact {
@@ -786,6 +1115,12 @@ final class WebBridgeHandler {
             id = uuid
         } else {
             id = UUID()
+        }
+        let signingKeys: [SigningKeyEntry]
+        if let skArray = d["signingKeys"] as? [[String: Any]] {
+            signingKeys = skArray.map { dictToSigningKey($0) }
+        } else {
+            signingKeys = []
         }
         return Contact(
             id: id,
@@ -798,8 +1133,37 @@ final class WebBridgeHandler {
             notes: d["notes"] as? String ?? "",
             createdAt: Date(timeIntervalSince1970: d["createdAt"] as? Double ?? Date.now.timeIntervalSince1970),
             updatedAt: .now,
-            isFavorite: d["isFavorite"] as? Bool ?? false
+            isFavorite: d["isFavorite"] as? Bool ?? false,
+            isMyCard: d["isMyCard"] as? Bool ?? false,
+            signingKeys: signingKeys
         )
+    }
+
+    private func dictToSigningKey(_ d: [String: Any]) -> SigningKeyEntry {
+        SigningKeyEntry(
+            id: UUID(uuidString: d["id"] as? String ?? "") ?? UUID(),
+            label: d["label"] as? String ?? "",
+            algorithm: d["algorithm"] as? String ?? "p256",
+            publicKeyHex: d["publicKeyHex"] as? String ?? "",
+            hasPrivateKey: d["hasPrivateKey"] as? Bool ?? false,
+            certificateSubject: d["certificateSubject"] as? String,
+            certificateDER: d["certificateDER"] as? String,
+            subjectKeyIdentifier: d["subjectKeyIdentifier"] as? String,
+            importedAt: Date(timeIntervalSince1970: d["importedAt"] as? Double ?? Date.now.timeIntervalSince1970)
+        )
+    }
+
+    /// Call a CMS FFI function (noble_sign_cms_ffi / noble_verify_cms_ffi).
+    private func callCmsFFI(
+        _ fn: @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?,
+        params: String
+    ) -> String {
+        guard let resultPtr = params.withCString({ fn($0) }) else {
+            return "{\"error\":\"CMS FFI returned null\"}"
+        }
+        let result = String(cString: resultPtr)
+        noble_free(resultPtr)
+        return result
     }
 
     private func saveFileDialog(suggestedName: String, content: String) async -> Bool {
@@ -862,6 +1226,7 @@ enum BridgeError: LocalizedError {
     case noPrivateKey
     case faucetUnavailable
     case faucetError(String)
+    case operationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -872,6 +1237,7 @@ enum BridgeError: LocalizedError {
         case .noPrivateKey: "No private key available [\(NE.noPrivateKey)]"
         case .faucetUnavailable: "Faucet service is not available [\(NE.faucetUnavailable)]"
         case .faucetError(let msg): "\(msg) [\(NE.faucetError)]"
+        case .operationFailed(let msg): "\(msg) [\(NE.operationFailed)]"
         }
     }
 }

@@ -521,10 +521,71 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     }
 
     async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
-        // Stub: full implementation requires a chain-scanning address index.
-        Ok(WalletTransactionsResponse {
-            transactions: vec![],
-        })
+        // Get wallet's public key to query address history.
+        let wallet_keys = {
+            let ks = self.wallet_keystore.lock();
+            ks.list_keys().unwrap_or_default()
+        };
+        let Some(wallet_pk) = wallet_keys.into_iter().next() else {
+            return Ok(WalletTransactionsResponse { transactions: vec![] });
+        };
+        let wallet_addr = noble_core::NobleAddress::Noble(wallet_pk);
+        let wallet_wire = wallet_addr.to_wire_bytes();
+
+        let storage = self.storage.read();
+        let tip_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
+        let tx_ids = storage.get_address_history(&wallet_addr, 0, 50).unwrap_or_default();
+
+        let mut entries = Vec::new();
+        for tx_id in &tx_ids {
+            let tx = match storage.get_transaction(tx_id) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let (height, _) = match storage.get_transaction_location(tx_id) {
+                Ok(loc) => loc,
+                Err(_) => continue,
+            };
+            let confirmations = tip_height.saturating_sub(height);
+
+            let is_sender = tx.issuer_sig.to_noble_public_key().ok()
+                .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes() == wallet_wire)
+                .unwrap_or(false);
+
+            let (direction, amount, tx_type) = if tx.is_coinbase() {
+                let subsidy: u64 = tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() == wallet_wire)
+                    .map(|o| o.value)
+                    .sum();
+                ("incoming".to_string(), subsidy, "validation_subsidy".to_string())
+            } else if is_sender {
+                let sent: u64 = tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() != wallet_wire)
+                    .map(|o| o.value)
+                    .sum();
+                ("outgoing".to_string(), sent, "transfer".to_string())
+            } else {
+                let received: u64 = tx.outputs.iter()
+                    .filter(|o| o.address.to_wire_bytes() == wallet_wire)
+                    .map(|o| o.value)
+                    .sum();
+                ("incoming".to_string(), received, "transfer".to_string())
+            };
+
+            entries.push(WalletTransactionEntry {
+                tx_type,
+                direction,
+                amount,
+                balance_after: 0,
+                confirmations,
+                block_height: Some(height),
+                tx_id: Some(hex::encode(tx_id.as_bytes())),
+                timestamp: Some(tx.timestamp),
+                counterparty: None,
+            });
+        }
+
+        Ok(WalletTransactionsResponse { transactions: entries })
     }
 
     async fn submit_document_batch(

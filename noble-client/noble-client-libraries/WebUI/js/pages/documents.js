@@ -22,6 +22,8 @@ export function init(root, ctx) {
     let versionFile = null;     // selected file for version lookup
     let wantsMetadata = false;
     let metadata = [];
+    let selectedSigningKeyId = null; // default signing key for all signed fields
+    let myCardKeys = [];             // signing keys from My Card
     let feeLevel = 'recommended';
     let feeData = null;
     let results = [];
@@ -50,7 +52,7 @@ export function init(root, ctx) {
     function getWizardState() {
         return {
             files, hashes, previousChecksum, isNewVersion, versionMode,
-            wantsMetadata, metadata, feeLevel, step
+            wantsMetadata, metadata, selectedSigningKeyId, feeLevel, step
         };
     }
 
@@ -62,6 +64,7 @@ export function init(root, ctx) {
         versionMode = d.versionMode || 'checksum';
         wantsMetadata = d.wantsMetadata || false;
         metadata = d.metadata || [];
+        selectedSigningKeyId = d.selectedSigningKeyId || null;
         feeLevel = d.feeLevel || 'recommended';
         step = d.step || 0;
         versionFile = null;
@@ -96,6 +99,8 @@ export function init(root, ctx) {
         versionFile = null;
         wantsMetadata = false;
         metadata = [];
+        selectedSigningKeyId = null;
+        myCardKeys = [];
         feeLevel = 'recommended';
         feeData = null;
         results = [];
@@ -579,19 +584,51 @@ export function init(root, ctx) {
 
     // ── Step 2: Metadata ──
 
-    // Predefined metadata fields from the client specification.
-    // Each field can be toggled between plaintext and encrypted by the user.
+    // Canonical metadata fields from metadata-types.md.
+    // Each has a unique type code (T01-T13) used in the schema descriptor (slot 0).
+    // Fields can be toggled between plaintext and encrypted by the user.
+    // contact:* fields are forced encrypted — node rejects plaintext.
     const METADATA_FIELDS = [
-        { key: 'document_name', label: 'Document Name',  icon: '\u{1F4C4}', placeholder: 'e.g. Contract v2.1' },
-        { key: 'description',   label: 'Description',    icon: '\u{1F4DD}', placeholder: 'Brief description of the document' },
-        { key: 'batch_name',    label: 'Batch Name',     icon: '\u{1F4C1}', placeholder: 'e.g. Q1 2026 Invoices' },
-        { key: 'uploader_name', label: 'Uploader Name',  icon: '\u{1F464}', placeholder: 'Your name or organization' },
-        { key: 'url',           label: 'URL',            icon: '\u{1F517}', placeholder: 'https://...' },
-        { key: 'sender_email',  label: 'Sender Email',   icon: '\u{2709}\uFE0F', placeholder: 'email@example.com', contactPicker: true },
-        { key: 'sender_pubkey', label: 'Sender Public Key', icon: '\u{1F511}', placeholder: '02ab3f...' },
-        { key: 'signatures',    label: 'Signatures',     icon: '\u{270D}\uFE0F', placeholder: 'Signer names or identifiers' },
-        { key: 'custom',        label: 'Custom Field',   icon: '\u{2795}', placeholder: 'Value', customKey: true },
+        { key: 'doc:title',       code: 'T01', label: 'Document Title',    icon: '\u{1F4C4}', placeholder: 'e.g. Contract v2.1' },
+        { key: 'doc:description', code: 'T02', label: 'Description',       icon: '\u{1F4DD}', placeholder: 'Brief description of the document' },
+        { key: 'doc:batch',       code: 'T03', label: 'Batch Name',        icon: '\u{1F4C1}', placeholder: 'e.g. Q1 2026 Invoices' },
+        { key: 'doc:url',         code: 'T04', label: 'URL',               icon: '\u{1F517}', placeholder: 'https://...' },
+        { key: 'doc:bridge',      code: 'T05', label: 'Linked Document',   icon: '\u{1F4CE}', placeholder: 'Checksum, locator, or tx_id of linked document' },
+        { key: 'doc:relation',    code: 'T06', label: 'Relation',          icon: '\u{1F4CB}', placeholder: 'e.g. amendment, annex, supersedes' },
+        { key: 'author',          code: 'T07', label: 'Author',            icon: '\u{1F464}', placeholder: 'Document author or uploader name' },
+        { key: 'publisher',       code: 'T08', label: 'Publisher',         icon: '\u{1F3E2}', placeholder: 'Distributing organization' },
+        { key: 'signer:pubkey',   code: 'T09', label: 'Sender Public Key', icon: '\u{1F511}', placeholder: 'nbl1... or hex public key' },
+        { key: 'contact:email',   code: 'T10', label: 'Email',             icon: '\u{2709}\uFE0F', placeholder: 'email@example.com', forceEncrypt: true },
+        { key: 'contact:phone',   code: 'T11', label: 'Phone',             icon: '\u{1F4F1}', placeholder: '+1 555-0100', forceEncrypt: true },
+        { key: 'custom',          code: 'T99', label: 'Custom Field',      icon: '\u{2795}', placeholder: 'Value', customKey: true },
     ];
+
+    // Compute slot budget: schema(1) + fields + signature slots
+    function computeSlotBudget() {
+        const validMeta = metadata.filter(m => m.key && m.value);
+        const sigCount = validMeta.filter(m => m.signed).length;
+        const used = 1 + validMeta.length + sigCount; // schema + fields + sigs
+        return { used, remaining: 16 - used };
+    }
+
+    // Load signing keys from My Card (cached for the session)
+    async function loadMyCardKeys() {
+        try {
+            const res = await Bridge.call('noble_security', 'getMyCard');
+            if (!alive) return;
+            myCardKeys = (res.signingKeys || []).filter(k => k.hasPrivateKey);
+            // Validate selectedSigningKeyId still exists (key may have been deleted)
+            if (selectedSigningKeyId && !myCardKeys.some(k => k.id === selectedSigningKeyId)) {
+                selectedSigningKeyId = null;
+            }
+            if (myCardKeys.length > 0 && !selectedSigningKeyId) {
+                selectedSigningKeyId = myCardKeys[0].id;
+            }
+        } catch (e) {
+            myCardKeys = [];
+            console.warn('[Documents] signing keys unavailable:', e.message || e);
+        }
+    }
 
     function renderStepMetadata(container) {
         const question = document.createElement('p');
@@ -610,6 +647,7 @@ export function init(root, ctx) {
             btn.addEventListener('click', () => {
                 wantsMetadata = opt.key;
                 if (!wantsMetadata) metadata = [];
+                if (wantsMetadata && myCardKeys.length === 0) loadMyCardKeys();
                 render();
             });
             toggle.appendChild(btn);
@@ -617,6 +655,43 @@ export function init(root, ctx) {
         container.appendChild(toggle);
 
         if (!wantsMetadata) return;
+
+        // ── Signing key selector + slot budget ──
+        const metaHeader = document.createElement('div');
+        metaHeader.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap);flex-wrap:wrap';
+
+        // Slot budget indicator
+        const budget = computeSlotBudget();
+        const budgetEl = document.createElement('span');
+        budgetEl.style.cssText = 'font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm)';
+        const budgetColor = budget.remaining > 4 ? 'var(--success)' : budget.remaining > 1 ? 'var(--warning)' : 'var(--error)';
+        budgetEl.style.background = `color-mix(in srgb, ${budgetColor} 12%, transparent)`;
+        budgetEl.style.color = budgetColor;
+        budgetEl.textContent = `${budget.used} / 16 slots`;
+        metaHeader.appendChild(budgetEl);
+
+        // Signing key dropdown (if keys available)
+        if (myCardKeys.length > 0) {
+            const keyLabel = document.createElement('span');
+            keyLabel.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-left:auto';
+            keyLabel.textContent = 'Sign with:';
+            metaHeader.appendChild(keyLabel);
+
+            const keySelect = document.createElement('select');
+            keySelect.className = 'form-input';
+            keySelect.style.cssText = 'width:auto;padding:2px 6px;font-size:var(--font-size-xs)';
+            for (const k of myCardKeys) {
+                const opt = document.createElement('option');
+                opt.value = k.id;
+                opt.textContent = k.label || k.certificateSubject || 'Key';
+                if (k.id === selectedSigningKeyId) opt.selected = true;
+                keySelect.appendChild(opt);
+            }
+            keySelect.addEventListener('change', () => { selectedSigningKeyId = keySelect.value; });
+            metaHeader.appendChild(keySelect);
+        }
+
+        container.appendChild(metaHeader);
 
         // Existing fields
         if (metadata.length > 0) {
@@ -628,8 +703,9 @@ export function init(root, ctx) {
             container.appendChild(list);
         }
 
-        // Add button with dropdown
-        if (metadata.length < 16) {
+        // Add button with dropdown (respect slot budget)
+        const budget2 = computeSlotBudget();
+        if (budget2.remaining > 1) { // need at least 1 field slot + potentially 1 sig slot
             renderAddFieldButton(container);
         }
     }
@@ -707,7 +783,7 @@ export function init(root, ctx) {
                         m.value = email;
                         render();
                     });
-                } catch { /* ignore */ }
+                } catch (e) { console.warn('[Documents] contact picker unavailable:', e.message || e); }
             });
             valRow.appendChild(pickBtn);
         }
@@ -715,6 +791,11 @@ export function init(root, ctx) {
         row.appendChild(valRow);
 
         // ── Visibility toggle: Public / Encrypted (segmented) ──
+        // contact:* fields are forced encrypted — no public toggle allowed.
+        if (fieldDef.forceEncrypt) {
+            m.mode = 'encrypted';
+        }
+
         const visSection = document.createElement('div');
         visSection.className = 'metadata-visibility';
 
@@ -723,24 +804,39 @@ export function init(root, ctx) {
         visLabel.textContent = 'Visibility';
         visSection.appendChild(visLabel);
 
-        const seg = document.createElement('div');
-        seg.className = 'segmented-control segmented-control-sm';
-        for (const opt of [
-            { key: 'plaintext', label: 'Public',    icon: '\u{1F513}' },
-            { key: 'encrypted', label: 'Encrypted', icon: '\u{1F512}' },
-        ]) {
-            const btn = document.createElement('button');
-            btn.className = m.mode === opt.key ? 'active' : '';
-            btn.innerHTML = `${opt.icon} ${opt.label}`;
-            btn.addEventListener('click', () => {
-                m.mode = opt.key;
-                if (opt.key === 'plaintext') m.recipients = [];
-                render();
-            });
-            seg.appendChild(btn);
+        if (fieldDef.forceEncrypt) {
+            const forceBadge = document.createElement('span');
+            forceBadge.className = 'segmented-control segmented-control-sm';
+            forceBadge.innerHTML = '<button class="active">\u{1F512} Encrypted (required)</button>';
+            visSection.appendChild(forceBadge);
+        } else {
+            const seg = document.createElement('div');
+            seg.className = 'segmented-control segmented-control-sm';
+            for (const opt of [
+                { key: 'plaintext', label: 'Public',    icon: '\u{1F513}' },
+                { key: 'encrypted', label: 'Encrypted', icon: '\u{1F512}' },
+            ]) {
+                const btn = document.createElement('button');
+                btn.className = m.mode === opt.key ? 'active' : '';
+                btn.innerHTML = `${opt.icon} ${opt.label}`;
+                btn.addEventListener('click', () => {
+                    m.mode = opt.key;
+                    if (opt.key === 'plaintext') m.recipients = [];
+                    render();
+                });
+                seg.appendChild(btn);
+            }
+            visSection.appendChild(seg);
         }
-        visSection.appendChild(seg);
         row.appendChild(visSection);
+
+        // ── Public warning ──
+        if (!isEncrypted && !fieldDef.forceEncrypt) {
+            const pubWarn = document.createElement('div');
+            pubWarn.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning);margin-top:var(--gap-xs);padding:4px 8px;background:color-mix(in srgb,var(--warning) 10%,transparent);border-radius:var(--radius-sm)';
+            pubWarn.textContent = '\u26A0 Warning: By not encrypting this field, you are making this information public and available to anyone.';
+            row.appendChild(pubWarn);
+        }
 
         // ── Encrypted: warning + recipient picker ──
         if (isEncrypted) {
@@ -791,6 +887,55 @@ export function init(root, ctx) {
             encBlock.appendChild(addRecip);
 
             row.appendChild(encBlock);
+        }
+
+        // ── Signing toggle: Unsigned / Signed ──
+        if (!m.signed) m.signed = false;
+        if (!m.signingKeyId) m.signingKeyId = selectedSigningKeyId;
+
+        if (myCardKeys.length > 0) {
+            const sigSection = document.createElement('div');
+            sigSection.className = 'metadata-visibility';
+
+            const sigLabel = document.createElement('span');
+            sigLabel.className = 'metadata-vis-label';
+            sigLabel.textContent = 'Signing';
+            sigSection.appendChild(sigLabel);
+
+            const budget = computeSlotBudget();
+            const canSign = m.signed || budget.remaining >= 1;
+
+            const sigSeg = document.createElement('div');
+            sigSeg.className = 'segmented-control segmented-control-sm';
+            for (const opt of [
+                { key: false, label: 'Unsigned' },
+                { key: true, label: 'Signed' },
+            ]) {
+                const btn = document.createElement('button');
+                btn.className = m.signed === opt.key ? 'active' : '';
+                btn.textContent = opt.label;
+                if (opt.key === true && !canSign) {
+                    btn.disabled = true;
+                    btn.title = 'No slots available for signature';
+                }
+                btn.addEventListener('click', () => {
+                    m.signed = opt.key;
+                    if (!opt.key) m.signingKeyId = null;
+                    else m.signingKeyId = selectedSigningKeyId;
+                    render();
+                });
+                sigSeg.appendChild(btn);
+            }
+            sigSection.appendChild(sigSeg);
+            row.appendChild(sigSection);
+
+            if (m.signed) {
+                const sigNote = document.createElement('div');
+                sigNote.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs);padding:4px 8px';
+                const keyName = myCardKeys.find(k => k.id === m.signingKeyId);
+                sigNote.textContent = `CMS signature using ${keyName ? keyName.label || keyName.certificateSubject || 'key' : 'selected key'} (+1 slot)`;
+                row.appendChild(sigNote);
+            }
         }
 
         return row;
@@ -930,7 +1075,6 @@ export function init(root, ctx) {
 
             const dropdown = document.createElement('div');
             dropdown.className = 'metadata-dropdown';
-            dropdown.style.cssText = 'position:absolute;top:56px;left:50%;transform:translateX(-50%);background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 4px 16px rgba(0,0,0,0.2);z-index:100;min-width:260px;max-height:320px;overflow-y:auto;';
 
             // Filter out already-added single-use fields (allow multiple url/signatures/custom)
             const multiUse = new Set(['url', 'signatures', 'custom']);
@@ -958,7 +1102,7 @@ export function init(root, ctx) {
                         fieldKey: field.key,
                         key: field.customKey ? '' : field.key,
                         value: '',
-                        mode: 'plaintext'
+                        mode: field.forceEncrypt ? 'encrypted' : 'plaintext',
                     });
                     dropdownOpen = false;
                     render();
@@ -1133,6 +1277,9 @@ export function init(root, ctx) {
     // ── Step 5: Review ──
 
     function renderStepReview(container) {
+        // Refresh signing keys to detect any added/removed since metadata step
+        if (metadata.some(m => m.signed)) loadMyCardKeys();
+
         const warning = document.createElement('div');
         warning.className = 'warning-box';
         warning.setAttribute('role', 'alert');
@@ -1307,10 +1454,68 @@ export function init(root, ctx) {
         try {
             const fee = getSelectedFee();
             const validMeta = metadata.filter(m => m.key && m.value);
+
+            // ── Step 1: Sign fields BEFORE encryption (sign plaintext) ──
+            // For each signed field, generate CMS detached signature over the plaintext value.
+            const sigEntries = []; // { afterIndex, key, value }
+            for (let i = 0; i < validMeta.length; i++) {
+                const m = validMeta[i];
+                if (!m.signed || !m.signingKeyId) continue;
+                try {
+                    const sigResult = await Bridge.call('noble_crypto', 'signMetadataField', {
+                        keyId: m.signingKeyId,
+                        fieldValue: m.value
+                    });
+                    if (!alive) return;
+                    if (sigResult && sigResult.signatureHex) {
+                        sigEntries.push({ afterIndex: i, sigHex: sigResult.signatureHex });
+                    }
+                } catch (sigErr) {
+                    // CMS signing failed — abort submission for this file
+                    results.push({
+                        file: f.name, hash, success: false,
+                        error: `CMS signing failed for field "${m.key}": ${sigErr.message}`
+                    });
+                    if (alive) render();
+                    return;
+                }
+            }
+
+            // ── Step 2: Build schema descriptor with SIG entries interleaved ──
+            const schemaLines = [];
+            let slotIndex = 1;
+            const metaWithSigs = []; // final metadata array (fields + sig slots)
+            for (let i = 0; i < validMeta.length; i++) {
+                const m = validMeta[i];
+                const def = METADATA_FIELDS.find(f => f.key === m.fieldKey) || { code: 'T99' };
+                const vis = m.mode === 'encrypted' ? 'priv' : 'pub';
+                schemaLines.push(`${slotIndex}:${def.code}:${vis}:${m.key}`);
+                metaWithSigs.push(m);
+                const fieldSlot = slotIndex;
+                slotIndex++;
+
+                // Insert signature slot immediately after the signed field
+                const sigEntry = sigEntries.find(s => s.afterIndex === i);
+                if (sigEntry) {
+                    const sigKey = `sig:${fieldSlot}`;
+                    schemaLines.push(`${slotIndex}:SIG:pub:${sigKey}`);
+                    metaWithSigs.push({ key: sigKey, value: sigEntry.sigHex, mode: 'plaintext' });
+                    slotIndex++;
+                }
+            }
+            const schemaEntry = schemaLines.length > 0
+                ? [{ key: 'schema', value: schemaLines.join('\n'), mode: 'plaintext' }]
+                : [];
+
+            // ── Step 3: Submit ──
+            // NOTE: Metadata encryption (ECIES for mode:'encrypted' fields) is handled
+            // by the native signNotarization handler. CMS sig slots use mode:'plaintext'
+            // and are never encrypted.
+            const allMeta = [...schemaEntry, ...metaWithSigs];
             const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
                 checksum: hash,
                 fee,
-                metadata: validMeta,
+                metadata: allMeta,
                 previousChecksum: previousChecksum || undefined
             });
             if (!alive) return;

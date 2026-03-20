@@ -34,6 +34,13 @@ pub trait BlockProvider: Send + Sync {
     fn avg_votes_per_block(&self) -> f32 {
         0.0
     }
+
+    /// Get the CBOR-encoded vote witness for a block at the given height.
+    /// Returns None if no vote data is available (synced block, genesis, etc.).
+    fn get_block_votes(&self, height: u64) -> Option<Vec<u8>> {
+        let _ = height;
+        None
+    }
 }
 
 /// Provides transaction data for serving tx requests.

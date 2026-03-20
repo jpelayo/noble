@@ -44,8 +44,14 @@ pub enum SyncResponse {
     Headers(Vec<BlockHeader>),
     /// A batch of full blocks.
     Blocks(Vec<Block>),
-    /// A single block (or None if not found).
-    Block(Option<Block>),
+    /// A single block (or None if not found) + optional vote witness (CBOR bytes).
+    /// Struct variant so `#[serde(default)]` works for backward compat with old peers.
+    Block {
+        block: Option<Block>,
+        /// Opaque CBOR-encoded `BlockVotes`. None if peer has no vote data (old version).
+        #[serde(default)]
+        vote_data: Option<Vec<u8>>,
+    },
     /// Chain status information.
     Status {
         height: u64,
@@ -320,7 +326,12 @@ pub enum NetworkEvent {
         round: u8,
     },
     /// A full block was received (via request-response or sync).
-    BlockReceived { peer_id: Vec<u8>, block: Block },
+    BlockReceived {
+        peer_id: Vec<u8>,
+        block: Block,
+        /// CBOR-encoded vote witness (None if peer has no vote data).
+        vote_data: Option<Vec<u8>>,
+    },
     /// Headers-first sync completed up to `new_height`.
     SyncComplete { new_height: u64 },
     /// A new peer connected.

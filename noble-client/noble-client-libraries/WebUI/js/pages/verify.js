@@ -261,6 +261,17 @@ export function init(root, ctx) {
                 } catch {
                     versions = [];
                 }
+                // Fetch transaction metadata for signature detection
+                if (result.registrations && result.registrations.length > 0) {
+                    try {
+                        const txId = result.registrations[0].txId;
+                        const txDetail = await Bridge.call('noble_api', 'getTransaction', { txId });
+                        if (!alive) return;
+                        result.metadata = txDetail.metadata || [];
+                    } catch {
+                        result.metadata = [];
+                    }
+                }
             }
         } catch (err) {
             if (!alive) return;
@@ -325,6 +336,11 @@ export function init(root, ctx) {
         card.innerHTML = html;
         container.appendChild(card);
 
+        // ── Signature verification badges ──
+        if (result.metadata && result.metadata.length > 0) {
+            renderSignatureBadges(container, result.metadata);
+        }
+
         // Version timeline
         if (versions && versions.length > 1) {
             const timeline = document.createElement('div');
@@ -353,6 +369,95 @@ export function init(root, ctx) {
             timeline.appendChild(body);
             container.appendChild(timeline);
         }
+    }
+
+    async function renderSignatureBadges(container, metadata) {
+        // Detect sig:N entries and match to their signed fields
+        const sigs = [];
+        for (let i = 0; i < metadata.length; i++) {
+            const m = metadata[i];
+            const match = (m.key || '').match(/^sig:(\d+)$/);
+            if (!match) continue;
+            const targetSlot = parseInt(match[1], 10);
+            // Slot indices are 1-based; metadata array includes schema at index 0
+            const targetField = metadata[targetSlot]; // slot N = array index N (schema at 0)
+            if (!targetField) continue;
+            sigs.push({ sigEntry: m, targetField, targetSlot });
+        }
+
+        if (sigs.length === 0) return;
+
+        const panel = document.createElement('div');
+        panel.className = 'panel sig-panel';
+        panel.innerHTML = '<div class="panel-header">Signatures</div>';
+
+        const body = document.createElement('div');
+        body.className = 'panel-body';
+
+        for (const sig of sigs) {
+            const entry = document.createElement('div');
+            entry.className = 'sig-entry';
+
+            // Field info
+            const fieldLabel = document.createElement('div');
+            fieldLabel.style.cssText = 'font-weight:500;margin-bottom:2px';
+            fieldLabel.textContent = `${esc(sig.targetField.key)}: "${esc(truncateStr(sig.targetField.value || '', 40))}"`;
+            entry.appendChild(fieldLabel);
+
+            // Attempt verification via bridge
+            try {
+                const vResult = await Bridge.call('noble_crypto', 'verifyMetadataField', {
+                    signatureHex: sig.sigEntry.value || '',
+                    fieldValue: sig.targetField.value || ''
+                });
+
+                const badge = document.createElement('span');
+                if (vResult.valid) {
+                    badge.className = 'sig-badge sig-badge-valid';
+                    const name = vResult.signerName || `SKI: ${(vResult.signerSKI || '').slice(0, 12)}...`;
+                    badge.textContent = `\u2713 Signed by ${name}`;
+                } else if (!vResult.hasCertificate && vResult.signerSKI) {
+                    badge.className = 'sig-badge sig-badge-unknown';
+                    badge.textContent = `? Unknown signer (SKI: ${(vResult.signerSKI || '').slice(0, 12)}...)`;
+                } else {
+                    badge.className = 'sig-badge sig-badge-invalid';
+                    badge.textContent = `\u2717 Invalid signature`;
+                }
+                entry.appendChild(badge);
+
+                if (vResult.algorithm) {
+                    const alg = document.createElement('span');
+                    alg.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-left:var(--gap-xs)';
+                    alg.textContent = vResult.algorithm;
+                    entry.appendChild(alg);
+                }
+
+                if (vResult.error) {
+                    const err = document.createElement('div');
+                    err.style.cssText = 'font-size:var(--font-size-xs);color:var(--error);margin-top:2px';
+                    err.textContent = vResult.error;
+                    entry.appendChild(err);
+                }
+            } catch (e) {
+                const badge = document.createElement('span');
+                badge.className = 'sig-badge sig-badge-malformed';
+                badge.textContent = `\u26A0 Malformed signature`;
+                entry.appendChild(badge);
+                const err = document.createElement('div');
+                err.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning);margin-top:2px';
+                err.textContent = e.message || 'Could not parse CMS signature';
+                entry.appendChild(err);
+            }
+
+            body.appendChild(entry);
+        }
+
+        panel.appendChild(body);
+        container.appendChild(panel);
+    }
+
+    function truncateStr(s, max) {
+        return s.length > max ? s.slice(0, max) + '\u2026' : s;
     }
 
     function renderNoMatchResult(container) {

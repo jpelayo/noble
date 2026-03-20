@@ -85,6 +85,17 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
         // For now, return 0.0 — enriched once cycle history tracking is wired.
         0.0
     }
+
+    fn get_block_votes(&self, height: u64) -> Option<Vec<u8>> {
+        let storage = self.storage.read();
+        match storage.get_block_votes(height) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("get_block_votes({height}) storage error: {e}");
+                None
+            }
+        }
+    }
 }
 
 /// Implements [`TxProvider`] using storage + mempool.

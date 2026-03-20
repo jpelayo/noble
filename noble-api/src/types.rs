@@ -187,7 +187,9 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
             .iter()
             .map(|m| MetadataResponse {
                 key: m.key.clone(),
-                value: hex::encode(&m.value),
+                // Return UTF-8 strings directly, hex-encode only binary values
+                value: String::from_utf8(m.value.clone())
+                    .unwrap_or_else(|_| hex::encode(&m.value)),
             })
             .collect(),
         has_encrypted_locator: has_locator,
@@ -311,7 +313,7 @@ pub struct AttestationResponse {
     pub signature_size: usize,
 }
 
-/// Metadata entry response (key + hex-encoded value).
+/// Metadata entry response (key + value as UTF-8 string, or hex if binary).
 #[derive(Debug, Clone, Serialize)]
 pub struct MetadataResponse {
     pub key: String,
@@ -1555,14 +1557,20 @@ pub struct WalletTransactionsResponse {
 /// A single wallet transaction entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletTransactionEntry {
+    #[serde(rename = "type")]
     pub tx_type: String,
     pub direction: String,
     pub amount: u64,
-    pub timestamp: u64,
-    pub description: String,
-    pub tx_id: String,
-    pub confirmations: u32,
-    pub running_balance: u64,
+    pub balance_after: u64,
+    pub confirmations: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty: Option<String>,
 }
 
 /// Response for `noble_getFinalityStatus`.

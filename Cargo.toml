@@ -22,7 +22,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.69.0"
+version = "0.70.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -106,3 +106,15 @@ bs58 = { version = "0.5", features = ["check"] }
 bech32 = "0.11"
 ureq = { version = "2", features = ["tls"] }
 libc = "0.2"
+
+# CMS/PKCS#7 per-field signing (RustCrypto ecosystem, all k256-0.13/der-0.7 generation)
+p256 = { version = "0.13", features = ["ecdsa"] }
+cms = { version = "0.2", features = ["builder"] }
+x509-cert = "0.2"
+pkcs12 = "0.1"
+der = { version = "0.7", features = ["alloc", "oid"] }
+const-oid = "0.9"
+spki = "0.7"
+signature = "2"
+ecdsa = { version = "0.16", features = ["hazmat"] }
+sha1 = "0.10"

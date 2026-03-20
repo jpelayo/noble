@@ -39,6 +39,30 @@ char *noble_select_utxos(const char *params_json);
 //         or:  { "error": "<message>" }
 char *noble_tx_encode(const char *tx_json);
 
+// ── CMS/PKCS#7 Per-Field Metadata Signing ──
+
+// Create a CMS/PKCS#7 detached signature over a field value.
+// Input JSON: { "private_key_hex": "<hex32>", "certificate_der_b64": "<base64>",
+//               "field_value": "<string>", "algorithm": "p256"|"secp256k1" }
+// Output JSON: { "cms_hex": "<der_hex>", "size": <uint> }
+//         or:  { "error": "<message>" }
+char *noble_sign_cms_ffi(const char *params_json);
+
+// Verify a CMS/PKCS#7 detached signature.
+// Input JSON: { "cms_hex": "<der_hex>", "field_value": "<string>",
+//               "certificate_der_b64": "<base64>" (optional) }
+// Output JSON: { "valid": <bool>, "signer_ski_hex": "<hex>",
+//                "algorithm": "<name>", "error": "<message>"|null }
+char *noble_verify_cms_ffi(const char *params_json);
+
+// Parse a PKCS#12 container and extract the EC key + certificate.
+// Input JSON: { "p12_hex": "<hex>", "password": "<string>" }
+// Output JSON: { "public_key_hex": "<hex>", "algorithm": "p256"|"secp256k1",
+//                "certificate_der_b64": "<base64>", "subject_name": "<string>",
+//                "ski_hex": "<hex>", "private_key_hex": "<hex>" }
+//         or:  { "error": "<message>" }
+char *noble_import_pkcs12_ffi(const char *params_json);
+
 // Free a string returned by any noble_* function.
 void noble_free(char *ptr);
 
