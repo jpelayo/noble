@@ -675,9 +675,11 @@ impl CycleEngine {
         // Proposal: wait VOTE_CAST_DELAY (30s) into the Proposal phase before proposing.
         // This gives the gossipsub mesh time to form and mempool txs to propagate.
         // Deadline safety net: if <30s left in Proposal phase and haven't proposed, force-retry.
+        // Safety guard: never propose with chain_id=0 after block 1 (would cause B4 merkle mismatch).
         if new_phase == CyclePhase::Proposal
             && self.our_validator_key.is_some()
             && self.proposals_enabled
+            && !(self.chain_id == 0 && self.tip_height >= 1)
         {
             let our_wire = self.our_validator_key.as_ref().unwrap().1.to_wire_bytes();
             if !self.candidate_tracker.has_proposed(&our_wire) {
@@ -1034,6 +1036,17 @@ impl CycleEngine {
                                     block.header.validator_id.to_wire_bytes()
                                 );
                                 outputs.push(CycleIo::ClearCycleHistory);
+
+                                // Derive chain_id synchronously from block 1's hash.
+                                // This MUST happen before CommitBlock reaches the node
+                                // event loop, otherwise the next cycle's proposal uses
+                                // chain_id=0 for block 2 → B4 merkle mismatch.
+                                let derived_chain_id = noble_core::derive_chain_id(&new_hash);
+                                self.chain_id = derived_chain_id;
+                                info!(
+                                    "chain_id derived synchronously: {:#010X} (from block 1 hash {})",
+                                    derived_chain_id, new_hash
+                                );
                             }
 
                             self.process_badge_transactions(&block, completed_cycle);
