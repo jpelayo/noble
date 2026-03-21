@@ -260,6 +260,21 @@ pub async fn start_network(
         bound_port
     };
 
+    // Advertise our reachable address to peers via the Identify protocol.
+    // Handles: 0.0.0.0 bind (peers need our real IP), port fallback (8780→8781),
+    // NAT/VPN/Docker (external IP differs from bind IP).
+    if let Some(ref external_ip) = config.external_ip {
+        if let Ok(ext_addr) = format!("/ip4/{external_ip}/tcp/{bound_port}").parse::<Multiaddr>() {
+            swarm.add_external_address(ext_addr);
+            tracing::info!(
+                task = "network_startup",
+                ip = %external_ip,
+                port = bound_port,
+                "Advertising external address to peers"
+            );
+        }
+    }
+
     // Dial bootstrap peers and add them to Kademlia routing table.
     for addr_str in &config.bootstrap_peers {
         match addr_str.parse::<Multiaddr>() {

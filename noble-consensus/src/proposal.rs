@@ -355,6 +355,7 @@ mod tests {
             current_time: now,
             parent: None,
             validator_list: &[val_pub],
+            skip_timestamp_skew: false,
         };
         assert!(noble_core::validate_block(&block, &ctx).is_ok());
     }

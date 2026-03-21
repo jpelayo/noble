@@ -2136,9 +2136,13 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             .map(|snap| snap.pubkey_vec.clone())
             .unwrap_or_default();
 
-        // For sync imports, use the block's own timestamp as "current_time" so the
-        // B6 skew check passes. Historical blocks are expected to have old timestamps.
-        let current_time = block.header.timestamp;
+        // Use wall-clock time for current_time, but skip B6 timestamp skew checks
+        // for sync imports. Historical blocks are expected to have old timestamps.
+        // B5 (monotonicity) and B13 (median) still apply.
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
         // Any validator can propose — include block's own validator_id.
         let mut val_list = validator_list;
@@ -2151,6 +2155,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             current_time,
             parent: parent_header.as_ref(),
             validator_list: &val_list,
+            skip_timestamp_skew: true,
         };
 
         if let Err(e) = noble_core::validate_block(block, &ctx) {

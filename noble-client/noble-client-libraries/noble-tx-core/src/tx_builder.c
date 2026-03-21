@@ -248,13 +248,6 @@ void tx_encode_address_serde(noble_buf_t *buf, const noble_address_t *addr) {
     size_t data_len = (size_t)(addr->wire_len - 1);
 
     switch (prefix) {
-    case 0x01: // Noble Ed25519
-        cbor_write_map(buf, 1);
-        cbor_write_text(buf, "Noble", 5);
-        cbor_write_map(buf, 1);
-        cbor_write_text(buf, "Ed25519", 7);
-        cbor_write_bytes(buf, data, data_len);
-        break;
     case 0x02: // Noble secp256k1
         cbor_write_map(buf, 1);
         cbor_write_text(buf, "Noble", 5);

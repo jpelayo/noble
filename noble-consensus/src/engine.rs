@@ -1529,17 +1529,23 @@ impl CycleEngine {
             current_time,
             parent: parent_header.as_ref(),
             validator_list: &val_list,
+            skip_timestamp_skew: false,
         };
 
         if let Err(e) = validate_block(&block, &ctx) {
             // Chain-disagreement errors (B2 prev_hash, B3 height, B5 timestamp ordering)
-            // mean the peer is on a different fork — not misbehaving.  Log and reject
-            // without banning so fork resolution remains possible.
+            // mean the peer is not misbehaving. B6 past skew (old block from gossip relay)
+            // is also exempted. B6 FUTURE skew is NOT exempted — future timestamps are
+            // evidence of clock manipulation and should still trigger a ban.
             let is_fork_disagreement = matches!(
                 e,
                 noble_core::ValidationError::PrevHashMismatch
                     | noble_core::ValidationError::HeightMismatch { .. }
                     | noble_core::ValidationError::TimestampNotAfterParent { .. }
+            ) || matches!(
+                &e,
+                noble_core::ValidationError::BlockTimestampSkew { block_time, current_time }
+                    if *block_time < *current_time  // past skew only — old blocks from gossip
             );
             if is_fork_disagreement {
                 outputs.push(CycleIo::Log(format!(
@@ -1906,6 +1912,7 @@ impl CycleEngine {
                     current_time,
                     parent: self.tip_header.as_ref(),
                     validator_list: &val_list,
+                    skip_timestamp_skew: false,
                 };
                 if let Err(e) = validate_block(&block, &ctx) {
                     outputs.push(CycleIo::Log(format!(

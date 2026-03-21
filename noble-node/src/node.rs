@@ -1291,6 +1291,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
         net_config.chain_meta = Some(self.chain_meta);
+        // Auto-detect external IP for Identify protocol advertisement.
+        // Peers need our real IP (not 0.0.0.0) to connect back.
+        net_config.external_ip = if_addrs::get_if_addrs()
+            .unwrap_or_default()
+            .iter()
+            .find(|iface| !iface.ip().is_loopback() && iface.ip().is_ipv4())
+            .map(|iface| iface.ip().to_string());
 
         // Try to load P2P identity from unified keystore (migrated in Node::new)
         {
@@ -3280,6 +3287,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 } else if self.healing.is_sync_block(block.header.height)
                     || (self.healing.is_syncing() && block.header.height == tip_height + 1)
                     || (self.healing.is_syncing() && block.header.height > tip_height && block.header.height <= tip_height + 256)
+                    // Historical catch-up: blocks 2+ ahead of our tip arriving via gossip
+                    // after sync completes. Route to sync import which skips B6 timestamp
+                    // checks (these blocks are valid but old relative to wall-clock).
+                    // NOTE: tip+1 is excluded — it MUST go through consensus for voting.
+                    || (!self.healing.is_syncing() && block.header.height > tip_height + 1 && block.header.height <= tip_height + 256)
                 {
                     // Sync import: block + vote witness from peer.
                     let now = std::time::SystemTime::now()

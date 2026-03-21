@@ -133,6 +133,11 @@ pub struct NetworkConfig {
     /// (≤ `EARLY_CHAIN_HEIGHT_LIMIT`) tolerate chain_id mismatches so that
     /// independently bootstrapped nodes can reconnect and adopt the longer chain.
     pub tip_height: u64,
+
+    /// External IP address (auto-detected by the node).
+    /// When set, advertised to peers via the Identify protocol so they know
+    /// our reachable address (handles 0.0.0.0 bind, NAT, VPN, Docker).
+    pub external_ip: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -160,6 +165,7 @@ impl Default for NetworkConfig {
             pre_loaded_p2p_key: None,
             gossipsub_heartbeat_interval_secs: 1,
             tip_height: 0,
+            external_ip: None,
         }
     }
 }

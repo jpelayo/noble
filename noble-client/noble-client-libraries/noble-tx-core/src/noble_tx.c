@@ -1172,18 +1172,14 @@ static int decode_address_serde(cbor_reader_t *r, noble_address_t *addr) {
     if (cbor_read_text(r, &key, &klen) != 0) return -1;
 
     if (text_matches(key, klen, "Noble")) {
-        // Nested map: {"Secp256k1": <bytes>} or {"Ed25519": <bytes>}
+        // Nested map: {"Secp256k1": <bytes>}
         size_t inner;
         if (cbor_read_map(r, &inner) != 0 || inner != 1) return -1;
         const char *ikey; size_t iklen;
         if (cbor_read_text(r, &ikey, &iklen) != 0) return -1;
         const uint8_t *data; size_t dlen;
         if (cbor_read_bytes(r, &data, &dlen) != 0) return -1;
-        if (text_matches(ikey, iklen, "Ed25519")) {
-            addr->wire[0] = 0x01; // Ed25519 prefix
-        } else {
-            addr->wire[0] = 0x02; // Secp256k1 prefix
-        }
+        addr->wire[0] = 0x02; // Secp256k1
         if (dlen > 33) dlen = 33;
         memcpy(&addr->wire[1], data, dlen);
         addr->wire_len = (uint8_t)(1 + dlen);

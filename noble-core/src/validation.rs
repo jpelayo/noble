@@ -35,6 +35,10 @@ pub struct BlockValidationContext<'a> {
     pub parent: Option<&'a BlockHeader>,
     /// The node's local trusted validator list.
     pub validator_list: &'a [NoblePublicKey],
+    /// Skip B6 timestamp skew checks (past/future).
+    /// Set to `true` for historical sync imports where the block's timestamp
+    /// is expected to be old. B5 (monotonicity) and B13 (median) still apply.
+    pub skip_timestamp_skew: bool,
 }
 
 /// Validate a BIP-137 (Bitcoin Signed Message) signature on a transaction (T26).
@@ -583,18 +587,20 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     }
     tracing::trace!("B4: merkle root verified");
 
-    // B6: Timestamp skew
-    if header.timestamp > ctx.current_time + MAX_BLOCK_FUTURE_SKEW {
-        return Err(ValidationError::BlockTimestampSkew {
-            block_time: header.timestamp,
-            current_time: ctx.current_time,
-        });
-    }
-    if ctx.current_time > header.timestamp + MAX_BLOCK_PAST_SKEW {
-        return Err(ValidationError::BlockTimestampSkew {
-            block_time: header.timestamp,
-            current_time: ctx.current_time,
-        });
+    // B6: Timestamp skew (skipped for historical sync imports where old timestamps are expected)
+    if !ctx.skip_timestamp_skew {
+        if header.timestamp > ctx.current_time + MAX_BLOCK_FUTURE_SKEW {
+            return Err(ValidationError::BlockTimestampSkew {
+                block_time: header.timestamp,
+                current_time: ctx.current_time,
+            });
+        }
+        if ctx.current_time > header.timestamp + MAX_BLOCK_PAST_SKEW {
+            return Err(ValidationError::BlockTimestampSkew {
+                block_time: header.timestamp,
+                current_time: ctx.current_time,
+            });
+        }
     }
     tracing::trace!("B6: timestamp skew check passed");
 
@@ -948,6 +954,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: Some(&parent_header),
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(result, Err(ValidationError::PrevHashMismatch)));
@@ -971,6 +978,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(
@@ -993,6 +1001,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(
@@ -1015,6 +1024,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(result, Err(ValidationError::ValidatorNotTrusted)));
@@ -1033,6 +1043,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         assert!(validate_block(&block, &ctx).is_ok());
     }
@@ -1045,6 +1056,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         assert!(validate_block(&block, &ctx).is_ok());
     }
@@ -1727,6 +1739,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(
@@ -1826,6 +1839,7 @@ mod tests {
             current_time: 1_700_000_000,
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
+            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(

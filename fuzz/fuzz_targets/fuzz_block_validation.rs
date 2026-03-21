@@ -13,6 +13,7 @@ fuzz_target!(|data: &[u8]| {
             current_time: 1_772_524_800 + 3600,
             parent: None,
             validator_list: &[],
+            skip_timestamp_skew: false,
         };
         let _ = validate_block(&block, &ctx);
     }
