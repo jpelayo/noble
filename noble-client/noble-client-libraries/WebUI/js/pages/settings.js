@@ -62,6 +62,7 @@ export function init(root, ctx) {
 
         renderNodeSection();
         renderWalletSection();
+        renderIdentitySection();
         renderBlockchainSection();
         renderSecuritySection();
         renderBackupSection();
@@ -255,6 +256,121 @@ export function init(root, ctx) {
             // QR code
             const qrSlot = card.querySelector('#settings-wallet-qr');
             if (qrSlot) renderQR(qrSlot, addr, 180);
+        }
+    }
+
+    // ── Identity & Signing ──
+
+    function renderIdentitySection() {
+        const card = nobleCard('Identity & Signing', '');
+        const body = card.querySelector('.panel-body');
+
+        const desc = document.createElement('p');
+        desc.style.cssText = 'color:var(--text-secondary);font-size:var(--font-size-sm);margin:0 0 var(--gap)';
+        desc.textContent = 'Manage your signing certificates for document authentication. Import PKCS#12 (.p12) corporate certificates or generate Noble-native signing keys.';
+        body.appendChild(desc);
+
+        const keyList = document.createElement('div');
+        keyList.id = 'identity-key-list';
+        body.appendChild(keyList);
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:var(--gap-sm);flex-wrap:wrap;margin-top:var(--gap)';
+
+        const importBtn = document.createElement('button');
+        importBtn.className = 'btn btn-primary';
+        importBtn.textContent = 'Import .p12 Certificate';
+        importBtn.addEventListener('click', async () => {
+            importBtn.disabled = true;
+            importBtn.textContent = 'Importing...';
+            try {
+                const result = await Bridge.call('noble_security', 'importPKCS12');
+                if (result && result.id) loadIdentityKeys();
+            } catch (e) {
+                console.error('PKCS#12 import failed:', e);
+            }
+            importBtn.disabled = false;
+            importBtn.textContent = 'Import .p12 Certificate';
+        });
+        actions.appendChild(importBtn);
+
+        const genBtn = document.createElement('button');
+        genBtn.className = 'btn btn-secondary';
+        genBtn.textContent = 'Generate Signing Key';
+        genBtn.addEventListener('click', async () => {
+            genBtn.disabled = true;
+            genBtn.textContent = 'Generating...';
+            try {
+                const result = await Bridge.call('noble_security', 'generateSigningKey');
+                if (result && result.id) loadIdentityKeys();
+            } catch (e) {
+                console.error('Key generation failed:', e);
+            }
+            genBtn.disabled = false;
+            genBtn.textContent = 'Generate Signing Key';
+        });
+        actions.appendChild(genBtn);
+
+        body.appendChild(actions);
+        root.appendChild(card);
+
+        loadIdentityKeys();
+
+        async function loadIdentityKeys() {
+            try {
+                const myCard = await Bridge.call('noble_security', 'getMyCard');
+                const keys = myCard?.signingKeys || [];
+                renderKeyList(keys);
+            } catch {
+                keyList.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">Could not load signing keys.</p>';
+            }
+        }
+
+        function renderKeyList(keys) {
+            keyList.innerHTML = '';
+            if (keys.length === 0) {
+                keyList.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">No signing keys configured. Import a .p12 certificate or generate a Noble-native key to sign document metadata.</p>';
+                return;
+            }
+            for (const sk of keys) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);padding:var(--gap-sm);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--gap-xs)';
+
+                const info = document.createElement('div');
+                info.style.flex = '1';
+                const algo = sk.algorithm === 'p256' ? 'P-256 (Corporate)' : 'secp256k1 (Noble)';
+                const algoBadge = sk.algorithm === 'p256'
+                    ? '<span style="font-size:0.6rem;padding:1px 5px;border-radius:var(--radius-sm);background:color-mix(in srgb, var(--accent) 15%, transparent);color:var(--accent)">P-256</span>'
+                    : '<span style="font-size:0.6rem;padding:1px 5px;border-radius:var(--radius-sm);background:color-mix(in srgb, var(--success) 15%, transparent);color:var(--success)">secp256k1</span>';
+                const subject = sk.certificateSubject ? `<div style="font-size:var(--font-size-xs);color:var(--text-secondary)">${esc(sk.certificateSubject)}</div>` : '';
+                const pkHex = sk.publicKeyHex ? sk.publicKeyHex.slice(0, 12) + '...' : '';
+                info.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:var(--gap-xs)">
+                        <strong style="font-size:var(--font-size-sm)">${esc(sk.label || 'Signing Key')}</strong>
+                        ${algoBadge}
+                    </div>
+                    ${subject}
+                    <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(pkHex)}</div>
+                `;
+                row.appendChild(info);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn btn-sm';
+                removeBtn.textContent = 'Remove';
+                removeBtn.style.cssText = 'color:var(--error);border-color:var(--error)';
+                removeBtn.addEventListener('click', async () => {
+                    if (!confirm('Remove this signing key? The private key will be permanently deleted from the Keychain.')) return;
+                    try {
+                        await Bridge.call('noble_security', 'removeSigningKey', { keyId: sk.id });
+                        loadIdentityKeys();
+                    } catch (e) {
+                        console.error('Remove key failed:', e);
+                    }
+                });
+                row.appendChild(removeBtn);
+
+                keyList.appendChild(row);
+            }
         }
     }
 
