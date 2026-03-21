@@ -91,6 +91,8 @@ pub struct CycleEngine {
     r2_vote_cast: bool,
     /// Suppresses repeated "no candidate for R2 vote" log after first emission per cycle.
     r2_retry_logged: bool,
+    /// Whether the early commit (120s before cycle boundary) has fired this cycle.
+    early_commit_done: bool,
     /// S15-A: Per-validator reputation scoring engine.
     reputation: ReputationEngine,
     /// First tick: triggers proposal request if starting mid-Proposal phase.
@@ -174,6 +176,7 @@ impl CycleEngine {
             r1_retry_logged: false,
             r2_vote_cast: false,
             r2_retry_logged: false,
+            early_commit_done: false,
             reputation: ReputationEngine::new(),
             first_tick: true,
             proposals_enabled: true, // default; call set_proposals_enabled(false) for vote-only
@@ -613,14 +616,8 @@ impl CycleEngine {
                 "cycle engine: initialized at cycle {}, phase {:?}",
                 new_cycle, new_phase
             );
-            // If starting mid-Proposal and we're a validator, request mempool
-            // txs so we can propose in the current cycle.
-            if new_phase == CyclePhase::Proposal
-                && self.our_validator_key.is_some()
-                && self.proposals_enabled
-            {
-                outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
-            }
+            // If starting mid-Proposal, the delayed proposal logic in handle_tick
+            // will fire after VOTE_CAST_DELAY (30s offset) or at the deadline.
         } else {
             // Detect cycle boundary
             if new_cycle > self.tracked_cycle {
@@ -631,7 +628,11 @@ impl CycleEngine {
                 );
                 self.tracked_cycle = new_cycle;
                 self.vote_mgr.set_current_cycle(new_cycle);
-                outputs.extend(self.handle_cycle_boundary(completed));
+                // Skip if early commit already handled this cycle's boundary.
+                if !self.early_commit_done {
+                    outputs.extend(self.handle_cycle_boundary(completed));
+                }
+                self.early_commit_done = false;
 
                 // If block 1 committed, handle_cycle_boundary reset the epoch.
                 // The local `new_cycle` and `new_phase` are stale (computed from
@@ -671,16 +672,23 @@ impl CycleEngine {
         // handle_mempool_transactions / cast_r1_vote / cast_r2_vote have their
         // own guards so duplicates are impossible.
 
-        // Proposal deadline: <30s left in Proposal phase and haven't proposed.
+        // Proposal: wait VOTE_CAST_DELAY (30s) into the Proposal phase before proposing.
+        // This gives the gossipsub mesh time to form and mempool txs to propagate.
+        // Deadline safety net: if <30s left in Proposal phase and haven't proposed, force-retry.
         if new_phase == CyclePhase::Proposal
             && self.our_validator_key.is_some()
             && self.proposals_enabled
         {
             let our_wire = self.our_validator_key.as_ref().unwrap().1.to_wire_bytes();
-            let remaining = self.cycle_mgr.seconds_until_phase_change(now);
-            if !self.candidate_tracker.has_proposed(&our_wire) && remaining <= DEADLINE_SECS {
-                debug!("cycle engine: deadline proposal — {remaining}s left in Proposal phase");
-                outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+            if !self.candidate_tracker.has_proposed(&our_wire) {
+                let phase_offset = self.cycle_mgr.phase_offset(now);
+                let remaining = self.cycle_mgr.seconds_until_phase_change(now);
+                if phase_offset >= VOTE_CAST_DELAY {
+                    outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+                } else if remaining <= DEADLINE_SECS {
+                    debug!("cycle engine: deadline proposal — {remaining}s left in Proposal phase");
+                    outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
+                }
             }
         }
 
@@ -695,6 +703,19 @@ impl CycleEngine {
                 // R1 deadline: <30s left in Voting phase and haven't voted.
                 debug!("cycle engine: deadline R1 vote — {remaining}s left in Voting phase");
                 outputs.extend(self.cast_r1_vote(new_cycle));
+            }
+        }
+
+        // Early commit: 120s before cycle boundary (at Propagation +180s).
+        // This gives the committed block time to propagate before the next cycle starts.
+        const EARLY_COMMIT_SECS: u64 = 120;
+        if new_phase == CyclePhase::Propagation && !self.early_commit_done {
+            let phase_offset = self.cycle_mgr.phase_offset(now);
+            let remaining = self.cycle_mgr.seconds_until_phase_change(now);
+            if remaining <= EARLY_COMMIT_SECS {
+                self.early_commit_done = true;
+                debug!("cycle engine: early commit at Propagation +{phase_offset}s ({remaining}s before boundary)");
+                outputs.extend(self.handle_cycle_boundary(self.tracked_cycle));
             }
         }
 
@@ -758,14 +779,12 @@ impl CycleEngine {
                 self.r1_retry_logged = false;
                 self.r2_vote_cast = false;
                 self.r2_retry_logged = false;
+                self.early_commit_done = false;
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cl}: entering Proposal phase"
                 )));
-                // P0.3: If we are a block-proposing validator, request mempool txs.
-                // Vote-only peers (proposals_enabled=false) skip proposal.
-                if self.our_validator_key.is_some() && self.proposals_enabled {
-                    outputs.push(CycleIo::RequestMempoolTransactions { max_count: 500 });
-                }
+                // Proposal is delayed by VOTE_CAST_DELAY (30s) — handled in handle_tick.
+                // This gives gossipsub mesh time to form and mempool txs to propagate.
             }
             CyclePhase::Voting => {
                 outputs.push(CycleIo::Log(format!(
