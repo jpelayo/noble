@@ -783,6 +783,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.send_network(NetworkCommand::UpdateTipHeight(h));
     }
 
+    /// Update chain_id across ALL subsystems: AtomicU32, consensus engine, network.
+    /// Single entry point — prevents forgetting one target (which caused B4 merkle
+    /// mismatch when only AtomicU32 + network were updated but engine stayed at 0).
+    fn update_chain_id(&self, new_cid: u32) {
+        self.chain_id.store(new_cid, Ordering::Relaxed);
+        self.consensus.write().set_chain_id(new_cid);
+        self.send_network(NetworkCommand::UpdateChainId(new_cid));
+        tracing::info!(task = "chain_id", "chain_id updated to {:#010X}", new_cid);
+    }
+
     fn clear_last_proposed(&self) {
         *self.last_proposed.lock() = None;
     }
@@ -1596,11 +1606,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             );
             self.wipe_and_reset("integrity probe: tip block missing from storage");
 
-            self.chain_id.store(0, Ordering::Relaxed);
+            self.update_chain_id(0);
             if let Err(e) = self.consensus.write().reset_tip(0, Hash256::ZERO, true) {
                 tracing::error!(task = "integrity", "reset_tip after integrity wipe failed: {e}");
             }
-            self.send_network(NetworkCommand::UpdateChainId(0));
             self.update_tip_height(0);
             self.clear_pending_proposals();
             self.clear_gossip_caches();
@@ -1740,8 +1749,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // 1. Wipe ALL chain data.
         self.wipe_and_reset(reason);
 
-        // 2. Reset chain_id to 0.
-        self.chain_id.store(0, Ordering::Relaxed);
+        // 2. Reset chain_id to 0 (all subsystems: atomic + consensus engine + network).
+        self.update_chain_id(0);
         self.chain_vote_weight.store(0, Ordering::Relaxed);
         self.fork_visible = false;
         self.fork_common_ancestor = None;
@@ -1757,8 +1766,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // 2d. Clear stale chain state from peer_info (stale-cache-#3).
         self.clear_peer_chain_state();
 
-        // 3. Tell network service.
-        self.send_network(NetworkCommand::UpdateChainId(0));
+        // 3. Update network tip height.
         self.update_tip_height(0);
 
         // 4. Reset consensus engine.
@@ -2263,10 +2271,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.clear_cycle_history_storage();
         }
 
-        // Update chain_id if needed.
+        // Update chain_id if needed (all subsystems: atomic + consensus engine + network).
         if let Some(new_cid) = new_chain_id {
-            self.chain_id.store(new_cid, Ordering::Relaxed);
-            self.send_network(NetworkCommand::UpdateChainId(new_cid));
+            self.update_chain_id(new_cid);
         }
 
         // Update network tip height.
