@@ -226,17 +226,15 @@ pub fn handle_crypto_action(
             let checksum =
                 hex::decode(checksum_hex).map_err(|e| format!("Invalid checksum hex: {e}"))?;
 
-            let fee = params
-                .get("fee")
-                .and_then(|v| v.as_u64())
-                .ok_or("Missing parameter: fee")?;
+            let fee = params.get("fee").and_then(|v| v.as_u64()).unwrap_or(0);
+            let fee_rate = params.get("fee_rate").and_then(|v| v.as_u64()).unwrap_or(0);
 
             // Use noble-tx-core shared C library.
             let metadata_arr: Vec<serde_json::Value> = parse_metadata(params)
                 .iter()
                 .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
                 .collect();
-            let input_json = serde_json::json!({
+            let mut input_json = serde_json::json!({
                 "checksum": hex::encode(&checksum),
                 "metadata": metadata_arr,
                 "fee": fee,
@@ -245,6 +243,9 @@ pub fn handle_crypto_action(
                 "private_key": hex::encode(private_key),
                 "chain_id": chain_id,
             });
+            if fee_rate > 0 {
+                input_json["fee_rate"] = serde_json::json!(fee_rate);
+            }
             let result_json = noble_tx_core::sign_notarization(&input_json.to_string())
                 .map_err(|e| format!("sign_notarization: {e}"))?;
             let result: serde_json::Value = serde_json::from_str(&result_json)
@@ -257,7 +258,8 @@ pub fn handle_crypto_action(
 
         "signTransfer" => {
             // Use noble-tx-core shared C library.
-            let input_json = serde_json::json!({
+            let fee_rate = params.get("fee_rate").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mut input_json = serde_json::json!({
                 "recipient": params.get("recipient").and_then(|v| v.as_str()).unwrap_or(""),
                 "amount": params.get("amount").and_then(|v| v.as_u64()).unwrap_or(0),
                 "fee": params.get("fee").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -266,6 +268,9 @@ pub fn handle_crypto_action(
                 "private_key": hex::encode(private_key),
                 "chain_id": chain_id,
             });
+            if fee_rate > 0 {
+                input_json["fee_rate"] = serde_json::json!(fee_rate);
+            }
             let result_json = noble_tx_core::sign_transfer(&input_json.to_string())
                 .map_err(|e| format!("sign_transfer: {e}"))?;
             let result: serde_json::Value = serde_json::from_str(&result_json)

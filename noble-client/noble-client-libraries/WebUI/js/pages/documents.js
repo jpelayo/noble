@@ -1440,6 +1440,13 @@ export function init(root, ctx) {
         return feeData.recommendedFee;
     }
 
+    function getSelectedFeeRate() {
+        if (!feeData) return 2;
+        if (feeLevel === 'min') return feeData.minFeeRate;
+        if (feeLevel === 'high') return feeData.highPriorityFeeRate;
+        return feeData.recommendedFeeRate;
+    }
+
     // ── Step 5: Review ──
 
     function renderStepReview(container) {
@@ -1687,9 +1694,11 @@ export function init(root, ctx) {
                 value: u.value,
             }));
 
+            const feeRate = getSelectedFeeRate();
             const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
                 checksum: hash,
                 fee,
+                fee_rate: feeRate,
                 metadata: allMeta,
                 utxos,
                 previousChecksum: previousChecksum || undefined

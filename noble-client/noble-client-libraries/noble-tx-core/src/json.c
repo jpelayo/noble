@@ -238,6 +238,14 @@ char *json_emit_result(const char *tx_hex, const char *tx_id) {
     return out;
 }
 
+char *json_emit_result_with_fee(const char *tx_hex, const char *tx_id, uint64_t fee, size_t size_bytes) {
+    size_t len = strlen(tx_hex) + strlen(tx_id) + 128;
+    char *out = (char *)malloc(len);
+    snprintf(out, len, "{\"tx_hex\":\"%s\",\"tx_id\":\"%s\",\"fee\":%llu,\"size\":%zu}",
+             tx_hex, tx_id, (unsigned long long)fee, size_bytes);
+    return out;
+}
+
 char *json_emit_error(const char *message) {
     size_t len = strlen(message) + 32;
     char *out = (char *)malloc(len);

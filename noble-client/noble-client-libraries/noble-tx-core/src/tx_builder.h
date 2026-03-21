@@ -10,8 +10,8 @@
 #include "cbor.h"
 #include <stdint.h>
 
-#define MAX_INPUTS     256
-#define MAX_OUTPUTS    256
+#define MAX_INPUTS     255
+#define MAX_OUTPUTS    255
 #define MAX_METADATA   16
 #define MAX_SIGS       8
 #define HASH256_LEN    32

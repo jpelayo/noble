@@ -81,10 +81,13 @@ public struct TransactionBuilder: Sendable {
     public init() {}
 
     /// Build a notarization transaction (type 0x00, UTXO model).
+    /// If `feeRate` > 0, the C library computes the exact fee from the actual
+    /// transaction size via two-pass encoding (fee = size × feeRate).
     public func buildNotarization(
         checksum: Hash256,
         metadata: [MetadataItem],
         fee: NobleAmount,
+        feeRate: UInt64 = 0,
         utxos: [UtxoOutpoint],
         changeAddress: [UInt8],
         privateKey: Data,
@@ -102,7 +105,7 @@ public struct TransactionBuilder: Sendable {
             ] as [String: Any]
         }
 
-        let params: [String: Any] = [
+        var params: [String: Any] = [
             "checksum": checksum.hex,
             "metadata": metadataArr,
             "fee": fee.atomic,
@@ -112,6 +115,9 @@ public struct TransactionBuilder: Sendable {
             "chain_id": chainId,
             "timestamp": UInt64(Date().timeIntervalSince1970),
         ]
+        if feeRate > 0 {
+            params["fee_rate"] = feeRate
+        }
 
         return try callNobleTxCore(noble_sign_notarization, params: params)
     }

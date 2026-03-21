@@ -49,6 +49,8 @@ uint32_t            json_get_uint32(const json_value_t *obj, const char *key);
 
 // Build a JSON output string. Caller must free() the result.
 char *json_emit_result(const char *tx_hex, const char *tx_id);
+// Result with fee and size info (used when fee_rate computes the exact fee).
+char *json_emit_result_with_fee(const char *tx_hex, const char *tx_id, uint64_t fee, size_t size_bytes);
 char *json_emit_error(const char *message);
 
 #endif // NOBLE_JSON_H

@@ -24,10 +24,12 @@ public protocol TransactionSigning: Sendable {
     ) throws -> String
 
     /// Build and sign a document notarization transaction (UTXO model). Returns hex-encoded CBOR.
+    /// If `feeRate` > 0, the C library computes the exact fee from actual tx size.
     func signNotarization(
         checksum: Hash256,
         metadata: [MetadataItem],
         fee: NobleAmount,
+        feeRate: UInt64,
         utxos: [UtxoOutpoint],
         changeAddress: [UInt8],
         privateKey: Data,

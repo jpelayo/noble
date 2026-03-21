@@ -198,7 +198,9 @@ char *noble_sign_transfer(const char *params_json) {
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = json_emit_result(tx_hex, tx_id_hex);
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
 
     free(tx_hex);
     noble_buf_free(&cbor);
@@ -275,20 +277,53 @@ char *noble_sign_notarization(const char *params_json) {
         input_total += json_get_uint(u, "value");
     }
 
-    // Output: change only (notarizations have no explicit recipient output).
-    uint64_t change = input_total - fee;
-    if (change > 0) {
-        noble_address_t change_addr;
-        if (parse_address_wire(change_hex, &change_addr) != 0) {
-            json_free(params);
-            return json_emit_error("invalid change_address");
-        }
-        tx.outputs[0].address = change_addr;
-        tx.outputs[0].value = change;
-        tx.output_count = 1;
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
     }
 
     tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Two-pass fee computation (same as noble_sign_transfer):
+    // When fee_rate is provided, build once to measure exact CBOR size,
+    // then compute fee = size × fee_rate.
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
+
+    if (fee_rate > 0) {
+        // Pass 1: build with fee=0 to measure exact tx size.
+        uint64_t change0 = input_total;
+        if (change0 > 0) {
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = change0;
+            tx.output_count = 1;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    // Guard against unsigned underflow.
+    if (actual_fee > input_total) {
+        json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+
+    // Output: change only (notarizations have no explicit recipient output).
+    uint64_t change = input_total - actual_fee;
+    if (change > 0) {
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = change;
+        tx.output_count = 1;
+    } else {
+        tx.output_count = 0;
+    }
 
     // Sign and encode.
     noble_buf_t cbor;
@@ -304,7 +339,9 @@ char *noble_sign_notarization(const char *params_json) {
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = json_emit_result(tx_hex, tx_id_hex);
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
 
     free(tx_hex);
     noble_buf_free(&cbor);
@@ -574,19 +611,49 @@ static char *sign_metadata_tx(
         input_total += json_get_uint(u, "value");
     }
 
-    // Output: change only
-    if (input_total > fee) {
-        noble_address_t change_addr;
-        if (parse_address_wire(change_hex, &change_addr) != 0) {
-            json_free(params);
-            return json_emit_error("invalid change_address");
-        }
-        tx.outputs[0].address = change_addr;
-        tx.outputs[0].value = input_total - fee;
-        tx.output_count = 1;
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
     }
 
     tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Two-pass fee computation: fee_rate takes precedence over absolute fee.
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
+
+    if (fee_rate > 0) {
+        uint64_t change0 = input_total;
+        if (change0 > 0) {
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = change0;
+            tx.output_count = 1;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    if (actual_fee > input_total) {
+        json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+
+    // Output: change only
+    uint64_t change_val = input_total - actual_fee;
+    if (change_val > 0) {
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = change_val;
+        tx.output_count = 1;
+    } else {
+        tx.output_count = 0;
+    }
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
@@ -601,7 +668,9 @@ static char *sign_metadata_tx(
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = json_emit_result(tx_hex, tx_id_hex);
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
 
     free(tx_hex);
     noble_buf_free(&cbor);
@@ -768,6 +837,8 @@ char *noble_sign_locked(const char *params_json) {
     // Max plaintext = (256 / 2) - 16 = 112 bytes.
     for (size_t i = 0; i < user_meta_count; i++) {
         if (strlen(user_meta[i].value) > 112) {
+            free(cksum_ct_hex);
+            memset(enc_key, 0, sizeof(enc_key));
             json_free(params);
             return json_emit_error("metadata value too long for locked encryption (max 112 bytes)");
         }
@@ -851,19 +922,47 @@ char *noble_sign_locked(const char *params_json) {
         input_total += json_get_uint(u, "value");
     }
 
-    // Output: change
-    if (input_total > fee) {
-        noble_address_t change_addr;
-        if (parse_address_wire(change_hex, &change_addr) != 0) {
-            json_free(params);
-            return json_emit_error("invalid change_address");
-        }
-        tx.outputs[0].address = change_addr;
-        tx.outputs[0].value = input_total - fee;
-        tx.output_count = 1;
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
     }
 
     tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Two-pass fee computation
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
+    if (fee_rate > 0) {
+        if (input_total > 0) {
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = input_total;
+            tx.output_count = 1;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    if (actual_fee > input_total) {
+        json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+
+    // Output: change
+    uint64_t locked_change = input_total - actual_fee;
+    if (locked_change > 0) {
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = locked_change;
+        tx.output_count = 1;
+    } else {
+        tx.output_count = 0;
+    }
 
     // Sign and encode
     noble_buf_t cbor;
@@ -879,7 +978,9 @@ char *noble_sign_locked(const char *params_json) {
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = json_emit_result(tx_hex, tx_id_hex);
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
 
     memset(enc_key, 0, sizeof(enc_key));
     free(tx_hex);
@@ -926,15 +1027,21 @@ char *noble_sign_unlocking(const char *params_json) {
     }
 
     // Metadata: unlock:password, unlock:txid (alphabetical)
-    strncpy(tx.metadata[0].key, "unlock:password", 64);
     size_t pwlen = strlen(password);
-    if (pwlen > 256) pwlen = 256;
+    if (pwlen > 256) {
+        json_free(params);
+        return json_emit_error("password too long (max 256 bytes)");
+    }
+    strncpy(tx.metadata[0].key, "unlock:password", 64);
     memcpy(tx.metadata[0].value, password, pwlen);
     tx.metadata[0].value_len = (uint16_t)pwlen;
 
-    strncpy(tx.metadata[1].key, "unlock:txid", 64);
     size_t txidlen = strlen(locked_txid);
-    if (txidlen > 256) txidlen = 256;
+    if (txidlen > 256) {
+        json_free(params);
+        return json_emit_error("locked_tx_id too long");
+    }
+    strncpy(tx.metadata[1].key, "unlock:txid", 64);
     memcpy(tx.metadata[1].value, locked_txid, txidlen);
     tx.metadata[1].value_len = (uint16_t)txidlen;
     tx.metadata_count = 2;
@@ -952,19 +1059,47 @@ char *noble_sign_unlocking(const char *params_json) {
         input_total += json_get_uint(u, "value");
     }
 
-    // Output: change
-    if (input_total > fee) {
-        noble_address_t change_addr;
-        if (parse_address_wire(change_hex, &change_addr) != 0) {
-            json_free(params);
-            return json_emit_error("invalid change_address");
-        }
-        tx.outputs[0].address = change_addr;
-        tx.outputs[0].value = input_total - fee;
-        tx.output_count = 1;
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
     }
 
     tx.timestamp = json_get_uint(params, "timestamp");
+
+    // Two-pass fee computation
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
+    if (fee_rate > 0) {
+        if (input_total > 0) {
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = input_total;
+            tx.output_count = 1;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    if (actual_fee > input_total) {
+        json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+
+    // Output: change
+    uint64_t unlock_change = input_total - actual_fee;
+    if (unlock_change > 0) {
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = unlock_change;
+        tx.output_count = 1;
+    } else {
+        tx.output_count = 0;
+    }
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
@@ -979,7 +1114,9 @@ char *noble_sign_unlocking(const char *params_json) {
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = json_emit_result(tx_hex, tx_id_hex);
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
 
     free(tx_hex);
     noble_buf_free(&cbor);
