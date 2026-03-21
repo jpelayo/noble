@@ -21,6 +21,7 @@ extern "C" {
     fn noble_sign_unlocking(params_json: *const c_char) -> *mut c_char;
     fn noble_select_utxos(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_encode(tx_json: *const c_char) -> *mut c_char;
+    fn noble_estimate_tx_size(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode_locked(params_json: *const c_char) -> *mut c_char;
     fn noble_verify_tx(params_json: *const c_char) -> *mut c_char;
@@ -87,6 +88,11 @@ pub fn sign_unlocking(params_json: &str) -> Result<String, String> {
 /// Run 5-pass coin selection on UTXOs.
 pub fn select_utxos(params_json: &str) -> Result<String, String> {
     call_ffi(noble_select_utxos, params_json)
+}
+
+/// Estimate the CBOR byte size of a transaction without submitting.
+pub fn estimate_tx_size(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_estimate_tx_size, params_json)
 }
 
 /// Decode a CBOR-encoded transaction back to JSON.

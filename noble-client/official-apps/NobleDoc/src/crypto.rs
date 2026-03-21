@@ -281,6 +281,26 @@ pub fn handle_crypto_action(
             Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
         }
 
+        "estimateTxSize" => {
+            let estimate_json = serde_json::json!({
+                "tx_type": params.get("tx_type").and_then(|v| v.as_str()).unwrap_or("notarization"),
+                "checksum": params.get("checksum").and_then(|v| v.as_str()).unwrap_or(&"00".repeat(32)),
+                "metadata": params.get("metadata").cloned().unwrap_or(serde_json::json!([])),
+                "recipient": params.get("recipient").and_then(|v| v.as_str()).unwrap_or(""),
+                "change_address": wallet_address,
+                "private_key": hex::encode(private_key),
+                "chain_id": chain_id,
+            });
+            let result_json = noble_tx_core::estimate_tx_size(&estimate_json.to_string())
+                .map_err(|e| format!("estimate_tx_size: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(result)
+        }
+
         _ => Err(format!("Unknown action: {action}")),
     }
 }

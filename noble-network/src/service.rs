@@ -287,7 +287,13 @@ pub async fn start_network(
                         None
                     }
                 });
-                if let Err(e) = swarm.dial(addr.clone()) {
+                // Use allocate_new_port() to avoid EADDRINUSE — Noble does not need
+                // NAT hole-punching, so ephemeral ports for outbound dials are correct.
+                let dial_opts = libp2p::swarm::dial_opts::DialOpts::unknown_peer_id()
+                    .address(addr.clone())
+                    .allocate_new_port()
+                    .build();
+                if let Err(e) = swarm.dial(dial_opts) {
                     tracing::warn!(task = "network_startup", %addr, err = %e, "failed to dial bootstrap peer");
                 }
                 // Add to Kademlia routing table for discovery.
@@ -2252,7 +2258,12 @@ async fn handle_command(
                     let _ = tx.send(Ok(()));
                 }
             } else {
-                match swarm.dial(addr.clone()) {
+                // Use allocate_new_port() to avoid EADDRINUSE on macOS/Linux.
+                let dial_opts = libp2p::swarm::dial_opts::DialOpts::unknown_peer_id()
+                    .address(addr.clone())
+                    .allocate_new_port()
+                    .build();
+                match swarm.dial(dial_opts) {
                     Ok(_) => {
                         tracing::info!(task = "network", %addr, "Dialing peer");
                         if let Some(tx) = result_tx {

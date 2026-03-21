@@ -98,6 +98,14 @@ char *noble_tx_decode_locked(const char *params_json);
 //                "tx_id": "<hash_hex>" }
 char *noble_verify_tx(const char *params_json);
 
+// Estimate the CBOR byte size of a transaction without submitting.
+// Builds the transaction, signs it (probe pass), and returns the size.
+// Input JSON: { "tx_type": "notarization"|"transfer"|"locked"|"unlocking",
+//               ...same params as the corresponding noble_sign_* function... }
+// Output JSON: { "size": <bytes> }
+//         or:  { "error": "<message>" }
+char *noble_estimate_tx_size(const char *params_json);
+
 // CMS stubs (temporary — replaced by noble-cms-core XCFramework).
 // Returns JSON error until noble-cms-core binary module is linked.
 char *noble_sign_cms_ffi(const char *params_json);

@@ -467,19 +467,29 @@ export function init(root, ctx) {
                 loading.textContent = 'Loading fee estimates...';
                 loading.style.color = 'var(--text-muted)';
                 el.appendChild(loading);
-                Bridge.call('noble_api', 'estimateFee').then(f => {
-                    // Store fee rates (groats/byte). The C library computes the
-                    // exact fee from the actual transaction size via two-pass encoding.
+                Bridge.call('noble_api', 'estimateFee').then(async (f) => {
                     const minRate = f.lowFeeRate || f.networkMinFeeRate || f.low_fee_rate || f.network_min_fee_rate || 1;
                     const recRate = f.recommendedFeeRate || f.networkMedianFeeRate || f.recommended_fee_rate || f.network_median_fee_rate || 2;
                     const highRate = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-                    // Display estimates (800 bytes typical transfer) for the UI.
-                    // The actual fee will be computed exactly by noble-tx-core.
+
+                    // Estimate real tx size using the C library
+                    let txSize = 450; // fallback for transfers
+                    try {
+                        const sizeResult = await Bridge.call('noble_crypto', 'estimateTxSize', {
+                            tx_type: 'transfer',
+                            recipient: recipient || state.walletAddress,
+                        });
+                        if (sizeResult && sizeResult.size) txSize = sizeResult.size;
+                    } catch { /* use fallback */ }
+
+                    // +2% safety margin
+                    const margin = Math.ceil(txSize * 0.02);
+                    const effectiveSize = txSize + margin;
+
                     feeData = {
-                        minFee: minRate * 800,
-                        recommendedFee: recRate * 800,
-                        highPriorityFee: highRate * 800,
-                        // Store rates so submitTransaction can pass fee_rate to the signer.
+                        minFee: minRate * effectiveSize,
+                        recommendedFee: recRate * effectiveSize,
+                        highPriorityFee: highRate * effectiveSize,
                         minFeeRate: minRate,
                         recommendedFeeRate: recRate,
                         highPriorityFeeRate: highRate,

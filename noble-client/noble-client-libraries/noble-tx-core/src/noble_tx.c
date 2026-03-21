@@ -1712,6 +1712,131 @@ char *noble_verify_tx(const char *params_json) {
     return result;
 }
 
+// ── noble_estimate_tx_size ───────────────────────────────────────────
+
+char *noble_estimate_tx_size(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *tx_type_str = json_get_string(params, "tx_type");
+    if (!tx_type_str) { json_free(params); return json_emit_error("missing tx_type"); }
+
+    // Determine tx_type code
+    uint8_t tx_type = 0xFF;
+    if (strcmp(tx_type_str, "notarization") == 0) tx_type = TX_TYPE_NOTARIZATION;
+    else if (strcmp(tx_type_str, "transfer") == 0) tx_type = TX_TYPE_TRANSFER;
+    else if (strcmp(tx_type_str, "locked") == 0) tx_type = TX_TYPE_LOCKED;
+    else if (strcmp(tx_type_str, "unlocking") == 0) tx_type = TX_TYPE_UNLOCKING;
+    else if (strcmp(tx_type_str, "key_rotation") == 0) tx_type = TX_TYPE_KEY_ROTATION;
+    else if (strcmp(tx_type_str, "badge_proposal") == 0) tx_type = TX_TYPE_BADGE_PROPOSAL;
+    else if (strcmp(tx_type_str, "badge_vote") == 0) tx_type = TX_TYPE_BADGE_VOTE;
+    else if (strcmp(tx_type_str, "badge_revocation") == 0) tx_type = TX_TYPE_BADGE_REVOCATION;
+    if (tx_type == 0xFF) { json_free(params); return json_emit_error("unknown tx_type"); }
+
+    const char *change_hex  = json_get_string(params, "change_address");
+    const char *privkey_hex = json_get_string(params, "private_key");
+    uint32_t chain_id       = json_get_uint32(params, "chain_id");
+
+    if (!change_hex || !privkey_hex) {
+        json_free(params);
+        return json_emit_error("missing change_address or private_key");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = tx_type;
+
+    // Checksum
+    const char *checksum_hex = json_get_string(params, "checksum");
+    if (checksum_hex) {
+        hex_decode(checksum_hex, strlen(checksum_hex), tx.checksum, HASH256_LEN);
+    }
+
+    // Metadata
+    const json_value_t *meta = json_get(params, "metadata");
+    if (meta && meta->type == JSON_ARRAY) {
+        size_t mc = meta->array.count;
+        if (mc > MAX_METADATA) mc = MAX_METADATA;
+        for (size_t i = 0; i < mc; i++) {
+            const json_value_t *m = &meta->array.items[i];
+            const char *k = json_get_string(m, "key");
+            const char *v = json_get_string(m, "value");
+            if (k && v) {
+                strncpy(tx.metadata[tx.metadata_count].key, k, 64);
+                tx.metadata[tx.metadata_count].key[64] = '\0';
+                size_t vlen = strlen(v);
+                if (vlen > 256) vlen = 256;
+                memcpy(tx.metadata[tx.metadata_count].value, v, vlen);
+                tx.metadata[tx.metadata_count].value_len = (uint16_t)vlen;
+                tx.metadata_count++;
+            }
+        }
+    }
+
+    // Inputs — use provided UTXOs or simulate 1 input
+    const json_value_t *utxos = json_get(params, "utxos");
+    if (utxos && utxos->type == JSON_ARRAY && utxos->array.count > 0) {
+        parse_utxos_into_inputs(utxos, &tx, NULL, NULL);
+    } else {
+        // Simulate 1 input for size estimation
+        memset(tx.inputs[0].prev_output.txid, 0xAA, HASH256_LEN);
+        tx.inputs[0].prev_output.vout = 0;
+        tx.input_count = 1;
+    }
+
+    // Output — simulate 1 change output
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) == 0) {
+        tx.outputs[0].address = change_addr;
+        tx.outputs[0].value = 100000000; // dummy value for size estimation
+        tx.output_count = 1;
+
+        // For transfers, add a second output (recipient)
+        if (tx_type == TX_TYPE_TRANSFER) {
+            const char *recipient_hex = json_get_string(params, "recipient");
+            if (recipient_hex) {
+                noble_address_t recip_addr;
+                if (parse_address_wire(recipient_hex, &recip_addr) == 0) {
+                    tx.outputs[1].address = recip_addr;
+                    tx.outputs[1].value = 50000000;
+                    tx.output_count = 2;
+                }
+            } else {
+                // Simulate a second output same size as change
+                tx.outputs[1].address = change_addr;
+                tx.outputs[1].value = 50000000;
+                tx.output_count = 2;
+            }
+        }
+    }
+
+    // Sign and encode (probe pass) to measure exact CBOR size
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("size estimation failed");
+    }
+
+    size_t size = cbor.len;
+    noble_buf_free(&cbor);
+
+    // Return size
+    size_t bufsize = 64;
+    char *result = (char *)malloc(bufsize);
+    snprintf(result, bufsize, "{\"size\":%zu}", size);
+
+    json_free(params);
+    return result;
+}
+
 // ── CMS stubs (temporary — replaced by noble-cms-core binary module) ───
 
 char *noble_sign_cms_ffi(const char *params_json) {

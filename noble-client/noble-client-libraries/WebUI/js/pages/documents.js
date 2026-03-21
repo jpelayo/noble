@@ -1126,9 +1126,10 @@ export function init(root, ctx) {
             // Position fixed to avoid overflow clipping by parent containers
             const btnRect = addBtn.getBoundingClientRect();
             dropdown.style.position = 'fixed';
-            dropdown.style.top = (btnRect.bottom + 4) + 'px';
             dropdown.style.left = (btnRect.left + btnRect.width / 2) + 'px';
             dropdown.style.transform = 'translateX(-50%)';
+            // Initially place below; will flip upward after measuring if it overflows
+            dropdown.style.top = (btnRect.bottom + 4) + 'px';
 
             // All fields can be added multiple times (user may need several URLs, emails, etc.)
             for (const field of METADATA_FIELDS) {
@@ -1172,6 +1173,14 @@ export function init(root, ctx) {
             setTimeout(() => document.addEventListener('click', closeHandler, true), 0);
 
             document.body.appendChild(dropdown);
+
+            // Flip upward if dropdown overflows the viewport bottom
+            const ddRect = dropdown.getBoundingClientRect();
+            const viewportH = window.innerHeight || document.documentElement.clientHeight;
+            if (ddRect.bottom > viewportH) {
+                dropdown.style.top = '';
+                dropdown.style.bottom = (viewportH - btnRect.top + 4) + 'px';
+            }
         });
 
         wrapper.appendChild(addBtn);
@@ -1409,10 +1418,28 @@ export function init(root, ctx) {
             const minRate = f.lowFeeRate || f.networkMinFeeRate || f.low_fee_rate || f.network_min_fee_rate || 1;
             const recRate = f.recommendedFeeRate || f.networkMedianFeeRate || f.recommended_fee_rate || f.network_median_fee_rate || 2;
             const highRate = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+
+            // Estimate real tx size using the C library (not hardcoded × 800)
+            let txSize = 400; // fallback
+            try {
+                const validMeta = metadata.filter(m => m.key && m.value);
+                const metaForEstimate = validMeta.map(m => ({ key: m.key, value: m.value }));
+                const sizeResult = await Bridge.call('noble_crypto', 'estimateTxSize', {
+                    tx_type: wantsLocking ? 'locked' : 'notarization',
+                    checksum: hashes[files[0]?.path] || '00'.repeat(32),
+                    metadata: metaForEstimate,
+                });
+                if (sizeResult && sizeResult.size) txSize = sizeResult.size;
+            } catch { /* use fallback */ }
+
+            // +2% safety margin to avoid mempool rejection from size variance
+            const margin = Math.ceil(txSize * 0.02);
+            const effectiveSize = txSize + margin;
+
             feeData = {
-                minFee: minRate * 800,
-                recommendedFee: recRate * 800,
-                highPriorityFee: highRate * 800,
+                minFee: minRate * effectiveSize,
+                recommendedFee: recRate * effectiveSize,
+                highPriorityFee: highRate * effectiveSize,
                 minFeeRate: minRate,
                 recommendedFeeRate: recRate,
                 highPriorityFeeRate: highRate,

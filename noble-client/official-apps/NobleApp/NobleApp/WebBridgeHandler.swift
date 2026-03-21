@@ -413,14 +413,20 @@ final class WebBridgeHandler {
                 MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
             }
 
-            // Parse available UTXOs from JS, then run coin selection.
-            // Use fee_rate estimate for coin selection target (C library computes exact fee).
+            // Parse available UTXOs and estimate real tx size for accurate coin selection.
             let allUtxos = try parseUtxoParams(params)
-            let feeEstimate = feeRate > 0 ? feeRate * 800 : feeAtomic
-            let selected = try CoinSelector.select(from: allUtxos, target: feeEstimate)
-
             let changeAddress = walletChangeAddress()
             let chainId = appState.resolvedChainId
+            let feeEstimate: UInt64
+            if feeRate > 0 {
+                let estSize = estimateTxSizeViaC(txType: "notarization", checksum: checksumHex,
+                    metadata: metadata, recipient: nil, changeAddress: changeAddress,
+                    privateKey: privateKey, chainId: chainId)
+                feeEstimate = feeRate * estSize
+            } else {
+                feeEstimate = feeAtomic
+            }
+            let selected = try CoinSelector.select(from: allUtxos, target: feeEstimate)
 
             let txHex = try appState.transactionSigner.signNotarization(
                 checksum: checksum,
@@ -448,16 +454,21 @@ final class WebBridgeHandler {
             let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
             let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
 
-            // Parse available UTXOs from JS, then run coin selection.
-            // Use a generous estimate for coin selection target; the C library
-            // computes the exact fee from actual tx size via two-pass encoding.
+            // Parse available UTXOs and estimate real tx size for accurate coin selection.
             let allUtxos = try parseUtxoParams(params)
-            let feeEstimate = feeRate > 0 ? feeRate * 800 : feeAtomic
-            let target = amountAtomic + feeEstimate
-            let selected = try CoinSelector.select(from: allUtxos, target: target)
-
             let changeAddress = walletChangeAddress()
             let chainId = appState.resolvedChainId
+            let feeEstimate: UInt64
+            if feeRate > 0 {
+                let estSize = estimateTxSizeViaC(txType: "transfer", checksum: nil,
+                    metadata: [], recipient: recipientHex, changeAddress: changeAddress,
+                    privateKey: privateKey, chainId: chainId)
+                feeEstimate = feeRate * estSize
+            } else {
+                feeEstimate = feeAtomic
+            }
+            let target = amountAtomic + feeEstimate
+            let selected = try CoinSelector.select(from: allUtxos, target: target)
 
             let txHex = try appState.transactionSigner.signTransfer(
                 to: to,
@@ -470,6 +481,47 @@ final class WebBridgeHandler {
                 chainId: chainId
             )
             return ["txHex": txHex]
+
+        case "estimateTxSize":
+            guard let privateKey = appState.loadPrivateKey() else {
+                throw BridgeError.noPrivateKey
+            }
+            let changeAddress = walletChangeAddress()
+            let chainId = appState.resolvedChainId
+            let txType = params["tx_type"] as? String ?? "notarization"
+            let checksum = params["checksum"] as? String ?? String(repeating: "00", count: 32)
+            let metaArr = (params["metadata"] as? [[String: String]] ?? []).map {
+                ["key": $0["key"] ?? "", "value": $0["value"] ?? ""]
+            }
+            let recipient = params["recipient"] as? String ?? changeAddress.map { String(format: "%02x", $0) }.joined()
+
+            let estimateParams: [String: Any] = [
+                "tx_type": txType,
+                "checksum": checksum,
+                "metadata": metaArr,
+                "recipient": recipient,
+                "change_address": changeAddress.map { String(format: "%02x", $0) }.joined(),
+                "private_key": privateKey.map { String(format: "%02x", $0) }.joined(),
+                "chain_id": chainId,
+            ]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: estimateParams),
+                  let jsonStr = String(data: jsonData, encoding: .utf8) else {
+                throw BridgeError.operationFailed("failed to serialize estimate params")
+            }
+            let cInput = jsonStr.cString(using: .utf8)!
+            guard let resultPtr = noble_estimate_tx_size(cInput) else {
+                throw BridgeError.operationFailed("estimate returned null")
+            }
+            let resultStr = String(cString: resultPtr)
+            noble_free(resultPtr)
+            guard let resultData = resultStr.data(using: .utf8),
+                  let resultDict = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any] else {
+                throw BridgeError.operationFailed("failed to parse estimate result")
+            }
+            if let error = resultDict["error"] as? String {
+                throw BridgeError.operationFailed(error)
+            }
+            return resultDict
 
         case "signMetadataField":
             guard let keyIdStr = params["keyId"] as? String,
@@ -572,6 +624,36 @@ final class WebBridgeHandler {
     }
 
     // MARK: - UTXO Helpers
+
+    /// Estimate transaction CBOR size using the C library (no submission).
+    private func estimateTxSizeViaC(
+        txType: String, checksum: String?, metadata: [[String: String]],
+        recipient: String?, changeAddress: [UInt8], privateKey: Data, chainId: UInt32
+    ) -> UInt64 {
+        var estimateParams: [String: Any] = [
+            "tx_type": txType,
+            "checksum": checksum ?? String(repeating: "00", count: 32),
+            "metadata": metadata,
+            "change_address": changeAddress.map { String(format: "%02x", $0) }.joined(),
+            "private_key": privateKey.map { String(format: "%02x", $0) }.joined(),
+            "chain_id": chainId,
+        ]
+        if let r = recipient { estimateParams["recipient"] = r }
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: estimateParams),
+              let jsonStr = String(data: jsonData, encoding: .utf8) else {
+            return 500
+        }
+        let cInput = jsonStr.cString(using: .utf8)!
+        guard let resultPtr = noble_estimate_tx_size(cInput) else { return 500 }
+        let resultStr = String(cString: resultPtr)
+        noble_free(resultPtr)
+        guard let resultData = resultStr.data(using: .utf8),
+              let resultDict = try? JSONSerialization.jsonObject(with: resultData) as? [String: Any],
+              let size = resultDict["size"] as? UInt64 else {
+            return 500
+        }
+        return size + (size / 50) + 1
+    }
 
     /// Parse UTXO array from JS bridge params.
     /// Expects params["utxos"] as [[String: Any]] with keys: txid (hex), vout (UInt32), value (UInt64).
