@@ -1,14 +1,11 @@
 // Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
 // SPDX-License-Identifier: Apache-2.0
 
-//! Independent faucet wallet — generates, stores, and signs transfers locally.
-//!
-//! The faucet maintains its own keystore (separate from the node's) so it can
-//! build and sign transfer transactions without delegating to `walletSendTransfer`.
+//! Independent faucet wallet — uses the same noble-tx-core C library
+//! as all client apps for coin selection, fee computation, signing, and encoding.
 
 use noble_crypto::keys::NoblePublicKey;
 use noble_crypto::SCHEME_SECP256K1;
-use noble_wallet::builder::{SelectedUtxo, TransactionBuilder};
 use noble_wallet::KeyStore;
 
 use crate::rpc_client::NodeRpcClient;
@@ -84,31 +81,28 @@ impl FaucetWallet {
         self.signer.to_address()
     }
 
-    /// Build a signed transfer transaction and return its hex-encoded CBOR.
+    /// Build a signed transfer using the same noble-tx-core C library the client apps use.
     ///
-    /// Two-pass fee computation:
-    ///   1. Build with fee=0 to measure real CBOR size
-    ///   2. Compute exact fee = size × fee_rate, rebuild with precise fee
-    ///
-    /// No hardcoded size estimates — fee is always derived from the actual
-    /// transaction size as measured by the canonical C encoder.
+    /// Uses the same noble-tx-core C library functions as Swift/WRY clients:
+    /// 1. `noble_select_utxos` — 5-pass coin selection
+    /// 2. `noble_sign_transfer` — two-pass fee computation + signing + CBOR encoding
     pub async fn build_transfer(
         &self,
         rpc: &NodeRpcClient,
         recipient_hex: &str,
         amount: u64,
         fee_rate: u64,
-        chain_height: u64,
     ) -> Result<String, String> {
-        let recipient = noble_core::NobleAddress::from_wire_bytes(
-            &hex::decode(recipient_hex).map_err(|e| format!("bad recipient hex: {e}"))?,
-        )
-        .map_err(|e| format!("bad recipient: {e}"))?;
+        // Get private key from keystore (secp256k1 = scheme 0x02)
+        let private_key = self.keystore
+            .get_raw(noble_crypto::SCHEME_SECP256K1)
+            .map_err(|e| format!("load private key: {e}"))?;
+        let private_key_hex = hex::encode(&private_key);
 
-        let change_address =
-            noble_core::NobleAddress::Noble(self.signer.clone());
+        // Change address = faucet's own address (wire hex)
+        let change_hex = hex::encode(self.signer.to_wire_bytes());
 
-        // Query real UTXOs from the node
+        // Query available UTXOs from the node — server computes maturity and pending status.
         let utxos = rpc.get_address_utxos(&self.address()).await
             .map_err(|e| format!("get UTXOs: {e}"))?;
 
@@ -116,84 +110,80 @@ impl FaucetWallet {
             return Err("faucet has no UTXOs (dry)".into());
         }
 
-        // Filter out immature coinbase UTXOs, sort by value descending
-        let mut sorted: Vec<_> = utxos.into_iter().filter(|u| {
-            !u.is_coinbase || chain_height >= u.height + noble_core::COINBASE_MATURITY
+        // Filter to available only — same as client apps.
+        let available: Vec<_> = utxos.into_iter().filter(|u| {
+            match u.status.as_deref() {
+                Some("available") | None => true,
+                _ => false,
+            }
         }).collect();
-        sorted.sort_by(|a, b| b.value.cmp(&a.value));
 
-        if sorted.is_empty() {
-            return Err("faucet has no mature UTXOs (all coinbase UTXOs are immature)".into());
+        if available.is_empty() {
+            return Err("faucet has no spendable UTXOs (all are immature, pending, or locked by other transactions)".into());
         }
 
-        // Pass 1: build with fee=0 to measure real CBOR size.
-        // Use generous coin selection (amount + fee_rate×1000) so we have
-        // enough UTXOs even before knowing the exact fee.
-        let generous = amount.saturating_add(fee_rate.saturating_mul(1000));
-        let selected = select_utxos(&sorted, generous)?;
+        // Build UTXO JSON array
+        let all_utxo_json: Vec<serde_json::Value> = available.iter().map(|u| {
+            serde_json::json!({
+                "txid": u.txid,
+                "vout": u.vout,
+                "value": u.value,
+            })
+        }).collect();
 
-        let draft = TransactionBuilder::build_transfer(
-            &self.keystore,
-            &self.signer,
-            recipient.clone(),
-            amount,
-            0,
-            None,
-            self.chain_id,
-            &selected,
-            &change_address,
-        )
-        .map_err(|e| format!("build draft: {e}"))?;
-
-        let tx_size = noble_tx_core::transaction_cbor_size(&draft)
-            .map_err(|e| format!("measure size: {e}"))?;
-
-        // Pass 2: rebuild with exact fee = size × fee_rate.
-        let exact_fee = (tx_size as u64).saturating_mul(fee_rate);
-        let required = amount.saturating_add(exact_fee);
-        let selected = select_utxos(&sorted, required)?;
-
-        let tx = TransactionBuilder::build_transfer(
-            &self.keystore,
-            &self.signer,
-            recipient,
-            amount,
-            exact_fee,
-            None,
-            self.chain_id,
-            &selected,
-            &change_address,
-        )
-        .map_err(|e| format!("build transfer: {e}"))?;
-
-        let cbor = noble_tx_core::encode_transaction(&tx)
-            .map_err(|e| format!("C encoder: {e}"))?;
-        Ok(hex::encode(cbor))
-    }
-}
-
-/// Select UTXOs (largest-first) until `required` is covered.
-fn select_utxos(sorted: &[crate::rpc_client::UtxoResult], required: u64) -> Result<Vec<SelectedUtxo>, String> {
-    let mut selected = Vec::new();
-    let mut total = 0u64;
-    for utxo in sorted {
-        selected.push(SelectedUtxo {
-            outpoint: noble_core::OutPoint {
-                txid: noble_crypto::Hash256::from_hex(&utxo.txid)
-                    .map_err(|e| format!("bad utxo txid {}: {e}", utxo.txid))?,
-                vout: utxo.vout,
-            },
-            value: utxo.value,
+        // 5-pass coin selection — same algorithm the Swift/WRY clients use.
+        // Selects the optimal subset of UTXOs for the target amount.
+        let target = amount.saturating_add(fee_rate.saturating_mul(500)); // generous estimate for selection
+        let select_params = serde_json::json!({
+            "target": target,
+            "utxos": all_utxo_json,
         });
-        total = total.saturating_add(utxo.value);
-        if total >= required {
-            break;
+        let select_result = noble_tx_core::select_utxos(&select_params.to_string())
+            .map_err(|e| format!("coin selection: {e}"))?;
+        let select_json: serde_json::Value = serde_json::from_str(&select_result)
+            .map_err(|e| format!("parse selection: {e}"))?;
+        if let Some(err) = select_json.get("error").and_then(|v| v.as_str()) {
+            return Err(format!("coin selection: {err}"));
         }
+        let utxo_json = select_json.get("selected")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or(all_utxo_json);
+
+        // Build params JSON — same structure the Swift/WRY clients pass to noble_sign_transfer
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let params = serde_json::json!({
+            "recipient": recipient_hex,
+            "amount": amount,
+            "fee": 0,
+            "fee_rate": fee_rate,
+            "utxos": utxo_json,
+            "change_address": change_hex,
+            "private_key": private_key_hex,
+            "chain_id": self.chain_id,
+            "timestamp": now,
+        });
+
+        // Call the same C library function all clients use
+        let result_json = noble_tx_core::sign_transfer(&params.to_string())
+            .map_err(|e| format!("sign_transfer: {e}"))?;
+
+        // Parse result — the C library returns {"tx_hex": "..."} or {"error": "..."}
+        let result: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| format!("parse result: {e}"))?;
+
+        if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            return Err(format!("sign_transfer: {err}"));
+        }
+
+        result.get("tx_hex")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "sign_transfer: missing tx_hex in result".to_string())
     }
-    if total < required {
-        return Err(format!("insufficient UTXOs: have {total}, need {required}"));
-    }
-    Ok(selected)
 }
 
 #[cfg(test)]

@@ -150,6 +150,17 @@ pub struct UtxoResult {
     pub value: u64,
     pub height: u64,
     pub is_coinbase: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FeeEstimateResult {
+    pub low_fee_rate: u64,
+    pub recommended_fee_rate: u64,
+    pub high_priority_fee_rate: u64,
+    pub network_min_fee_rate: u64,
+    pub network_median_fee_rate: u64,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +264,11 @@ impl NodeRpcClient {
             &Params { address },
         ).await?;
         Ok(resp.utxos)
+    }
+
+    /// Estimate fee rates from the node (mempool percentiles + network landscape).
+    pub async fn estimate_fee(&self) -> Result<FeeEstimateResult, FaucetError> {
+        self.call("noble_estimateFee", &serde_json::Value::Null).await
     }
 
     /// Get balance for an address.

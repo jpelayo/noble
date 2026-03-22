@@ -24,11 +24,11 @@ export function init(root, ctx) {
         <div class="kpi-value" id="mp-size">--</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Min Fee</div>
+        <div class="kpi-label">Min Fee Rate</div>
         <div class="kpi-value" id="mp-min-fee">--</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Max Fee</div>
+        <div class="kpi-label">Max Fee Rate</div>
         <div class="kpi-value" id="mp-max-fee">--</div>
       </div>
     </div>
@@ -58,8 +58,8 @@ export function init(root, ctx) {
       const info = await rpc.call('noble_getMempoolInfo');
       mpCount.textContent = formatNumber(info.count);
       mpSize.textContent = formatBytes(info.total_bytes);
-      mpMinFee.textContent = formatFee(info.min_fee_rate);
-      mpMaxFee.textContent = formatFee(info.max_fee_rate);
+      mpMinFee.textContent = formatNumber(info.min_fee_rate) + ' g/B';
+      mpMaxFee.textContent = formatNumber(info.max_fee_rate) + ' g/B';
 
       // Fee histogram chart
       if (typeof echarts !== 'undefined' && info.fee_histogram) {

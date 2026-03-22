@@ -160,15 +160,26 @@ pub async fn handle_faucet(
 
     // Send transfer: local signing (preferred) or node RPC (legacy fallback).
     let tx_id = if let Some(ref wallet) = state.wallet {
-        // Get current chain height for coinbase maturity filtering
-        let chain_height = state.rpc.get_node_info()
-            .await
-            .map(|info| info.block_height)
-            .unwrap_or(0);
-        // Build and sign locally — two-pass fee from real tx size.
-        let fee_rate = noble_core::MIN_RELAY_FEE_RATE;
+        // Network-aware fee rate — same logic as client apps.
+        let fee_rate = match state.rpc.estimate_fee().await {
+            Ok(est) => {
+                let rate = est.recommended_fee_rate
+                    .max(est.network_min_fee_rate)
+                    .max(noble_core::MIN_RELAY_FEE_RATE);
+                tracing::debug!(
+                    "Faucet fee rate: {} g/B (recommended={}, net_min={}, net_median={})",
+                    rate, est.recommended_fee_rate, est.network_min_fee_rate, est.network_median_fee_rate
+                );
+                rate
+            }
+            Err(e) => {
+                tracing::warn!("Faucet: estimateFee failed ({e}), using protocol floor");
+                noble_core::MIN_RELAY_FEE_RATE
+            }
+        };
+        // Build and sign using the same noble-tx-core C library all client apps use.
         let tx_hex = wallet
-            .build_transfer(&state.rpc, &resolved_address, state.config.drip_amount, fee_rate, chain_height)
+            .build_transfer(&state.rpc, &resolved_address, state.config.drip_amount, fee_rate)
             .await
             .map_err(|e| internal_error(&format!("Build transfer: {e}")))?;
         state

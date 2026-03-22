@@ -1721,13 +1721,22 @@ export function init(root, ctx) {
 
             // Fetch wallet UTXOs for coin selection — only use available UTXOs.
             const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
-            const utxos = (utxoResp.utxos || [])
+            const allUtxos = utxoResp.utxos || [];
+            const utxos = allUtxos
                 .filter(u => !u.status || u.status === 'available')
                 .map(u => ({
                     txid: u.txid,
                     vout: u.vout,
                     value: u.value,
                 }));
+
+            if (utxos.length === 0 && allUtxos.length > 0) {
+                const pending = allUtxos.filter(u => u.status === 'pending_spend').length;
+                const immature = allUtxos.filter(u => u.status === 'immature').length;
+                throw new Error(
+                    `No spendable UTXOs available. ${pending ? pending + ' locked by pending transactions. ' : ''}${immature ? immature + ' immature coinbase outputs.' : ''}Wait for pending transactions to confirm.`
+                );
+            }
 
             const feeRate = getSelectedFeeRate();
             const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
