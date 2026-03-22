@@ -708,39 +708,92 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             });
         }
 
-        // Prepend mempool pending txs from all 3 variants.
+        // Prepend mempool pending txs — both sent BY and sent TO the wallet.
         let mut pending_entries = Vec::new();
         {
             let mempool = self.mempool.lock();
             let mut seen_pending = std::collections::HashSet::new();
-            for addr in [&noble_addr, &hash160_addr, &taproot_addr] {
-                for s in mempool.pending_tx_summaries(addr) {
-                    if !seen_pending.insert(s.tx_id) { continue; }
-                    pending_entries.push(WalletTransactionEntry {
-                        tx_id: hex::encode(s.tx_id.as_bytes()),
-                        tx_type: 0x01, // best guess for pending
-                        type_label: "Pending Transfer".to_string(),
-                        direction: "outgoing".to_string(),
-                        amount: s.outputs_to_others,
-                        counterparty: Some("Pending".to_string()),
-                        status: "pending".to_string(),
-                        total_output: s.outputs_to_others + s.outputs_to_self,
-                        transfer_value: s.outputs_to_others,
-                        fee: Some(s.fee),
-                        checksum: String::new(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        signer: noble_crypto::noble_addr::encode(&wallet_pk),
-                        inputs: vec![],
-                        outputs: vec![],
-                        metadata: vec![],
-                        has_encrypted_locator: false,
-                        confirmations: 0,
-                        block_height: None,
-                    });
+
+            for entry in mempool.iter_by_fee_rate_desc() {
+                if !seen_pending.insert(entry.tx_id) { continue; }
+
+                // Check if we are the sender.
+                let sender_is_ours = entry.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| is_ours(&noble_core::NobleAddress::Noble(pk).to_wire_bytes()))
+                    .unwrap_or(false);
+
+                // Check if any output goes to us (incoming).
+                let value_to_us: u64 = entry.tx.outputs.iter()
+                    .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                    .map(|o| o.value)
+                    .sum();
+
+                if !sender_is_ours && value_to_us == 0 {
+                    continue; // Not our tx — skip
                 }
+
+                let (direction, amount, counterparty) = if sender_is_ours {
+                    // Outgoing: we sent it
+                    let sent: u64 = entry.tx.outputs.iter()
+                        .filter(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.value)
+                        .sum();
+                    let cp = entry.tx.outputs.iter()
+                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.address.to_display_address());
+                    ("outgoing", sent, cp)
+                } else {
+                    // Incoming: someone sent to us
+                    let cp = entry.tx.issuer_sig.to_noble_public_key().ok()
+                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
+                    ("incoming", value_to_us, cp)
+                };
+
+                let signer_display = entry.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| noble_crypto::noble_addr::encode(&pk))
+                    .unwrap_or_default();
+
+                let tx_type_names = [
+                    (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
+                    (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
+                    (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Coinbase"),
+                ];
+                let type_label = tx_type_names.iter()
+                    .find(|(code, _)| *code == entry.tx.tx_type)
+                    .map(|(_, name)| format!("Pending {name}"))
+                    .unwrap_or_else(|| "Pending".to_string());
+
+                pending_entries.push(WalletTransactionEntry {
+                    tx_id: hex::encode(entry.tx_id.as_bytes()),
+                    tx_type: entry.tx.tx_type,
+                    type_label,
+                    direction: direction.to_string(),
+                    amount,
+                    counterparty,
+                    status: "pending".to_string(),
+                    total_output: entry.tx.total_output_value(),
+                    transfer_value: amount,
+                    fee: Some(entry.fee),
+                    checksum: hex::encode(entry.tx.checksum.as_bytes()),
+                    timestamp: entry.tx.timestamp,
+                    signer: signer_display,
+                    inputs: entry.tx.inputs.iter().map(|i| TxInputResponse {
+                        txid: hex::encode(i.prev_output.txid.as_bytes()),
+                        vout: i.prev_output.vout,
+                    }).collect(),
+                    outputs: entry.tx.outputs.iter().map(|o| TxOutputResponse {
+                        value: o.value,
+                        address: o.address.to_display_address(),
+                    }).collect(),
+                    metadata: entry.tx.metadata.iter().map(|m| MetadataResponse {
+                        key: m.key.clone(),
+                        value: String::from_utf8(m.value.clone())
+                            .unwrap_or_else(|_| hex::encode(&m.value)),
+                    }).collect(),
+                    has_encrypted_locator: entry.tx.encrypted_locator.is_some(),
+                    confirmations: 0,
+                    block_height: None,
+                });
             }
         }
 
