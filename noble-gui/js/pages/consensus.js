@@ -1679,6 +1679,60 @@ export function init(root, ctx) {
           strip.appendChild(leftNav);
           strip.appendChild(rightNav);
           updatePositions();
+
+          // Mouse/touch drag with natural inertia + mouse wheel
+          let dragStartX = 0, lastMoveX = 0, lastMoveTime = 0;
+          let dragging = false, accumulated = 0, inertiaId = null;
+
+          function stopInertia() { if (inertiaId) { cancelAnimationFrame(inertiaId); inertiaId = null; } }
+
+          function startDrag(x) {
+            stopInertia();
+            dragStartX = x; lastMoveX = x; lastMoveTime = Date.now();
+            accumulated = 0; dragging = true;
+          }
+
+          function moveDrag(x) {
+            if (!dragging) return;
+            accumulated += x - lastMoveX;
+            lastMoveX = x;
+            // Step every 60px of accumulated movement
+            while (accumulated > 60) { accumulated -= 60; if (focusIdx > 0) { focusIdx--; updatePositions(); } }
+            while (accumulated < -60) { accumulated += 60; if (focusIdx < proposals.length - 1) { focusIdx++; updatePositions(); } }
+          }
+
+          function endDrag() {
+            if (!dragging) return;
+            dragging = false;
+            const dt = Math.max(1, Date.now() - lastMoveTime);
+            let velocity = accumulated / dt; // px/ms
+            // Natural inertia via requestAnimationFrame with exponential decay
+            function inertiaStep() {
+              velocity *= 0.92;
+              accumulated += velocity * 16;
+              let stepped = false;
+              while (accumulated > 60) { accumulated -= 60; if (focusIdx > 0) { focusIdx--; updatePositions(); stepped = true; } }
+              while (accumulated < -60) { accumulated += 60; if (focusIdx < proposals.length - 1) { focusIdx++; updatePositions(); stepped = true; } }
+              if (Math.abs(velocity) > 0.05) inertiaId = requestAnimationFrame(inertiaStep);
+              else inertiaId = null;
+            }
+            if (Math.abs(velocity) > 0.1) inertiaId = requestAnimationFrame(inertiaStep);
+          }
+
+          strip.addEventListener('mousedown', (e) => { e.preventDefault(); startDrag(e.clientX); });
+          strip.addEventListener('mousemove', (e) => moveDrag(e.clientX));
+          strip.addEventListener('mouseup', endDrag);
+          strip.addEventListener('mouseleave', endDrag);
+          strip.addEventListener('touchstart', (e) => startDrag(e.touches[0].clientX), { passive: true });
+          strip.addEventListener('touchmove', (e) => moveDrag(e.touches[0].clientX), { passive: true });
+          strip.addEventListener('touchend', endDrag);
+
+          // Mouse wheel: scroll through cards
+          strip.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            if (e.deltaX > 20 || e.deltaY > 20) { if (focusIdx < proposals.length - 1) { focusIdx++; updatePositions(); } }
+            else if (e.deltaX < -20 || e.deltaY < -20) { if (focusIdx > 0) { focusIdx--; updatePositions(); } }
+          }, { passive: false });
         } else {
           // ── Simple flex layout for 1-2 proposals ──
           strip.style.cssText = 'display:flex;gap:var(--gap);margin-top:var(--gap-xs);flex-wrap:wrap';

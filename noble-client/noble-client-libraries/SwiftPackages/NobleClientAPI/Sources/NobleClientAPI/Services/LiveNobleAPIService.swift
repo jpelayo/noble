@@ -211,8 +211,11 @@ public struct LiveNobleAPIService: NobleAPIService {
         // Address history returns tx IDs — fetch each receipt
         var records: [TransactionRecord] = []
         for txIdHex in dto.transactions.prefix(limit) {
-            if let receipt = try? await getTransaction(txId: txIdHex) {
+            do {
+                let receipt = try await getTransaction(txId: txIdHex)
                 records.append(receipt)
+            } catch {
+                print("[NobleAPI] getTransactionHistory: failed to fetch tx \(txIdHex): \(error)")
             }
         }
         return records
@@ -278,7 +281,7 @@ public struct LiveNobleAPIService: NobleAPIService {
             print("[NobleAPI] Warning: could not parse signer '\(dto?.signer ?? "nil")' — using placeholder")
             signer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
         }
-        let txType: TransactionType = (dto?.tx_type ?? "notarization") == "transfer" ? .transfer : .notarization
+        let txType: TransactionType = (dto?.tx_type ?? 0) == 1 ? .transfer : .notarization
         let status: TransactionStatus = (receipt?.status ?? "pending") == "confirmed" ? .confirmed : .pending
         let checksum = dto?.checksum.flatMap { Hash256(hex: $0) }
         let timestamp = dto?.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }

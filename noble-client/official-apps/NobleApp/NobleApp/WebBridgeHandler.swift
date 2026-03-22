@@ -729,10 +729,15 @@ final class WebBridgeHandler {
             throw BridgeError.operationFailed("PKCS#12 import: iOS file picker integration pending")
 
         case "generateSigningKey":
-            let privKeyBytes = NobleClientCrypto.generatePrivateKey()
-            let pubKeyBytes = try NobleClientCrypto.derivePublicKey(from: privKeyBytes)
+            // Generate a secp256k1 keypair using SecRandomCopyBytes + derivePublicKey
+            var privKeyBytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, 32, &privKeyBytes) == errSecSuccess else {
+                throw BridgeError.operationFailed("Failed to generate random key")
+            }
+            let privKeyData = Data(privKeyBytes)
+            let pubKeyBytes = try appState.mnemonicProvider.derivePublicKey(privateKey: privKeyData)
             let compressedHex = pubKeyBytes.map { String(format: "%02x", $0) }.joined()
-            let skiData = Insecure.SHA1.hash(data: Data(pubKeyBytes))
+            let skiData = Insecure.SHA1.hash(data: pubKeyBytes)
             let skiHex = skiData.map { String(format: "%02x", $0) }.joined()
 
             let keyEntry = SigningKeyEntry(
@@ -743,7 +748,7 @@ final class WebBridgeHandler {
                 subjectKeyIdentifier: skiHex
             )
 
-            try appState.keychainService.storeKey(Data(privKeyBytes), label: "signing-key-\(keyEntry.id.uuidString)")
+            try appState.keychainService.storeKey(privKeyData, label: "signing-key-\(keyEntry.id.uuidString)")
 
             if let idx = appState.contacts.firstIndex(where: { $0.isMyCard }) {
                 appState.contacts[idx].signingKeys.append(keyEntry)

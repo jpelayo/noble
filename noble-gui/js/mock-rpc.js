@@ -574,18 +574,25 @@ export class MockRpcClient {
         const start = Array.isArray(params) ? (params[0] ?? 0) : (params.start ?? 0);
         const count = Array.isArray(params) ? (params[1] ?? 50) : ((params.end ?? start + 49) - start + 1);
         const end = Math.min(start + count - 1, this.chainHeight);
-        const epoch = this.#chain.blocks.length > 1 ? this.#chain.blocks[1].header.timestamp : 0;
-        return this.#chain.blocks.slice(start, end + 1).map(b => ({
-          height: b.header.height,
-          hash: b._hash,
-          prev_hash: b.header.prev_hash,
-          merkle_root: b.header.merkle_root,
-          timestamp: b.header.timestamp,
-          tx_count: b.header.tx_count,
-          validator_id: b.header.validator_id,
-          validator_name: 'Mock Validator',
-          cycle: epoch ? Math.floor((b.header.timestamp - epoch) / 1200) : null,
-        }));
+        // Map the most recent blocks to current wall-clock cycles so the
+        // timeline builder finds committed blocks for recent cycle numbers.
+        const nowCycle = Math.floor(Date.now() / 1000 / CYCLE_DURATION_SECS);
+        return this.#chain.blocks.slice(start, end + 1).map((b, i, arr) => {
+          // Assign cycle = currentCycle - (distance from tip)
+          const distFromTip = this.chainHeight - b.header.height;
+          const cycle = b.header.height === 0 ? null : Math.max(0, nowCycle - 1 - distFromTip);
+          return {
+            height: b.header.height,
+            hash: b._hash,
+            prev_hash: b.header.prev_hash,
+            merkle_root: b.header.merkle_root,
+            timestamp: b.header.timestamp,
+            tx_count: b.header.tx_count,
+            validator_id: b.header.validator_id,
+            validator_name: 'Mock Validator',
+            cycle,
+          };
+        });
       }
 
       case 'noble_getChainStats': {
@@ -899,14 +906,15 @@ export class MockRpcClient {
         const phaseLen = CYCLE_DURATION_SECS / 4;
         const currentPhaseIndex = Math.min(3, Math.floor(elapsed / phaseLen));
 
-        // Generate history for last 3 cycles (current + 2 past)
+        // Generate history for last 4 cycles (current + 3 past)
         const cycles = [];
-        for (let offset = 2; offset >= 0; offset--) {
+        for (let offset = 3; offset >= 0; offset--) {
           const cn = currentCycle - offset;
           const isCurrent = offset === 0;
 
-          // Deterministic proposals per cycle based on cycle number
-          const proposerCount = (cn % 3 === 0) ? 3 : (cn % 3 === 1) ? 1 : 2;
+          // Deterministic proposals per cycle based on cycle number.
+          // Every 4th cycle has 20 proposals to showcase the coverflow card layout.
+          const proposerCount = (cn % 4 === 0) ? 20 : (cn % 3 === 0) ? 3 : (cn % 3 === 1) ? 1 : 2;
           const proposals = [];
           for (let p = 0; p < proposerCount; p++) {
             const onlineVals = this.#validators.filter(v => v.status === 'alive');
@@ -1030,11 +1038,20 @@ export class MockRpcClient {
         const phaseLen = CYCLE_DURATION_SECS / 4;
         const phaseIndex = Math.min(3, Math.floor(elapsed / phaseLen));
         const phases = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
-        // Always return candidates so manual vote dropdown has options
-        const tallies = [
-          { block_hash: 'a1b2c3d4e5f6'.padEnd(64, '0'), validator: 'noble-alpha', validator_key: 'aa'.repeat(33), vote_count: phaseIndex >= 1 ? 3 : 0 },
-          { block_hash: 'f6e5d4c3b2a1'.padEnd(64, '0'), validator: 'noble-beta', validator_key: 'bb'.repeat(33), vote_count: phaseIndex >= 1 ? 1 : 0 },
+        // 20 mock validators to showcase coverflow card layout
+        const mockNames = [
+          'noble-alpha', 'noble-beta', 'noble-gamma', 'noble-delta', 'noble-epsilon',
+          'noble-zeta', 'noble-eta', 'noble-theta', 'noble-iota', 'noble-kappa',
+          'noble-lambda', 'noble-mu', 'noble-nu', 'noble-xi', 'noble-omicron',
+          'noble-pi', 'noble-rho', 'noble-sigma', 'noble-tau', 'noble-upsilon',
         ];
+        const tallies = mockNames.map((name, i) => ({
+          block_hash: (name + 'hash').padEnd(64, i.toString(16)),
+          validator: name,
+          validator_key: (i + 10).toString(16).repeat(33).slice(0, 66),
+          vote_count: phaseIndex >= 1 ? Math.max(1, 20 - i * 2) : 0,
+          tx_count: 1 + (i * 3 % 10),
+        }));
         return { cycle, phase: phases[phaseIndex], tallies };
       }
 

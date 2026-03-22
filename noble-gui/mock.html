@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOBLE Control Panel — Mock Mode</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/themes.css">
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    window.__v = Date.now();
+    window.__noble_v = window.__v;
+    window.NOBLE_VERSION = '0.75.0-mock';
+  </script>
+</head>
+<body>
+  <a href="#content" class="skip-to-content">Skip to content</a>
+  <nav id="sidebar" aria-label="Main navigation">
+    <div class="logo">
+      <div class="logo-tagline">MOCK MODE</div>
+      <img src="assets/logo-sm.png" alt="NOBLE" />
+      <div class="logo-acronym">
+        <span><b>N</b>eutral</span>
+        <span><b>O</b>pen</span>
+        <span><b>BL</b>ockchain</span>
+        <span><b>E</b>nvironment</span>
+      </div>
+    </div>
+    <div id="chain-id-bar" class="chain-id-bar" style="display:none">
+      <span class="chain-id-label">Chain ID</span>
+      <span id="chain-id-hex" class="chain-id-hex"></span>
+    </div>
+    <div id="fork-status-bar" class="fork-status-bar" style="display:none">
+      <span id="fork-status-label" class="fork-status-label"></span>
+      <span id="fork-status-detail" class="fork-status-detail"></span>
+    </div>
+    <ul role="list">
+      <li><a href="#/"><span class="nav-icon">&#9673;</span><span class="nav-label">Overview</span></a></li>
+      <li><a href="#/blocks"><span class="nav-icon">&#9638;</span><span class="nav-label">Blocks</span></a></li>
+      <li><a href="#/transactions"><span class="nav-icon">&#8644;</span><span class="nav-label">Transactions</span></a></li>
+      <li><a href="#/verify"><span class="nav-icon">&#10003;</span><span class="nav-label">Verify</span></a></li>
+      <li><a href="#/mempool"><span class="nav-icon">&#9776;</span><span class="nav-label">Mempool</span></a></li>
+      <li><a href="#/network"><span class="nav-icon">&#9700;</span><span class="nav-label">Network</span></a></li>
+      <li><a href="#/consensus"><span class="nav-icon">&#9211;</span><span class="nav-label">Consensus</span></a></li>
+      <li><a href="#/wallet"><span class="nav-icon">&#9671;</span><span class="nav-label">Wallet</span></a></li>
+      <li><a href="#/health"><span class="nav-icon">&#9829;</span><span class="nav-label">Health</span></a></li>
+      <li><a href="#/storage"><span class="nav-icon">&#9744;</span><span class="nav-label">Storage</span></a></li>
+      <li><a href="#/identity"><span class="nav-icon">&#9998;</span><span class="nav-label">Identity</span></a></li>
+      <li><a href="#/trace"><span class="nav-icon">&#9783;</span><span class="nav-label">Trace</span></a></li>
+      <li><a href="#/settings"><span class="nav-icon">&#9881;</span><span class="nav-label">Settings</span></a></li>
+    </ul>
+    <button id="theme-toggle" title="Toggle dark/light theme">Dark</button>
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-text">&copy; 2026 InfiniteContext.com</div>
+      <div class="sidebar-footer-text">License: Apache 2.0</div>
+      <div id="noble-version-footer" class="sidebar-footer-text" style="opacity:0.4;font-size:10px;margin-top:2px"></div>
+    </div>
+  </nav>
+
+  <main id="content" role="main">
+    <p>Loading mock...</p>
+  </main>
+
+  <footer id="status-bar" aria-live="polite" role="status">
+    <span><span id="kpi-height" class="kpi-val">--</span><span class="kpi-label"> height</span></span>
+    <span><span id="kpi-peers" class="kpi-val">--</span><span class="kpi-label"> peers</span></span>
+    <span><span id="kpi-mempool" class="kpi-val">--</span><span class="kpi-label"> mempool</span></span>
+    <span><span id="kpi-phase" class="kpi-val">--</span></span>
+    <span id="status-indicator"><span class="status-dot"></span> Mock</span>
+  </footer>
+
+  <script src="vendor/echarts.min.js"></script>
+  <script type="module">
+    // Mock boot: loads MockRpc instead of RpcClient, stubs WS.
+    // Does NOT touch app.js — completely standalone entry point.
+    const _v = (p) => p + '?v=' + window.__v;
+
+    const { createStore } = await import(_v('./js/state.js'));
+    const { Router } = await import(_v('./js/router.js'));
+    const { formatNumber, formatChainLabel } = await import(_v('./js/utils.js'));
+    const { MockRpcClient, MockWsManager } = await import(_v('./js/mock-rpc.js'));
+
+    const [
+      overviewPage, blocksPage, blockDetailPage, transactionsPage,
+      txDetailPage, verifyPage, mempoolPage, networkPage,
+      consensusPage, walletPage, healthPage, identityPage,
+      tracePage, storagePage, settingsPage,
+    ] = await Promise.all([
+      import(_v('./js/pages/overview.js')),
+      import(_v('./js/pages/blocks.js')),
+      import(_v('./js/pages/block-detail.js')),
+      import(_v('./js/pages/transactions.js')),
+      import(_v('./js/pages/tx-detail.js')),
+      import(_v('./js/pages/verify.js')),
+      import(_v('./js/pages/mempool.js')),
+      import(_v('./js/pages/network.js')),
+      import(_v('./js/pages/consensus.js')),
+      import(_v('./js/pages/wallet.js')),
+      import(_v('./js/pages/health.js')),
+      import(_v('./js/pages/identity.js')),
+      import(_v('./js/pages/trace.js')),
+      import(_v('./js/pages/storage.js')),
+      import(_v('./js/pages/settings.js')),
+    ]);
+
+    // Mock RPC + Mock WS
+    const rpc = new MockRpcClient();
+    const ws = new MockWsManager();
+
+    // State store
+    const { state, subscribe, getState } = createStore({
+      blockHeight: 0,
+      peerCount: 0,
+      mempoolSize: 0,
+      cyclePhase: '--',
+      connected: true,
+      connectionStatus: 'connected',
+    });
+    const store = { state, subscribe, getState };
+
+    // Bind status bar
+    const kpiHeight = document.getElementById('kpi-height');
+    const kpiPeers = document.getElementById('kpi-peers');
+    const kpiMempool = document.getElementById('kpi-mempool');
+    const kpiPhase = document.getElementById('kpi-phase');
+
+    subscribe('blockHeight', (v) => { kpiHeight.textContent = formatNumber(v); });
+    subscribe('peerCount', (v) => { kpiPeers.textContent = formatNumber(v); });
+    subscribe('mempoolSize', (v) => { kpiMempool.textContent = formatNumber(v); });
+    subscribe('cyclePhase', (v) => { kpiPhase.textContent = v; });
+
+    // Theme
+    const themeToggle = document.getElementById('theme-toggle');
+    const html = document.documentElement;
+    function applyTheme(t) { html.setAttribute('data-theme', t); localStorage.setItem('noble-theme', t); themeToggle.textContent = t === 'dark' ? 'Light' : 'Dark'; }
+    const saved = localStorage.getItem('noble-theme');
+    applyTheme(saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+    themeToggle.addEventListener('click', () => applyTheme(html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+
+    // Router
+    const ctx = { rpc, ws, state, subscribe, getState };
+    const content = document.getElementById('content');
+    const router = new Router(content, ctx);
+    router
+      .add('/', overviewPage)
+      .add('/blocks', blocksPage)
+      .add('/block/:height', blockDetailPage)
+      .add('/transactions', transactionsPage)
+      .add('/tx/:txid', txDetailPage)
+      .add('/verify', verifyPage)
+      .add('/mempool', mempoolPage)
+      .add('/network', networkPage)
+      .add('/consensus', consensusPage)
+      .add('/wallet', walletPage)
+      .add('/health', healthPage)
+      .add('/storage', storagePage)
+      .add('/identity', identityPage)
+      .add('/trace', tracePage)
+      .add('/settings', settingsPage)
+      .start();
+
+    // Bootstrap mock data
+    try {
+      const [blockCount, mempoolInfo, networkInfo, cycleStatus, nodeInfo] = await Promise.all([
+        rpc.call('noble_getBlockCount'),
+        rpc.call('noble_getMempoolInfo'),
+        rpc.call('noble_getNetworkInfo'),
+        rpc.call('noble_getCycleStatus'),
+        rpc.call('noble_getNodeInfo'),
+      ]);
+      state.blockHeight = blockCount.height;
+      state.peerCount = networkInfo.peer_count;
+      state.mempoolSize = mempoolInfo.count;
+      state.cyclePhase = cycleStatus.phase;
+      kpiHeight.textContent = formatNumber(state.blockHeight);
+      kpiPeers.textContent = formatNumber(state.peerCount);
+      kpiMempool.textContent = formatNumber(state.mempoolSize);
+      kpiPhase.textContent = state.cyclePhase;
+
+      // Chain ID bar
+      const bar = document.getElementById('chain-id-bar');
+      const label = formatChainLabel(nodeInfo);
+      if (bar && label) {
+        document.getElementById('chain-id-hex').textContent = label;
+        bar.style.display = '';
+      }
+    } catch (e) {
+      console.error('Mock bootstrap failed:', e);
+    }
+
+    // Version footer
+    const vf = document.getElementById('noble-version-footer');
+    if (vf) vf.textContent = 'v0.75.0-mock';
+
+    console.info('[mock] Dashboard loaded with mock data');
+  </script>
+</body>
+</html>

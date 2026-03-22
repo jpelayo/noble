@@ -32,7 +32,7 @@ struct TxOutputDTO: Decodable, Sendable {
 
 struct TransactionDTO: Decodable, Sendable {
     let tx_id: String?
-    let tx_type: String?
+    let tx_type: UInt8?
     let checksum: String?
     let timestamp: UInt64?
     let total_output: UInt64?
