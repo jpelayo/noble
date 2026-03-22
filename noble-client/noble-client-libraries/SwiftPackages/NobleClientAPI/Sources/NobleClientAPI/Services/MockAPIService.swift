@@ -189,16 +189,9 @@ public struct MockAPIService: NobleAPIService {
         return .confirmed
     }
 
-    public func getTransactionHistory(
-        address: String,
-        page: Int,
-        limit: Int
-    ) async throws -> [TransactionRecord] {
+    public func getWalletTransactions() async throws -> [TransactionRecord] {
         await simulateDelay()
         return Self.makeSampleTransactions()
-            .dropFirst(page * limit)
-            .prefix(limit)
-            .map { $0 }
     }
 
     // MARK: - Documents

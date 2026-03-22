@@ -228,21 +228,31 @@ fn first_validator(all: &[&crate::candidate::CandidateEntry]) -> Option<Hash256>
 
 /// Fallback chain: FollowMajority → Random → None (don't vote).
 /// Used when a strategy's primary logic can't pick (validator offline, empty list, etc.).
+///
+/// If R1 votes are tied (multiple candidates with the same top count),
+/// returns None — the node abstains. Tied R1 must produce an empty cycle,
+/// not a winner determined by hash luck or arrival order.
 fn fallback(
     all: &[&crate::candidate::CandidateEntry],
     vote_tallies: Option<&HashMap<Hash256, usize>>,
     current_cycle: u64,
 ) -> Option<Hash256> {
-    // Step 1: Follow majority — pick the vote leader.
+    // Step 1: Follow majority — pick the vote leader, but ONLY if there is a clear leader.
     if let Some(tallies) = vote_tallies {
         if !tallies.is_empty() {
             let mut sorted: Vec<(Hash256, usize)> =
                 tallies.iter().map(|(h, c)| (*h, *c)).collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            return sorted.first().map(|(h, _)| *h);
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            // Only pick a winner if the leader has strictly more votes than the runner-up.
+            if sorted.len() == 1 || sorted[0].1 > sorted[1].1 {
+                return Some(sorted[0].0);
+            }
+            // Tied — abstain. No hash tiebreaker. Empty cycle is the correct outcome.
+            return None;
         }
     }
     // Step 2: Random — deterministic pick using cycle number.
+    // Only reached when no R1 votes exist at all (not on ties).
     if !all.is_empty() {
         let idx = current_cycle as usize % all.len();
         return Some(all[idx].block_hash);

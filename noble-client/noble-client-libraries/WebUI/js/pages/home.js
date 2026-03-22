@@ -142,7 +142,7 @@ export function init(root, ctx) {
         try {
             const [balance, history] = await Promise.all([
                 Bridge.call('noble_api', 'getBalance', { address }),
-                Bridge.call('noble_api', 'getTransactionHistory', { address, page: 0, limit: 20 })
+                Bridge.call('noble_api', 'getWalletTransactions')
             ]);
             if (!alive) return;
 
@@ -222,7 +222,7 @@ export function init(root, ctx) {
 
     function renderRecentDocs(container, txs) {
         container.innerHTML = '';
-        const docs = txs.filter(t => t.type === 'notarization').slice(0, 5);
+        const docs = txs.filter(t => (t.tx_type === 0x00) || (t.type || '').toLowerCase() === 'notarization').slice(0, 5);
 
         if (docs.length === 0) {
             const card = nobleCard('Recent Documents', '');
@@ -263,7 +263,7 @@ export function init(root, ctx) {
 
     function renderRecentTxs(container, txs) {
         container.innerHTML = '';
-        const transfers = txs.filter(t => t.type !== 'notarization').slice(0, 5);
+        const transfers = txs.filter(t => (t.tx_type !== 0x00) && (t.type || '').toLowerCase() !== 'notarization').slice(0, 5);
 
         if (transfers.length === 0) {
             const card = nobleCard('Recent Transactions', '');

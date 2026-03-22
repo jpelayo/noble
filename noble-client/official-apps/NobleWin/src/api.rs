@@ -202,33 +202,12 @@ pub async fn handle_api_action(
             }))
         }
 
-        "getTransactionHistory" => {
-            let address = params
-                .get("address")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing parameter: address")?;
-            let page = params.get("page").and_then(|v| v.as_u64()).unwrap_or(0);
-            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20);
+        "getWalletTransactions" | "getTransactionHistory" => {
+            // Server returns fully enriched list — all address variants, mempool, newest first.
             let result = client
-                .call_rpc(
-                    "noble_getTransactionHistory",
-                    json!([address, page, limit]),
-                )
+                .call_rpc("noble_getWalletTransactions", json!([]))
                 .await?;
-
-            // The RPC returns transactions — reshape for WebUI with direction/counterparty
-            let txs = result
-                .get("transactions")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            let enriched: Vec<Value> = txs
-                .into_iter()
-                .map(|tx| enrich_transaction(&tx, wallet_address, block_height))
-                .collect();
-
-            Ok(json!({ "transactions": enriched }))
+            Ok(result)
         }
 
         "estimateFee" => {

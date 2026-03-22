@@ -1565,23 +1565,40 @@ pub struct WalletTransactionsResponse {
     pub transactions: Vec<WalletTransactionEntry>,
 }
 
-/// A single wallet transaction entry.
+/// A single wallet transaction entry — fully enriched with all fields
+/// the client needs for display (absorbs TransactionResponse + receipt context).
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletTransactionEntry {
+    // Identity
+    pub tx_id: String,
+    pub tx_type: u8,
     #[serde(rename = "type")]
-    pub tx_type: String,
+    pub type_label: String,
+
+    // Wallet-enriched fields (computed by server)
     pub direction: String,
     pub amount: u64,
-    pub balance_after: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty: Option<String>,
+    pub status: String,
+
+    // From TransactionResponse (full tx data)
+    pub total_output: u64,
+    pub transfer_value: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee: Option<u64>,
+    pub checksum: String,
+    pub timestamp: u64,
+    pub signer: String,
+    pub inputs: Vec<TxInputResponse>,
+    pub outputs: Vec<TxOutputResponse>,
+    pub metadata: Vec<MetadataResponse>,
+    pub has_encrypted_locator: bool,
+
+    // From TransactionReceiptResponse (block context)
     pub confirmations: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_height: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tx_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counterparty: Option<String>,
 }
 
 /// Response for `noble_getFinalityStatus`.

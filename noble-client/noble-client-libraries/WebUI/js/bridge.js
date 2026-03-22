@@ -128,7 +128,7 @@ class MockBridge {
             if (action === 'getCycleStatus') return {
                 cycleNumber: 42, phase: 'Proposal', phaseRemainingSecs: 180, cycleRemainingSecs: 780
             };
-            if (action === 'getTransactionHistory') return {
+            if (action === 'getWalletTransactions' || action === 'getTransactionHistory') return {
                 transactions: [
                     { txId: 'a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890', blockHeight: 1230, type: 'notarization', direction: '', total_output: 0, inputs: [], outputs: [], signer: '020123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01', counterparty: '', timestamp: Date.now() / 1000 - 7200, confirmations: 4 },
                     { txId: 'b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1', blockHeight: 1228, type: 'transfer', direction: 'incoming', total_output: 50000000, inputs: [{txid: '0000000000000000000000000000000000000000000000000000000000000000', vout: 0}], outputs: [{value: 50000000, address: '020123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01'}], signer: '03ff1122334455667788990011223344556677889900112233445566778899001122', counterparty: '03ff1122334455667788990011223344556677889900112233445566778899001122', timestamp: Date.now() / 1000 - 14400, confirmations: 6 },

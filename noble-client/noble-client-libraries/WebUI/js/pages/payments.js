@@ -85,28 +85,11 @@ export function init(root, ctx) {
         if (!address) return;
 
         try {
-            let balance, history;
-            try {
-                // Primary path: Bridge (Swift hydrates full tx objects)
-                [balance, history] = await Promise.all([
-                    Bridge.call('noble_api', 'getBalance', { address }),
-                    Bridge.call('noble_api', 'getTransactionHistory', { address, page: historyPage, limit: historyLimit })
-                ]);
-            } catch {
-                // Fallback: direct RPC (returns tx_id strings, fetch details)
-                const [bal, hist] = await Promise.all([
-                    Bridge.call('noble_api', 'getAddressBalance', { address }),
-                    Bridge.call('noble_api', 'getAddressHistory', { address, page: historyPage, limit: historyLimit }),
-                ]);
-                balance = bal;
-                const txIds = (hist && hist.transactions) || [];
-                const txDetails = await Promise.all(
-                    txIds.slice(0, 20).map(id =>
-                        Bridge.call('noble_api', 'getTransaction', { txId: id }).catch(() => null)
-                    )
-                );
-                history = { transactions: txDetails.filter(Boolean) };
-            }
+            // Single RPC — server returns fully enriched list (all address variants, mempool).
+            const [balance, history] = await Promise.all([
+                Bridge.call('noble_api', 'getBalance', { address }),
+                Bridge.call('noble_api', 'getWalletTransactions'),
+            ]);
             if (!alive) return;
             balanceData = balance;
             historyData = history;
@@ -215,47 +198,11 @@ export function init(root, ctx) {
             });
         });
 
-        // Pagination
-        const pagination = document.createElement('div');
-        pagination.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:var(--gap-sm) var(--gap);';
-
-        const pageInfo = document.createElement('span');
-        pageInfo.style.cssText = 'font-size:var(--font-size-xs); color:var(--text-muted)';
-        pageInfo.textContent = `Page ${historyPage + 1} of ${Math.max(1, Math.ceil((data.total || 1) / historyLimit))}`;
-
-        const btnGroup = document.createElement('div');
-        btnGroup.style.display = 'flex';
-        btnGroup.style.gap = 'var(--gap-sm)';
-
-        const prevBtn = document.createElement('button');
-        prevBtn.className = 'btn btn-sm btn-secondary';
-        prevBtn.textContent = 'Previous';
-        prevBtn.disabled = historyPage === 0;
-        prevBtn.addEventListener('click', async () => {
-            historyPage--;
-            const h = await Bridge.call('noble_api', 'getTransactionHistory', { address: state.walletAddress, page: historyPage, limit: historyLimit });
-            if (!alive) return;
-            historyData = h;
-            renderHistory(container, h);
-        });
-
-        const nextBtn = document.createElement('button');
-        nextBtn.className = 'btn btn-sm btn-secondary';
-        nextBtn.textContent = 'Next';
-        nextBtn.disabled = (historyPage + 1) * historyLimit >= (data.total || 0);
-        nextBtn.addEventListener('click', async () => {
-            historyPage++;
-            const h = await Bridge.call('noble_api', 'getTransactionHistory', { address: state.walletAddress, page: historyPage, limit: historyLimit });
-            if (!alive) return;
-            historyData = h;
-            renderHistory(container, h);
-        });
-
-        btnGroup.appendChild(prevBtn);
-        btnGroup.appendChild(nextBtn);
-        pagination.appendChild(pageInfo);
-        pagination.appendChild(btnGroup);
-        card.appendChild(pagination);
+        // Transaction count footer
+        const footer = document.createElement('div');
+        footer.style.cssText = 'padding:var(--gap-sm) var(--gap); font-size:var(--font-size-xs); color:var(--text-muted); text-align:center';
+        footer.textContent = `${txs.length} transaction${txs.length !== 1 ? 's' : ''}`;
+        card.appendChild(footer);
 
         container.appendChild(card);
     }

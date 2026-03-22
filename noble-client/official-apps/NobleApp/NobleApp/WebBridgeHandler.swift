@@ -93,41 +93,10 @@ final class WebBridgeHandler {
                 "cycleRemainingSecs": cycle.cycleRemainingSecs,
             ] as [String: Any]
 
-        case "getTransactionHistory":
-            guard let address = params["address"] as? String else {
-                throw BridgeError.missingParam("address")
-            }
-            let page = params["page"] as? Int ?? 0
-            let limit = params["limit"] as? Int ?? 20
-            let txs = try await api.getTransactionHistory(address: address, page: page, limit: limit)
-            var allTxs: [[String: Any]] = []
-
-            // Prepend pending mempool txs on page 0
-            if page == 0 {
-                var pending: [PendingTransaction] = []
-                do { pending = try await api.getAddressPending(address: address) }
-                catch { print("[Bridge] warning: getAddressPending failed: \(error)") }
-                for p in pending {
-                    allTxs.append([
-                        "txId": p.txId,
-                        "tx_type": 1,
-                        "type": "Transfer",
-                        "txType": "Pending Transfer",
-                        "status": "pending",
-                        "direction": "outgoing",
-                        "counterparty": "Pending",
-                        "total_output": p.sent,
-                        "transfer_value": p.sent,
-                        "fee": p.fee,
-                        "net_debit": p.netDebit,
-                        "confirmations": 0,
-                        "timestamp": Date().timeIntervalSince1970,
-                    ] as [String: Any])
-                }
-            }
-
-            allTxs.append(contentsOf: txs.map { txToDict($0) })
-            return ["transactions": allTxs] as [String: Any]
+        case "getWalletTransactions", "getTransactionHistory":
+            // Server returns fully enriched list — all address variants, mempool, newest first.
+            let txs = try await api.getWalletTransactions()
+            return ["transactions": txs.map { txToDict($0) }] as [String: Any]
 
         case "estimateFee":
             let fee = try await api.estimateFee()

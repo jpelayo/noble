@@ -67,12 +67,8 @@ public protocol NobleAPIService: Sendable {
     /// Fetch transaction status.
     func getTransactionStatus(txId: String) async throws -> TransactionStatus
 
-    /// Fetch transaction history for an address.
-    func getTransactionHistory(
-        address: String,
-        page: Int,
-        limit: Int
-    ) async throws -> [TransactionRecord]
+    /// Fetch wallet transaction history (all address variants, mempool, enriched).
+    func getWalletTransactions() async throws -> [TransactionRecord]
 
     // MARK: - Documents
 

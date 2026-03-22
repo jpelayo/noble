@@ -110,3 +110,31 @@ struct PendingTxDTO: Decodable, Sendable {
     let net_debit: UInt64
     let confirmation_status: String?
 }
+
+// MARK: - noble_getWalletTransactions
+
+struct WalletTransactionsDTO: Decodable, Sendable {
+    let transactions: [WalletTxEntryDTO]
+}
+
+struct WalletTxEntryDTO: Decodable, Sendable {
+    let tx_id: String
+    let tx_type: UInt8
+    let type_label: String?
+    let direction: String
+    let amount: UInt64
+    let transfer_value: UInt64?
+    let fee: UInt64?
+    let total_output: UInt64?
+    let confirmations: UInt64
+    let block_height: UInt64?
+    let timestamp: UInt64?
+    let counterparty: String?
+    let signer: String?
+    let status: String?
+    let checksum: String?
+    let inputs: [TxInputDTO]?
+    let outputs: [TxOutputDTO]?
+    let metadata: [MetadataDTO]?
+    let has_encrypted_locator: Bool?
+}
