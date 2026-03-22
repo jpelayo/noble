@@ -40,6 +40,8 @@ struct UtxoDTO: Decodable, Sendable {
     let value: UInt64
     let height: UInt64
     let is_coinbase: Bool
+    /// UTXO lifecycle: "available", "pending_spend", "immature".
+    let status: String?
 }
 
 // MARK: - noble_getAddressHistory

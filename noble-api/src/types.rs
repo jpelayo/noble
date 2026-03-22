@@ -637,6 +637,11 @@ pub struct UtxoResponse {
     pub value: u64,
     pub height: u64,
     pub is_coinbase: bool,
+    /// UTXO lifecycle status for client coin selection:
+    /// - `"available"`: spendable, mature, not consumed by a pending tx
+    /// - `"pending_spend"`: consumed by a pending mempool transaction
+    /// - `"immature"`: coinbase output not yet mature (< COINBASE_MATURITY confirmations)
+    pub status: String,
 }
 
 /// Response for `noble_getAddressHistory`.

@@ -139,7 +139,7 @@ public struct LiveNobleAPIService: NobleAPIService {
         return AddressUtxos(
             address: dto.address ?? address,
             utxos: dto.utxos.map { u in
-                UtxoEntry(txid: u.txid, vout: u.vout, value: u.value, height: u.height, isCoinbase: u.is_coinbase)
+                UtxoEntry(txid: u.txid, vout: u.vout, value: u.value, height: u.height, isCoinbase: u.is_coinbase, status: u.status ?? "available")
             }
         )
     }

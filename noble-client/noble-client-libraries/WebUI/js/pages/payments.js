@@ -460,9 +460,15 @@ export function init(root, ctx) {
                 loading.style.color = 'var(--text-muted)';
                 el.appendChild(loading);
                 Bridge.call('noble_api', 'estimateFee').then(async (f) => {
-                    const minRate = f.lowFeeRate || f.networkMinFeeRate || f.low_fee_rate || f.network_min_fee_rate || 1;
-                    const recRate = f.recommendedFeeRate || f.networkMedianFeeRate || f.recommended_fee_rate || f.network_median_fee_rate || 2;
-                    const highRate = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+                    // Network-aware fee rates: always meet the highest known validator minimum.
+                    const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
+                    const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
+                    const localLow = f.lowFeeRate || f.low_fee_rate || 1;
+                    const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
+                    const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+                    const minRate = Math.max(localLow, netMin);
+                    const recRate = Math.max(localRec, netMedian, netMin);
+                    const highRate = Math.max(localHigh, netMedian * 2, netMin);
 
                     // Estimate real tx size using the C library
                     let txSize = 450; // fallback for transfers
@@ -541,13 +547,16 @@ export function init(root, ctx) {
                 const fee = getSelectedFee();
                 const amountAtomic = parseAmount(amount);
 
-                // Fetch wallet UTXOs for coin selection.
+                // Fetch wallet UTXOs for coin selection — only use available UTXOs.
+                // UTXOs with status "pending_spend" or "immature" are excluded.
                 const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
-                const utxos = (utxoResp.utxos || []).map(u => ({
-                    txid: u.txid,
-                    vout: u.vout,
-                    value: u.value,
-                }));
+                const utxos = (utxoResp.utxos || [])
+                    .filter(u => !u.status || u.status === 'available')
+                    .map(u => ({
+                        txid: u.txid,
+                        vout: u.vout,
+                        value: u.value,
+                    }));
 
                 const feeRate = getSelectedFeeRate();
                 const signResult = await Bridge.call('noble_crypto', 'signTransfer', {

@@ -98,6 +98,39 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             .unwrap_or_default()
             .as_secs();
 
+        // Check fee rate against this node's minimum preference.
+        // This prevents txs from entering the mempool only to be ignored at proposal time.
+        let node_min_rate = self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed);
+        if node_min_rate > noble_core::MIN_RELAY_FEE_RATE && !tx.is_coinbase() {
+            let storage = self.storage.read();
+            let mut input_total: u64 = 0;
+            let mut all_resolved = true;
+            for inp in &tx.inputs {
+                match storage.get_utxo(&inp.prev_output) {
+                    Ok(Some(entry)) => input_total += entry.value,
+                    Ok(None) => { all_resolved = false; break; }
+                    Err(e) => {
+                        tracing::warn!(task = "submit_tx", "fee check: UTXO lookup error: {e}");
+                        all_resolved = false;
+                        break;
+                    }
+                }
+            }
+            if all_resolved {
+                let output_total: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                let fee = input_total.saturating_sub(output_total);
+                let size = tx_bytes.len() as u64;
+                let fee_rate = if size > 0 { fee / size } else { 0 };
+                if fee_rate < node_min_rate {
+                    return Err(ApiError::TxRejected(format!(
+                        "Fee rate too low for this node: {} groats/byte (node minimum: {}). \
+                         Increase the fee or connect to a node with a lower minimum fee rate.",
+                        fee_rate, node_min_rate
+                    )).into());
+                }
+            }
+        }
+
         // Admit to mempool with storage-backed lookups
         let tx_id = {
             let storage = self.storage.read();

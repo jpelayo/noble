@@ -185,8 +185,6 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         let storage = self.storage.read();
         let utxos = storage.get_address_utxos(&addr).map_err(ApiError::from)?;
 
-        // Exclude immature coinbase UTXOs — clients should never see
-        // unspendable coins in the UTXO set (prevents NE-618 at source).
         let chain_height = storage
             .get_chain_tip()
             .ok()
@@ -194,28 +192,37 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             .map(|t| t.height)
             .unwrap_or(0);
 
+        // Check mempool for outpoints consumed by pending transactions.
+        let mempool = self.mempool.lock();
+
         let mut immature_count: usize = 0;
         let mut immature_value: u64 = 0;
 
+        // Return ALL UTXOs with lifecycle status so the client has full visibility.
         let entries: Vec<UtxoResponse> = utxos
             .iter()
-            .filter(|(_, entry)| {
-                if !entry.is_mature(chain_height) {
+            .map(|(outpoint, entry)| {
+                let status = if !entry.is_mature(chain_height) {
                     immature_count += 1;
                     immature_value += entry.value;
-                    false
+                    "immature"
+                } else if mempool.is_outpoint_spent(outpoint) {
+                    "pending_spend"
                 } else {
-                    true
+                    "available"
+                };
+                UtxoResponse {
+                    txid: hash_to_hex(&outpoint.txid),
+                    vout: outpoint.vout,
+                    value: entry.value,
+                    height: entry.height,
+                    is_coinbase: entry.is_coinbase,
+                    status: status.to_string(),
                 }
             })
-            .map(|(outpoint, entry)| UtxoResponse {
-                txid: hash_to_hex(&outpoint.txid),
-                vout: outpoint.vout,
-                value: entry.value,
-                height: entry.height,
-                is_coinbase: entry.is_coinbase,
-            })
             .collect();
+
+        drop(mempool);
 
         Ok(AddressUtxosResponse {
             address,

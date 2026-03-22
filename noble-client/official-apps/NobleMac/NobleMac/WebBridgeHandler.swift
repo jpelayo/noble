@@ -271,6 +271,7 @@ final class WebBridgeHandler {
                         "value": u.value,
                         "height": u.height,
                         "is_coinbase": u.isCoinbase,
+                        "status": u.status,
                     ] as [String: Any]
                 },
             ] as [String: Any]
