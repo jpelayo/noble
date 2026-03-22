@@ -13,7 +13,7 @@ use noble_consensus::{ConsensusStateMachine, VotingStrategy};
 use noble_crypto::NoblePublicKey;
 use noble_storage::StorageEngine;
 
-/// Parse a public key that may be either hex wire bytes or a `nbl1…` bech32 address.
+/// Parse a public key that may be hex wire bytes, a raw compressed key, or a `nbl1…` bech32 address.
 fn parse_pubkey_input(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
     let trimmed = input.trim();
     // Try nbl1… bech32 address first
@@ -21,11 +21,18 @@ fn parse_pubkey_input(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
         return noble_crypto::noble_addr::decode(trimmed)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
     }
-    // Fall back to hex wire bytes
+    // Fall back to hex bytes
     let wire_bytes =
         hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-    NoblePublicKey::from_wire_bytes(&wire_bytes)
-        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
+    // Try Noble wire format first (scheme_id prefix + key)
+    if let Ok(pk) = NoblePublicKey::from_wire_bytes(&wire_bytes) {
+        return Ok(pk);
+    }
+    // Fallback: raw 33-byte compressed secp256k1 key (0x02 or 0x03 SEC1 prefix)
+    if wire_bytes.len() == 33 && (wire_bytes[0] == 0x02 || wire_bytes[0] == 0x03) {
+        return Ok(NoblePublicKey::Secp256k1(wire_bytes));
+    }
+    Err(ApiError::InvalidAddress("not a valid public key (expected nbl1… bech32, Noble wire hex, or 33-byte compressed key)".into()).into())
 }
 
 /// Convert a `VotingStrategy` to a (name, params) pair for RPC responses.

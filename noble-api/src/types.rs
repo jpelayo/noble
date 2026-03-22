@@ -21,6 +21,7 @@ pub fn hash_to_hex(h: &Hash256) -> String {
 }
 
 /// Parse a hex-encoded wire-format public key, returning a JSON-RPC error on failure.
+/// Accepts Noble wire format (0x02 scheme prefix + 33 bytes) or raw 33-byte compressed key (0x02/0x03 SEC1 prefix).
 pub fn parse_pubkey(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
     let trimmed = input.trim();
     // Try nbl1… bech32 address first
@@ -28,11 +29,18 @@ pub fn parse_pubkey(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
         return noble_crypto::noble_addr::decode(trimmed)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
     }
-    // Fall back to hex wire bytes
+    // Fall back to hex bytes
     let bytes =
         hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
-    NoblePublicKey::from_wire_bytes(&bytes)
-        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
+    // Try Noble wire format first (scheme_id prefix + key)
+    if let Ok(pk) = NoblePublicKey::from_wire_bytes(&bytes) {
+        return Ok(pk);
+    }
+    // Fallback: raw 33-byte compressed secp256k1 key (0x02 or 0x03 SEC1 prefix)
+    if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+        return Ok(NoblePublicKey::Secp256k1(bytes));
+    }
+    Err(ApiError::InvalidAddress("not a valid public key".into()).into())
 }
 
 /// Parse an address string into a `NobleAddress`.
@@ -83,8 +91,15 @@ pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
     // Try hex-encoded wire bytes (covers both NOBLE keys and Bitcoin address wire format)
     let bytes = hex::decode(trimmed)
         .map_err(|_| ApiError::InvalidAddress("invalid hex string or unrecognized address format".into()))?;
-    NobleAddress::from_wire_bytes(&bytes)
-        .map_err(|e| ApiError::InvalidAddress(e.to_string()).into())
+    // Try Noble wire format first (scheme_id + key or Bitcoin address wire)
+    if let Ok(addr) = NobleAddress::from_wire_bytes(&bytes) {
+        return Ok(addr);
+    }
+    // Fallback: raw 33-byte compressed secp256k1 key (0x02 or 0x03 SEC1 prefix)
+    if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+        return Ok(NobleAddress::Noble(NoblePublicKey::Secp256k1(bytes)));
+    }
+    Err(ApiError::InvalidAddress("not a valid address or public key".into()).into())
 }
 
 /// Parse a hex string into a `Hash256`, returning a JSON-RPC error on failure.

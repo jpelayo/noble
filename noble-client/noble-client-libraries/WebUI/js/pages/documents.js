@@ -1175,12 +1175,21 @@ export function init(root, ctx) {
 
             document.body.appendChild(dropdown);
 
-            // Flip upward if dropdown overflows the viewport bottom
+            // Position dropdown so it's fully visible and centered on the button.
             const ddRect = dropdown.getBoundingClientRect();
             const viewportH = window.innerHeight || document.documentElement.clientHeight;
-            if (ddRect.bottom > viewportH) {
-                dropdown.style.top = '';
-                dropdown.style.bottom = (viewportH - btnRect.top + 4) + 'px';
+            const ddHeight = ddRect.height;
+
+            // Try below first
+            if (btnRect.bottom + 4 + ddHeight <= viewportH) {
+                // Fits below — keep default position
+            } else if (btnRect.top - 4 - ddHeight >= 0) {
+                // Fits above
+                dropdown.style.top = (btnRect.top - ddHeight - 4) + 'px';
+            } else {
+                // Doesn't fit above or below — center vertically in viewport
+                const top = Math.max(8, (viewportH - ddHeight) / 2);
+                dropdown.style.top = top + 'px';
             }
         });
 

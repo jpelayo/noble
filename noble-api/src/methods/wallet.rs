@@ -714,12 +714,20 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             let mempool = self.mempool.lock();
             let mut seen_pending = std::collections::HashSet::new();
 
+            let mempool_count = mempool.len();
+            tracing::debug!(task = "wallet_txs", "mempool scan: {} entries, {} wallet wire variants", mempool_count, my_wires.len());
+            for (i, w) in my_wires.iter().enumerate() {
+                tracing::debug!(task = "wallet_txs", "  my_wire[{}] = {} ({} bytes)", i, hex::encode(w), w.len());
+            }
+
             for entry in mempool.iter_by_fee_rate_desc() {
                 if !seen_pending.insert(entry.tx_id) { continue; }
 
                 // Check if we are the sender.
-                let sender_is_ours = entry.tx.issuer_sig.to_noble_public_key().ok()
-                    .map(|pk| is_ours(&noble_core::NobleAddress::Noble(pk).to_wire_bytes()))
+                let issuer_wire = entry.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+                let sender_is_ours = issuer_wire.as_ref()
+                    .map(|w| is_ours(w))
                     .unwrap_or(false);
 
                 // Check if any output goes to us (incoming).
@@ -727,6 +735,16 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value)
                     .sum();
+
+                tracing::debug!(
+                    task = "wallet_txs",
+                    "mempool tx {} type={} issuer_wire={} sender_ours={} value_to_us={}",
+                    hex::encode(entry.tx_id.as_bytes()),
+                    entry.tx.tx_type,
+                    issuer_wire.as_ref().map(|w| hex::encode(w)).unwrap_or_else(|| "ERR".into()),
+                    sender_is_ours,
+                    value_to_us,
+                );
 
                 if !sender_is_ours && value_to_us == 0 {
                     continue; // Not our tx — skip
