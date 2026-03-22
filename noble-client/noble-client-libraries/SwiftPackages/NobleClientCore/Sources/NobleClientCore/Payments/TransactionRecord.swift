@@ -41,6 +41,16 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
     public let blockHeight: UInt64?
     public let timestamp: Date?
     public let checksum: Hash256?
+    /// Transaction fee in groats (computed from inputs - outputs).
+    public let fee: UInt64?
+    /// Net transfer value (outputs NOT going back to signer).
+    public let transferValue: UInt64?
+    /// User metadata attached to the transaction.
+    public let metadata: [MetadataItem]?
+    /// Whether the transaction has an encrypted locator.
+    public let hasEncryptedLocator: Bool
+    /// Number of confirmations (tip_height - tx_height + 1).
+    public let confirmations: UInt64?
 
     public init(
         txId: Hash256,
@@ -52,7 +62,12 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         outputs: [TxOutput] = [],
         blockHeight: UInt64? = nil,
         timestamp: Date? = nil,
-        checksum: Hash256? = nil
+        checksum: Hash256? = nil,
+        fee: UInt64? = nil,
+        transferValue: UInt64? = nil,
+        metadata: [MetadataItem]? = nil,
+        hasEncryptedLocator: Bool = false,
+        confirmations: UInt64? = nil
     ) {
         self.txId = txId
         self.txType = txType
@@ -64,5 +79,10 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         self.blockHeight = blockHeight
         self.timestamp = timestamp
         self.checksum = checksum
+        self.fee = fee
+        self.transferValue = transferValue
+        self.metadata = metadata
+        self.hasEncryptedLocator = hasEncryptedLocator
+        self.confirmations = confirmations
     }
 }

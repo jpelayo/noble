@@ -36,6 +36,8 @@ struct TransactionDTO: Decodable, Sendable {
     let checksum: String?
     let timestamp: UInt64?
     let total_output: UInt64?
+    let transfer_value: UInt64?
+    let fee: UInt64?
     let inputs: [TxInputDTO]?
     let outputs: [TxOutputDTO]?
     let signer: String?

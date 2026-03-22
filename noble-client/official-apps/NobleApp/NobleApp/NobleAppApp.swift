@@ -12,6 +12,9 @@ struct NobleAppApp: App {
     init() {
         // Kill all WKWebView caches so updated JS/CSS from new builds
         // are never masked by stale cached responses.
+        let dataStore = WKWebsiteDataStore.default()
+        let allTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        dataStore.removeData(ofTypes: allTypes, modifiedSince: .distantPast) { }
         URLCache.shared.removeAllCachedResponses()
     }
 
@@ -27,7 +30,10 @@ struct NobleAppApp: App {
                 }
             }
             .task {
-                await appState.autoConnectIfNeeded()
+                if appState.autoConnect && !appState.nodeURL.isEmpty
+                    && appState.hasWallet && appState.hasCompletedOnboarding {
+                    await appState.connectToNode()
+                }
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {

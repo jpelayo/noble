@@ -107,6 +107,7 @@ struct WebContentView: UIViewRepresentable {
         // Register the custom URL scheme handler for bundled WebUI files.
         // iOS bundles individual folder references (js/, css/, index.html) at the bundle root,
         // so we fall back to resourceURL if no WebUI directory exists.
+        // (macOS uses resourceURL/WebUI — the fallback paths differ by platform.)
         let webUIDir = Bundle.main.url(forResource: "WebUI", withExtension: nil)
             ?? Bundle.main.resourceURL!
         let schemeHandler = WebUISchemeHandler(baseDirectory: webUIDir)

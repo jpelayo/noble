@@ -7,6 +7,7 @@ import WebKit
 @main
 struct NobleMacApp: App {
     @State private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let dataStore = WKWebsiteDataStore.default()
@@ -26,6 +27,18 @@ struct NobleMacApp: App {
             }
             .task {
                 appState.checkExistingWallet()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .active:
+                    if appState.isConnected {
+                        appState.startPolling()
+                    }
+                case .background, .inactive:
+                    appState.stopPolling()
+                @unknown default:
+                    break
+                }
             }
         }
         #if os(macOS)

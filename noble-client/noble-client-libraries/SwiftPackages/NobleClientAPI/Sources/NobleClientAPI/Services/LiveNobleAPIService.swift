@@ -144,6 +144,18 @@ public struct LiveNobleAPIService: NobleAPIService {
         )
     }
 
+    public func getAddressPending(address: String) async throws -> [PendingTransaction] {
+        struct Params: Encodable, Sendable { let address: String }
+        let dto = try await client.call(
+            method: "noble_getAddressPending",
+            params: Params(address: address),
+            expecting: AddressPendingDTO.self
+        )
+        return dto.transactions.map {
+            PendingTransaction(txId: $0.tx_id, sent: $0.sent, change: $0.change, fee: $0.fee, netDebit: $0.net_debit)
+        }
+    }
+
     // MARK: - Fees
 
     public func estimateFee() async throws -> FeeEstimate {
@@ -281,13 +293,19 @@ public struct LiveNobleAPIService: NobleAPIService {
             print("[NobleAPI] Warning: could not parse signer '\(dto?.signer ?? "nil")' — using placeholder")
             signer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!  // swiftlint:disable:this force_unwrapping
         }
-        let txType: TransactionType = (dto?.tx_type ?? 0) == 1 ? .transfer : .notarization
-        let status: TransactionStatus = (receipt?.status ?? "pending") == "confirmed" ? .confirmed : .pending
+        let txType = TransactionType(rawValue: dto?.tx_type ?? 0) ?? .notarization
+        // Rust returns "pending", "admitted", "maturing", "complete" — map to Swift enum.
+        let status: TransactionStatus
+        switch receipt?.status {
+        case "complete", "maturing", "admitted": status = .confirmed
+        default: status = .pending
+        }
         let checksum = dto?.checksum.flatMap { Hash256(hex: $0) }
         let timestamp = dto?.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
 
         let inputs = (dto?.inputs ?? []).map { TxInput(txid: $0.txid, vout: $0.vout) }
         let outputs = (dto?.outputs ?? []).map { TxOutput(value: $0.value, address: $0.address) }
+        let metadata = (dto?.metadata ?? []).map { MetadataItem(key: $0.key, value: $0.value) }
 
         return TransactionRecord(
             txId: txId,
@@ -299,7 +317,12 @@ public struct LiveNobleAPIService: NobleAPIService {
             outputs: outputs,
             blockHeight: receipt?.block_height,
             timestamp: timestamp,
-            checksum: checksum
+            checksum: checksum,
+            fee: dto?.fee,
+            transferValue: dto?.transfer_value,
+            metadata: metadata.isEmpty ? nil : metadata,
+            hasEncryptedLocator: dto?.has_encrypted_locator ?? false,
+            confirmations: receipt?.confirmations
         )
     }
 

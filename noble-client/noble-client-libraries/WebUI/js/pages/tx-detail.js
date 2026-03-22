@@ -1,0 +1,226 @@
+// NOBLE Client — Transaction Detail Page
+// Type-aware rendering adapted from node dashboard tx-detail.js.
+
+import { formatAmount } from '../components/amount-text.js';
+import { TX_TYPES, TX_TYPE_NAMES, txDisplayAmount, classifyMetadata, isZeroChecksum, formatTxType, decodeMetadataValue, txStatusBadge } from '../tx-display.js';
+
+export function init(root, ctx) {
+    const { state, Bridge, params } = ctx;
+    const txid = params?.txid;
+    if (!txid) {
+        root.innerHTML = '<div class="empty-state">No transaction ID provided</div>';
+        return { destroy() {} };
+    }
+
+    root.innerHTML = `
+        <div style="margin-bottom:var(--gap)">
+            <button class="btn btn-sm" id="tx-back">&larr; Back</button>
+        </div>
+        <div class="page-header">
+            <h2 style="margin:0">Transaction Detail</h2>
+        </div>
+        <div id="tx-loading" class="empty-state">Loading...</div>
+    `;
+
+    root.querySelector('#tx-back').addEventListener('click', () => {
+        if (window.App) App.navigateTo('payments');
+    });
+
+    async function load() {
+        let tx = null;
+        let receipt = null;
+
+        try {
+            // Try getTransaction first (returns enriched tx with fee, transfer_value)
+            tx = await Bridge.call('noble_api', 'getTransaction', { txId: txid });
+        } catch (e) {
+            console.warn('[tx-detail] getTransaction failed:', e);
+        }
+
+        if (!tx) {
+            root.querySelector('#tx-loading')?.remove();
+            root.innerHTML += '<div class="empty-state">Transaction not found</div>';
+            return;
+        }
+
+        root.querySelector('#tx-loading')?.remove();
+
+        const txType = tx.tx_type ?? parseTypeFromLabel(tx.type);
+        const metadata = tx.metadata || [];
+        const { system, user, signatures } = classifyMetadata(metadata, txType);
+        const disp = txDisplayAmount(tx);
+
+        // ── Hero Section ──
+        const heroEl = document.createElement('div');
+        heroEl.className = 'card';
+        heroEl.style.cssText = 'text-align:center;padding:var(--gap);margin-bottom:var(--gap)';
+
+        if ((txType === TX_TYPES.NOTARIZATION || txType === TX_TYPES.UNLOCKING) && !isZeroChecksum(tx.checksum)) {
+            heroEl.innerHTML = `
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:4px">${txType === TX_TYPES.UNLOCKING ? 'Revealed Document Checksum' : 'Document Checksum'}</div>
+                <div class="mono" style="word-break:break-all;font-size:var(--font-size-sm)">${esc(tx.checksum)}</div>
+                <button class="btn btn-sm" id="copy-checksum" style="margin-top:8px">Copy Checksum</button>
+            `;
+        } else if (txType === TX_TYPES.LOCKED) {
+            heroEl.innerHTML = `
+                <div style="font-size:1.2rem">&#x1F512; Encrypted Document</div>
+                <div style="color:var(--text-muted);font-size:var(--font-size-xs);margin-top:4px">Checksum and metadata encrypted with AES-256-GCM</div>
+            `;
+        } else if (txType === TX_TYPES.TRANSFER) {
+            heroEl.innerHTML = `
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer</div>
+                <div style="font-size:1.5rem;font-weight:700" class="mono">&diams; ${formatAmount(disp.amount)}</div>
+            `;
+        } else if (txType === TX_TYPES.COINBASE) {
+            heroEl.innerHTML = `
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted)"><span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Coinbase</span> Block Reward</div>
+                <div style="font-size:1.5rem;font-weight:700" class="mono">&diams; ${formatAmount(disp.amount)}</div>
+            `;
+        } else if (txType === TX_TYPES.KEY_ROTATION) {
+            heroEl.innerHTML = '<div style="font-size:1.2rem">&#x1F504; Key Rotation</div>';
+        } else if (txType === TX_TYPES.BADGE_PROPOSAL) {
+            heroEl.innerHTML = '<div style="font-size:1.2rem">&#x1F3C5; Badge Proposal</div>';
+        } else if (txType === TX_TYPES.BADGE_VOTE) {
+            heroEl.innerHTML = '<div style="font-size:1.2rem">&#x1F5F3; Badge Vote</div>';
+        } else if (txType === TX_TYPES.BADGE_REVOCATION) {
+            heroEl.innerHTML = '<div style="font-size:1.2rem">&#x26D4; Badge Revocation</div>';
+        } else {
+            heroEl.style.display = 'none';
+        }
+        root.appendChild(heroEl);
+
+        // Copy button
+        root.querySelector('#copy-checksum')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(tx.checksum).then(() => {
+                const btn = root.querySelector('#copy-checksum');
+                btn.textContent = 'Copied!';
+                setTimeout(() => { btn.textContent = 'Copy Checksum'; }, 1500);
+            });
+        });
+
+        // ── Detail Grid ──
+        const grid = document.createElement('div');
+        grid.className = 'card';
+        grid.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+        let html = '<dl style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0">';
+        html += row('TX ID', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.txId || txid)}</span>`);
+        html += row('Type', formatTxType(txType));
+        if (tx.timestamp) html += row('Time', formatTime(tx.timestamp));
+
+        if (txType === TX_TYPES.TRANSFER) {
+            html += row('Amount Sent', `<span class="mono">&diams; ${formatAmount(disp.amount)}</span>`);
+            if (tx.fee != null) html += row('Fee', `<span class="mono">&diams; ${formatAmount(tx.fee)}</span>`);
+        } else if (txType === TX_TYPES.COINBASE) {
+            html += row('Block Reward', `<span class="mono">&diams; ${formatAmount(disp.amount)}</span>`);
+        } else {
+            if (tx.fee != null) html += row('Fee', `<span class="mono">&diams; ${formatAmount(tx.fee)}</span>`);
+            html += row('Total Output', `<span class="mono" style="color:var(--text-muted)">&diams; ${formatAmount(tx.total_output || 0)}</span>`);
+        }
+
+        const badge = txStatusBadge(tx.confirmations, tx.status);
+        html += row('Status', `<span class="badge ${badge.cls}">${badge.html}</span>`);
+        if (tx.blockHeight != null) html += row('Block Height', String(tx.blockHeight));
+        if (tx.confirmations != null) html += row('Confirmations', String(tx.confirmations));
+        if (tx.signer) html += row('Signer', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.signer)}</span>`);
+
+        html += '</dl>';
+        grid.innerHTML = html;
+        root.appendChild(grid);
+
+        // ── Inputs ──
+        const inputs = tx.inputs || [];
+        if (inputs.length > 0) {
+            const panel = document.createElement('div');
+            panel.className = 'card';
+            panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+            const isCoinbase = inputs.length === 1 && /^0+$/.test(inputs[0].txid);
+            let ihtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Inputs (${inputs.length})</h3>`;
+            if (isCoinbase) {
+                ihtml += '<div style="color:var(--text-muted);font-size:var(--font-size-xs)">Coinbase (new coins minted by the network)</div>';
+            } else {
+                for (let i = 0; i < inputs.length; i++) {
+                    ihtml += `<div style="margin-bottom:4px;font-size:var(--font-size-xs)">
+                        <span style="color:var(--text-muted)">#${i}</span>
+                        <span class="mono" style="word-break:break-all">${esc(inputs[i].txid)}</span>:<strong>${inputs[i].vout}</strong>
+                    </div>`;
+                }
+            }
+            panel.innerHTML = ihtml;
+            root.appendChild(panel);
+        }
+
+        // ── Outputs ──
+        const outputs = tx.outputs || [];
+        if (outputs.length > 0) {
+            const panel = document.createElement('div');
+            panel.className = 'card';
+            panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+            let ohtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Outputs (${outputs.length})</h3>`;
+            for (let i = 0; i < outputs.length; i++) {
+                ohtml += `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;font-size:var(--font-size-xs)">
+                    <span class="mono" style="word-break:break-all;flex:1;margin-right:8px">#${i} &rarr; ${esc(outputs[i].address)}</span>
+                    <span class="mono" style="white-space:nowrap">&diams; ${formatAmount(outputs[i].value)}</span>
+                </div>`;
+            }
+            panel.innerHTML = ohtml;
+            root.appendChild(panel);
+        }
+
+        // ── User Metadata ──
+        if (user.length > 0) {
+            const panel = document.createElement('div');
+            panel.className = 'card';
+            panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+            let mhtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Metadata (${user.length})</h3>`;
+            for (const entry of user) {
+                const val = decodeMetadataValue(entry.value);
+                const sigMatch = signatures.find(s => s.slotIndex === metadata.indexOf(metadata.find(m => m.key === entry.key)));
+                const sigBadge = sigMatch ? ' <span class="badge" style="background:var(--success);color:#fff;font-size:0.5rem;padding:1px 4px">Signed</span>' : '';
+                mhtml += `<div style="margin-bottom:6px">
+                    <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(entry.key)}${sigBadge}</div>
+                    <div class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(val)}</div>
+                </div>`;
+            }
+            panel.innerHTML = mhtml;
+            root.appendChild(panel);
+        }
+
+        // ── Encrypted locator ──
+        if (tx.has_encrypted_locator) {
+            const locEl = document.createElement('div');
+            locEl.className = 'card';
+            locEl.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap);border-left:3px solid var(--accent)';
+            locEl.innerHTML = '<span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Encrypted Locator</span> Available';
+            root.appendChild(locEl);
+        }
+    }
+
+    load();
+    return { destroy() {} };
+}
+
+// ── Helpers ──
+
+function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+}
+
+function row(label, value) {
+    return `<dt style="font-size:var(--font-size-xs);color:var(--text-muted);padding:2px 0">${label}</dt><dd style="margin:0;padding:2px 0">${value}</dd>`;
+}
+
+function formatTime(ts) {
+    if (!ts) return '—';
+    const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
+    return d.toLocaleString();
+}
+
+function parseTypeFromLabel(label) {
+    if (!label) return -1;
+    const lower = label.toLowerCase().replace(/[_\s-]/g, '');
+    const map = { notarization: 0, transfer: 1, keyrotation: 2, badgeproposal: 3, badgevote: 4, badgerevocation: 5, locked: 6, unlocking: 7, coinbase: 16 };
+    return map[lower] ?? -1;
+}

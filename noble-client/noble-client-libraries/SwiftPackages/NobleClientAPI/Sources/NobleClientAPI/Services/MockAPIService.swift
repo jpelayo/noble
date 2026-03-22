@@ -143,6 +143,11 @@ public struct MockAPIService: NobleAPIService {
         ])
     }
 
+    public func getAddressPending(address: String) async throws -> [PendingTransaction] {
+        await simulateDelay()
+        return []
+    }
+
     // MARK: - Fees
 
     public func estimateFee() async throws -> FeeEstimate {

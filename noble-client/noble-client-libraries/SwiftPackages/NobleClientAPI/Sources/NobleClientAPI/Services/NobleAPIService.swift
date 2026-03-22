@@ -48,6 +48,9 @@ public protocol NobleAPIService: Sendable {
     /// Fetch UTXOs for a specific address.
     func getAddressUtxos(address: String) async throws -> AddressUtxos
 
+    /// Fetch pending (mempool) transactions for an address.
+    func getAddressPending(address: String) async throws -> [PendingTransaction]
+
     // MARK: - Fees
 
     /// Estimate transaction fees.

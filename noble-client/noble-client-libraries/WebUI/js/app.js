@@ -9,6 +9,7 @@ import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
 import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
+import { init as initTxDetail } from './pages/tx-detail.js';
 
 const pages = {
     home:      initHome,
@@ -19,6 +20,7 @@ const pages = {
     contacts:  initContacts,
     settings:  initSettings,
     faucet:    initFaucet,
+    'tx-detail': initTxDetail,
 };
 
 let currentPage = null;
@@ -31,9 +33,11 @@ let bootComplete = false;
 const mountedPages = {};  // section → { root: HTMLElement, page: pageInstance }
 
 const App = {
-    /** Navigate to a section. Pages are mounted once and hidden/shown, never destroyed. */
-    navigateTo(section) {
-        if (section === currentRoute) return;
+    /** Navigate to a section. Pages are mounted once and hidden/shown, never destroyed.
+     *  Parameterized pages (like tx-detail) are always recreated with fresh params. */
+    navigateTo(section, params) {
+        const isParameterized = !!params;
+        if (section === currentRoute && !isParameterized) return;
         const container = document.getElementById('app-content');
         if (!container) return;
 
@@ -43,6 +47,13 @@ const App = {
         }
 
         currentRoute = section;
+
+        // Parameterized pages: destroy old instance and recreate
+        if (isParameterized && mountedPages[section]) {
+            if (mountedPages[section].page?.destroy) mountedPages[section].page.destroy();
+            mountedPages[section].root.remove();
+            delete mountedPages[section];
+        }
 
         // Reuse existing page or create new one
         if (mountedPages[section]) {
@@ -62,7 +73,7 @@ const App = {
             const initFn = pages[section];
             let page = null;
             if (initFn) {
-                page = initFn(root, { state: appState, Bridge });
+                page = initFn(root, { state: appState, Bridge, params: params || {} });
             } else {
                 root.appendChild(emptyState({
                     icon: '\u{1F6A7}',

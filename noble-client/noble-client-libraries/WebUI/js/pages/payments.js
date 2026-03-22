@@ -8,7 +8,7 @@ import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
 import { renderQR } from '../components/qr-code.js';
 import { esc, timeAgo, truncate, initials, showCopyFeedback } from '../utils.js';
-import { txDisplayAmount } from '../tx-display.js';
+import { TX_TYPES, txDisplayAmount, formatTxType, txStatusBadge } from '../tx-display.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -17,7 +17,7 @@ export function init(root, ctx) {
     const historyLimit = 20;
     let historyData = null;
     let balanceData = null;
-    let expandedTx = null;
+    // expandedTx removed — tx-detail page used instead
 
     render();
 
@@ -102,7 +102,7 @@ export function init(root, ctx) {
                 const txIds = (hist && hist.transactions) || [];
                 const txDetails = await Promise.all(
                     txIds.slice(0, 20).map(id =>
-                        Bridge.call('noble_api', 'getTransaction', { tx_id: id }).catch(() => null)
+                        Bridge.call('noble_api', 'getTransaction', { txId: id }).catch(() => null)
                     )
                 );
                 history = { transactions: txDetails.filter(Boolean) };
@@ -174,29 +174,37 @@ export function init(root, ctx) {
             return;
         }
 
-        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th></th><th>Counterparty</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>';
+        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th></th><th>Type</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>';
         for (const tx of txs) {
             const dir = txDirection(tx);
-            const counterparty = tx.counterparty ? truncate(tx.counterparty, 8) : '\u2014';
+            const typeName = formatTxType(tx.tx_type ?? parseTypeLabel(tx.type));
+            const counterparty = tx.counterparty ? truncate(tx.counterparty, 12) : '';
             const disp = txDisplayAmount(tx);
             const amount = formatAmount(disp.amount);
-            const status = tx.confirmations >= 6 ? 'confirmed' : (tx.confirmations > 0 ? 'pending' : 'pending');
+            const badge = txStatusBadge(tx.confirmations, tx.status);
             const ago = timeAgo(tx.timestamp);
-            const isExpanded = expandedTx === tx.txId;
             html += `<tr class="tx-row" data-txid="${esc(tx.txId)}" style="cursor:pointer">
                 <td><span class="tx-direction ${dir.cls}">${dir.icon}</span></td>
-                <td class="mono" style="font-size:var(--font-size-xs)">${counterparty}</td>
+                <td>
+                    <div style="font-size:var(--font-size-xs);font-weight:600">${typeName}</div>
+                    ${counterparty ? `<div class="mono" style="font-size:0.65rem;color:var(--text-muted)">${counterparty}</div>` : ''}
+                </td>
                 <td class="mono">\u25C6 ${amount}</td>
-                <td><span class="badge badge-${status}">${status}</span></td>
+                <td><span class="badge ${badge.cls}">${badge.html}</span></td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;
-            if (isExpanded) {
-                html += `<tr class="tx-detail-row"><td colspan="5">${renderTxDetail(tx)}</td></tr>`;
-            }
         }
         html += '</tbody></table></div>';
 
         const card = nobleCard('Transaction History', html);
+
+        // Click handler → navigate to tx-detail page
+        card.addEventListener('click', e => {
+            const row = e.target.closest('.tx-row');
+            if (!row) return;
+            const txId = row.dataset.txid;
+            if (txId && window.App) App.navigateTo('tx-detail', { txid: txId });
+        });
 
         // Keyboard accessibility for tx rows
         card.querySelectorAll('.tx-row').forEach(row => {
@@ -205,15 +213,6 @@ export function init(root, ctx) {
             row.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
             });
-        });
-
-        // Click handler for rows
-        card.addEventListener('click', e => {
-            const row = e.target.closest('.tx-row');
-            if (!row) return;
-            const txId = row.dataset.txid;
-            expandedTx = expandedTx === txId ? null : txId;
-            renderHistory(container, data);
         });
 
         // Pagination
@@ -261,31 +260,24 @@ export function init(root, ctx) {
         container.appendChild(card);
     }
 
-    function renderTxDetail(tx) {
-        const outputsHtml = (tx.outputs || []).map((o, i) =>
-            `<dt>Output #${i}</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">\u25C6 ${formatAmount(o.value)} \u2192 ${esc(o.address)}</dd>`
-        ).join('');
-        const inputsHtml = (tx.inputs || []).map((inp, i) =>
-            `<dt>Input #${i}</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(inp.txid)}:${inp.vout}</dd>`
-        ).join('');
-        const txDisp = txDisplayAmount(tx);
-        return `<div class="detail-grid" style="padding:var(--gap-sm) 0">
-            <dt>TX ID</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.txId)}</dd>
-            <dt>Block Height</dt><dd>${tx.blockHeight || '\u2014'}</dd>
-            <dt>Confirmations</dt><dd>${tx.confirmations}</dd>
-            <dt>Type</dt><dd>${esc(tx.type)}</dd>
-            <dt>${txDisp.label}</dt><dd class="mono">\u25C6 ${formatAmount(txDisp.amount)}</dd>
-            ${outputsHtml}
-            ${inputsHtml}
-            ${tx.counterparty ? `<dt>Counterparty</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(tx.counterparty)}</dd>` : ''}
-            <dt>Time</dt><dd>${new Date(tx.timestamp * 1000).toLocaleString()}</dd>
-        </div>`;
-    }
-
     function txDirection(tx) {
-        if (tx.type === 'notarization') return { icon: '\u{1F4C4}', cls: 'tx-notarization' };
+        const t = tx.tx_type ?? parseTypeLabel(tx.type);
+        if (t === TX_TYPES.COINBASE) return { icon: '\u26CF', cls: 'tx-coinbase' };
+        if (t === TX_TYPES.LOCKED) return { icon: '\u{1F512}', cls: 'tx-locked' };
+        if (t === TX_TYPES.UNLOCKING) return { icon: '\u{1F511}', cls: 'tx-unlocking' };
+        if (t === TX_TYPES.KEY_ROTATION) return { icon: '\u{1F504}', cls: 'tx-rotation' };
+        if (t === TX_TYPES.BADGE_PROPOSAL || t === TX_TYPES.BADGE_VOTE || t === TX_TYPES.BADGE_REVOCATION) return { icon: '\u{1F3C5}', cls: 'tx-badge' };
+        if (t === TX_TYPES.NOTARIZATION) return { icon: '\u{1F4C4}', cls: 'tx-notarization' };
         if (tx.direction === 'incoming') return { icon: '\u2B07', cls: 'tx-incoming' };
         return { icon: '\u2B06', cls: 'tx-outgoing' };
+    }
+
+    function parseTypeLabel(label) {
+        if (typeof label === 'number') return label;
+        if (!label) return -1;
+        const lower = label.toLowerCase().replace(/[_\s-]/g, '');
+        const map = { notarization: 0, transfer: 1, keyrotation: 2, badgeproposal: 3, badgevote: 4, badgerevocation: 5, locked: 6, unlocking: 7, coinbase: 16 };
+        return map[lower] ?? -1;
     }
 
     // ── Send Wizard ──

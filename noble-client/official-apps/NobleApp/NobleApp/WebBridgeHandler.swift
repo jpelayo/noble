@@ -100,11 +100,34 @@ final class WebBridgeHandler {
             let page = params["page"] as? Int ?? 0
             let limit = params["limit"] as? Int ?? 20
             let txs = try await api.getTransactionHistory(address: address, page: page, limit: limit)
-            return [
-                "transactions": txs.map { tx in
-                    txToDict(tx)
-                },
-            ] as [String: Any]
+            var allTxs: [[String: Any]] = []
+
+            // Prepend pending mempool txs on page 0
+            if page == 0 {
+                var pending: [PendingTransaction] = []
+                do { pending = try await api.getAddressPending(address: address) }
+                catch { print("[Bridge] warning: getAddressPending failed: \(error)") }
+                for p in pending {
+                    allTxs.append([
+                        "txId": p.txId,
+                        "tx_type": 1,
+                        "type": "Transfer",
+                        "txType": "Pending Transfer",
+                        "status": "pending",
+                        "direction": "outgoing",
+                        "counterparty": "Pending",
+                        "total_output": p.sent,
+                        "transfer_value": p.sent,
+                        "fee": p.fee,
+                        "net_debit": p.netDebit,
+                        "confirmations": 0,
+                        "timestamp": Date().timeIntervalSince1970,
+                    ] as [String: Any])
+                }
+            }
+
+            allTxs.append(contentsOf: txs.map { txToDict($0) })
+            return ["transactions": allTxs] as [String: Any]
 
         case "estimateFee":
             let fee = try await api.estimateFee()
@@ -334,6 +357,7 @@ final class WebBridgeHandler {
     private func txToDict(_ tx: TransactionRecord) -> [String: Any] {
         var dict: [String: Any] = [
             "txId": tx.txId.hex,
+            "tx_type": tx.txType.rawValue,
             "txType": tx.txType.label,
             "type": tx.txType.label,
             "status": tx.status.rawValue,
@@ -341,31 +365,57 @@ final class WebBridgeHandler {
             "total_output": tx.totalOutput,
             "inputs": tx.inputs.map { ["txid": $0.txid, "vout": $0.vout] as [String: Any] },
             "outputs": tx.outputs.map { ["value": $0.value, "address": $0.address] as [String: Any] },
+            "has_encrypted_locator": tx.hasEncryptedLocator,
         ]
         if let h = tx.blockHeight { dict["blockHeight"] = h }
         if let t = tx.timestamp { dict["timestamp"] = t.timeIntervalSince1970 }
         if let c = tx.checksum { dict["checksum"] = c.hex }
+        if let f = tx.fee { dict["fee"] = f }
+        if let tv = tx.transferValue { dict["transfer_value"] = tv }
+        if let conf = tx.confirmations { dict["confirmations"] = conf }
+        if let meta = tx.metadata, !meta.isEmpty {
+            dict["metadata"] = meta.map { ["key": $0.key, "value": $0.value] as [String: Any] }
+        }
 
-        // Derived fields for WebUI compatibility
+        // Direction and counterparty for all transaction types
         let walletAddr = appState.walletAddress ?? ""
-        let firstOutputAddr = tx.outputs.first?.address ?? ""
-        if tx.txType == .transfer {
+        switch tx.txType {
+        case .transfer:
             if tx.signer.nobleBech32 == walletAddr {
                 dict["direction"] = "outgoing"
-                // Counterparty is the first output that isn't us
-                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? firstOutputAddr
+                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? tx.outputs.first?.address ?? ""
                 dict["counterparty"] = counterparty
             } else {
                 dict["direction"] = "incoming"
                 dict["counterparty"] = tx.signer.nobleBech32
             }
+        case .coinbase:
+            dict["direction"] = "incoming"
+            dict["counterparty"] = "Block Reward"
+        case .notarization, .locked, .unlocking:
+            if tx.signer.nobleBech32 == walletAddr {
+                dict["direction"] = "outgoing"
+                dict["counterparty"] = "Self (Document)"
+            } else {
+                dict["direction"] = "incoming"
+                dict["counterparty"] = tx.signer.nobleBech32
+            }
+        case .keyRotation:
+            dict["direction"] = "self"
+            dict["counterparty"] = "Key Rotation"
+        case .badgeProposal, .badgeVote, .badgeRevocation:
+            dict["direction"] = "self"
+            dict["counterparty"] = "Governance"
         }
-        // Confirmations: compute from current block height if possible
-        if let txHeight = tx.blockHeight {
-            let tipHeight = UInt64(appState.blockHeight)
-            dict["confirmations"] = tipHeight >= txHeight ? (tipHeight - txHeight + 1) : 0
-        } else {
-            dict["confirmations"] = 0
+
+        // Confirmations fallback: compute from tip if not provided by RPC
+        if dict["confirmations"] == nil {
+            if let txHeight = tx.blockHeight {
+                let tipHeight = UInt64(appState.blockHeight)
+                dict["confirmations"] = tipHeight >= txHeight ? (tipHeight - txHeight + 1) : 0
+            } else {
+                dict["confirmations"] = 0
+            }
         }
         return dict
     }
@@ -415,7 +465,7 @@ final class WebBridgeHandler {
 
             // Parse available UTXOs and estimate real tx size for accurate coin selection.
             let allUtxos = try parseUtxoParams(params)
-            let changeAddress = walletChangeAddress()
+            let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
             let feeEstimate: UInt64
             if feeRate > 0 {
@@ -456,7 +506,7 @@ final class WebBridgeHandler {
 
             // Parse available UTXOs and estimate real tx size for accurate coin selection.
             let allUtxos = try parseUtxoParams(params)
-            let changeAddress = walletChangeAddress()
+            let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
             let feeEstimate: UInt64
             if feeRate > 0 {
@@ -486,7 +536,7 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let changeAddress = walletChangeAddress()
+            let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
             let txType = params["tx_type"] as? String ?? "notarization"
             let checksum = params["checksum"] as? String ?? String(repeating: "00", count: 32)
@@ -721,12 +771,146 @@ final class WebBridgeHandler {
             return contactToDict(myCard)
 
         case "importPKCS12":
-            // iOS: use UIDocumentPickerViewController for .p12 file selection
-            // This requires UIKit integration — for now, return a stub indicating
-            // the import must happen through the iOS document picker flow.
-            // The full iOS PKCS#12 import will use SecPKCS12Import identically
-            // to macOS, but the file selection UI differs.
-            throw BridgeError.operationFailed("PKCS#12 import: iOS file picker integration pending")
+            // Step 1: Pick .p12/.pfx file via UIDocumentPicker
+            let p12URL: URL = try await withCheckedThrowingContinuation { continuation in
+                let types = [
+                    UTType(filenameExtension: "p12") ?? .data,
+                    UTType(filenameExtension: "pfx") ?? .data,
+                ]
+                let picker = UIDocumentPickerViewController(forOpeningContentTypes: types)
+                picker.allowsMultipleSelection = false
+                let delegate = PKCS12PickerDelegate(continuation: continuation)
+                picker.delegate = delegate
+                // Prevent delegate from being deallocated before callback
+                objc_setAssociatedObject(picker, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
+                guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let root = scene.windows.first?.rootViewController else {
+                    continuation.resume(throwing: BridgeError.operationFailed("Cannot present file picker"))
+                    return
+                }
+                root.present(picker, animated: true)
+            }
+
+            let accessing = p12URL.startAccessingSecurityScopedResource()
+            defer { if accessing { p12URL.stopAccessingSecurityScopedResource() } }
+            let p12Data = try Data(contentsOf: p12URL)
+            let fileName = p12URL.deletingPathExtension().lastPathComponent
+
+            // Step 2: Prompt for password via UIAlertController
+            let password: String = try await withCheckedThrowingContinuation { continuation in
+                let alert = UIAlertController(
+                    title: "PKCS#12 Password",
+                    message: "Enter the password for \(p12URL.lastPathComponent):",
+                    preferredStyle: .alert
+                )
+                alert.addTextField { field in
+                    field.isSecureTextEntry = true
+                    field.placeholder = "Password"
+                }
+                alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                    continuation.resume(throwing: BridgeError.operationFailed("cancelled"))
+                })
+                alert.addAction(UIAlertAction(title: "Import", style: .default) { _ in
+                    let pw = alert.textFields?.first?.text ?? ""
+                    continuation.resume(returning: pw)
+                })
+                guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let root = scene.windows.first?.rootViewController else {
+                    continuation.resume(throwing: BridgeError.operationFailed("Cannot present password prompt"))
+                    return
+                }
+                // Present on the topmost presented controller
+                var presenter = root
+                while let next = presenter.presentedViewController { presenter = next }
+                presenter.present(alert, animated: true)
+            }
+
+            // Step 3: Import via Security.framework (identical to macOS)
+            var importedItems: CFArray?
+            let options = [kSecImportExportPassphrase: password] as NSDictionary
+            let importStatus = SecPKCS12Import(p12Data as CFData, options, &importedItems)
+            guard importStatus == errSecSuccess,
+                  let items = importedItems as? [[String: Any]],
+                  let firstItem = items.first else {
+                throw BridgeError.operationFailed("PKCS#12 import failed (wrong password or invalid file)")
+            }
+
+            guard let identityRef = firstItem[kSecImportItemIdentity as String] else {
+                throw BridgeError.operationFailed("No identity found in PKCS#12")
+            }
+            // SecIdentity is a CF type — downcast always succeeds if the key exists.
+            let identity = identityRef as! SecIdentity
+
+            var privateKeyRef: SecKey?
+            let privStatus = SecIdentityCopyPrivateKey(identity, &privateKeyRef)
+            guard privStatus == errSecSuccess, let privKey = privateKeyRef else {
+                throw BridgeError.operationFailed("Cannot extract private key (OSStatus \(privStatus))")
+            }
+
+            var certRef: SecCertificate?
+            let certStatus = SecIdentityCopyCertificate(identity, &certRef)
+            guard certStatus == errSecSuccess, let cert = certRef else {
+                throw BridgeError.operationFailed("Cannot extract certificate (OSStatus \(certStatus))")
+            }
+
+            // Only accept EC keys (P-256). Reject RSA.
+            guard let keyAttrs = SecKeyCopyAttributes(privKey) as? [String: Any],
+                  let keyType = keyAttrs[kSecAttrKeyType as String] as? String else {
+                throw BridgeError.operationFailed("Cannot determine key type")
+            }
+            guard keyType == (kSecAttrKeyTypeECSECPrimeRandom as String) else {
+                throw BridgeError.operationFailed("Only ECDSA (P-256) keys are supported. RSA signatures exceed the 256-byte metadata slot limit.")
+            }
+
+            guard let privKeyData = SecKeyCopyExternalRepresentation(privKey, nil) as? Data else {
+                throw BridgeError.operationFailed("Cannot export private key")
+            }
+
+            let certDER = SecCertificateCopyData(cert) as Data
+            let subjectSummary = SecCertificateCopySubjectSummary(cert) as? String ?? "Unknown"
+
+            // Compressed public key
+            guard let pubKeyRef = SecKeyCopyPublicKey(privKey) else {
+                throw BridgeError.operationFailed("Cannot derive public key from private key")
+            }
+            var pubKeyError: Unmanaged<CFError>?
+            guard let pubKeyRaw = SecKeyCopyExternalRepresentation(pubKeyRef, &pubKeyError) as? Data else {
+                let errMsg = pubKeyError?.takeRetainedValue().localizedDescription ?? "unknown"
+                throw BridgeError.operationFailed("Cannot export public key: \(errMsg)")
+            }
+            let compressedHex: String
+            if pubKeyRaw.count == 65 && pubKeyRaw[0] == 0x04 {
+                let x = pubKeyRaw[1...32]
+                let yParity: UInt8 = pubKeyRaw[64] & 1 == 0 ? 0x02 : 0x03
+                compressedHex = String(format: "%02x", yParity) + x.map { String(format: "%02x", $0) }.joined()
+            } else {
+                compressedHex = pubKeyRaw.map { String(format: "%02x", $0) }.joined()
+            }
+
+            // Compute SKI (SHA-1 of uncompressed public key)
+            let skiData = Insecure.SHA1.hash(data: pubKeyRaw)
+            let skiHex = skiData.map { String(format: "%02x", $0) }.joined()
+
+            // Store in Keychain
+            let keyEntry = SigningKeyEntry(
+                label: fileName,
+                algorithm: "p256",
+                publicKeyHex: compressedHex,
+                hasPrivateKey: true,
+                certificateSubject: subjectSummary,
+                certificateDER: certDER.base64EncodedString(),
+                subjectKeyIdentifier: skiHex
+            )
+
+            try appState.keychainService.storeKey(privKeyData, label: "signing-key-\(keyEntry.id.uuidString)")
+            try appState.keychainService.storeKey(certDER, label: "signing-cert-\(keyEntry.id.uuidString)")
+
+            if let idx = appState.contacts.firstIndex(where: { $0.isMyCard }) {
+                appState.contacts[idx].signingKeys.append(keyEntry)
+                appState.saveContactsToDefaults()
+            }
+
+            return signingKeyToDict(keyEntry)
 
         case "generateSigningKey":
             // Generate a secp256k1 keypair using SecRandomCopyBytes + derivePublicKey
@@ -762,8 +946,11 @@ final class WebBridgeHandler {
                   let keyId = UUID(uuidString: keyIdStr) else {
                 throw BridgeError.missingParam("keyId")
             }
-            try? appState.keychainService.deleteKey(label: "signing-key-\(keyIdStr)")
-            try? appState.keychainService.deleteKey(label: "signing-cert-\(keyIdStr)")
+            // Key deletion MUST succeed — prevent key material leak.
+            try appState.keychainService.deleteKey(label: "signing-key-\(keyIdStr)")
+            // Certificate deletion is best-effort (key material is the critical one).
+            do { try appState.keychainService.deleteKey(label: "signing-cert-\(keyIdStr)") }
+            catch { print("[Bridge] warning: cert cleanup failed (key removed): \(error)") }
 
             for i in 0..<appState.contacts.count {
                 appState.contacts[i].signingKeys.removeAll { $0.id == keyId }
@@ -1175,5 +1362,29 @@ private final class FaucetTLSDelegate: NSObject, URLSessionDelegate {
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
+    }
+}
+
+/// UIDocumentPicker delegate that resumes a continuation with the selected URL.
+private final class PKCS12PickerDelegate: NSObject, UIDocumentPickerDelegate {
+    private var continuation: CheckedContinuation<URL, any Error>?
+
+    init(continuation: CheckedContinuation<URL, any Error>) {
+        self.continuation = continuation
+        super.init()
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        if let url = urls.first {
+            continuation?.resume(returning: url)
+        } else {
+            continuation?.resume(throwing: BridgeError.operationFailed("cancelled"))
+        }
+        continuation = nil
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        continuation?.resume(throwing: BridgeError.operationFailed("cancelled"))
+        continuation = nil
     }
 }

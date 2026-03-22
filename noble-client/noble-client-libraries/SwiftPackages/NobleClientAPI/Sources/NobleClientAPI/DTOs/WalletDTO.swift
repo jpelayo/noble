@@ -91,3 +91,20 @@ struct AddressKeyDTO: Decodable, Sendable {
     let scheme: String?
     let bitcoin_addresses: [String]?
 }
+
+// MARK: - noble_getAddressPending
+
+struct AddressPendingDTO: Decodable, Sendable {
+    let address: String
+    let count: Int
+    let transactions: [PendingTxDTO]
+}
+
+struct PendingTxDTO: Decodable, Sendable {
+    let tx_id: String
+    let sent: UInt64
+    let change: UInt64
+    let fee: UInt64
+    let net_debit: UInt64
+    let confirmation_status: String?
+}

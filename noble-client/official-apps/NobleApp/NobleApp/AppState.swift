@@ -54,10 +54,6 @@ final class AppState {
 
     // MARK: - Connection
 
-    /// Whether the app has completed startup (wallet check + auto-connect attempt).
-    /// The WebView is not shown until this is true.
-    var isReady = false
-
     /// Whether the app is connected to a NOBLE node.
     var isConnected = false
 
@@ -130,6 +126,9 @@ final class AppState {
     // MARK: - Init (synchronous state from UserDefaults + Keychain)
 
     init() {
+        // Migrate noblemac.* → nobleapp.* keys from pre-rename builds.
+        Self.migrateKeyPrefixes(keychainService: keychainService)
+
         // Read all synchronous state at construction time so the first SwiftUI
         // frame renders the correct view — no flash between onboarding/main/loading.
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey)
@@ -148,10 +147,6 @@ final class AppState {
         } catch {
             hasWallet = false
         }
-
-        // Ready immediately unless auto-connect will happen (set by checkExistingWallet).
-        let willAutoConnect = autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding
-        isReady = !willAutoConnect
     }
 
     /// Mnemonic provider for wallet creation/import.
@@ -163,21 +158,68 @@ final class AppState {
     /// Document hasher for computing SHA-256 checksums.
     let documentHasher = DocumentHasher()
 
+    // MARK: - Key Prefix Migration (noblemac.* → nobleapp.*)
+
+    /// One-time migration of persistence keys from the old noblemac.* prefix
+    /// to the correct nobleapp.* prefix. Runs on first launch after the rename.
+    private static func migrateKeyPrefixes(keychainService: any KeychainService) {
+        let defaults = UserDefaults.standard
+        let sentinel = "nobleapp.migration.v1.complete"
+        guard !defaults.bool(forKey: sentinel) else { return }
+
+        // Keychain labels
+        let keychainMappings = [
+            ("noblemac.wallet.privatekey", "nobleapp.wallet.privatekey"),
+            ("noblemac.wallet.mnemonic", "nobleapp.wallet.mnemonic"),
+            ("noblemac.settings.nodeurl", "nobleapp.settings.nodeurl"),
+        ]
+        for (old, new) in keychainMappings {
+            if let data = try? keychainService.loadKey(label: old) {
+                do {
+                    try keychainService.storeKey(data, label: new)
+                    try? keychainService.deleteKey(label: old)
+                } catch {
+                    print("[Migration] Failed to migrate \(old) → \(new): \(error)")
+                    // Keep old key intact — do NOT delete it if the new write failed.
+                }
+            }
+        }
+
+        // UserDefaults keys
+        let defaultsMappings = [
+            ("noblemac.contacts", "nobleapp.contacts"),
+            ("noblemac.settings.appLockEnabled", "nobleapp.settings.appLockEnabled"),
+            ("noblemac.settings.lockTimeout", "nobleapp.settings.lockTimeout"),
+            ("noblemac.settings.reAuthForSends", "nobleapp.settings.reAuthForSends"),
+            ("noblemac.settings.autoConnect", "nobleapp.settings.autoConnect"),
+            ("noblemac.onboardingComplete", "nobleapp.onboardingComplete"),
+            ("noblemac.documentDrafts", "nobleapp.documentDrafts"),
+        ]
+        for (old, new) in defaultsMappings {
+            if let value = defaults.object(forKey: old) {
+                defaults.set(value, forKey: new)
+                defaults.removeObject(forKey: old)
+            }
+        }
+
+        defaults.set(true, forKey: sentinel)
+    }
+
     // MARK: - Keychain Labels
 
-    static let privateKeyLabel = "noblemac.wallet.privatekey"
-    static let mnemonicLabel = "noblemac.wallet.mnemonic"
-    static let nodeURLLabel = "noblemac.settings.nodeurl"
+    static let privateKeyLabel = "nobleapp.wallet.privatekey"
+    static let mnemonicLabel = "nobleapp.wallet.mnemonic"
+    static let nodeURLLabel = "nobleapp.settings.nodeurl"
 
     // MARK: - UserDefaults Keys
 
-    private static let contactsKey = "noblemac.contacts"
-    private static let appLockEnabledKey = "noblemac.settings.appLockEnabled"
-    private static let lockTimeoutKey = "noblemac.settings.lockTimeout"
-    private static let reAuthForSendsKey = "noblemac.settings.reAuthForSends"
-    private static let autoConnectKey = "noblemac.settings.autoConnect"
-    private static let onboardingCompleteKey = "noblemac.onboardingComplete"
-    private static let draftsKey = "noblemac.documentDrafts"
+    private static let contactsKey = "nobleapp.contacts"
+    private static let appLockEnabledKey = "nobleapp.settings.appLockEnabled"
+    private static let lockTimeoutKey = "nobleapp.settings.lockTimeout"
+    private static let reAuthForSendsKey = "nobleapp.settings.reAuthForSends"
+    private static let autoConnectKey = "nobleapp.settings.autoConnect"
+    private static let onboardingCompleteKey = "nobleapp.onboardingComplete"
+    private static let draftsKey = "nobleapp.documentDrafts"
 
     // MARK: - iOS Bridge Coordination
 
@@ -195,18 +237,6 @@ final class AppState {
 
     /// Items to share via the share sheet.
     var shareSheetItems: [Any] = []
-
-    // MARK: - Lifecycle
-
-    /// Check if a wallet already exists on launch.
-    /// Attempt auto-connect if conditions are met.
-    /// All synchronous state (wallet, onboarding, settings) is already loaded in init().
-    func autoConnectIfNeeded() async {
-        if autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding {
-            await connectToNode()
-        }
-        isReady = true
-    }
 
     // MARK: - Wallet Operations
 
@@ -345,6 +375,7 @@ final class AppState {
         isConnected = false
         chainId = ""
         blockHeight = 0
+        walletBalance = nil
         connectionError = nil
     }
 

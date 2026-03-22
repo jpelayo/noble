@@ -314,6 +314,7 @@ final class AppState {
         isConnected = false
         chainId = ""
         blockHeight = 0
+        walletBalance = nil
         connectionError = nil
     }
 
@@ -375,8 +376,13 @@ final class AppState {
                 ]
             }
 
-            // Fetch balance if wallet exists
-            if let address = walletAddress {
+            // Fetch total wallet balance (all keys: wallet + validator)
+            if let walletInfo = try? await service.getFullWalletInfo() {
+                walletBalance = walletInfo.balance.formatted
+                stateUpdate["walletBalance"] = walletInfo.balance.atomic
+                stateUpdate["walletAvailable"] = walletInfo.available.atomic
+            } else if let address = walletAddress {
+                // Fallback: query single address if getFullWalletInfo unavailable
                 if let balance = try? await service.getBalance(address: address) {
                     walletBalance = balance.balance.formatted
                     stateUpdate["walletBalance"] = balance.balance.atomic

@@ -313,6 +313,8 @@ input, textarea, select, button {
 
 .badge-confirmed { background: rgba(16, 185, 129, 0.12); color: var(--success); }
 .badge-pending   { background: rgba(245, 158, 11, 0.12); color: var(--warning); }
+.badge-admitted  { background: rgba(59, 130, 246, 0.12); color: var(--accent); }
+.badge-maturing  { background: rgba(59, 130, 246, 0.12); color: var(--accent); }
 .badge-failed    { background: rgba(239, 68, 68, 0.12); color: var(--error); }
 
 /* ── Buttons ── */
@@ -1258,6 +1260,11 @@ textarea.caret-hidden {
 .tx-incoming { color: var(--success); }
 .tx-outgoing { color: var(--error); }
 .tx-notarization { color: var(--accent); }
+.tx-coinbase { color: var(--warning); }
+.tx-locked { color: var(--warning); }
+.tx-unlocking { color: var(--success); }
+.tx-rotation { color: var(--info); }
+.tx-badge { color: var(--info); }
 
 /* ── Transaction Detail Row ── */
 .tx-detail-row td {

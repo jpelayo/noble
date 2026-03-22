@@ -156,18 +156,12 @@ struct MainView: View {
 
     // MARK: - Web Content
 
-    @ViewBuilder
     private var webContent: some View {
-        if appState.isReady {
-            WebContentView(appState: appState)
-                .refreshable {
-                    await appState.pollTick()
-                    HapticManager.shared.success()
-                }
-        } else {
-            ProgressView("Connecting...")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        WebContentView(appState: appState)
+            .refreshable {
+                await appState.pollTick()
+                HapticManager.shared.success()
+            }
     }
 
     // MARK: - Toolbar Status
@@ -184,12 +178,21 @@ struct MainView: View {
                         .font(.caption2.monospacedDigit().bold())
                         .foregroundStyle(.primary)
                 }
+                if !appState.chainId.isEmpty {
+                    Text(appState.chainId)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            } else {
+                Text("Disconnected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             appState.isConnected
-                ? "Connected, \(appState.walletBalance ?? "0") NOBLE"
+                ? "Connected, \(appState.walletBalance ?? "0") NOBLE on \(appState.chainId)"
                 : "Disconnected"
         )
     }

@@ -157,3 +157,24 @@ export function decodeMetadataValue(value) {
     } catch { /* not valid UTF-8 hex */ }
     return value;
 }
+
+/**
+ * Transaction status badge with pie-chart filling icon.
+ * 4-state lifecycle: Pending → Admitted → Maturing → Complete.
+ * @param {number|null|undefined} confirmations — null/undefined = pending (mempool)
+ * @param {string} status — "pending", "confirmed", etc. from RPC
+ * @param {number} maturity — COINBASE_MATURITY (default 6)
+ * @returns {{ html: string, cls: string }}
+ */
+export function txStatusBadge(confirmations, status, maturity = 6) {
+    if (status === 'pending' || confirmations == null || confirmations < 0) {
+        return { html: '\u25D4 Pending', cls: 'badge-pending' };
+    }
+    if (confirmations === 0) {
+        return { html: '\u25D1 Admitted', cls: 'badge-admitted' };
+    }
+    if (confirmations < maturity) {
+        return { html: `\u25D5 Maturing (${confirmations}/${maturity})`, cls: 'badge-maturing' };
+    }
+    return { html: `\u25CF Complete`, cls: 'badge-confirmed' };
+}

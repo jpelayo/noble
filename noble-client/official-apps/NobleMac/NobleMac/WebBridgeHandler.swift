@@ -100,11 +100,34 @@ final class WebBridgeHandler {
             let page = params["page"] as? Int ?? 0
             let limit = params["limit"] as? Int ?? 20
             let txs = try await api.getTransactionHistory(address: address, page: page, limit: limit)
-            return [
-                "transactions": txs.map { tx in
-                    txToDict(tx)
-                },
-            ] as [String: Any]
+            var allTxs: [[String: Any]] = []
+
+            // Prepend pending mempool txs on page 0
+            if page == 0 {
+                var pending: [PendingTransaction] = []
+                do { pending = try await api.getAddressPending(address: address) }
+                catch { print("[Bridge] warning: getAddressPending failed: \(error)") }
+                for p in pending {
+                    allTxs.append([
+                        "txId": p.txId,
+                        "tx_type": 1,
+                        "type": "Transfer",
+                        "txType": "Pending Transfer",
+                        "status": "pending",
+                        "direction": "outgoing",
+                        "counterparty": "Pending",
+                        "total_output": p.sent,
+                        "transfer_value": p.sent,
+                        "fee": p.fee,
+                        "net_debit": p.netDebit,
+                        "confirmations": 0,
+                        "timestamp": Date().timeIntervalSince1970,
+                    ] as [String: Any])
+                }
+            }
+
+            allTxs.append(contentsOf: txs.map { txToDict($0) })
+            return ["transactions": allTxs] as [String: Any]
 
         case "estimateFee":
             let fee = try await api.estimateFee()
@@ -334,6 +357,7 @@ final class WebBridgeHandler {
     private func txToDict(_ tx: TransactionRecord) -> [String: Any] {
         var dict: [String: Any] = [
             "txId": tx.txId.hex,
+            "tx_type": tx.txType.rawValue,
             "txType": tx.txType.label,
             "type": tx.txType.label,
             "status": tx.status.rawValue,
@@ -341,31 +365,57 @@ final class WebBridgeHandler {
             "total_output": tx.totalOutput,
             "inputs": tx.inputs.map { ["txid": $0.txid, "vout": $0.vout] as [String: Any] },
             "outputs": tx.outputs.map { ["value": $0.value, "address": $0.address] as [String: Any] },
+            "has_encrypted_locator": tx.hasEncryptedLocator,
         ]
         if let h = tx.blockHeight { dict["blockHeight"] = h }
         if let t = tx.timestamp { dict["timestamp"] = t.timeIntervalSince1970 }
         if let c = tx.checksum { dict["checksum"] = c.hex }
+        if let f = tx.fee { dict["fee"] = f }
+        if let tv = tx.transferValue { dict["transfer_value"] = tv }
+        if let conf = tx.confirmations { dict["confirmations"] = conf }
+        if let meta = tx.metadata, !meta.isEmpty {
+            dict["metadata"] = meta.map { ["key": $0.key, "value": $0.value] as [String: Any] }
+        }
 
-        // Derived fields for WebUI compatibility
+        // Direction and counterparty for all transaction types
         let walletAddr = appState.walletAddress ?? ""
-        let firstOutputAddr = tx.outputs.first?.address ?? ""
-        if tx.txType == .transfer {
+        switch tx.txType {
+        case .transfer:
             if tx.signer.nobleBech32 == walletAddr {
                 dict["direction"] = "outgoing"
-                // Counterparty is the first output that isn't us
-                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? firstOutputAddr
+                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? tx.outputs.first?.address ?? ""
                 dict["counterparty"] = counterparty
             } else {
                 dict["direction"] = "incoming"
                 dict["counterparty"] = tx.signer.nobleBech32
             }
+        case .coinbase:
+            dict["direction"] = "incoming"
+            dict["counterparty"] = "Block Reward"
+        case .notarization, .locked, .unlocking:
+            if tx.signer.nobleBech32 == walletAddr {
+                dict["direction"] = "outgoing"
+                dict["counterparty"] = "Self (Document)"
+            } else {
+                dict["direction"] = "incoming"
+                dict["counterparty"] = tx.signer.nobleBech32
+            }
+        case .keyRotation:
+            dict["direction"] = "self"
+            dict["counterparty"] = "Key Rotation"
+        case .badgeProposal, .badgeVote, .badgeRevocation:
+            dict["direction"] = "self"
+            dict["counterparty"] = "Governance"
         }
-        // Confirmations: compute from current block height if possible
-        if let txHeight = tx.blockHeight {
-            let tipHeight = UInt64(appState.blockHeight)
-            dict["confirmations"] = tipHeight >= txHeight ? (tipHeight - txHeight + 1) : 0
-        } else {
-            dict["confirmations"] = 0
+
+        // Confirmations fallback: compute from tip if not provided by RPC
+        if dict["confirmations"] == nil {
+            if let txHeight = tx.blockHeight {
+                let tipHeight = UInt64(appState.blockHeight)
+                dict["confirmations"] = tipHeight >= txHeight ? (tipHeight - txHeight + 1) : 0
+            } else {
+                dict["confirmations"] = 0
+            }
         }
         return dict
     }
@@ -1048,6 +1098,15 @@ final class WebBridgeHandler {
                 "version": info.version,
                 "blockHeight": info.blockHeight,
             ] as [String: Any]
+
+        case "connectToNode":
+            guard let url = params["url"] as? String, !url.isEmpty else {
+                throw BridgeError.missingParam("url")
+            }
+            appState.nodeURL = url
+            appState.saveNodeURL(url)
+            await appState.connectToNode()
+            return ["connected": appState.isConnected]
 
         case "disconnectNode":
             appState.disconnect()

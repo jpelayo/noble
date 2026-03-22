@@ -35,7 +35,7 @@ struct OnboardingCompleteView: View {
             .background(.quaternary.opacity(0.5))
             .clipShape(.rect(cornerRadius: 12))
 
-            Button("Start Using NobleMac") {
+            Button("Start Using Noble") {
                 appState.completeOnboarding()
             }
             .buttonStyle(.borderedProminent)
