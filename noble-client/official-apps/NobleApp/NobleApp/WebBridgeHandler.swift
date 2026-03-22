@@ -106,6 +106,7 @@ final class WebBridgeHandler {
                 "highPriorityFeeRate": fee.highPriorityFeeRate,
                 "networkMinFeeRate": fee.networkMinFeeRate,
                 "networkMedianFeeRate": fee.networkMedianFeeRate,
+                "localMinFeeRate": fee.localMinFeeRate,
             ] as [String: Any]
 
         case "verifyDocument":

@@ -228,6 +228,7 @@ pub async fn handle_api_action(
                 "highPriorityFeeRate": high,
                 "networkMinFeeRate": result.get("network_min_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1),
                 "networkMedianFeeRate": result.get("network_median_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1),
+                "localMinFeeRate": result.get("local_min_fee_rate").and_then(|v| v.as_u64()).unwrap_or(1),
             }))
         }
 

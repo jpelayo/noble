@@ -70,6 +70,7 @@ struct FeeEstimateDTO: Decodable, Sendable {
     let high_priority_fee_rate: UInt64
     let network_min_fee_rate: UInt64?
     let network_median_fee_rate: UInt64?
+    let local_min_fee_rate: UInt64?
 }
 
 // MARK: - noble_getMempoolInfo

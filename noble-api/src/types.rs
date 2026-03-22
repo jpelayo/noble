@@ -377,6 +377,9 @@ pub struct FeeEstimateResponse {
     pub network_min_fee_rate: u64,
     /// Median min_fee_rate among connected peers (from NodeAnnounce gossip).
     pub network_median_fee_rate: u64,
+    /// This node's own configured minimum fee rate (groats/byte).
+    /// Transactions below this rate will be rejected at submission.
+    pub local_min_fee_rate: u64,
 }
 
 /// Response for `noble_getMempoolInfo`.

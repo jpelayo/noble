@@ -161,7 +161,11 @@ pub struct FeeEstimateResult {
     pub high_priority_fee_rate: u64,
     pub network_min_fee_rate: u64,
     pub network_median_fee_rate: u64,
+    #[serde(default = "default_one")]
+    pub local_min_fee_rate: u64,
 }
+
+fn default_one() -> u64 { 1 }
 
 #[derive(Deserialize)]
 pub struct BalanceResult {

@@ -29,6 +29,7 @@ export function init(root, ctx) {
     let lockingPasswordConfirm = '';
     let feeLevel = 'recommended';
     let feeData = null;
+    let feeError = null;
     let results = [];
     let editingDraftId = null;  // ID of draft being resumed
     let balanceData = null;     // cached balance { available }
@@ -1334,6 +1335,13 @@ export function init(root, ctx) {
         desc.textContent = 'Select a fee level for your transactions.';
         container.appendChild(desc);
 
+        if (feeError) {
+            const errEl = document.createElement('div');
+            errEl.className = 'error-card';
+            errEl.innerHTML = `<p>${feeError}. Please check your connection and try again.</p>`;
+            container.appendChild(errEl);
+            return;
+        }
         if (!feeData) {
             const loading = document.createElement('p');
             loading.textContent = 'Loading fee estimates...';
@@ -1418,12 +1426,13 @@ export function init(root, ctx) {
             // Network-aware fee rates: always meet the highest known validator minimum.
             const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
             const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
+            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
             const localLow = f.lowFeeRate || f.low_fee_rate || 1;
             const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
             const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-            const minRate = Math.max(localLow, netMin);
-            const recRate = Math.max(localRec, netMedian, netMin);
-            const highRate = Math.max(localHigh, netMedian * 2, netMin);
+            const minRate = Math.max(localLow, netMin, localMin);
+            const recRate = Math.max(localRec, netMedian, netMin, localMin);
+            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
 
             // Estimate real tx size using the C library (not hardcoded × 800)
             let txSize = 400; // fallback
@@ -1451,9 +1460,9 @@ export function init(root, ctx) {
                 highPriorityFeeRate: highRate,
             };
             if (alive) render();
-        } catch {
-            feeData = { minFee: 800, recommendedFee: 1600, highPriorityFee: 4000,
-                        minFeeRate: 1, recommendedFeeRate: 2, highPriorityFeeRate: 5 };
+        } catch (err) {
+            // Cannot estimate fees — do NOT proceed with hardcoded rates.
+            feeError = `Could not estimate fees: ${err?.message || 'node unreachable'}`;
             if (alive) render();
         }
     }

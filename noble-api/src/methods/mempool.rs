@@ -66,6 +66,7 @@ impl<S: StorageEngine + Send + Sync + 'static> MempoolApiServer for Arc<ApiState
             high_priority_fee_rate: high,
             network_min_fee_rate: net_min,
             network_median_fee_rate: net_median,
+            local_min_fee_rate: self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 

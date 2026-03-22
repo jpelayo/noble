@@ -165,7 +165,8 @@ public struct LiveNobleAPIService: NobleAPIService {
             recommendedFeeRate: dto.recommended_fee_rate,
             highPriorityFeeRate: dto.high_priority_fee_rate,
             networkMinFeeRate: dto.network_min_fee_rate ?? 1,
-            networkMedianFeeRate: dto.network_median_fee_rate ?? 1
+            networkMedianFeeRate: dto.network_median_fee_rate ?? 1,
+            localMinFeeRate: dto.local_min_fee_rate ?? 1
         )
     }
 

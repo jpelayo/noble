@@ -165,10 +165,11 @@ pub async fn handle_faucet(
             Ok(est) => {
                 let rate = est.recommended_fee_rate
                     .max(est.network_min_fee_rate)
+                    .max(est.local_min_fee_rate)
                     .max(noble_core::MIN_RELAY_FEE_RATE);
                 tracing::debug!(
-                    "Faucet fee rate: {} g/B (recommended={}, net_min={}, net_median={})",
-                    rate, est.recommended_fee_rate, est.network_min_fee_rate, est.network_median_fee_rate
+                    "Faucet fee rate: {} g/B (recommended={}, net_min={}, net_median={}, local_min={})",
+                    rate, est.recommended_fee_rate, est.network_min_fee_rate, est.network_median_fee_rate, est.local_min_fee_rate
                 );
                 rate
             }

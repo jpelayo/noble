@@ -157,7 +157,8 @@ public struct MockAPIService: NobleAPIService {
             recommendedFeeRate: 2,
             highPriorityFeeRate: 5,
             networkMinFeeRate: 1,
-            networkMedianFeeRate: 2
+            networkMedianFeeRate: 2,
+            localMinFeeRate: 1
         )
     }
 

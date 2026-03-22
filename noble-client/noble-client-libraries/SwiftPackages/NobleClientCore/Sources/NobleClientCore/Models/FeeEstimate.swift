@@ -14,18 +14,23 @@ public struct FeeEstimate: Codable, Equatable, Sendable {
     public let networkMinFeeRate: UInt64
     /// Median min_fee_rate among connected peers.
     public let networkMedianFeeRate: UInt64
+    /// The connected node's own configured minimum fee rate.
+    /// Transactions below this rate will be rejected at submission.
+    public let localMinFeeRate: UInt64
 
     public init(
         lowFeeRate: UInt64 = 1,
         recommendedFeeRate: UInt64 = 1,
         highPriorityFeeRate: UInt64 = 1,
         networkMinFeeRate: UInt64 = 1,
-        networkMedianFeeRate: UInt64 = 1
+        networkMedianFeeRate: UInt64 = 1,
+        localMinFeeRate: UInt64 = 1
     ) {
         self.lowFeeRate = lowFeeRate
         self.recommendedFeeRate = recommendedFeeRate
         self.highPriorityFeeRate = highPriorityFeeRate
         self.networkMinFeeRate = networkMinFeeRate
         self.networkMedianFeeRate = networkMedianFeeRate
+        self.localMinFeeRate = localMinFeeRate
     }
 }
