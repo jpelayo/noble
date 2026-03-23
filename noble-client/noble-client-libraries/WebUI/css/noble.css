@@ -144,6 +144,31 @@ body {
   font-weight: 500;
   opacity: 0.85;
 }
+/* Node alignment state badge in chain bar */
+.node-state-badge {
+  font-size: 0.75em;
+  padding: 1px 8px;
+  border-radius: 4px;
+  margin-left: 4px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+}
+.node-state-isolated { background: var(--error); color: #fff; }
+.node-state-syncing,
+.node-state-catching-up,
+.node-state-bootstrapping,
+.node-state-creating { background: #f59e0b; color: #000; }
+.node-state-diverged { background: #f97316; color: #fff; }
+/* Alignment status card on home page */
+.alignment-card {
+  padding: var(--gap);
+  border-radius: var(--radius);
+  text-align: center;
+  font-weight: 500;
+}
+.alignment-danger { background: rgba(239,68,68,0.15); color: var(--error); border: 1px solid var(--error); }
+.alignment-warning { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid #f59e0b; }
+.alignment-info { background: rgba(59,130,246,0.15); color: #3b82f6; border: 1px solid #3b82f6; }
 
 /* ── Typography ── */
 .mono {

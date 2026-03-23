@@ -55,7 +55,8 @@ public struct MockAPIService: NobleAPIService {
             isSynced: true,
             currentHeight: 1_247,
             highestKnown: 1_247,
-            progress: 1.0
+            progress: 1.0,
+            state: "Aligned"
         )
     }
 

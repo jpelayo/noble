@@ -39,7 +39,8 @@ public struct LiveNobleAPIService: NobleAPIService {
             isSynced: dto.synced,
             currentHeight: dto.current_height,
             highestKnown: dto.highest_known ?? dto.current_height,
-            progress: dto.progress ?? (dto.synced ? 1.0 : 0.0)
+            progress: dto.progress ?? (dto.synced ? 1.0 : 0.0),
+            state: dto.state ?? "Unknown"
         )
     }
 

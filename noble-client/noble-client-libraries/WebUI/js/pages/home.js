@@ -96,6 +96,13 @@ export function init(root, ctx) {
     header.innerHTML = '<h1>Home</h1><p>Dashboard overview</p>';
     root.appendChild(header);
 
+    // Node alignment status card (shown when node is not fully aligned)
+    const alignmentBanner = document.createElement('div');
+    alignmentBanner.id = 'home-alignment-banner';
+    alignmentBanner.style.marginBottom = 'var(--gap)';
+    root.appendChild(alignmentBanner);
+    renderAlignmentBanner(alignmentBanner, state);
+
     // Balance card placeholder
     const balanceContainer = document.createElement('div');
     balanceContainer.style.marginBottom = 'var(--gap)';
@@ -334,6 +341,31 @@ export function init(root, ctx) {
         destroy() { alive = false; },
         refresh(newState) {
             Object.assign(state, newState);
+            renderAlignmentBanner(alignmentBanner, state);
         }
     };
+}
+
+/** Render a contextual status card based on node alignment state.
+ *  Shown when connected but node is NOT fully aligned. */
+function renderAlignmentBanner(container, state) {
+    if (!state.isConnected) {
+        container.innerHTML = '';
+        return;
+    }
+    const ns = state.nodeState;
+    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown') {
+        container.innerHTML = '';
+        return;
+    }
+    const messages = {
+        'Isolated': { text: 'Node has no peers. Waiting for network connections.', cls: 'danger' },
+        'Syncing': { text: 'Node is syncing with the network...', cls: 'warning' },
+        'Catching Up': { text: 'Node is catching up with peers...', cls: 'warning' },
+        'Diverged': { text: 'Node is on a minority fork. Healing in progress.', cls: 'warning' },
+        'Bootstrapping': { text: 'Node is bootstrapping — waiting for peers.', cls: 'info' },
+        'Creating': { text: 'Node is forming the initial chain.', cls: 'info' },
+    };
+    const info = messages[ns] || { text: `Node status: ${ns}`, cls: 'info' };
+    container.innerHTML = `<div class="alignment-card alignment-${info.cls}">${info.text}</div>`;
 }

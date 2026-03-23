@@ -160,7 +160,15 @@ const App = {
         if (appState.chainId) {
             bar.hidden = false;
             const dotClass = appState.isConnected ? 'chain-dot' : 'chain-dot chain-dot-offline';
-            bar.innerHTML = `<span class="${dotClass}"></span><span class="chain-label">${appState.isConnected ? 'Chain' : 'Offline'}</span> ${appState.chainId}`;
+            const connLabel = appState.isConnected ? 'Chain' : 'Offline';
+            let html = `<span class="${dotClass}"></span><span class="chain-label">${connLabel}</span> ${appState.chainId}`;
+            // Node alignment badge — only shown when NOT "Aligned" (the normal state).
+            const ns = appState.nodeState;
+            if (ns && ns !== 'Aligned' && ns !== 'Connected' && ns !== 'Unknown' && appState.isConnected) {
+                const cls = 'node-state-' + ns.toLowerCase().replace(/\s+/g, '-');
+                html += ` <span class="node-state-badge ${cls}">${ns}</span>`;
+            }
+            bar.innerHTML = html;
         } else {
             bar.hidden = true;
             bar.innerHTML = '';

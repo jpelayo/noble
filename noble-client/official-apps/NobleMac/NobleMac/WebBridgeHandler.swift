@@ -940,6 +940,14 @@ final class WebBridgeHandler {
     private func handleApp(action: String, params: [String: Any]) async throws -> Any {
         switch action {
         case "getState":
+            // Include node alignment state (Aligned/Syncing/Diverged/etc.).
+            let nodeState: String
+            if appState.isConnected, let svc = appState.apiService {
+                let sync = try? await svc.getSyncStatus()
+                nodeState = sync?.state ?? "Connected"
+            } else {
+                nodeState = appState.isConnected ? "Connected" : "Offline"
+            }
             return [
                 "isConnected": appState.isConnected,
                 "hasWallet": appState.hasWallet,
@@ -947,6 +955,7 @@ final class WebBridgeHandler {
                 "chainId": appState.chainId,
                 "blockHeight": appState.blockHeight,
                 "selectedSection": appState.selectedSection?.webRoute ?? "home",
+                "nodeState": nodeState,
             ] as [String: Any]
 
         case "navigateTo":

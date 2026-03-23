@@ -98,6 +98,9 @@ final class AppState {
     /// RPC poll timer for live data refresh (30s interval).
     private var pollTimer: Timer?
 
+    /// Reconnect timer — retries connectToNode every 10s after initial failure.
+    private var reconnectTimer: Timer?
+
     /// Consecutive poll failures — disconnect after 3.
     private var pollFailureCount = 0
 
@@ -166,13 +169,8 @@ final class AppState {
         }
         loadContactsFromDefaults()
         loadSecuritySettings()
-
-        // Auto-connect if enabled and node URL is saved
-        if autoConnect && !nodeURL.isEmpty && hasWallet && hasCompletedOnboarding {
-            Task {
-                await connectToNode()
-            }
-        }
+        // Auto-connect is handled by scene phase .active in NobleMacApp.swift
+        // to avoid racing with a second connectToNode() call.
     }
 
     // MARK: - Wallet Operations
@@ -252,6 +250,8 @@ final class AppState {
     /// Test connection to the node and update state.
     func connectToNode() async {
         connectionError = nil
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
 
         guard let url = URL(string: nodeURL) else {
             connectionError = NE.message("Invalid URL", code: NE.invalidURL)
@@ -268,6 +268,12 @@ final class AppState {
             chainId = nodeInfo.chainId
             blockHeight = nodeInfo.blockHeight
             saveNodeURL(nodeURL)
+            // Push connected state to WebView immediately (don't wait for first pollTick).
+            pushStateToWebView([
+                "isConnected": true,
+                "blockHeight": nodeInfo.blockHeight,
+                "chainId": nodeInfo.chainId,
+            ])
             startPolling()
         } catch {
             isConnected = false
@@ -283,6 +289,24 @@ final class AppState {
                 connectionError = NE.message("Connection timed out.", code: NE.timeout)
             } else {
                 connectionError = "\(desc) [\(NE.nodeUnreachable)]"
+            }
+            // Schedule automatic reconnect attempts every 10s.
+            scheduleReconnect()
+        }
+    }
+
+    /// Schedule repeating reconnect attempts (10s interval).
+    /// Self-cancels when connectToNode succeeds.
+    private func scheduleReconnect() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isConnected, !self.nodeURL.isEmpty else {
+                    self?.reconnectTimer?.invalidate()
+                    self?.reconnectTimer = nil
+                    return
+                }
+                await self.connectToNode()
             }
         }
     }
@@ -365,7 +389,9 @@ final class AppState {
                     "synced": sync.isSynced,
                     "currentHeight": sync.currentHeight,
                     "highestKnown": sync.highestKnown,
+                    "state": sync.state,
                 ]
+                stateUpdate["nodeState"] = sync.state
             }
 
             if let cycle = cycleStatus {
@@ -395,14 +421,19 @@ final class AppState {
 
         } catch {
             pollFailureCount += 1
-            if pollFailureCount >= 2 && isConnected {
+            if pollFailureCount >= 3 && isConnected {
                 isConnected = false
                 pushStateToWebView(["isConnected": false])
             }
-            // Auto-reconnect: retry every 2 ticks while disconnected.
+            // Auto-reconnect: create a FRESH client (old NWConnection may be dead
+            // after node restart). Retry every 2 ticks while disconnected.
             if !isConnected, pollFailureCount % 2 == 0 {
+                guard let url = URL(string: nodeURL) else { return }
+                let freshClient = JSONRPCClient(baseURL: url)
+                let freshService = LiveNobleAPIService(client: freshClient)
                 do {
-                    let nodeInfo = try await service.getNodeInfo()
+                    let nodeInfo = try await freshService.getNodeInfo()
+                    apiService = freshService  // Replace dead service
                     isConnected = true
                     pollFailureCount = 0
                     chainId = nodeInfo.chainId

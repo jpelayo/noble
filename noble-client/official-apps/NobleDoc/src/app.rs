@@ -24,6 +24,7 @@ pub struct AppState {
     pub chain_id: String,
     pub block_height: u64,
     pub node_url: String,
+    pub node_state: String,
     pub has_wallet: bool,
     pub wallet_address: String,
     pub wallet_balance: String,
@@ -31,6 +32,7 @@ pub struct AppState {
     pub settings: Settings,
     pub api_client: Option<ApiClient>,
     poll_failure_count: u32,
+    reconnect_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
             chain_id: String::new(),
             block_height: 0,
             node_url,
+            node_state: String::new(),
             has_wallet,
             wallet_address,
             wallet_balance: String::new(),
@@ -62,6 +65,7 @@ impl AppState {
             settings,
             api_client: None,
             poll_failure_count: 0,
+            reconnect_handle: None,
         }
     }
 
@@ -73,6 +77,7 @@ impl AppState {
             "walletAddress": self.wallet_address,
             "chainId": self.chain_id,
             "blockHeight": self.block_height,
+            "nodeState": self.node_state,
             "selectedSection": self.selected_section,
         })
     }
@@ -115,7 +120,7 @@ pub fn start_polling(
             interval.tick().await;
 
             let (node_url, wallet_address, is_connected) = {
-                let st = state.lock().unwrap();
+                let st = state.lock().expect("app state lock poisoned");
                 (
                     st.node_url.clone(),
                     st.wallet_address.clone(),
@@ -123,30 +128,31 @@ pub fn start_polling(
                 )
             };
 
-            let client = ApiClient::new(&node_url);
-
-            // If disconnected, attempt silent reconnection.
+            // If disconnected, attempt silent reconnection with a fresh client.
             if !is_connected {
-                if let Ok(info) = client.call_rpc("noble_getNodeInfo", json!([])).await {
+                let reconnect_client = ApiClient::new(&node_url);
+                if let Ok(info) = reconnect_client.call_rpc("noble_getNodeInfo", json!([])).await {
                     let chain_id = info.get("chain_id").or(info.get("chainId"))
                         .and_then(|v| v.as_u64()).map(|c| format!("{c:08X}")).unwrap_or_default();
                     let block_height = info.get("block_height").or(info.get("blockHeight"))
                         .and_then(|v| v.as_u64()).unwrap_or(0);
                     {
-                        let mut st = state.lock().unwrap();
+                        let mut st = state.lock().expect("app state lock poisoned");
                         st.is_connected = true;
                         st.chain_id = chain_id.clone();
                         st.block_height = block_height;
                         st.poll_failure_count = 0;
                     }
-                    let _ = proxy.send_event(UserEvent::PollTick(json!({
+                    if let Err(e) = proxy.send_event(UserEvent::PollTick(json!({
                         "isConnected": true,
                         "blockHeight": block_height,
                         "chainId": chain_id,
-                    })));
+                    }))) { eprintln!("event send failed: {e:?}"); }
                 }
                 continue;
             }
+
+            let client = ApiClient::new(&node_url);
 
             // Fetch node info
             let node_info = client
@@ -186,7 +192,13 @@ pub fn start_polling(
                     });
 
                     // Fetch sync status
+                    let mut node_state_value = String::new();
                     if let Ok(sync) = client.call_rpc("noble_getSyncStatus", json!([])).await {
+                        let sync_state = sync.get("state")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        node_state_value = sync_state.clone();
                         state_update["syncStatus"] = json!({
                             "synced": sync.get("synced").and_then(|v| v.as_bool()).unwrap_or(false),
                             "currentHeight": sync.get("current_height")
@@ -196,6 +208,7 @@ pub fn start_polling(
                                 .or(sync.get("highestKnown"))
                                 .and_then(|v| v.as_u64()).unwrap_or(0),
                         });
+                        state_update["nodeState"] = json!(sync_state);
                     }
 
                     // Fetch cycle status
@@ -232,31 +245,32 @@ pub fn start_polling(
 
                     // Update local state
                     {
-                        let mut st = state.lock().unwrap();
+                        let mut st = state.lock().expect("app state lock poisoned");
                         st.block_height = block_height;
                         st.chain_id = chain_id;
+                        st.node_state = node_state_value;
                         st.poll_failure_count = 0;
                     }
 
                     // Push to WebView
-                    let _ = proxy.send_event(UserEvent::PollTick(state_update));
+                    if let Err(e) = proxy.send_event(UserEvent::PollTick(state_update)) { eprintln!("event send failed: {e:?}"); }
                 }
                 Err(_) => {
                     let should_disconnect = {
-                        let mut st = state.lock().unwrap();
+                        let mut st = state.lock().expect("app state lock poisoned");
                         st.poll_failure_count += 1;
                         st.poll_failure_count >= 3
                     };
 
                     if should_disconnect {
                         {
-                            let mut st = state.lock().unwrap();
+                            let mut st = state.lock().expect("app state lock poisoned");
                             st.is_connected = false;
                             // Keep node_url and api_client alive for reconnection.
                         }
-                        let _ = proxy.send_event(UserEvent::PollTick(json!({
+                        if let Err(e) = proxy.send_event(UserEvent::PollTick(json!({
                             "isConnected": false,
-                        })));
+                        }))) { eprintln!("event send failed: {e:?}"); }
                     }
                 }
             }
@@ -282,7 +296,7 @@ pub async fn handle_app_action(
 ) -> Result<Value, String> {
     match action {
         "getState" => {
-            let st = state.lock().unwrap();
+            let st = state.lock().expect("app state lock poisoned");
             Ok(st.snapshot())
         }
 
@@ -292,7 +306,7 @@ pub async fn handle_app_action(
                 .and_then(|v| v.as_str())
                 .ok_or("Missing parameter: section")?;
             {
-                let mut st = state.lock().unwrap();
+                let mut st = state.lock().expect("app state lock poisoned");
                 st.selected_section = section.to_string();
             }
             Ok(json!({ "ok": true }))
@@ -398,7 +412,7 @@ pub async fn handle_app_action(
         }
 
         "getSettings" => {
-            let st = state.lock().unwrap();
+            let st = state.lock().expect("app state lock poisoned");
             Ok(json!({
                 "nodeURL": st.node_url,
                 "authMode": "none",
@@ -409,14 +423,14 @@ pub async fn handle_app_action(
         }
 
         "saveSettings" => {
-            let mut st = state.lock().unwrap();
+            let mut st = state.lock().expect("app state lock poisoned");
             if let Some(url) = params.get("nodeURL").and_then(|v| v.as_str()) {
                 st.node_url = url.to_string();
                 st.settings.node_url = url.to_string();
-                let _ = security::store_credential(
+                if let Err(e) = security::store_credential(
                     security::KEY_NODE_URL,
                     url.as_bytes(),
-                );
+                ) { eprintln!("credential store failed: {e}"); }
             }
             if let Some(auto) = params.get("autoConnect").and_then(|v| v.as_bool()) {
                 st.settings.auto_connect = auto;
@@ -426,7 +440,7 @@ pub async fn handle_app_action(
         }
 
         "getSecuritySettings" => {
-            let st = state.lock().unwrap();
+            let st = state.lock().expect("app state lock poisoned");
             Ok(json!({
                 "appLockEnabled": st.settings.app_lock_enabled,
                 "lockTimeout": st.settings.lock_timeout,
@@ -435,7 +449,7 @@ pub async fn handle_app_action(
         }
 
         "saveSecuritySettings" => {
-            let mut st = state.lock().unwrap();
+            let mut st = state.lock().expect("app state lock poisoned");
             if let Some(enabled) = params.get("appLockEnabled").and_then(|v| v.as_bool()) {
                 st.settings.app_lock_enabled = enabled;
             }
@@ -474,59 +488,157 @@ pub async fn handle_app_action(
 
         "connectToNode" => {
             let url = {
-                let st = state.lock().unwrap();
+                let st = state.lock().expect("app state lock poisoned");
                 st.node_url.clone()
             };
 
-            let client = ApiClient::new(&url);
-            let info = client
-                .call_rpc("noble_getNodeInfo", json!([]))
-                .await
-                .map_err(|e| format!("Connection failed: {e}"))?;
-
-            let chain_id = info
-                .get("chain_id")
-                .or(info.get("chainId"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let block_height = info
-                .get("block_height")
-                .or(info.get("blockHeight"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
+            // Cancel any existing reconnect loop before attempting.
             {
-                let mut st = state.lock().unwrap();
-                st.is_connected = true;
-                st.chain_id = chain_id.clone();
-                st.block_height = block_height;
-                st.api_client = Some(client);
-                st.poll_failure_count = 0;
-                let _ = security::store_credential(
-                    security::KEY_NODE_URL,
-                    st.node_url.as_bytes(),
-                );
+                let mut st = state.lock().expect("app state lock poisoned");
+                if let Some(handle) = st.reconnect_handle.take() {
+                    handle.abort();
+                }
             }
 
-            // Start polling
-            start_polling(state.clone(), proxy.clone(), tokio_handle.clone());
+            let client = ApiClient::new(&url);
+            match client.call_rpc("noble_getNodeInfo", json!([])).await {
+                Ok(info) => {
+                    let chain_id = info
+                        .get("chain_id")
+                        .or(info.get("chainId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let block_height = info
+                        .get("block_height")
+                        .or(info.get("blockHeight"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
 
-            Ok(json!({
-                "ok": true,
-                "chainId": chain_id,
-                "blockHeight": block_height,
-            }))
+                    {
+                        let mut st = state.lock().expect("app state lock poisoned");
+                        st.is_connected = true;
+                        st.chain_id = chain_id.clone();
+                        st.block_height = block_height;
+                        st.api_client = Some(client);
+                        st.poll_failure_count = 0;
+                        if let Err(e) = security::store_credential(
+                            security::KEY_NODE_URL,
+                            st.node_url.as_bytes(),
+                        ) { eprintln!("credential store failed: {e}"); }
+                    }
+
+                    // B1: Push connected state to WebView immediately.
+                    if let Err(e) = proxy.send_event(UserEvent::PollTick(json!({
+                        "isConnected": true,
+                        "chainId": chain_id,
+                        "blockHeight": block_height,
+                    }))) { eprintln!("event send failed: {e:?}"); }
+
+                    // Start polling
+                    start_polling(state.clone(), proxy.clone(), tokio_handle.clone());
+
+                    Ok(json!({
+                        "ok": true,
+                        "chainId": chain_id,
+                        "blockHeight": block_height,
+                    }))
+                }
+                Err(e) => {
+                    // B1: Connection failed — spawn a reconnect loop that retries every 10s.
+                    let reconnect_state = state.clone();
+                    let reconnect_proxy = proxy.clone();
+                    let reconnect_tokio = tokio_handle.clone();
+                    let handle = tokio_handle.spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(10),
+                        );
+                        interval.tick().await; // skip immediate tick
+
+                        loop {
+                            interval.tick().await;
+
+                            let current_url = {
+                                let st = reconnect_state.lock().expect("app state lock poisoned");
+                                if st.is_connected {
+                                    return; // Already connected (e.g. manual retry succeeded).
+                                }
+                                st.node_url.clone()
+                            };
+
+                            let retry_client = ApiClient::new(&current_url);
+                            if let Ok(info) = retry_client
+                                .call_rpc("noble_getNodeInfo", json!([]))
+                                .await
+                            {
+                                let chain_id = info
+                                    .get("chain_id")
+                                    .or(info.get("chainId"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let block_height = info
+                                    .get("block_height")
+                                    .or(info.get("blockHeight"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+
+                                {
+                                    let mut st = reconnect_state.lock().expect("app state lock poisoned");
+                                    st.is_connected = true;
+                                    st.chain_id = chain_id.clone();
+                                    st.block_height = block_height;
+                                    st.api_client = Some(retry_client);
+                                    st.poll_failure_count = 0;
+                                    st.reconnect_handle = None;
+                                    if let Err(e) = security::store_credential(
+                                        security::KEY_NODE_URL,
+                                        st.node_url.as_bytes(),
+                                    ) { eprintln!("credential store failed: {e}"); }
+                                }
+
+                                // Push connected state to WebView.
+                                if let Err(e) = reconnect_proxy.send_event(UserEvent::PollTick(json!({
+                                    "isConnected": true,
+                                    "chainId": chain_id,
+                                    "blockHeight": block_height,
+                                }))) { eprintln!("event send failed: {e:?}"); }
+
+                                // Start polling loop.
+                                start_polling(
+                                    reconnect_state.clone(),
+                                    reconnect_proxy.clone(),
+                                    reconnect_tokio.clone(),
+                                );
+                                return;
+                            }
+                        }
+                    });
+
+                    // Store the handle so it can be cancelled on next connectToNode or disconnect.
+                    {
+                        let mut st = state.lock().expect("app state lock poisoned");
+                        st.reconnect_handle = Some(handle);
+                    }
+
+                    Err(format!("Connection failed: {e}"))
+                }
+            }
         }
 
         "disconnectNode" => {
             {
-                let mut st = state.lock().unwrap();
+                let mut st = state.lock().expect("app state lock poisoned");
                 st.is_connected = false;
                 st.chain_id = String::new();
                 st.block_height = 0;
+                st.node_state = String::new();
                 st.api_client = None;
                 st.poll_failure_count = 0;
+                // Cancel any pending reconnect loop.
+                if let Some(handle) = st.reconnect_handle.take() {
+                    handle.abort();
+                }
             }
             Ok(json!({ "ok": true }))
         }
@@ -543,7 +655,7 @@ pub async fn handle_app_action(
             security::store_credential(security::KEY_MNEMONIC, mnemonic_data.as_bytes())?;
 
             {
-                let mut st = state.lock().unwrap();
+                let mut st = state.lock().expect("app state lock poisoned");
                 st.has_wallet = true;
                 st.wallet_address = address.clone();
             }
@@ -576,7 +688,7 @@ pub async fn handle_app_action(
             security::store_credential(security::KEY_MNEMONIC, mnemonic_str.as_bytes())?;
 
             {
-                let mut st = state.lock().unwrap();
+                let mut st = state.lock().expect("app state lock poisoned");
                 st.has_wallet = true;
                 st.wallet_address = address.clone();
             }
