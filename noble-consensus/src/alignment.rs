@@ -20,6 +20,8 @@ pub enum AlignmentState {
     Syncing,
     /// On the majority chain (> 50% of known peers agree).
     Aligned,
+    /// Behind peers that share our chain_id — sequential catch-up in progress.
+    CatchingUp,
     /// NOT on the majority chain, or healing fork dwell timer running.
     Diverged,
 }
@@ -33,6 +35,7 @@ impl AlignmentState {
             Self::Creating => "Creating",
             Self::Syncing => "Syncing",
             Self::Aligned => "Aligned",
+            Self::CatchingUp => "Catching Up",
             Self::Diverged => "Diverged",
         }
     }
@@ -41,7 +44,7 @@ impl AlignmentState {
     pub fn severity(&self) -> &'static str {
         match self {
             Self::Isolated => "high",
-            Self::Bootstrapping | Self::Creating | Self::Syncing => "syncing",
+            Self::Bootstrapping | Self::Creating | Self::Syncing | Self::CatchingUp => "syncing",
             Self::Aligned => "zero",
             Self::Diverged => "medium",
         }

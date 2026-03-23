@@ -624,6 +624,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 // 5. Majority chain check. Need storage (lock 2) — safe because
                 //    consensus(4) and peer_info(7) are already dropped.
                 let mut agreeing: usize = 0;
+                let mut ahead_same_chain: usize = 0;
                 {
                     let storage = self.storage.read();
                     for (peer_h, peer_hash) in &peers_snapshot {
@@ -644,8 +645,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                     tracing::trace!(task = "alignment", "storage miss at height {ph}: {e}");
                                 }
                             }
+                        } else {
+                            // Peer ahead — already filtered to same chain_id (line 580).
+                            // Count as agreeing: they're on our chain, just further along.
+                            agreeing += 1;
+                            ahead_same_chain += 1;
                         }
-                        // Peer ahead with unknown tip: can't verify, don't count.
                     }
                 }
 
@@ -654,7 +659,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 let local_side = agreeing + 1;
                 let total = peers_with_tip + 1;
                 if local_side * 2 > total {
-                    AlignmentState::Aligned
+                    if ahead_same_chain > 0 {
+                        AlignmentState::CatchingUp
+                    } else {
+                        AlignmentState::Aligned
+                    }
                 } else {
                     AlignmentState::Diverged
                 }
