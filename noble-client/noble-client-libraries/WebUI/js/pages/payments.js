@@ -691,9 +691,20 @@ export function init(root, ctx) {
         openModal({ title: 'Receive NOBLE', body });
     }
 
+    // Track last known balance to detect changes that warrant a tx list refresh.
+    let lastKnownBalance = state.walletBalance;
+
     return {
         destroy() { alive = false; closeModal(); },
-        refresh(newState) { Object.assign(state, newState); },
+        refresh(newState) {
+            const prevBalance = lastKnownBalance;
+            Object.assign(state, newState);
+            // Re-fetch tx list when balance changes (new tx confirmed or new mempool entry).
+            if (newState.walletBalance !== undefined && newState.walletBalance !== prevBalance) {
+                lastKnownBalance = newState.walletBalance;
+                loadData(balanceContainer, historyContainer);
+            }
+        },
         openSendWizard(recipientAddress) { openSendWizard(recipientAddress); }
     };
 }

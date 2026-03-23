@@ -248,7 +248,11 @@ public struct LiveNobleAPIService: NobleAPIService {
                 transferValue: e.transfer_value,
                 metadata: metadata.isEmpty ? nil : metadata,
                 hasEncryptedLocator: e.has_encrypted_locator ?? false,
-                confirmations: e.confirmations
+                confirmations: e.confirmations,
+                direction: e.direction,
+                displayAmount: e.amount,
+                counterparty: e.counterparty,
+                typeLabel: e.type_label
             )
         }
     }

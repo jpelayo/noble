@@ -348,35 +348,52 @@ final class WebBridgeHandler {
             dict["metadata"] = meta.map { ["key": $0.key, "value": $0.value] as [String: Any] }
         }
 
-        // Direction and counterparty for all transaction types
-        let walletAddr = appState.walletAddress ?? ""
-        switch tx.txType {
-        case .transfer:
-            if tx.signer.nobleBech32 == walletAddr {
-                dict["direction"] = "outgoing"
-                let counterparty = tx.outputs.first(where: { $0.address != walletAddr })?.address ?? tx.outputs.first?.address ?? ""
-                dict["counterparty"] = counterparty
-            } else {
+        // Use server-computed direction/counterparty/amount when available.
+        // The server has full wire-byte matching across all 3 address variants —
+        // more reliable than client-side bech32 string comparison.
+        if let dir = tx.direction {
+            dict["direction"] = dir
+        }
+        if let cp = tx.counterparty {
+            dict["counterparty"] = cp
+        }
+        if let amt = tx.displayAmount {
+            dict["amount"] = amt
+        }
+        if let lbl = tx.typeLabel {
+            dict["type_label"] = lbl
+        }
+
+        // Fallback: recompute direction if server didn't provide it (old server compat).
+        if dict["direction"] == nil {
+            let walletAddr = appState.walletAddress ?? ""
+            switch tx.txType {
+            case .transfer:
+                if tx.signer.nobleBech32 == walletAddr {
+                    dict["direction"] = "outgoing"
+                    dict["counterparty"] = dict["counterparty"] ?? tx.outputs.first(where: { $0.address != walletAddr })?.address
+                } else {
+                    dict["direction"] = "incoming"
+                    dict["counterparty"] = dict["counterparty"] ?? tx.signer.nobleBech32
+                }
+            case .coinbase:
                 dict["direction"] = "incoming"
-                dict["counterparty"] = tx.signer.nobleBech32
+                dict["counterparty"] = dict["counterparty"] ?? "Block Reward"
+            case .notarization, .locked, .unlocking:
+                if tx.signer.nobleBech32 == walletAddr {
+                    dict["direction"] = "outgoing"
+                    dict["counterparty"] = dict["counterparty"] ?? "Self (Document)"
+                } else {
+                    dict["direction"] = "incoming"
+                    dict["counterparty"] = dict["counterparty"] ?? tx.signer.nobleBech32
+                }
+            case .keyRotation:
+                dict["direction"] = "self"
+                dict["counterparty"] = dict["counterparty"] ?? "Key Rotation"
+            case .badgeProposal, .badgeVote, .badgeRevocation:
+                dict["direction"] = "self"
+                dict["counterparty"] = dict["counterparty"] ?? "Governance"
             }
-        case .coinbase:
-            dict["direction"] = "incoming"
-            dict["counterparty"] = "Block Reward"
-        case .notarization, .locked, .unlocking:
-            if tx.signer.nobleBech32 == walletAddr {
-                dict["direction"] = "outgoing"
-                dict["counterparty"] = "Self (Document)"
-            } else {
-                dict["direction"] = "incoming"
-                dict["counterparty"] = tx.signer.nobleBech32
-            }
-        case .keyRotation:
-            dict["direction"] = "self"
-            dict["counterparty"] = "Key Rotation"
-        case .badgeProposal, .badgeVote, .badgeRevocation:
-            dict["direction"] = "self"
-            dict["counterparty"] = "Governance"
         }
 
         // Confirmations fallback: compute from tip if not provided by RPC

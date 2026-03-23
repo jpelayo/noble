@@ -51,6 +51,14 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
     public let hasEncryptedLocator: Bool
     /// Number of confirmations (tip_height - tx_height + 1).
     public let confirmations: UInt64?
+    /// Direction from server: "incoming", "outgoing", "self".
+    public let direction: String?
+    /// Display amount from server (groats).
+    public let displayAmount: UInt64?
+    /// Counterparty address from server (bech32m or display string).
+    public let counterparty: String?
+    /// Type label from server (e.g. "Pending Notarization", "Transfer").
+    public let typeLabel: String?
 
     public init(
         txId: Hash256,
@@ -67,7 +75,11 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         transferValue: UInt64? = nil,
         metadata: [MetadataItem]? = nil,
         hasEncryptedLocator: Bool = false,
-        confirmations: UInt64? = nil
+        confirmations: UInt64? = nil,
+        direction: String? = nil,
+        displayAmount: UInt64? = nil,
+        counterparty: String? = nil,
+        typeLabel: String? = nil
     ) {
         self.txId = txId
         self.txType = txType
@@ -84,5 +96,9 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         self.metadata = metadata
         self.hasEncryptedLocator = hasEncryptedLocator
         self.confirmations = confirmations
+        self.direction = direction
+        self.displayAmount = displayAmount
+        self.counterparty = counterparty
+        self.typeLabel = typeLabel
     }
 }
