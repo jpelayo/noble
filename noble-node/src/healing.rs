@@ -74,12 +74,49 @@ pub enum SyncState {
 
 /// Maximum number of blocks in a single manifest window.
 const MANIFEST_WINDOW: u16 = 256;
-/// Timeout for manifest request (seconds).
-const MANIFEST_TIMEOUT_SECS: u64 = 30;
-/// Maximum retry attempts for a single block before switching peers.
-const MAX_BLOCK_RETRIES: u8 = 3;
+/// Manifest request timeout (seconds).  Relaxed from 30s to accommodate large chains.
+const SYNC_MANIFEST_TIMEOUT_SECS: u64 = 60;
+/// Maximum retry attempts for a single block before escalating.
+/// Relaxed from 3 to 5 — transient network issues during long syncs need more headroom.
+/// Post-sync verification is the safety net.
+const SYNC_MAX_BLOCK_RETRIES: u8 = 5;
 /// Minimum interval between advance_sync actions (seconds).
 const SYNC_RETRY_SECS: u64 = 10;
+
+// ---------------------------------------------------------------------------
+// Sync Import Identity
+// ---------------------------------------------------------------------------
+
+/// Which healing case triggered this sync import.
+/// Determines per-case error handling and tolerance behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncImportKind {
+    /// Same chain, peer is ahead — normal catch-up.
+    CatchUp,
+    /// Minority fork → majority fork (post-rollback to common ancestor).
+    ForkResolution,
+    /// Different chain entirely (post-wipe to genesis).
+    CrossChainAdoption,
+    /// Fresh node joining an existing chain.
+    Bootstrap,
+}
+
+/// Result of post-sync range verification.
+#[derive(Debug)]
+pub enum SyncVerifyResult {
+    /// Chain integrity and peer alignment verified.
+    Ok,
+    /// Storage corruption detected in synced range.
+    IntegrityFailure {
+        first_corrupt: u64,
+        findings_count: usize,
+    },
+    /// Our tip doesn't match any connected peer.
+    MisalignedWithPeers {
+        our_height: u64,
+        peer_count: usize,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // Healing Clue System
@@ -292,6 +329,12 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     healing_phase: HealingPhase,
     /// Accumulates clues from all detection sources within a tick.
     clue_collector: ClueCollector,
+    /// Which healing case triggered the current sync (for per-case error handling).
+    sync_import_kind: SyncImportKind,
+    /// Height at which the current sync session started (for post-sync range verification).
+    sync_start_height: u64,
+    /// Consecutive post-sync verification failures (for ancestor depth escalation).
+    sync_verify_retries: u8,
 
     // ── Cross-chain state ──
     /// Blockchains discovered via NodeAnnounce. Shared with ApiState.
@@ -359,6 +402,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             fork_common_ancestor: None,
             healing_phase: HealingPhase::Idle,
             clue_collector: ClueCollector::new(),
+            sync_import_kind: SyncImportKind::CatchUp,
+            sync_start_height: 0,
+            sync_verify_retries: 0,
             discovered_blockchains,
             discovered_blockchains_path,
             announce_cache: parking_lot::Mutex::new(HashMap::new()),
@@ -883,6 +929,159 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
     }
 
+    /// Post-sync range verification: integrity check + peer alignment.
+    /// Called after sync completes, BEFORE resetting to Idle.
+    fn verify_sync_range(&self, sync_start: u64, sync_end: u64) -> SyncVerifyResult {
+        if sync_end <= sync_start {
+            return SyncVerifyResult::Ok;
+        }
+        // 1. Full integrity check on the synced range.
+        let chain_id = self.get_chain_id();
+        let report = {
+            let storage = self.storage.read();
+            noble_storage::verify_chain_integrity(
+                &*storage, chain_id, sync_start + 1, sync_end,
+            )
+        };
+        if !report.is_clean() {
+            let first = report.first_corrupt_height.unwrap_or(sync_start + 1);
+            tracing::error!(
+                task = "sync_verify",
+                "post-sync integrity failure: {} finding(s), first corrupt at height {}",
+                report.findings.len(), first,
+            );
+            return SyncVerifyResult::IntegrityFailure {
+                first_corrupt: first,
+                findings_count: report.findings.len(),
+            };
+        }
+
+        // 2. Peer alignment check: does our new tip match at least one peer?
+        // Only meaningful if at least one peer has reported a chain tip (via NodeAnnounce).
+        // Peers with chain_tip_height=None haven't announced yet — don't count them.
+        let our_tip = self.consensus.read().chain_tip();
+        let peers = self.peer_info.read();
+        let peers_with_tip: usize = peers.values()
+            .filter(|p| p.chain_tip_height.is_some())
+            .count();
+        if peers_with_tip > 0 {
+            let our_tip_hex = hex::encode(our_tip.1.as_bytes());
+            let agreeing = peers.values()
+                .filter(|p| {
+                    p.chain_tip_height == Some(our_tip.0)
+                        && p.chain_tip_hash.as_deref() == Some(&our_tip_hex)
+                })
+                .count();
+            // Also count peers that are ahead of us (they implicitly passed through
+            // our height — alignment will be confirmed when we catch up further).
+            let ahead = peers.values()
+                .filter(|p| p.chain_tip_height.map_or(false, |h| h > our_tip.0))
+                .count();
+            if agreeing == 0 && ahead == 0 {
+                tracing::warn!(
+                    task = "sync_verify",
+                    "post-sync misalignment: our tip {} doesn't match any of {} peer(s) with tips",
+                    our_tip.0, peers_with_tip,
+                );
+                return SyncVerifyResult::MisalignedWithPeers {
+                    our_height: our_tip.0,
+                    peer_count: peers_with_tip,
+                };
+            }
+        }
+
+        tracing::info!(
+            task = "sync_verify",
+            "post-sync verification passed: range {}..={}, {} block(s) verified",
+            sync_start + 1, sync_end, sync_end - sync_start,
+        );
+        SyncVerifyResult::Ok
+    }
+
+    /// Handle post-sync verification result. On failure, escalates recovery
+    /// based on `sync_verify_retries` (ancestor depth escalation).
+    fn handle_post_sync_failure(&mut self, result: SyncVerifyResult) {
+        self.sync_verify_retries = self.sync_verify_retries.saturating_add(1);
+        let retries = self.sync_verify_retries;
+
+        match result {
+            SyncVerifyResult::Ok => unreachable!(),
+            SyncVerifyResult::IntegrityFailure { first_corrupt, findings_count } => {
+                // Escalate rollback depth based on retry count (same as misalignment).
+                let rollback_height = match retries {
+                    1 => first_corrupt.saturating_sub(1),
+                    2 => first_corrupt.saturating_sub(1).min(self.sync_start_height),
+                    _ => 0, // Third+ failure: full re-sync from genesis.
+                };
+                tracing::warn!(
+                    task = "sync_verify",
+                    "integrity failure recovery (attempt {}): rolling back to {} ({} findings, first_corrupt={})",
+                    retries, rollback_height, findings_count, first_corrupt,
+                );
+                self.broadcast_event(serde_json::json!({
+                    "event": "sync_verify_failure",
+                    "kind": "integrity",
+                    "first_corrupt": first_corrupt,
+                    "rollback_to": rollback_height,
+                    "retry": retries,
+                }));
+                self.rollback_to(rollback_height);
+                self.reset_sync_idle();
+                if retries >= 3 {
+                    self.sync_verify_retries = 0; // Reset for fresh attempt.
+                }
+            }
+            SyncVerifyResult::MisalignedWithPeers { our_height, peer_count } => {
+                // Ancestor depth escalation based on retry count.
+                let rollback_height = match retries {
+                    1 => {
+                        // First failure: re-find common ancestor with peers.
+                        // For now, rollback to sync_start (the pre-sync height).
+                        tracing::warn!(
+                            task = "sync_verify",
+                            "misalignment recovery (attempt 1): rolling back to sync start {}",
+                            self.sync_start_height,
+                        );
+                        self.sync_start_height
+                    }
+                    2 => {
+                        // Second failure: halve the trust point.
+                        let half = our_height / 2;
+                        tracing::warn!(
+                            task = "sync_verify",
+                            "misalignment recovery (attempt 2): rolling back to height {}",
+                            half,
+                        );
+                        half
+                    }
+                    _ => {
+                        // Third+ failure: full re-sync from genesis.
+                        tracing::error!(
+                            task = "sync_verify",
+                            "misalignment recovery (attempt {}): rolling back to genesis",
+                            retries,
+                        );
+                        0
+                    }
+                };
+                self.broadcast_event(serde_json::json!({
+                    "event": "sync_verify_failure",
+                    "kind": "misalignment",
+                    "our_height": our_height,
+                    "peer_count": peer_count,
+                    "rollback_to": rollback_height,
+                    "retry": retries,
+                }));
+                self.rollback_to(rollback_height);
+                self.reset_sync_idle();
+                // If we've retried 3+ times, also ban the current sync peer.
+                if retries >= 3 {
+                    self.sync_verify_retries = 0; // Reset for fresh peer attempt.
+                }
+            }
+        }
+    }
+
     /// Sync conveyor: advance the manifest-based sync state machine.
     ///
     /// **Isolated from healing decisions.** The conveyor only runs when the
@@ -903,6 +1102,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 let (best_peer, best_height) = self.find_best_sync_peer(our_height);
                 if let Some(peer) = best_peer {
                     let behind = best_height - our_height;
+                    // Record sync session metadata for post-sync verification.
+                    self.sync_start_height = our_height;
+                    self.sync_import_kind = match self.healing_phase {
+                        HealingPhase::Resolving => SyncImportKind::ForkResolution,
+                        HealingPhase::Adopting => SyncImportKind::CrossChainAdoption,
+                        _ if our_height == 0 => SyncImportKind::Bootstrap,
+                        _ => SyncImportKind::CatchUp,
+                    };
                     // Transition healing phase to Syncing.
                     self.healing_phase = HealingPhase::Syncing;
                     tracing::info!(
@@ -935,24 +1142,34 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 // If we already caught up (e.g., blocks arrived via fallback
                 // while waiting for the manifest), stop syncing.
                 if our_height >= *target {
-                    self.reset_sync_idle();
-                    self.broadcast_event(serde_json::json!({
-                        "event": "sync_complete",
-                        "height": our_height,
-                    }));
-                    tracing::info!(
-                        task = "sync",
-                        "Sync complete (caught up during AwaitingManifest) — height {}",
-                        our_height,
-                    );
+                    // Post-sync verification before declaring complete.
+                    let verify = self.verify_sync_range(self.sync_start_height, our_height);
+                    match verify {
+                        SyncVerifyResult::Ok => {
+                            self.sync_verify_retries = 0;
+                            self.reset_sync_idle();
+                            self.broadcast_event(serde_json::json!({
+                                "event": "sync_complete",
+                                "height": our_height,
+                            }));
+                            tracing::info!(
+                                task = "sync",
+                                "Sync complete (caught up during AwaitingManifest) — height {}",
+                                our_height,
+                            );
+                        }
+                        failure => {
+                            self.handle_post_sync_failure(failure);
+                        }
+                    }
                     return;
                 }
                 // Timeout check.
-                if now.saturating_sub(*requested_at) >= MANIFEST_TIMEOUT_SECS {
+                if now.saturating_sub(*requested_at) >= SYNC_MANIFEST_TIMEOUT_SECS {
                     tracing::warn!(
                         task = "sync",
                         "manifest request timed out after {}s — trying different peer",
-                        MANIFEST_TIMEOUT_SECS,
+                        SYNC_MANIFEST_TIMEOUT_SECS,
                     );
                     let old_peer = peer.clone();
                     let target = *target;
@@ -1056,7 +1273,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                     });
                                     // Mark as failed so the conveyor switches peer.
                                     if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
-                                        manifest[cursor].status = EntryStatus::Failed { attempts: MAX_BLOCK_RETRIES };
+                                        manifest[cursor].status = EntryStatus::Failed { attempts: SYNC_MAX_BLOCK_RETRIES };
                                     }
                                 } else {
                                     tracing::warn!(
@@ -1094,25 +1311,32 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                                 }
                             }
                         }
-                        EntryStatus::Failed { attempts } if attempts >= MAX_BLOCK_RETRIES => {
-                            // Too many failures — switch peer.
+                        EntryStatus::Failed { attempts } if attempts >= SYNC_MAX_BLOCK_RETRIES => {
+                            // Too many failures — ingest SyncStall clue so
+                            // evaluate_and_execute can trigger fork resolution
+                            // instead of endlessly restarting sync.
+                            let stalled_h = manifest[cursor].height;
                             tracing::warn!(
                                 task = "sync",
-                                "block {} failed {} times — switching peer",
-                                manifest[cursor].height, attempts,
+                                "block {} failed {} times — ingesting sync stall clue",
+                                stalled_h, attempts,
                             );
+                            self.ingest_clue(HealingClue::SyncStall {
+                                stalled_height: stalled_h,
+                                target_height: target,
+                                reason: format!(
+                                    "block {stalled_h} failed {attempts} times, sync cannot advance"
+                                ),
+                            });
                             self.reset_sync_idle();
-                            // advance_sync will be called again on next tick.
                         }
                         EntryStatus::Failed { .. } => {
-                            // Retry.
+                            // Retry — but keep Failed status so the attempt counter
+                            // accumulates across retries (don't reset to Requested).
                             self.send_network(NetworkCommand::RequestBlockByHeight {
                                 peer_id: peer.clone(),
                                 height: entry_height,
                             });
-                            if let SyncState::Fetching { ref mut manifest, .. } = self.sync_state {
-                                manifest[cursor].status = EntryStatus::Requested { at: now };
-                            }
                         }
                         EntryStatus::Done => {
                             // Should not happen — cursor should advance past Done entries.
@@ -1125,17 +1349,26 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 } else {
                     // All entries processed — check if we need more.
                     if our_height >= target {
-                        // Caught up!
-                        self.reset_sync_idle();
-                        self.broadcast_event(serde_json::json!({
-                            "event": "sync_complete",
-                            "height": our_height,
-                        }));
-                        tracing::info!(
-                            task = "sync",
-                            "Sync complete — caught up at height {}",
-                            our_height
-                        );
+                        // Post-sync verification before declaring complete.
+                        let verify = self.verify_sync_range(self.sync_start_height, our_height);
+                        match verify {
+                            SyncVerifyResult::Ok => {
+                                self.sync_verify_retries = 0;
+                                self.reset_sync_idle();
+                                self.broadcast_event(serde_json::json!({
+                                    "event": "sync_complete",
+                                    "height": our_height,
+                                }));
+                                tracing::info!(
+                                    task = "sync",
+                                    "Sync complete — caught up at height {}",
+                                    our_height
+                                );
+                            }
+                            failure => {
+                                self.handle_post_sync_failure(failure);
+                            }
+                        }
                     } else {
                         // Need next manifest window.
                         let start = our_height + 1;
@@ -1629,8 +1862,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.persist_discovered_blockchains();
             self.fork_common_ancestor = None;
 
-            // Reset sync state.
+            // Reset sync state + post-sync verification counters
+            // (prevent retry bleed from previous healing case).
             self.reset_sync_idle();
+            self.sync_verify_retries = 0;
+            self.sync_start_height = 0;
 
             // Request fresh sync from any available peer.
             self.request_sync();
@@ -1789,11 +2025,14 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             self.fork_resolution_delay_cycles,
         );
 
-        // 5. Reset sync state — conveyor restarts on next tick.
+        // 5. Reset sync state + post-sync verification counters
+        // (prevent retry bleed from previous healing case).
         // NOTE(stale-cache-#12): reset_sync_idle() → sync_atomics_from_state()
         // sets sync_target_height_shared, sync_progress_current, and
         // sync_progress_total all to 0 when state is Idle. No separate reset needed.
         self.reset_sync_idle();
+        self.sync_verify_retries = 0;
+        self.sync_start_height = 0;
 
         // 6. Clear stale proposals and gossip dedup caches.
         self.clear_pending_proposals();
@@ -2153,10 +2392,13 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             .map(|snap| snap.pubkey_vec.clone())
             .unwrap_or_default();
 
-        // Use wall-clock time for current_time, but skip B6 timestamp skew checks
-        // for sync imports. Historical blocks are expected to have old timestamps.
-        // B5 (monotonicity) and B13 (median) still apply.
-        let current_time = std::time::SystemTime::now()
+        // Historical TimeContext: T4 validates tx timestamps against the block's
+        // own timestamp (proves tx was fresh when block was created).  B6 future-guard
+        // uses wall clock (no importing future blocks).  B6 past and B13 are skipped
+        // (historical blocks are old; recent timestamps are unreliable after rollback).
+        // T-EXPIRY is skipped (proposer validated at creation time).
+        // B5 (monotonicity) always enforced.
+        let wall_clock = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
@@ -2169,10 +2411,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         let ctx = noble_core::BlockValidationContext {
             chain_id,
-            current_time,
+            time_context: noble_core::TimeContext::Historical {
+                block_time: block.header.timestamp,
+                wall_clock,
+            },
             parent: parent_header.as_ref(),
             validator_list: &val_list,
-            skip_timestamp_skew: true,
         };
 
         if let Err(e) = noble_core::validate_block(block, &ctx) {

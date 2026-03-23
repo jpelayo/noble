@@ -352,10 +352,9 @@ mod tests {
 
         let ctx = noble_core::BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: now,
+            time_context: noble_core::TimeContext::RealTime { wall_clock: now },
             parent: None,
             validator_list: &[val_pub],
-            skip_timestamp_skew: false,
         };
         assert!(noble_core::validate_block(&block, &ctx).is_ok());
     }

@@ -8,7 +8,7 @@
 
 use noble_core::{
     validate_block, validate_transaction, Block, BlockHeader, BlockValidationContext,
-    TxValidationContext,
+    TimeContext, TxValidationContext,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey};
 use tracing::{debug, info, warn};
@@ -1558,10 +1558,9 @@ impl CycleEngine {
         }
         let ctx = BlockValidationContext {
             chain_id: self.chain_id,
-            current_time,
+            time_context: TimeContext::RealTime { wall_clock: current_time },
             parent: parent_header.as_ref(),
             validator_list: &val_list,
-            skip_timestamp_skew: false,
         };
 
         if let Err(e) = validate_block(&block, &ctx) {
@@ -1941,10 +1940,9 @@ impl CycleEngine {
                 let val_list = self.snapshot_pubkey_vec();
                 let ctx = BlockValidationContext {
                     chain_id: self.chain_id,
-                    current_time,
+                    time_context: TimeContext::RealTime { wall_clock: current_time },
                     parent: self.tip_header.as_ref(),
                     validator_list: &val_list,
-                    skip_timestamp_skew: false,
                 };
                 if let Err(e) = validate_block(&block, &ctx) {
                     outputs.push(CycleIo::Log(format!(
@@ -1956,7 +1954,7 @@ impl CycleEngine {
                     for tx in &block.transactions {
                         let tx_ctx = TxValidationContext {
                             chain_id: self.chain_id,
-                            current_time,
+                            time_context: TimeContext::RealTime { wall_clock: current_time },
                             chain_height: self.tip_height + 1,
                         };
                         match tx.compute_tx_id(self.chain_id) {

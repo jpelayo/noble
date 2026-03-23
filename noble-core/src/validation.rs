@@ -15,12 +15,37 @@ use crate::merkle::compute_merkle_root;
 use crate::metadata::{validate_metadata, validate_version_metadata};
 use crate::transaction::Transaction;
 
+/// Temporal context for validation — determines how time-dependent checks
+/// (T4, T-EXPIRY, B6, B13) are evaluated.
+#[derive(Debug, Clone, Copy)]
+pub enum TimeContext {
+    /// Live proposals: wall clock is the reference for all time checks.
+    /// T4:  abs_diff(tx.timestamp, wall_clock) ≤ MAX_TX_TIMESTAMP_SKEW
+    /// T-EXPIRY: wall_clock > expires_at → reject
+    /// B6:  block.timestamp within ±skew of wall_clock
+    /// B13: median check active
+    RealTime { wall_clock: u64 },
+
+    /// Historical sync imports: the block's own timestamp is the canonical
+    /// reference for T4 and T-EXPIRY.  Wall clock used only for B6 future-guard.
+    /// T4:  abs_diff(tx.timestamp, block_time) ≤ SYNC_TX_TIMESTAMP_TOLERANCE
+    /// T-EXPIRY: skipped (proposer validated at creation time)
+    /// B6:  block.timestamp ≤ wall_clock + SYNC_BLOCK_FUTURE_TOLERANCE (future only)
+    /// B13: skipped (recent timestamps unreliable after rollback)
+    Historical { block_time: u64, wall_clock: u64 },
+}
+
+/// Relaxed T4 tolerance for historical sync imports (2h vs 1h real-time).
+pub const SYNC_TX_TIMESTAMP_TOLERANCE: u64 = 7200;
+/// Relaxed B6 future tolerance for historical sync imports (10min vs 5min real-time).
+pub const SYNC_BLOCK_FUTURE_TOLERANCE: u64 = 600;
+
 /// Context needed for transaction validation.
 pub struct TxValidationContext {
     /// Chain ID for tx_id computation.
     pub chain_id: u32,
-    /// Current wall-clock time (Unix seconds).
-    pub current_time: u64,
+    /// Temporal context: real-time (wall clock) or historical (block timestamp).
+    pub time_context: TimeContext,
     /// Current chain height (for activation-gated rules like T32).
     pub chain_height: u64,
 }
@@ -29,16 +54,12 @@ pub struct TxValidationContext {
 pub struct BlockValidationContext<'a> {
     /// Chain ID for tx_id computation.
     pub chain_id: u32,
-    /// Current wall-clock time (Unix seconds).
-    pub current_time: u64,
+    /// Temporal context: real-time (wall clock) or historical (block timestamp).
+    pub time_context: TimeContext,
     /// Parent block header (None for genesis).
     pub parent: Option<&'a BlockHeader>,
     /// The node's local trusted validator list.
     pub validator_list: &'a [NoblePublicKey],
-    /// Skip B6 timestamp skew checks (past/future).
-    /// Set to `true` for historical sync imports where the block's timestamp
-    /// is expected to be old. B5 (monotonicity) and B13 (median) still apply.
-    pub skip_timestamp_skew: bool,
 }
 
 /// Validate a BIP-137 (Bitcoin Signed Message) signature on a transaction (T26).
@@ -162,16 +183,32 @@ fn validate_tx_protocol_fields(
     // T3: Checksum is [u8; 32] — enforced at compile time by Hash256
     tracing::trace!("T3: checksum type enforced at compile time");
 
-    // T4: Timestamp skew
-    let diff = tx.timestamp.abs_diff(ctx.current_time);
-    if diff > MAX_TX_TIMESTAMP_SKEW {
-        return Err(ValidationError::TimestampOutOfRange {
-            tx_time: tx.timestamp,
-            current_time: ctx.current_time,
-            max_skew: MAX_TX_TIMESTAMP_SKEW,
-        });
+    // T4: Timestamp skew — reference time depends on context.
+    match ctx.time_context {
+        TimeContext::RealTime { wall_clock } => {
+            let diff = tx.timestamp.abs_diff(wall_clock);
+            if diff > MAX_TX_TIMESTAMP_SKEW {
+                return Err(ValidationError::TimestampOutOfRange {
+                    tx_time: tx.timestamp,
+                    current_time: wall_clock,
+                    max_skew: MAX_TX_TIMESTAMP_SKEW,
+                });
+            }
+            tracing::trace!(skew = diff, "T4: timestamp skew check passed (real-time)");
+        }
+        TimeContext::Historical { block_time, .. } => {
+            // Validate tx was fresh when the block was created (relaxed tolerance).
+            let diff = tx.timestamp.abs_diff(block_time);
+            if diff > SYNC_TX_TIMESTAMP_TOLERANCE {
+                return Err(ValidationError::TimestampOutOfRange {
+                    tx_time: tx.timestamp,
+                    current_time: block_time,
+                    max_skew: SYNC_TX_TIMESTAMP_TOLERANCE,
+                });
+            }
+            tracing::trace!(skew = diff, "T4: timestamp skew check passed (historical)");
+        }
     }
-    tracing::trace!(skew = diff, "T4: timestamp skew check passed");
 
     // T5: Issuer scheme recognized
     if !is_recognized_scheme(tx.issuer_sig.scheme_id) {
@@ -345,12 +382,15 @@ pub fn validate_transaction(
     ctx: &TxValidationContext,
 ) -> Result<(), ValidationError> {
     // T-EXPIRY: Reject expired transactions.
-    if let Some(expires_at) = tx.expires_at {
-        if ctx.current_time > expires_at {
-            return Err(ValidationError::Internal(format!(
-                "transaction expired: expires_at={expires_at}, current_time={}",
-                ctx.current_time
-            )));
+    // In Historical mode, skip — the proposer enforced T-EXPIRY at creation time.
+    // Post-sync verification catches any inconsistency via peer alignment.
+    if let TimeContext::RealTime { wall_clock } = ctx.time_context {
+        if let Some(expires_at) = tx.expires_at {
+            if wall_clock > expires_at {
+                return Err(ValidationError::Internal(format!(
+                    "transaction expired: expires_at={expires_at}, current_time={wall_clock}",
+                )));
+            }
         }
     }
 
@@ -457,18 +497,18 @@ pub fn median_timestamp(timestamps: &[u64]) -> u64 {
 /// Validate a block's timestamp against B5, B6, and B13 (median-of-11).
 ///
 /// This consolidates all timestamp checks into one function for the consensus layer:
-/// - Monotonicity (B5): `block_timestamp > parent_timestamp`
-/// - Median-of-11 (B13): `block_timestamp >= median(recent_timestamps)`
-/// - Future skew (B6): `block_timestamp <= now + MAX_BLOCK_FUTURE_SKEW`
-/// - Past skew (B6): `now <= block_timestamp + MAX_BLOCK_PAST_SKEW`
+/// - Monotonicity (B5): `block_timestamp > parent_timestamp` (always)
+/// - Median-of-11 (B13): `block_timestamp >= median(recent_timestamps)` (RealTime only)
+/// - Future skew (B6): `block_timestamp <= wall_clock + tolerance` (always, tolerance varies)
+/// - Past skew (B6): `wall_clock <= block_timestamp + tolerance` (RealTime only)
 #[tracing::instrument(skip(recent_timestamps), fields(task = "block_validation"))]
 pub fn validate_block_timestamp(
     block_timestamp: u64,
     parent_timestamp: u64,
     recent_timestamps: &[u64],
-    current_time: u64,
+    time_context: TimeContext,
 ) -> Result<(), ValidationError> {
-    // B5: Monotonicity
+    // B5: Monotonicity — always enforced, no relaxation.
     if block_timestamp <= parent_timestamp {
         return Err(ValidationError::TimestampNotAfterParent {
             block_time: block_timestamp,
@@ -476,30 +516,45 @@ pub fn validate_block_timestamp(
         });
     }
 
-    // B13: Median-of-11 (only if we have recent timestamps)
-    if !recent_timestamps.is_empty() {
-        let median = median_timestamp(recent_timestamps);
-        if block_timestamp < median {
-            return Err(ValidationError::BlockTimestampBeforeMedian {
-                block_time: block_timestamp,
-                median,
-            });
+    match time_context {
+        TimeContext::RealTime { wall_clock } => {
+            // B13: Median-of-11
+            if !recent_timestamps.is_empty() {
+                let median = median_timestamp(recent_timestamps);
+                if block_timestamp < median {
+                    return Err(ValidationError::BlockTimestampBeforeMedian {
+                        block_time: block_timestamp,
+                        median,
+                    });
+                }
+            }
+            // B6: Future skew (strict)
+            if block_timestamp > wall_clock + MAX_BLOCK_FUTURE_SKEW {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: block_timestamp,
+                    current_time: wall_clock,
+                });
+            }
+            // B6: Past skew (strict)
+            if wall_clock > block_timestamp + MAX_BLOCK_PAST_SKEW {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: block_timestamp,
+                    current_time: wall_clock,
+                });
+            }
         }
-    }
-
-    // B6: Future skew
-    if block_timestamp > current_time + MAX_BLOCK_FUTURE_SKEW {
-        return Err(ValidationError::BlockTimestampSkew {
-            block_time: block_timestamp,
-            current_time,
-        });
-    }
-    // B6: Past skew
-    if current_time > block_timestamp + MAX_BLOCK_PAST_SKEW {
-        return Err(ValidationError::BlockTimestampSkew {
-            block_time: block_timestamp,
-            current_time,
-        });
+        TimeContext::Historical { wall_clock, .. } => {
+            // B13: Skipped — recent timestamps are unreliable after rollback.
+            // B6: Future guard only (relaxed tolerance) — no importing future blocks.
+            if block_timestamp > wall_clock + SYNC_BLOCK_FUTURE_TOLERANCE {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: block_timestamp,
+                    current_time: wall_clock,
+                });
+            }
+            // B6: Past skew NOT checked — historical blocks ARE old.
+            // B5 monotonicity (above) enforces temporal ordering.
+        }
     }
 
     Ok(())
@@ -587,22 +642,35 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
     }
     tracing::trace!("B4: merkle root verified");
 
-    // B6: Timestamp skew (skipped for historical sync imports where old timestamps are expected)
-    if !ctx.skip_timestamp_skew {
-        if header.timestamp > ctx.current_time + MAX_BLOCK_FUTURE_SKEW {
-            return Err(ValidationError::BlockTimestampSkew {
-                block_time: header.timestamp,
-                current_time: ctx.current_time,
-            });
+    // B6: Timestamp skew — dispatches on TimeContext.
+    match ctx.time_context {
+        TimeContext::RealTime { wall_clock } => {
+            if header.timestamp > wall_clock + MAX_BLOCK_FUTURE_SKEW {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: header.timestamp,
+                    current_time: wall_clock,
+                });
+            }
+            if wall_clock > header.timestamp + MAX_BLOCK_PAST_SKEW {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: header.timestamp,
+                    current_time: wall_clock,
+                });
+            }
+            tracing::trace!("B6: timestamp skew check passed (real-time)");
         }
-        if ctx.current_time > header.timestamp + MAX_BLOCK_PAST_SKEW {
-            return Err(ValidationError::BlockTimestampSkew {
-                block_time: header.timestamp,
-                current_time: ctx.current_time,
-            });
+        TimeContext::Historical { wall_clock, .. } => {
+            // Future guard only (relaxed tolerance).
+            if header.timestamp > wall_clock + SYNC_BLOCK_FUTURE_TOLERANCE {
+                return Err(ValidationError::BlockTimestampSkew {
+                    block_time: header.timestamp,
+                    current_time: wall_clock,
+                });
+            }
+            // Past skew not checked — historical blocks are old by definition.
+            tracing::trace!("B6: future guard passed (historical)");
         }
     }
-    tracing::trace!("B6: timestamp skew check passed");
 
     // B7: tx_count
     if header.tx_count != block.transactions.len() as u32 {
@@ -661,9 +729,16 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
             tracing::debug!("tx_id computation failed: {e}");
             ValidationError::Internal("tx_id computation failed".into())
         })?;
+        let tx_time_ctx = match ctx.time_context {
+            TimeContext::RealTime { wall_clock } => TimeContext::RealTime { wall_clock },
+            TimeContext::Historical { wall_clock, .. } => TimeContext::Historical {
+                block_time: block.header.timestamp,
+                wall_clock,
+            },
+        };
         let tx_ctx = TxValidationContext {
             chain_id: ctx.chain_id,
-            current_time: ctx.current_time,
+            time_context: tx_time_ctx,
             chain_height: block.header.height,
         };
         validate_transaction(tx, &tx_id, &tx_ctx).map_err(|e| {
@@ -753,7 +828,7 @@ mod tests {
     fn default_tx_ctx() -> TxValidationContext {
         TxValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             chain_height: 0,
         }
     }
@@ -951,10 +1026,9 @@ mod tests {
 
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: Some(&parent_header),
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(result, Err(ValidationError::PrevHashMismatch)));
@@ -975,10 +1049,9 @@ mod tests {
 
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(
@@ -998,10 +1071,9 @@ mod tests {
 
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(
@@ -1021,10 +1093,9 @@ mod tests {
         // Empty validator list
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(result, Err(ValidationError::ValidatorNotTrusted)));
@@ -1040,10 +1111,9 @@ mod tests {
 
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         assert!(validate_block(&block, &ctx).is_ok());
     }
@@ -1053,10 +1123,9 @@ mod tests {
         let (block, _) = make_valid_block(vec![]);
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         assert!(validate_block(&block, &ctx).is_ok());
     }
@@ -1373,7 +1442,7 @@ mod tests {
             999,   // block timestamp
             1_000, // parent timestamp (higher)
             &[],
-            1_700_000_000,
+            TimeContext::RealTime { wall_clock: 1_700_000_000 },
         );
         assert!(matches!(
             result,
@@ -1389,7 +1458,7 @@ mod tests {
             250, // below median of 300
             200, // parent (ok, 250 > 200)
             &recent,
-            1_700_000_000,
+            TimeContext::RealTime { wall_clock: 1_700_000_000 },
         );
         assert!(matches!(
             result,
@@ -1400,7 +1469,10 @@ mod tests {
     #[test]
     fn b6_block_timestamp_too_far_future() {
         let now = 1_700_000_000;
-        let result = validate_block_timestamp(now + MAX_BLOCK_FUTURE_SKEW + 1, now, &[], now);
+        let result = validate_block_timestamp(
+            now + MAX_BLOCK_FUTURE_SKEW + 1, now, &[],
+            TimeContext::RealTime { wall_clock: now },
+        );
         assert!(matches!(
             result,
             Err(ValidationError::BlockTimestampSkew { .. })
@@ -1415,7 +1487,7 @@ mod tests {
             now + 10, // slightly in the future
             now,      // parent
             &recent,
-            now + 10,
+            TimeContext::RealTime { wall_clock: now + 10 },
         );
         assert!(result.is_ok());
     }
@@ -1736,10 +1808,9 @@ mod tests {
         };
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(
@@ -1836,10 +1907,9 @@ mod tests {
         let (block, _) = make_valid_block(vec![(tx, tx_id)]);
         let ctx = BlockValidationContext {
             chain_id: test_chain_id(),
-            current_time: 1_700_000_000,
+            time_context: TimeContext::RealTime { wall_clock: 1_700_000_000 },
             parent: None,
             validator_list: &[block.header.validator_id.clone()],
-            skip_timestamp_skew: false,
         };
         let result = validate_block(&block, &ctx);
         assert!(matches!(

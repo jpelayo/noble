@@ -352,7 +352,10 @@ impl InvalidBlockEvidence {
                 let tx_id = tx.compute_tx_id(chain_id)
                     .map_err(|e| EvidenceError::HashError(e.to_string()))?;
                 let ctx = crate::validation::TxValidationContext {
-                    current_time: self.block.header.timestamp,
+                    time_context: crate::validation::TimeContext::Historical {
+                        block_time: self.block.header.timestamp,
+                        wall_clock: self.block.header.timestamp,
+                    },
                     chain_id,
                     chain_height: self.block.header.height,
                 };
