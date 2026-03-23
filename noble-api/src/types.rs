@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use noble_core::{Block, NobleAddress, Transaction};
 use noble_crypto::{Hash256, NoblePublicKey};
 
+fn is_zero(v: &u64) -> bool { *v == 0 }
+
 use crate::error::ApiError;
 
 // ---------------------------------------------------------------------------
@@ -685,6 +687,9 @@ pub struct WalletInfoResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
+    /// Immature coinbase outputs (depth < COINBASE_MATURITY). Not yet spendable.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub immature: u64,
     /// Balance held in Noble (secp256k1) address buckets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub noble_balance: Option<u64>,

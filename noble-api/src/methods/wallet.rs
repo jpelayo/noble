@@ -221,46 +221,54 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let all_keys = collect_wallet_keys(self);
         let key_count = all_keys.len();
 
-        // Sum balances across all wallet keys and all address buckets
+        // Sum balances across all wallet keys and all address buckets.
+        // Also compute immature coinbase total (same pattern as getAddressBalance in address.rs).
         let storage = self.storage.read();
         let mempool = self.mempool.lock();
+        let tip_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
         let mut total_balance = 0u64;
+        let mut total_immature = 0u64;
         let mut total_pending = 0u64;
         let mut noble_bal = 0u64;
         let mut hash160_bal = 0u64;
         let mut taproot_bal = 0u64;
 
+        // Scan UTXOs per address to separate mature from immature coinbase.
+        let mut scan_address = |addr: &noble_core::NobleAddress| -> (u64, u64) {
+            let mut bal = 0u64;
+            let mut immature = 0u64;
+            for (_, entry) in storage.get_address_utxos(addr).unwrap_or_default() {
+                bal = bal.saturating_add(entry.value);
+                if entry.is_coinbase && !entry.is_mature(tip_height) {
+                    immature = immature.saturating_add(entry.value);
+                }
+            }
+            (bal, immature)
+        };
+
         for pk in &all_keys {
             // Noble bucket (all key types)
-            let nb = storage
-                .get_balance(&noble_core::NobleAddress::Noble(pk.clone()))
-                .unwrap_or_else(|e| {
-                    tracing::warn!("balance read failed for Noble bucket: {e}");
-                    0
-                });
+            let noble_addr = noble_core::NobleAddress::Noble(pk.clone());
+            let (nb, nb_imm) = scan_address(&noble_addr);
             noble_bal = noble_bal.saturating_add(nb);
             total_balance = total_balance.saturating_add(nb);
+            total_immature = total_immature.saturating_add(nb_imm);
 
             // Hash160 + Taproot buckets (secp256k1 keys only)
             if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
-                let hb = storage.get_balance(&h160_addr).unwrap_or_else(|e| {
-                    tracing::warn!("balance read failed for Hash160 bucket: {e}");
-                    0
-                });
+                let (hb, hb_imm) = scan_address(&h160_addr);
                 hash160_bal = hash160_bal.saturating_add(hb);
                 total_balance = total_balance.saturating_add(hb);
+                total_immature = total_immature.saturating_add(hb_imm);
             }
             if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
-                let tb = storage.get_balance(&tap_addr).unwrap_or_else(|e| {
-                    tracing::warn!("balance read failed for Taproot bucket: {e}");
-                    0
-                });
+                let (tb, tb_imm) = scan_address(&tap_addr);
                 taproot_bal = taproot_bal.saturating_add(tb);
                 total_balance = total_balance.saturating_add(tb);
+                total_immature = total_immature.saturating_add(tb_imm);
             }
 
             // Pending debits per bucket (bucket-aware)
-            let noble_addr = noble_core::NobleAddress::Noble(pk.clone());
             total_pending = total_pending.saturating_add(mempool.pending_debit_for_address(&noble_addr));
 
             if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
@@ -276,13 +284,19 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         // Only include bucket breakdown if there are non-zero Bitcoin balances
         let has_bitcoin = hash160_bal > 0 || taproot_bal > 0;
 
+        // available = total - immature - mempool_pending
+        let available = total_balance
+            .saturating_sub(total_immature)
+            .saturating_sub(total_pending);
+
         Ok(WalletInfoResponse {
             unlocked: state.is_unlocked(),
             expires_at: state.expires_at_unix(),
             key_count,
             balance: total_balance,
-            available: total_balance.saturating_sub(total_pending),
+            available,
             pending: total_pending,
+            immature: total_immature,
             noble_balance: if has_bitcoin { Some(noble_bal) } else { None },
             hash160_balance: if has_bitcoin { Some(hash160_bal) } else { None },
             taproot_balance: if has_bitcoin { Some(taproot_bal) } else { None },

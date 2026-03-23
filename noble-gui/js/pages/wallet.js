@@ -32,12 +32,12 @@ export function init(root, ctx) {
       <div class="kpi-card">
         <div class="kpi-label">Available</div>
         <div class="kpi-value" id="w-available" style="color:var(--success)">--</div>
-        <div class="kpi-sub">Confirmed (depth &ge; 6)</div>
+        <div class="kpi-sub" id="w-available-sub">Mature (depth &ge; 6)</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Pending</div>
         <div class="kpi-value" id="w-pending" style="color:var(--warning)">--</div>
-        <div class="kpi-sub">Awaiting confirmation depth</div>
+        <div class="kpi-sub" id="w-pending-sub">Mempool + maturing</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Total Earned</div>
@@ -211,10 +211,25 @@ export function init(root, ctx) {
       const info = await rpc.call('noble_getWalletInfo');
 
       // KPI cards
+      const immature = info.immature || 0;
       wBalance.textContent = formatNoble(info.balance);
       wBalanceAtomic.textContent = `${formatNumber(info.balance)} atomic units`;
       wAvailable.textContent = formatNoble(info.available);
-      wPending.textContent = formatNoble(info.pending);
+      wPending.textContent = formatNoble(info.pending + immature);
+
+      // Dynamic subtitles
+      const wAvailSub = root.querySelector('#w-available-sub');
+      const wPendSub = root.querySelector('#w-pending-sub');
+      if (wAvailSub) {
+        wAvailSub.textContent = immature > 0
+          ? `${formatNoble(immature)} maturing`
+          : 'Mature (depth \u2265 6)';
+      }
+      if (wPendSub) {
+        wPendSub.textContent = immature > 0
+          ? `${formatNoble(immature)} coinbase maturing + ${formatNoble(info.pending)} mempool`
+          : info.pending > 0 ? 'In mempool' : 'No pending';
+      }
 
       // Identity — show key count and balances
       wIdentity.innerHTML = `
