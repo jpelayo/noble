@@ -203,10 +203,58 @@ pub async fn handle_api_action(
         }
 
         "getWalletTransactions" | "getTransactionHistory" => {
-            // Server returns fully enriched list — all address variants, mempool, newest first.
-            let result = client
+            let mut result = client
                 .call_rpc("noble_getWalletTransactions", json!([]))
                 .await?;
+
+            // Compose: fetch CLIENT's own pending mempool txs.
+            if !wallet_address.is_empty() {
+                if let Ok(pending_result) = client.call_rpc("noble_getAddressPending", json!([wallet_address])).await {
+                    if let Some(pending_txs) = pending_result.get("transactions").and_then(|v| v.as_array()) {
+                        let confirmed_ids: std::collections::HashSet<String> = result
+                            .get("transactions").and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|t| t.get("tx_id").and_then(|v| v.as_str()).map(String::from)).collect())
+                            .unwrap_or_default();
+
+                        let mut pending_entries: Vec<Value> = Vec::new();
+                        for p in pending_txs {
+                            let tx_id = p.get("tx_id").and_then(|v| v.as_str()).unwrap_or("");
+                            if confirmed_ids.contains(tx_id) { continue; }
+                            let sent = p.get("sent").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let fee = p.get("fee").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let change = p.get("change").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let net_debit = p.get("net_debit").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let is_transfer = sent > 0;
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default().as_secs();
+                            pending_entries.push(json!({
+                                "txId": tx_id,
+                                "tx_type": if is_transfer { 1 } else { 0 },
+                                "type": if is_transfer { "Pending Transfer" } else { "Pending Notarization" },
+                                "direction": "outgoing",
+                                "amount": net_debit,
+                                "fee": fee,
+                                "status": "pending",
+                                "confirmations": 0,
+                                "counterparty": if is_transfer { "Transfer" } else { "Self (Document)" },
+                                "total_output": change + sent,
+                                "transfer_value": sent,
+                                "timestamp": now,
+                            }));
+                        }
+
+                        if !pending_entries.is_empty() {
+                            if let Some(txs) = result.get_mut("transactions").and_then(|v| v.as_array_mut()) {
+                                for entry in pending_entries.into_iter().rev() {
+                                    txs.insert(0, entry);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Ok(result)
         }
 

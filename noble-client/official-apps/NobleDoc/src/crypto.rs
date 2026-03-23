@@ -306,6 +306,36 @@ pub fn handle_crypto_action(
 }
 
 
+/// SHA-256 hash of raw bytes.
+pub fn sha256_hash(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
+/// Parse chain ID hex string (e.g. "0x4E4F424C") to u32.
+pub fn parse_chain_id(s: &str) -> u32 {
+    let hex_str = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u32::from_str_radix(hex_str, 16).unwrap_or(0)
+}
+
+/// Extract metadata key-value pairs from bridge params.
+pub fn parse_metadata(params: &Value) -> Vec<(String, String)> {
+    params.get("metadata")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|entry| {
+                let key = entry.get("key").and_then(|v| v.as_str())?;
+                let value = entry.get("value").and_then(|v| v.as_str())?;
+                Some((key.to_string(), value.to_string()))
+            }).collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn hash_file(path: &str) -> Result<String, String> {
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
     let hash = sha256_hash(&data);

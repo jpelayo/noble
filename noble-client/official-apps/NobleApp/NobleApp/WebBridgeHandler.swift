@@ -94,9 +94,34 @@ final class WebBridgeHandler {
             ] as [String: Any]
 
         case "getWalletTransactions", "getTransactionHistory":
-            // Server returns fully enriched list — all address variants, mempool, newest first.
+            // Confirmed txs from node keystore (uses validator key when keystore locked).
             let txs = try await api.getWalletTransactions()
-            return ["transactions": txs.map { txToDict($0) }] as [String: Any]
+            var allDicts = txs.map { txToDict($0) }
+
+            // Compose: fetch CLIENT's own pending mempool txs via getAddressPending.
+            if let addr = appState.walletAddress, !addr.isEmpty {
+                let pending = (try? await api.getAddressPending(address: addr)) ?? []
+                let confirmedIds = Set(allDicts.compactMap { $0["txId"] as? String })
+                for p in pending where !confirmedIds.contains(p.txId) {
+                    let isTransfer = p.sent > 0
+                    allDicts.insert([
+                        "txId": p.txId,
+                        "tx_type": isTransfer ? 1 : 0,
+                        "type": isTransfer ? "Pending Transfer" : "Pending Notarization",
+                        "direction": "outgoing",
+                        "amount": p.netDebit,
+                        "fee": p.fee,
+                        "status": "pending",
+                        "confirmations": 0,
+                        "counterparty": isTransfer ? "Transfer" : "Self (Document)",
+                        "total_output": p.change + p.sent,
+                        "transfer_value": p.sent,
+                        "timestamp": Date().timeIntervalSince1970,
+                    ] as [String: Any], at: 0)
+                }
+            }
+
+            return ["transactions": allDicts] as [String: Any]
 
         case "estimateFee":
             let fee = try await api.estimateFee()
