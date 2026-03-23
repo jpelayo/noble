@@ -117,6 +117,28 @@ pub trait WalletApi {
     async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
 }
 
+/// Collect all public keys the wallet considers "ours":
+/// wallet keystore keys + validator key (if not already included).
+/// Single source of truth — used by both get_wallet_info and get_wallet_transactions.
+fn collect_wallet_keys<S: StorageEngine + Send + Sync + 'static>(state: &ApiState<S>) -> Vec<noble_crypto::NoblePublicKey> {
+    let mut all_keys: Vec<noble_crypto::NoblePublicKey> = {
+        let ks = state.wallet_keystore.lock();
+        ks.list_keys().unwrap_or_default()
+    };
+    // Include the validator key if it's not already in the wallet keystore.
+    if let Some(ref vk_hex) = *state.validator_pubkey.read() {
+        if let Ok(vk_bytes) = hex::decode(vk_hex) {
+            if let Ok(vk) = noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
+                let already = all_keys.iter().any(|k| k.to_wire_bytes() == vk.to_wire_bytes());
+                if !already {
+                    all_keys.push(vk);
+                }
+            }
+        }
+    }
+    all_keys
+}
+
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<S>> {
     async fn create_address(
@@ -190,13 +212,10 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     }
 
     async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned> {
-        let keystore = self.wallet_keystore.lock();
         let state = self.wallet_state.lock();
 
-        let keys = keystore.list_keys().map_err(|e| {
-            ErrorObjectOwned::owned(-32603, format!("keystore read failed: {e}"), None::<()>)
-        })?;
-        let key_count = keys.len();
+        let all_keys = collect_wallet_keys(self);
+        let key_count = all_keys.len();
 
         // Sum balances across all wallet keys and all address buckets
         let storage = self.storage.read();
@@ -206,23 +225,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let mut noble_bal = 0u64;
         let mut hash160_bal = 0u64;
         let mut taproot_bal = 0u64;
-
-        // Collect all keys to query: wallet keystore keys + validator key (if not already included).
-        let mut all_keys: Vec<noble_crypto::NoblePublicKey> = keys.clone();
-        if let Some(ref vk_hex) = *self.validator_pubkey.read() {
-            match hex::decode(vk_hex) {
-                Ok(vk_bytes) => match noble_crypto::NoblePublicKey::from_wire_bytes(&vk_bytes) {
-                    Ok(vk) => {
-                        let already = all_keys.iter().any(|k| k.to_wire_bytes() == vk.to_wire_bytes());
-                        if !already {
-                            all_keys.push(vk);
-                        }
-                    }
-                    Err(e) => tracing::warn!("validator_pubkey wire decode failed: {e}"),
-                },
-                Err(e) => tracing::warn!("validator_pubkey hex decode failed: {e}"),
-            }
-        }
 
         for pk in &all_keys {
             // Noble bucket (all key types)
@@ -523,36 +525,31 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
         use noble_core::NobleAddress;
 
-        // Get wallet's public key.
-        let wallet_keys = {
-            let ks = self.wallet_keystore.lock();
-            ks.list_keys().unwrap_or_default()
-        };
-        let Some(wallet_pk) = wallet_keys.into_iter().next() else {
+        // Collect all keys: wallet keystore + validator (same universe as get_wallet_info).
+        let all_keys = collect_wallet_keys(self);
+        if all_keys.is_empty() {
             return Ok(WalletTransactionsResponse { transactions: vec![] });
-        };
+        }
 
-        // Derive ALL 3 address variants for this key.
-        let noble_addr = NobleAddress::Noble(wallet_pk.clone());
-        let hash160_addr = NobleAddress::BitcoinHash160(
-            noble_crypto::bitcoin_addr::hash160(wallet_pk.key_bytes()),
-        );
-        let taproot_addr = NobleAddress::bitcoin_taproot_for_pubkey(&wallet_pk)
-            .unwrap_or_else(|| {
-                // Fallback: raw x-only (shouldn't happen for valid secp256k1 keys)
-                let kb = wallet_pk.key_bytes();
-                let mut xonly = [0u8; 32];
-                xonly.copy_from_slice(&kb[1..33]);
-                NobleAddress::BitcoinTaproot(xonly)
-            });
+        // Derive ALL 3 address variants for EACH key.
+        let mut all_addrs: Vec<NobleAddress> = Vec::new();
+        let mut my_wires: Vec<Vec<u8>> = Vec::new();
+        for pk in &all_keys {
+            let noble_addr = NobleAddress::Noble(pk.clone());
+            my_wires.push(noble_addr.to_wire_bytes());
+            all_addrs.push(noble_addr);
 
-        // All wire byte sets for "is this address ours?" checks.
-        let my_wires: Vec<Vec<u8>> = vec![
-            noble_addr.to_wire_bytes(),
-            hash160_addr.to_wire_bytes(),
-            taproot_addr.to_wire_bytes(),
-        ];
+            if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                my_wires.push(h160.to_wire_bytes());
+                all_addrs.push(h160);
+            }
+            if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                my_wires.push(tap.to_wire_bytes());
+                all_addrs.push(tap);
+            }
+        }
         let is_ours = |wire: &[u8]| my_wires.iter().any(|w| w.as_slice() == wire);
+
 
         let storage = self.storage.read();
         let tip_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
@@ -560,7 +557,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         // Query history from ALL three address variants, deduplicate, sort newest first.
         let mut seen = std::collections::HashSet::new();
         let mut all_tx_ids: Vec<(noble_crypto::Hash256, u64)> = Vec::new();
-        for addr in [&noble_addr, &hash160_addr, &taproot_addr] {
+        for addr in &all_addrs {
             let ids = match storage.get_address_history(addr, 0, 1000) {
                 Ok(ids) => ids,
                 Err(e) => {

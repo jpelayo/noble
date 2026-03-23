@@ -31,8 +31,9 @@ struct NobleMacApp: App {
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
-                    if appState.isConnected {
-                        appState.startPolling()
+                    appState.startPolling()
+                    if !appState.isConnected && !appState.nodeURL.isEmpty {
+                        Task { await appState.connectToNode() }
                     }
                 case .background, .inactive:
                     appState.stopPolling()
