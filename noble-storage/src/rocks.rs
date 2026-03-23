@@ -706,16 +706,40 @@ impl StorageEngine for RocksDbStorage {
         let undo_bytes = Self::encode_undo_data(&spent_utxos);
         batch.put_cf(cf_undo, height_be, &undo_bytes);
 
-        // Verify coinbase output value matches subsidy + collected fees
+        // Verify block reward + fee distribution outputs match subsidy + collected fees.
+        // Block Reward (index 0): outputs must sum to subsidy.
+        // Fee Distribution (index 1, if present): outputs must sum to total_fees.
+        // Legacy format (single coinbase with subsidy+fees merged): also accepted.
         let subsidy = subsidy_at_height(height);
-        if let Some(coinbase_tx) = block.transactions.first() {
-            if coinbase_tx.is_coinbase() {
-                let coinbase_total: u64 = coinbase_tx.outputs.iter().map(|o| o.value).sum();
-                let expected = subsidy + total_fees;
-                if coinbase_total != expected {
-                    return Err(StorageError::Database(format!(
-                        "coinbase output mismatch: got {coinbase_total}, expected {expected} (subsidy {subsidy} + fees {total_fees})"
-                    )));
+        if let Some(reward_tx) = block.transactions.first() {
+            if reward_tx.is_coinbase() {
+                let reward_total: u64 = reward_tx.outputs.iter().map(|o| o.value).sum();
+                // Check for new format: block reward = subsidy, fee dist = fees
+                let has_fee_dist = block.transactions.get(1)
+                    .map(|tx| tx.tx_type == noble_core::TX_TYPE_FEE)
+                    .unwrap_or(false);
+                if has_fee_dist {
+                    // New format: reward must equal subsidy exactly
+                    if reward_total != subsidy {
+                        return Err(StorageError::Database(format!(
+                            "block reward mismatch: got {reward_total}, expected {subsidy}"
+                        )));
+                    }
+                    let fee_tx = &block.transactions[1];
+                    let fee_total: u64 = fee_tx.outputs.iter().map(|o| o.value).sum();
+                    if fee_total != total_fees {
+                        return Err(StorageError::Database(format!(
+                            "fee distribution mismatch: got {fee_total}, expected {total_fees}"
+                        )));
+                    }
+                } else {
+                    // Legacy format: single coinbase with subsidy + fees merged
+                    let expected = subsidy + total_fees;
+                    if reward_total != expected {
+                        return Err(StorageError::Database(format!(
+                            "coinbase output mismatch: got {reward_total}, expected {expected} (subsidy {subsidy} + fees {total_fees})"
+                        )));
+                    }
                 }
             }
         }

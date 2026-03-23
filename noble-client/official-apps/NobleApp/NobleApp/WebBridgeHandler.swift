@@ -94,11 +94,16 @@ final class WebBridgeHandler {
             ] as [String: Any]
 
         case "getWalletTransactions", "getTransactionHistory":
-            // Confirmed txs from node keystore (uses validator key when keystore locked).
-            let txs = try await api.getWalletTransactions()
+            // Pass client wallet address so server includes client-key txs.
+            let txs: [TransactionRecord]
+            if let addr = appState.walletAddress, !addr.isEmpty {
+                txs = try await api.getWalletTransactions(addresses: [addr])
+            } else {
+                txs = try await api.getWalletTransactions()
+            }
             var allDicts = txs.map { txToDict($0) }
 
-            // Compose: fetch CLIENT's own pending mempool txs via getAddressPending.
+            // Also fetch pending mempool txs for the client's address.
             if let addr = appState.walletAddress, !addr.isEmpty {
                 let pending = (try? await api.getAddressPending(address: addr)) ?? []
                 let confirmedIds = Set(allDicts.compactMap { $0["txId"] as? String })

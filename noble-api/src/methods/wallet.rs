@@ -112,9 +112,13 @@ pub trait WalletApi {
         passphrase: String,
     ) -> Result<DeleteAddressResponse, ErrorObjectOwned>;
 
-    /// Get wallet transaction history (stub — returns empty list).
+    /// Get wallet transaction history.
+    ///
+    /// `addresses` — optional list of additional addresses (bech32m or hex wire)
+    /// to include in the search. Useful when the client's wallet key differs
+    /// from the node's keystore (e.g., remote client with its own Keychain).
     #[method(name = "getWalletTransactions")]
-    async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
+    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
 }
 
 /// Collect all public keys the wallet considers "ours":
@@ -522,14 +526,11 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         })
     }
 
-    async fn get_wallet_transactions(&self) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
+    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
         use noble_core::NobleAddress;
 
         // Collect all keys: wallet keystore + validator (same universe as get_wallet_info).
         let all_keys = collect_wallet_keys(self);
-        if all_keys.is_empty() {
-            return Ok(WalletTransactionsResponse { transactions: vec![] });
-        }
 
         // Derive ALL 3 address variants for EACH key.
         let mut all_addrs: Vec<NobleAddress> = Vec::new();
@@ -547,6 +548,23 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 my_wires.push(tap.to_wire_bytes());
                 all_addrs.push(tap);
             }
+        }
+
+        // Include additional client-provided addresses (bech32m or hex wire).
+        if let Some(extra_addrs) = addresses {
+            for addr_str in &extra_addrs {
+                if let Ok(addr) = crate::types::parse_address(addr_str) {
+                    let wire = addr.to_wire_bytes();
+                    if !my_wires.contains(&wire) {
+                        my_wires.push(wire);
+                        all_addrs.push(addr);
+                    }
+                }
+            }
+        }
+
+        if all_addrs.is_empty() {
+            return Ok(WalletTransactionsResponse { transactions: vec![] });
         }
         let is_ours = |wire: &[u8]| my_wires.iter().any(|w| w.as_slice() == wire);
 
@@ -630,15 +648,23 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             let tx_type_names = [
                 (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
                 (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
-                (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Coinbase"),
+                (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Block Reward"),
+                (0x11, "Fee Distribution"),
             ];
             let type_label = tx_type_names.iter()
                 .find(|(code, _)| *code == tx.tx_type)
                 .map(|(_, name)| name.to_string())
                 .unwrap_or_else(|| format!("Type 0x{:02x}", tx.tx_type));
 
-            let (direction, amount, counterparty) = if tx.is_coinbase() {
-                // Coinbase: sum outputs going to any of our addresses.
+            let (direction, amount, counterparty) = if tx.tx_type == 0x11 {
+                // Fee Distribution: fees collected from block transactions.
+                let fee_income: u64 = tx.outputs.iter()
+                    .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                    .map(|o| o.value)
+                    .sum();
+                ("incoming".to_string(), fee_income, Some("Fee Income".to_string()))
+            } else if tx.is_coinbase() {
+                // Block Reward: subsidy only (new format) or subsidy+fees (legacy).
                 let reward: u64 = tx.outputs.iter()
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value)
@@ -771,7 +797,8 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 let tx_type_names = [
                     (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
                     (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
-                    (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Coinbase"),
+                    (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Block Reward"),
+                    (0x11, "Fee Distribution"),
                 ];
                 let type_label = tx_type_names.iter()
                     .find(|(code, _)| *code == entry.tx.tx_type)

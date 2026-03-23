@@ -203,9 +203,14 @@ pub async fn handle_api_action(
         }
 
         "getWalletTransactions" | "getTransactionHistory" => {
-            // Confirmed txs from node keystore.
+            // Pass client wallet address so server includes client-key txs.
+            let addresses_param = if !wallet_address.is_empty() {
+                json!([vec![wallet_address]])
+            } else {
+                json!([null])
+            };
             let mut result = client
-                .call_rpc("noble_getWalletTransactions", json!([]))
+                .call_rpc("noble_getWalletTransactions", addresses_param)
                 .await?;
 
             // Compose: fetch CLIENT's own pending mempool txs via getAddressPending.

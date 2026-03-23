@@ -88,9 +88,15 @@ pub const TX_TYPE_UNLOCKING: u8 = 0x07;
 
 /// Transaction type: coinbase (block reward + collected fees).
 /// Always the first transaction (index 0) in every block.
-/// Has a single null input (`OutPoint::COINBASE_PREVOUT`) and outputs carrying
-/// `subsidy_at_height(height) + total_block_fees`.
+/// Block Reward: carries `subsidy_at_height(height)` to the validator.
+/// Has a single null input (`OutPoint::COINBASE_PREVOUT`).
+/// Always block transaction index 0.
 pub const TX_TYPE_COINBASE: u8 = 0x10;
+
+/// Fee Distribution: carries collected transaction fees to validator + gateways.
+/// Has a single null input (`OutPoint::COINBASE_PREVOUT`).
+/// Block transaction index 1 (omitted if total fees == 0).
+pub const TX_TYPE_FEE: u8 = 0x11;
 
 /// Number of confirmations before coinbase outputs are spendable.
 /// Prevents cascading invalidation if a reorg orphans the coinbase block.

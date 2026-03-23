@@ -11,6 +11,7 @@ export const TX_TYPES = {
     LOCKED:            0x06,
     UNLOCKING:         0x07,
     COINBASE:          0x10,
+    FEE_DISTRIBUTION:  0x11,
 };
 
 export const TX_TYPE_NAMES = {
@@ -22,7 +23,8 @@ export const TX_TYPE_NAMES = {
     0x05: 'Badge Revocation',
     0x06: 'Locked',
     0x07: 'Unlocking',
-    0x10: 'Coinbase',
+    0x10: 'Block Reward',
+    0x11: 'Fee Distribution',
 };
 
 /**
@@ -53,6 +55,12 @@ export function txDisplayAmount(tx) {
                 amount: tx.total_output ?? 0,
                 showFee: false,
             };
+        case TX_TYPES.FEE_DISTRIBUTION:
+            return {
+                label: 'Fee Income',
+                amount: tx.total_output ?? 0,
+                showFee: false,
+            };
         default:
             // Notarization, Locked, Unlocking, Key Rotation, Badge types
             // The meaningful "cost" is the fee. All outputs are change.
@@ -71,7 +79,8 @@ function parseTypeString(s) {
     const map = {
         notarization: 0x00, transfer: 0x01, keyrotation: 0x02,
         badgeproposal: 0x03, badgevote: 0x04, badgerevocation: 0x05,
-        locked: 0x06, unlocking: 0x07, coinbase: 0x10,
+        locked: 0x06, unlocking: 0x07, blockreward: 0x10, coinbase: 0x10,
+        feedistribution: 0x11, feeincome: 0x11,
     };
     return map[lower] ?? -1;
 }

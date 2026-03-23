@@ -21,6 +21,7 @@ mod badge_proposal;
 mod badge_vote;
 mod badge_revocation;
 mod coinbase;
+mod fee_distribution;
 mod locked;
 mod unlocking;
 
@@ -31,6 +32,7 @@ pub use badge_proposal::BadgeProposal;
 pub use badge_vote::BadgeVote;
 pub use badge_revocation::BadgeRevocation;
 pub use coinbase::Coinbase;
+pub use fee_distribution::FeeDistribution;
 pub use locked::Locked;
 pub use unlocking::Unlocking;
 
@@ -93,6 +95,7 @@ pub fn handler_for(tx_type: u8) -> Option<&'static dyn TxTypeHandler> {
         TX_TYPE_BADGE_VOTE => Some(&BadgeVote),
         TX_TYPE_BADGE_REVOCATION => Some(&BadgeRevocation),
         TX_TYPE_COINBASE => Some(&Coinbase),
+        TX_TYPE_FEE => Some(&FeeDistribution),
         TX_TYPE_LOCKED => Some(&Locked),
         TX_TYPE_UNLOCKING => Some(&Unlocking),
         _ => None,

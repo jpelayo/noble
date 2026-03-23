@@ -159,6 +159,8 @@ body {
 .node-state-bootstrapping,
 .node-state-creating { background: #f59e0b; color: #000; }
 .node-state-diverged { background: #f97316; color: #fff; }
+/* Fee Distribution transaction type */
+.tx-fee-distribution { color: #22d3ee; }
 /* Alignment status card on home page */
 .alignment-card {
   padding: var(--gap);

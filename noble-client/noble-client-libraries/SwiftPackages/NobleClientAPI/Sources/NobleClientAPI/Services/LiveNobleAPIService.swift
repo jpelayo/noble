@@ -257,6 +257,44 @@ public struct LiveNobleAPIService: NobleAPIService {
         }
     }
 
+    public func getWalletTransactions(addresses: [String]) async throws -> [TransactionRecord] {
+        struct Params: Encodable, Sendable { let addresses: [String] }
+        let dto = try await client.call(
+            method: "noble_getWalletTransactions",
+            params: Params(addresses: addresses),
+            expecting: WalletTransactionsDTO.self
+        )
+        return dto.transactions.map { e in
+            let txId = Hash256(hex: e.tx_id) ?? Hash256(hex: String(repeating: "0", count: 64))!
+            let txType = TransactionType(rawValue: e.tx_type) ?? .notarization
+            let status: TransactionStatus = (e.status == "pending") ? .pending : .confirmed
+            let signer: NobleAddress
+            if let s = e.signer, let parsed = NobleAddress(wireHex: s) {
+                signer = parsed
+            } else if let s = e.signer, s.starts(with: "nbl1") {
+                signer = NobleAddress(wireHex: s) ?? NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
+            } else {
+                signer = NobleAddress(wireHex: "0200000000000000000000000000000000000000000000000000000000000000000000")!
+            }
+            let checksum = e.checksum.flatMap { Hash256(hex: $0) }
+            let timestamp = e.timestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            let inputs = (e.inputs ?? []).map { TxInput(txid: $0.txid, vout: $0.vout) }
+            let outputs = (e.outputs ?? []).map { TxOutput(value: $0.value, address: $0.address) }
+            let metadata = (e.metadata ?? []).map { MetadataItem(key: $0.key, value: $0.value) }
+            return TransactionRecord(
+                txId: txId, txType: txType, status: status, signer: signer,
+                totalOutput: e.total_output ?? 0, inputs: inputs, outputs: outputs,
+                blockHeight: e.block_height, timestamp: timestamp, checksum: checksum,
+                fee: e.fee, transferValue: e.transfer_value,
+                metadata: metadata.isEmpty ? nil : metadata,
+                hasEncryptedLocator: e.has_encrypted_locator ?? false,
+                confirmations: e.confirmations,
+                direction: e.direction, displayAmount: e.amount,
+                counterparty: e.counterparty, typeLabel: e.type_label
+            )
+        }
+    }
+
     // MARK: - Documents
 
     public func verifyDocument(checksum: String) async throws -> VerificationResult {

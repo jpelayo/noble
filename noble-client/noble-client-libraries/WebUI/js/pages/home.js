@@ -6,7 +6,7 @@ import { amountText, formatAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { esc, timeAgo, showCopyFeedback } from '../utils.js';
-import { txDisplayAmount } from '../tx-display.js';
+import { txDisplayAmount, formatTxType, txStatusBadge } from '../tx-display.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -270,9 +270,10 @@ export function init(root, ctx) {
 
     function renderRecentTxs(container, txs) {
         container.innerHTML = '';
-        const transfers = txs.filter(t => (t.tx_type !== 0x00) && (t.type || '').toLowerCase() !== 'notarization').slice(0, 5);
+        // Show ALL transaction types — no filtering.
+        const recent = txs.slice(0, 5);
 
-        if (transfers.length === 0) {
+        if (recent.length === 0) {
             const card = nobleCard('Recent Transactions', '');
             card.querySelector('.panel-body').appendChild(emptyState({
                 icon: '\u{1F4B8}',
@@ -283,14 +284,16 @@ export function init(root, ctx) {
             return;
         }
 
-        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th>Type</th><th>Amount</th><th>Time</th></tr></thead><tbody>';
-        for (const tx of transfers) {
-            const dir = tx.direction === 'incoming' ? '\u2199' : '\u2197';
-            const typeLabel = tx.type.replace('_', ' ');
+        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th>Type</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>';
+        for (const tx of recent) {
+            const typeName = formatTxType(tx.tx_type);
+            const disp = txDisplayAmount(tx);
+            const badge = txStatusBadge(tx.confirmations, tx.status);
             const ago = timeAgo(tx.timestamp);
             html += `<tr>
-                <td>${dir} ${typeLabel}</td>
-                <td class="mono">\u25C6 ${formatAmount(txDisplayAmount(tx).amount)}</td>
+                <td style="font-size:var(--font-size-xs);font-weight:600">${typeName}</td>
+                <td class="mono">\u25C6 ${formatAmount(disp.amount)}</td>
+                <td><span class="badge ${badge.cls}" style="font-size:0.7em">${badge.html}</span></td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;
         }

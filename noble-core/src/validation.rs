@@ -703,24 +703,43 @@ pub fn validate_block(block: &Block, ctx: &BlockValidationContext) -> Result<(),
 
     // B10: One block per cycle — deferred to consensus layer (needs cycle state)
 
-    // U9: Coinbase enforcement (skip genesis blocks at height 0 — they have no transactions)
+    // U9: Block Reward + Fee Distribution enforcement
+    // (skip genesis blocks at height 0 — they have no transactions)
     if header.height > 0 {
-        // U9: Block must have at least one transaction (the coinbase)
+        // U9a: Block must have at least one transaction (the block reward)
         if block.transactions.is_empty() {
-            return Err(ValidationError::Internal("block has no transactions (missing coinbase)".into()));
+            return Err(ValidationError::Internal("block has no transactions (missing block reward)".into()));
         }
-        // U9: First transaction must be coinbase
-        if !block.transactions[0].is_coinbase() {
-            return Err(ValidationError::Internal("U9: first transaction must be coinbase".into()));
+        // U9b: First transaction must be Block Reward (type 0x10) with coinbase input
+        if !block.transactions[0].is_coinbase() || block.transactions[0].tx_type != crate::constants::TX_TYPE_COINBASE {
+            return Err(ValidationError::Internal("U9: first transaction must be block reward (type 0x10)".into()));
         }
-        // U9: Only one coinbase per block
-        let coinbase_count = block.transactions.iter().filter(|tx| tx.is_coinbase()).count();
-        if coinbase_count != 1 {
+        // U9c: Exactly one Block Reward per block
+        let reward_count = block.transactions.iter().filter(|tx| tx.tx_type == crate::constants::TX_TYPE_COINBASE).count();
+        if reward_count != 1 {
             return Err(ValidationError::Internal(format!(
-                "U9: block must have exactly 1 coinbase, found {coinbase_count}"
+                "U9: block must have exactly 1 block reward, found {reward_count}"
             )));
         }
-        tracing::trace!("U9: coinbase structure validated (1 coinbase at index 0)");
+        // U9d: At most one Fee Distribution per block (type 0x11), must be at index 1
+        let fee_count = block.transactions.iter().filter(|tx| tx.tx_type == crate::constants::TX_TYPE_FEE).count();
+        if fee_count > 1 {
+            return Err(ValidationError::Internal(format!(
+                "U9: block must have at most 1 fee distribution, found {fee_count}"
+            )));
+        }
+        if fee_count == 1 && block.transactions.get(1).map(|tx| tx.tx_type) != Some(crate::constants::TX_TYPE_FEE) {
+            return Err(ValidationError::Internal("U9: fee distribution must be at index 1".into()));
+        }
+        // U9e: No other coinbase-input txs besides Block Reward and Fee Distribution
+        let coinbase_input_count = block.transactions.iter().filter(|tx| tx.is_coinbase()).count();
+        let expected_coinbase_inputs = 1 + fee_count;
+        if coinbase_input_count != expected_coinbase_inputs {
+            return Err(ValidationError::Internal(format!(
+                "U9: unexpected coinbase-input tx count: got {coinbase_input_count}, expected {expected_coinbase_inputs}"
+            )));
+        }
+        tracing::trace!("U9: block reward + fee distribution structure validated");
     }
 
     // B11: All transactions valid

@@ -5,7 +5,7 @@
 
 use noble_core::{
     compute_merkle_root, Block, BlockHeader, NobleAddress, OutPoint, Transaction, TxIn, TxOut,
-    PROTOCOL_VERSION, TX_TYPE_COINBASE, subsidy_at_height,
+    PROTOCOL_VERSION, TX_TYPE_COINBASE, TX_TYPE_FEE, subsidy_at_height,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
 use tracing;
@@ -77,45 +77,17 @@ pub fn propose_block(
         selected.push(tx.clone());
     }
 
-    // Build coinbase transaction (index 0)
-    // Outputs: [0] validator gets subsidy + (total_fees - gateway_shares_sum)
-    //          [1..N] one output per unique gateway with their accumulated share
+    // Block Reward transaction (index 0): subsidy only → validator
     let subsidy = subsidy_at_height(height);
-    let total_gateway_share: u64 = gateway_shares.values().sum();
-    let validator_amount = subsidy.saturating_add(total_fees.saturating_sub(total_gateway_share));
 
-    let mut coinbase_outputs = vec![TxOut {
-        value: validator_amount,
-        address: validator_addr,
-    }];
-
-    // Add gateway outputs (sorted for deterministic coinbase)
-    let mut gw_entries: Vec<_> = gateway_shares.into_iter().collect();
-    gw_entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (gw_wire, gw_amount) in gw_entries {
-        match NobleAddress::from_wire_bytes(&gw_wire) {
-            Ok(gw_addr) => {
-                coinbase_outputs.push(TxOut {
-                    value: gw_amount,
-                    address: gw_addr,
-                });
-            }
-            Err(e) => {
-                // Recover the gateway's share back to the validator to prevent
-                // value destruction (coinbase total must equal subsidy + fees).
-                tracing::warn!(
-                    "gateway address decode failed ({e}), recovering {gw_amount} groats to validator"
-                );
-                coinbase_outputs[0].value += gw_amount;
-            }
-        }
-    }
-
-    let mut coinbase = Transaction {
+    let mut block_reward = Transaction {
         version: PROTOCOL_VERSION,
         tx_type: TX_TYPE_COINBASE,
         inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
-        outputs: coinbase_outputs,
+        outputs: vec![TxOut {
+            value: subsidy,
+            address: validator_addr.clone(),
+        }],
         checksum: Hash256::ZERO,
         timestamp,
         issuer_sig: SignatureEnvelope {
@@ -129,18 +101,84 @@ pub fn propose_block(
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
-            expires_at: None,
+        expires_at: None,
     };
-    let coinbase_msg = coinbase
+    let reward_msg = block_reward
         .compute_signing_message_for_chain(chain_id)
-        .map_err(|e| format!("failed to compute coinbase signing message: {e}"))?;
-    coinbase.issuer_sig = validator_key
-        .sign(&coinbase_msg)
-        .map_err(|e| format!("failed to sign coinbase: {e}"))?;
+        .map_err(|e| format!("failed to compute block reward signing message: {e}"))?;
+    block_reward.issuer_sig = validator_key
+        .sign(&reward_msg)
+        .map_err(|e| format!("failed to sign block reward: {e}"))?;
 
-    // Prepend coinbase, then user transactions
-    let mut all_txs = Vec::with_capacity(1 + selected.len());
-    all_txs.push(coinbase);
+    // Fee Distribution transaction (index 1): collected fees → validator + gateways
+    // Omitted entirely if total_fees == 0 (no fee-paying txs in block).
+    let total_gateway_share: u64 = gateway_shares.values().sum();
+    let validator_fee_share = total_fees.saturating_sub(total_gateway_share);
+
+    let fee_dist_tx = if total_fees > 0 {
+        let mut fee_outputs = vec![TxOut {
+            value: validator_fee_share,
+            address: validator_addr,
+        }];
+
+        // Add gateway outputs (sorted for deterministic ordering)
+        let mut gw_entries: Vec<_> = gateway_shares.into_iter().collect();
+        gw_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (gw_wire, gw_amount) in gw_entries {
+            match NobleAddress::from_wire_bytes(&gw_wire) {
+                Ok(gw_addr) => {
+                    fee_outputs.push(TxOut {
+                        value: gw_amount,
+                        address: gw_addr,
+                    });
+                }
+                Err(e) => {
+                    // Recover the gateway's share back to the validator.
+                    tracing::warn!(
+                        "gateway address decode failed ({e}), recovering {gw_amount} groats to validator"
+                    );
+                    fee_outputs[0].value += gw_amount;
+                }
+            }
+        }
+
+        let mut fee_tx = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: TX_TYPE_FEE,
+            inputs: vec![TxIn { prev_output: OutPoint::COINBASE_PREVOUT }],
+            outputs: fee_outputs,
+            checksum: Hash256::ZERO,
+            timestamp,
+            issuer_sig: SignatureEnvelope {
+                scheme_id: validator_pubkey.scheme_id(),
+                public_key: validator_pubkey.key_bytes().to_vec(),
+                signature: vec![],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            contract_data: None,
+            expires_at: None,
+        };
+        let fee_msg = fee_tx
+            .compute_signing_message_for_chain(chain_id)
+            .map_err(|e| format!("failed to compute fee distribution signing message: {e}"))?;
+        fee_tx.issuer_sig = validator_key
+            .sign(&fee_msg)
+            .map_err(|e| format!("failed to sign fee distribution: {e}"))?;
+        Some(fee_tx)
+    } else {
+        None
+    };
+
+    // Assemble: Block Reward + Fee Distribution (if any) + user transactions
+    let mut all_txs = Vec::with_capacity(2 + selected.len());
+    all_txs.push(block_reward);
+    if let Some(fee_tx) = fee_dist_tx {
+        all_txs.push(fee_tx);
+    }
     all_txs.extend(selected);
 
     // Compute tx_ids and merkle root (coinbase included)

@@ -196,6 +196,11 @@ public struct MockAPIService: NobleAPIService {
         return Self.makeSampleTransactions()
     }
 
+    public func getWalletTransactions(addresses: [String]) async throws -> [TransactionRecord] {
+        await simulateDelay()
+        return Self.makeSampleTransactions()
+    }
+
     // MARK: - Documents
 
     public func verifyDocument(checksum: String) async throws -> VerificationResult {

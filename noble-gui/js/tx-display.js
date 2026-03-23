@@ -13,6 +13,7 @@ export const TX_TYPES = {
     LOCKED:            0x06,
     UNLOCKING:         0x07,
     COINBASE:          0x10,
+    FEE_DISTRIBUTION:  0x11,
 };
 
 export const TX_TYPE_NAMES = {
@@ -24,14 +25,16 @@ export const TX_TYPE_NAMES = {
     0x05: 'Badge Revocation',
     0x06: 'Locked',
     0x07: 'Unlocking',
-    0x10: 'Coinbase',
+    0x10: 'Block Reward',
+    0x11: 'Fee Distribution',
 };
 
 /** Short labels for compact displays (mempool stream, block tx list). */
 export const TX_TYPE_SHORT = {
     0x00: 'Doc', 0x01: 'Transfer', 0x02: 'Key Rot.',
     0x03: 'Badge', 0x04: 'Vote', 0x05: 'Revoke',
-    0x06: 'Locked', 0x07: 'Unlock', 0x10: 'Coinbase',
+    0x06: 'Locked', 0x07: 'Unlock', 0x10: 'Reward',
+    0x11: 'Fees',
 };
 
 /**

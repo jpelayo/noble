@@ -105,8 +105,11 @@ impl Transaction {
     }
 
     /// Whether this is a coinbase transaction (block reward).
+    /// Returns true for both Block Reward (0x10) and Fee Distribution (0x11) —
+    /// both have a single null input (COINBASE_PREVOUT) and create new coins.
     pub fn is_coinbase(&self) -> bool {
-        self.tx_type == crate::constants::TX_TYPE_COINBASE
+        (self.tx_type == crate::constants::TX_TYPE_COINBASE
+            || self.tx_type == crate::constants::TX_TYPE_FEE)
             && self.inputs.len() == 1
             && self.inputs[0].prev_output.is_coinbase()
     }

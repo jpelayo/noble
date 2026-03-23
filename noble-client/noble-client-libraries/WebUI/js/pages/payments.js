@@ -210,6 +210,7 @@ export function init(root, ctx) {
     function txDirection(tx) {
         const t = tx.tx_type ?? parseTypeLabel(tx.type);
         if (t === TX_TYPES.COINBASE) return { icon: '\u26CF', cls: 'tx-coinbase' };
+        if (t === TX_TYPES.FEE_DISTRIBUTION) return { icon: '\u{1F4B0}', cls: 'tx-fee-distribution' };
         if (t === TX_TYPES.LOCKED) return { icon: '\u{1F512}', cls: 'tx-locked' };
         if (t === TX_TYPES.UNLOCKING) return { icon: '\u{1F511}', cls: 'tx-unlocking' };
         if (t === TX_TYPES.KEY_ROTATION) return { icon: '\u{1F504}', cls: 'tx-rotation' };

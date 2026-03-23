@@ -70,6 +70,9 @@ public protocol NobleAPIService: Sendable {
     /// Fetch wallet transaction history (all address variants, mempool, enriched).
     func getWalletTransactions() async throws -> [TransactionRecord]
 
+    /// Fetch wallet transaction history with additional client-provided addresses.
+    func getWalletTransactions(addresses: [String]) async throws -> [TransactionRecord]
+
     // MARK: - Documents
 
     /// Verify a document checksum on-chain.

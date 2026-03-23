@@ -12,6 +12,7 @@ public enum TransactionType: UInt8, Codable, Sendable, CaseIterable {
     case locked = 6
     case unlocking = 7
     case coinbase = 16
+    case feeDistribution = 17
 
     /// Types the client app can create and sign locally.
     public static let creatableTypes: Set<TransactionType> = [.notarization, .transfer]
@@ -27,7 +28,8 @@ public enum TransactionType: UInt8, Codable, Sendable, CaseIterable {
         case .badgeRevocation: "Badge Revocation"
         case .locked: "Locked"
         case .unlocking: "Unlocking"
-        case .coinbase: "Coinbase"
+        case .coinbase: "Block Reward"
+        case .feeDistribution: "Fee Distribution"
         }
     }
 }
