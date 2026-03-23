@@ -50,10 +50,12 @@ export function init(root, ctx) {
       `;
 
       // Add consensus row if votes are available
-      if (votes) {
-        const strengthBadge = votes.strength === 'Strong'
+      const strengthBadge = votes
+        ? (votes.strength === 'Strong'
           ? '<span class="badge consensus-strong">Strong</span>'
-          : '<span class="badge consensus-plurality">Plurality</span>';
+          : '<span class="badge consensus-plurality">Plurality</span>')
+        : '';
+      if (votes) {
         const witnessInfo = `${votes.unique_witness_count} witness${votes.unique_witness_count !== 1 ? 'es' : ''}`;
         const cycleInfo = `Cycle ${formatNumber(votes.cycle_number)}`;
         grid.innerHTML += `
@@ -64,32 +66,67 @@ export function init(root, ctx) {
 
       root.appendChild(grid);
 
-      // Voting witnesses panel
+      // Consensus legitimacy panel
       if (!votes || (!votes.r1_voters.length && !votes.r2_voters.length)) {
         const noVotePanel = document.createElement('div');
         noVotePanel.className = 'panel';
         noVotePanel.innerHTML = `
-          <div class="panel-header">Voting Witnesses</div>
+          <div class="panel-header">Consensus Legitimacy</div>
           <div class="panel-body"><p class="text-muted">Vote data unavailable for this block.</p></div>
         `;
         root.appendChild(noVotePanel);
-      } else if (votes && (votes.r1_voters.length > 0 || votes.r2_voters.length > 0)) {
+      } else if (votes) {
+        const total = votes.voter_count || 1;
+        const r1For = votes.r1_voters.length;
+        const r2For = votes.r2_voters.length;
+        const r1Against = total - r1For;
+        const r2Against = total - r2For;
+        const r1Pct = Math.round(r1For / total * 100);
+        const r2Pct = Math.round(r2For / total * 100);
+        const totalWitnesses = votes.unique_witness_count;
+
         const votePanel = document.createElement('div');
         votePanel.className = 'panel';
-        const totalWitnesses = votes.unique_witness_count;
         votePanel.innerHTML = `
-          <div class="panel-header">Voting Witnesses (${totalWitnesses})</div>
-          <div class="panel-body" style="padding:0">
-            <table class="data-table">
-              <thead><tr><th>Round</th><th>Validator</th><th>Key</th></tr></thead>
-              <tbody id="block-votes"></tbody>
-            </table>
+          <div class="panel-header">Consensus Legitimacy</div>
+          <div class="panel-body">
+            <div style="margin-bottom:var(--gap)">
+              <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
+                <span><span class="badge consensus-r1">R1</span> Round 1</span>
+                <span>${r1For} FOR / ${r1Against} against &mdash; <strong>${r1Pct}%</strong></span>
+              </div>
+              <div style="height:10px;background:var(--bg-tertiary);border-radius:5px;overflow:hidden;display:flex">
+                <div style="width:${r1Pct}%;background:var(--success);transition:width 0.3s"></div>
+                <div style="width:${100 - r1Pct}%;background:var(--error-bg, rgba(239,68,68,0.3))"></div>
+              </div>
+            </div>
+            <div style="margin-bottom:var(--gap)">
+              <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
+                <span><span class="badge consensus-r2">R2</span> Round 2</span>
+                <span>${r2For} FOR / ${r2Against} against &mdash; <strong>${r2Pct}%</strong></span>
+              </div>
+              <div style="height:10px;background:var(--bg-tertiary);border-radius:5px;overflow:hidden;display:flex">
+                <div style="width:${r2Pct}%;background:var(--success);transition:width 0.3s"></div>
+                <div style="width:${100 - r2Pct}%;background:var(--error-bg, rgba(239,68,68,0.3))"></div>
+              </div>
+            </div>
+            <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)">
+              ${totalWitnesses} unique witnesses out of ${total} voters &middot; ${strengthBadge}
+            </div>
+            <details>
+              <summary style="cursor:pointer;font-size:var(--font-size-sm);color:var(--accent);user-select:none">
+                Show ${totalWitnesses} individual votes
+              </summary>
+              <table class="data-table" style="margin-top:var(--gap-sm)">
+                <thead><tr><th>Round</th><th>Validator</th><th>Key</th></tr></thead>
+                <tbody id="block-votes"></tbody>
+              </table>
+            </details>
           </div>
         `;
         root.appendChild(votePanel);
 
         const voteBody = votePanel.querySelector('#block-votes');
-        // Track which keys we've shown to mark R2-only voters
         const r1Keys = new Set(votes.r1_voters.map(v => v.validator_key));
 
         votes.r1_voters.forEach(v => {
@@ -97,25 +134,22 @@ export function init(root, ctx) {
           const roundLabel = inR2
             ? '<span class="badge consensus-r1">R1</span> <span class="badge consensus-r2">R2</span>'
             : '<span class="badge consensus-r1">R1</span>';
-          const name = v.name || v.validator_key;
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${roundLabel}</td>
-            <td>${esc(name)}</td>
+            <td>${esc(v.name || v.validator_key)}</td>
             <td class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${v.validator_key}</td>
           `;
           voteBody.appendChild(tr);
         });
 
-        // R2-only voters (voted in R2 but not R1)
         votes.r2_voters
           .filter(v => !r1Keys.has(v.validator_key))
           .forEach(v => {
-            const name = v.name || v.validator_key;
             const tr = document.createElement('tr');
             tr.innerHTML = `
               <td><span class="badge consensus-r2">R2</span></td>
-              <td>${esc(name)}</td>
+              <td>${esc(v.name || v.validator_key)}</td>
               <td class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${v.validator_key}</td>
             `;
             voteBody.appendChild(tr);
