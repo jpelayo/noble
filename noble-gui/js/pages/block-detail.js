@@ -173,8 +173,14 @@ export function init(root, ctx) {
 
         const tbody = panel.querySelector('#block-txs');
         block.transactions.forEach((tx, i) => {
-          const isCoinbase = tx.tx_type === 0x10 || (tx.inputs && tx.inputs.length === 1 && tx.inputs[0].txid === '0'.repeat(64));
-          const typeLabel = isCoinbase ? '<span class="badge coinbase">Coinbase</span>' : (TX_TYPE_NAMES[tx.tx_type] || `Type ${tx.tx_type}`);
+          let typeLabel;
+          if (tx.tx_type === 0x10) {
+            typeLabel = '<span class="badge coinbase">Block Reward</span>';
+          } else if (tx.tx_type === 0x11) {
+            typeLabel = '<span class="badge tx-fee-distribution">Fee Distribution</span>';
+          } else {
+            typeLabel = TX_TYPE_NAMES[tx.tx_type] || `Type ${tx.tx_type}`;
+          }
           const disp = txDisplayAmount(tx);
           const tr = document.createElement('tr');
           tr.className = 'clickable';
