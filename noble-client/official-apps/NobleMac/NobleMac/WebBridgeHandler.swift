@@ -424,6 +424,9 @@ final class WebBridgeHandler {
             case .badgeProposal, .badgeVote, .badgeRevocation:
                 dict["direction"] = "self"
                 dict["counterparty"] = dict["counterparty"] ?? "Governance"
+            case .feeDistribution:
+                dict["direction"] = "incoming"
+                dict["counterparty"] = dict["counterparty"] ?? "Fee Distribution"
             }
         }
 

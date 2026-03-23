@@ -193,7 +193,11 @@ export function init(root, ctx) {
                 || (c.lastName || '').toLowerCase().includes(q)
                 || (c.company || '').toLowerCase().includes(q)
                 || (c.email || '').toLowerCase().includes(q)
-                || (c.noblePubkey || '').toLowerCase().startsWith(q);
+                || (c.noblePubkey || '').toLowerCase().startsWith(q)
+                || (c.nobleHex || '').toLowerCase().startsWith(q)
+                || (c.bitcoinP2pkh || '').toLowerCase().startsWith(q)
+                || (c.bitcoinP2wpkh || '').toLowerCase().startsWith(q)
+                || (c.bitcoinP2tr || '').toLowerCase().startsWith(q);
         });
 
         if (filtered.length === 0 && !myCard) {
@@ -462,7 +466,10 @@ export function init(root, ctx) {
             company: existing?.company || '',
             email: existing?.email || '',
             noblePubkey: existing?.noblePubkey || '',
-            bitcoinKey: existing?.bitcoinKey || '',
+            nobleHex: existing?.nobleHex || '',
+            bitcoinP2pkh: existing?.bitcoinP2pkh || '',
+            bitcoinP2wpkh: existing?.bitcoinP2wpkh || '',
+            bitcoinP2tr: existing?.bitcoinP2tr || '',
             notes: existing?.notes || '',
             isFavorite: existing?.isFavorite || false,
         };
@@ -474,8 +481,11 @@ export function init(root, ctx) {
             { key: 'lastName', label: 'Last Name', type: 'text', placeholder: 'Doe' },
             { key: 'company', label: 'Company', type: 'text', placeholder: 'Acme Corp' },
             { key: 'email', label: 'Email', type: 'email', placeholder: 'jane@example.com' },
-            { key: 'noblePubkey', label: 'Noble Pubkey', type: 'text', placeholder: '02ab3f...', mono: true },
-            { key: 'bitcoinKey', label: 'Bitcoin Key', type: 'text', placeholder: 'bc1q...', mono: true },
+            { key: 'noblePubkey', label: 'Noble Address (bech32m)', type: 'text', placeholder: 'nbl1p...', mono: true },
+            { key: 'nobleHex', label: 'Noble Pubkey (hex wire)', type: 'text', placeholder: '0202ab3f...', mono: true },
+            { key: 'bitcoinP2pkh', label: 'Bitcoin P2PKH', type: 'text', placeholder: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', mono: true },
+            { key: 'bitcoinP2wpkh', label: 'Bitcoin P2WPKH', type: 'text', placeholder: 'bc1qw508d6qejxtdg4y5r3zarv...', mono: true },
+            { key: 'bitcoinP2tr', label: 'Bitcoin P2TR (Taproot)', type: 'text', placeholder: 'bc1p5cyxnuxmeuwuvkwfem96lq...', mono: true },
             { key: 'notes', label: 'Notes', type: 'textarea', placeholder: 'Additional notes...' },
         ];
 
@@ -518,21 +528,52 @@ export function init(root, ctx) {
             if (f.key === 'noblePubkey') {
                 input.addEventListener('blur', () => {
                     const pk = form.noblePubkey;
-                    const isNbl1 = pk && pk.toLowerCase().startsWith('nbl1');
-                    const isValidHex = pk && /^[0-9a-fA-F]+$/.test(pk) && pk.length % 2 === 0;
-                    if (pk && !isNbl1 && !isValidHex) {
-                        error.textContent = 'Must be a Noble address (nbl1…) or even-length hex';
+                    if (pk && !pk.toLowerCase().startsWith('nbl1')) {
+                        error.textContent = 'Must be a Noble bech32m address (nbl1…)';
                         error.style.display = '';
                     } else {
                         error.style.display = 'none';
                     }
                 });
             }
-            if (f.key === 'bitcoinKey') {
+            if (f.key === 'nobleHex') {
                 input.addEventListener('blur', () => {
-                    const bk = form.bitcoinKey;
-                    if (bk && !/^(bc1q|bc1p|1|3)/.test(bk)) {
-                        error.textContent = 'Must start with bc1q, bc1p, 1, or 3';
+                    const pk = form.nobleHex;
+                    if (pk && !/^[0-9a-fA-F]+$/.test(pk)) {
+                        error.textContent = 'Must be even-length hex (wire bytes)';
+                        error.style.display = '';
+                    } else {
+                        error.style.display = 'none';
+                    }
+                });
+            }
+            if (f.key === 'bitcoinP2pkh') {
+                input.addEventListener('blur', () => {
+                    const bk = form.bitcoinP2pkh;
+                    if (bk && !/^[13]/.test(bk)) {
+                        error.textContent = 'Must start with 1 or 3';
+                        error.style.display = '';
+                    } else {
+                        error.style.display = 'none';
+                    }
+                });
+            }
+            if (f.key === 'bitcoinP2wpkh') {
+                input.addEventListener('blur', () => {
+                    const bk = form.bitcoinP2wpkh;
+                    if (bk && !bk.toLowerCase().startsWith('bc1q')) {
+                        error.textContent = 'Must start with bc1q';
+                        error.style.display = '';
+                    } else {
+                        error.style.display = 'none';
+                    }
+                });
+            }
+            if (f.key === 'bitcoinP2tr') {
+                input.addEventListener('blur', () => {
+                    const bk = form.bitcoinP2tr;
+                    if (bk && !bk.toLowerCase().startsWith('bc1p')) {
+                        error.textContent = 'Must start with bc1p';
                         error.style.display = '';
                     } else {
                         error.style.display = 'none';

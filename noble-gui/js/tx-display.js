@@ -56,6 +56,12 @@ export function txDisplayAmount(tx) {
                 amount: tx.total_output ?? 0,
                 showFee: false,
             };
+        case TX_TYPES.FEE_DISTRIBUTION:
+            return {
+                label: 'Fee Income',
+                amount: tx.total_output ?? 0,
+                showFee: false,
+            };
         default:
             return {
                 label: 'Fee',
@@ -66,7 +72,8 @@ export function txDisplayAmount(tx) {
 }
 
 export function formatTxType(txType) {
-    if (txType === TX_TYPES.COINBASE) return '<span class="badge coinbase">Coinbase</span>';
+    if (txType === TX_TYPES.COINBASE) return '<span class="badge coinbase">Block Reward</span>';
+    if (txType === TX_TYPES.FEE_DISTRIBUTION) return '<span class="badge tx-fee-distribution">Fee Distribution</span>';
     return TX_TYPE_NAMES[txType] || `Type 0x${(txType ?? 0).toString(16).padStart(2, '0')}`;
 }
 

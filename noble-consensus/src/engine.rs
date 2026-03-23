@@ -1234,6 +1234,10 @@ impl CycleEngine {
                 );
             }
 
+            // TODO(S85): Populate listers from ValidatorSnapshot + badge_holders from BadgeStore
+            // once those are wired into the engine. For now, pass empty defaults.
+            let listers = std::collections::HashMap::new();
+            let badge_holders: Vec<Vec<u8>> = Vec::new();
             self.reputation.process_cycle_boundary(
                 completed_cycle,
                 winner_wire.as_deref(),
@@ -1241,6 +1245,9 @@ impl CycleEngine {
                 &voters,
                 &all_validators,
                 &active,
+                &listers,
+                0, // total_peers_with_lists — wire from node.rs when available
+                &badge_holders,
             );
         }
 

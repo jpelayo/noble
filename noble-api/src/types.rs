@@ -119,12 +119,16 @@ pub fn parse_hash(hex_str: &str) -> Result<Hash256, ErrorObjectOwned> {
 
 /// Convert a `Block` to a `BlockResponse`.
 pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> BlockResponse {
+    // Block 1 (genesis) was committed with chain_id=0 because the real chain_id
+    // is derived from block 1's hash AFTER commit.  Use chain_id=0 so the tx_ids
+    // we return match what is stored in CF_TX_INDEX.
+    let effective_chain_id = if block.header.height <= 1 { 0 } else { chain_id };
     let txs: Vec<TransactionResponse> = block
         .transactions
         .iter()
         .map(|tx| {
             let tx_id = tx
-                .compute_tx_id(chain_id)
+                .compute_tx_id(effective_chain_id)
                 .map(|id| hash_to_hex(&id))
                 .unwrap_or_default();
             tx_to_response(tx, &tx_id)

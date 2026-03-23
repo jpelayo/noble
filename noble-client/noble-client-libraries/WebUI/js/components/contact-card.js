@@ -43,18 +43,45 @@ export function contactCard(contact, { onSend, onEdit, onExport, onDelete } = {}
 
     if (contact.noblePubkey) {
         const dt = document.createElement('dt');
-        dt.textContent = 'Noble Pubkey';
+        dt.textContent = 'Noble Address';
         const dd = document.createElement('dd');
-        dd.appendChild(hashText(contact.noblePubkey, { chars: 12 }));
+        dd.appendChild(hashText(contact.noblePubkey, { chars: 14 }));
         grid.appendChild(dt);
         grid.appendChild(dd);
     }
 
-    if (contact.bitcoinKey) {
+    if (contact.nobleHex) {
         const dt = document.createElement('dt');
-        dt.textContent = 'Bitcoin Key';
+        dt.textContent = 'Noble Hex';
         const dd = document.createElement('dd');
-        dd.appendChild(hashText(contact.bitcoinKey, { chars: 12 }));
+        dd.appendChild(hashText(contact.nobleHex, { chars: 12 }));
+        grid.appendChild(dt);
+        grid.appendChild(dd);
+    }
+
+    if (contact.bitcoinP2pkh) {
+        const dt = document.createElement('dt');
+        dt.textContent = 'BTC P2PKH';
+        const dd = document.createElement('dd');
+        dd.appendChild(hashText(contact.bitcoinP2pkh, { chars: 12 }));
+        grid.appendChild(dt);
+        grid.appendChild(dd);
+    }
+
+    if (contact.bitcoinP2wpkh) {
+        const dt = document.createElement('dt');
+        dt.textContent = 'BTC P2WPKH';
+        const dd = document.createElement('dd');
+        dd.appendChild(hashText(contact.bitcoinP2wpkh, { chars: 14 }));
+        grid.appendChild(dt);
+        grid.appendChild(dd);
+    }
+
+    if (contact.bitcoinP2tr) {
+        const dt = document.createElement('dt');
+        dt.textContent = 'BTC Taproot';
+        const dd = document.createElement('dd');
+        dd.appendChild(hashText(contact.bitcoinP2tr, { chars: 14 }));
         grid.appendChild(dt);
         grid.appendChild(dd);
     }

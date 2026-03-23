@@ -6,6 +6,7 @@
 
 import { formatNumber, formatFee, formatTimestamp, timeAgo, truncateHash, bytesToHex } from '../utils.js';
 import { createMnemonicGrid, startAutoClearTimer, wipeInput, destroySecureElements } from '../wallet-security.js';
+import { TX_TYPES, TX_TYPE_NAMES } from '../tx-display.js';
 
 export function init(root, ctx) {
   const { rpc, ws } = ctx;
@@ -117,9 +118,9 @@ export function init(root, ctx) {
             <tr>
               <th style="width:30px"></th>
               <th>Type</th>
-              <th>Description</th>
+              <th>Counterparty</th>
               <th>Amount</th>
-              <th>Balance After</th>
+              <th>Status</th>
               <th>Confirmations</th>
               <th>Time</th>
             </tr>
@@ -175,6 +176,7 @@ export function init(root, ctx) {
   const wRewardInfo = root.querySelector('#w-reward-info');
 
   let allTransactions = [];
+  let loadInFlight = false;
 
   // ── Load reward address (read-only display) ──
   async function loadRewardAddress() {
@@ -203,6 +205,8 @@ export function init(root, ctx) {
 
   // ── Load wallet info ──
   async function loadWallet() {
+    if (loadInFlight) return;
+    loadInFlight = true;
     try {
       const info = await rpc.call('noble_getWalletInfo');
 
@@ -211,10 +215,6 @@ export function init(root, ctx) {
       wBalanceAtomic.textContent = `${formatNumber(info.balance)} atomic units`;
       wAvailable.textContent = formatNoble(info.available);
       wPending.textContent = formatNoble(info.pending);
-      wEarned.textContent = formatNoble(info.total_earned || 0);
-      wEarnedSub.textContent = info.blocks_validated
-        ? `from ${formatNumber(info.blocks_validated)} blocks validated`
-        : '';
 
       // Identity — show key count and balances
       wIdentity.innerHTML = `
@@ -227,26 +227,38 @@ export function init(root, ctx) {
 
       // Load transactions separately so identity panel works even if this fails
       let txResult = { transactions: [] };
-      try { txResult = await rpc.call('noble_getWalletTransactions'); } catch {}
+      try { txResult = await rpc.call('noble_getWalletTransactions'); } catch (e) { console.error('[wallet] tx history:', e); }
 
-      // Income breakdown — 3 categories: subsidies, validator fees, gateway fees
-      const subsidyTotal = txResult.transactions
-        .filter(t => t.type === 'validation_subsidy')
-        .reduce((s, t) => s + t.amount, 0);
-      const valFeeTotal = txResult.transactions
-        .filter(t => t.type === 'fee_validation')
-        .reduce((s, t) => s + t.amount, 0);
-      const gwFeeTotal = txResult.transactions
-        .filter(t => t.type === 'fee_gateway')
-        .reduce((s, t) => s + t.amount, 0);
+      // Total Earned — sum of incoming tx amounts (block rewards + fee distributions + received transfers)
+      const totalEarned = txResult.transactions
+        .filter(t => t.direction === 'incoming')
+        .reduce((s, t) => s + (t.amount || 0), 0);
+      const blocksValidated = txResult.transactions
+        .filter(t => t.tx_type === TX_TYPES.COINBASE)
+        .length;
+      wEarned.textContent = formatNoble(totalEarned);
+      wEarnedSub.textContent = blocksValidated > 0
+        ? `from ${formatNumber(blocksValidated)} block${blocksValidated !== 1 ? 's' : ''} validated`
+        : '';
+
+      // Income breakdown — by tx_type numeric codes
+      const rewardTotal = txResult.transactions
+        .filter(t => t.tx_type === TX_TYPES.COINBASE)
+        .reduce((s, t) => s + (t.amount || 0), 0);
+      const feeTotal = txResult.transactions
+        .filter(t => t.tx_type === TX_TYPES.FEE_DISTRIBUTION)
+        .reduce((s, t) => s + (t.amount || 0), 0);
+      const otherIncome = txResult.transactions
+        .filter(t => t.direction === 'incoming' && t.tx_type !== TX_TYPES.COINBASE && t.tx_type !== TX_TYPES.FEE_DISTRIBUTION)
+        .reduce((s, t) => s + (t.amount || 0), 0);
       const outTotal = txResult.transactions
         .filter(t => t.direction === 'outgoing')
-        .reduce((s, t) => s + t.amount, 0);
-      const totalIncome = subsidyTotal + valFeeTotal + gwFeeTotal;
+        .reduce((s, t) => s + (t.amount || 0), 0);
+      const totalIncome = rewardTotal + feeTotal + otherIncome;
 
-      const subsidyPct = totalIncome > 0 ? Math.round(subsidyTotal / totalIncome * 100) : 0;
-      const valFeePct = totalIncome > 0 ? Math.round(valFeeTotal / totalIncome * 100) : 0;
-      const gwFeePct = Math.max(0, 100 - subsidyPct - valFeePct);
+      const rewardPct = totalIncome > 0 ? Math.round(rewardTotal / totalIncome * 100) : 0;
+      const feePct = totalIncome > 0 ? Math.round(feeTotal / totalIncome * 100) : 0;
+      const otherPct = totalIncome > 0 ? Math.max(0, 100 - rewardPct - feePct) : 0;
 
       if (txResult.transactions.length === 0) {
         wIncomeBreakdown.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">No transaction history yet. Income data will appear once the node validates blocks.</p>';
@@ -259,31 +271,31 @@ export function init(root, ctx) {
       wIncomeBreakdown.innerHTML = `
         <div style="margin-bottom:var(--gap)">
           <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
-            <span>Block Subsidies</span>
-            <span class="mono">${formatNoble(subsidyTotal)} (${subsidyPct}%)</span>
+            <span>Block Rewards</span>
+            <span class="mono">${formatNoble(rewardTotal)} (${rewardPct}%)</span>
           </div>
           <div style="height:8px;background:var(--bg-tertiary);border-radius:4px">
-            <div style="height:100%;width:${subsidyPct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
+            <div style="height:100%;width:${rewardPct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
           </div>
         </div>
         <div style="margin-bottom:var(--gap)">
           <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
-            <span>Validator Fees</span>
-            <span class="mono">${formatNoble(valFeeTotal)} (${valFeePct}%)</span>
+            <span>Fee Income</span>
+            <span class="mono">${formatNoble(feeTotal)} (${feePct}%)</span>
           </div>
           <div style="height:8px;background:var(--bg-tertiary);border-radius:4px">
-            <div style="height:100%;width:${valFeePct}%;background:var(--success);border-radius:4px;transition:width 0.3s"></div>
+            <div style="height:100%;width:${feePct}%;background:var(--success);border-radius:4px;transition:width 0.3s"></div>
           </div>
         </div>
-        <div style="margin-bottom:var(--gap)">
+        ${otherIncome > 0 ? `<div style="margin-bottom:var(--gap)">
           <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
-            <span>Gateway Fees</span>
-            <span class="mono">${formatNoble(gwFeeTotal)} (${gwFeePct}%)</span>
+            <span>Other Income</span>
+            <span class="mono">${formatNoble(otherIncome)} (${otherPct}%)</span>
           </div>
           <div style="height:8px;background:var(--bg-tertiary);border-radius:4px">
-            <div style="height:100%;width:${gwFeePct}%;background:var(--warning);border-radius:4px;transition:width 0.3s"></div>
+            <div style="height:100%;width:${otherPct}%;background:var(--info, #60a5fa);border-radius:4px;transition:width 0.3s"></div>
           </div>
-        </div>
+        </div>` : ''}
         <div style="padding-top:var(--gap-sm);border-top:1px solid var(--border);display:flex;justify-content:space-between;font-size:var(--font-size-sm)">
           <span>Total Outgoing</span>
           <span class="mono" style="color:var(--error)">${outTotal > 0 ? '-' : ''}${formatNoble(outTotal)}</span>
@@ -293,19 +305,20 @@ export function init(root, ctx) {
       // Recent activity (last 5 transactions)
       const recent = txResult.transactions.slice(0, 5);
       wRecentActivity.innerHTML = recent.map(tx => {
-        const isIn = tx.direction === 'incoming';
+        const isIn = tx.direction === 'incoming' || tx.direction === 'self';
         const color = isIn ? 'var(--success)' : 'var(--error)';
         const sign = isIn ? '+' : '-';
-        const icon = typeIcon(tx.type);
+        const icon = txIcon(tx.tx_type);
+        const label = TX_TYPE_NAMES[tx.tx_type] || tx.type || 'Unknown';
         return `<div style="display:flex;justify-content:space-between;align-items:center;padding:var(--gap-xs) 0;border-bottom:1px solid var(--border);font-size:var(--font-size-sm)">
           <div style="display:flex;align-items:center;gap:var(--gap-sm)">
             <span style="font-size:var(--font-size-base)">${icon}</span>
             <div>
-              <div>${typeLabel(tx.type)}</div>
+              <div>${label}</div>
               <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${timeAgo(tx.timestamp)}</div>
             </div>
           </div>
-          <span class="mono" style="color:${color};font-weight:600">${sign}${formatNoble(tx.amount)}</span>
+          <span class="mono" style="color:${color};font-weight:600">${sign}${formatNoble(tx.amount || 0)}</span>
         </div>`;
       }).join('');
 
@@ -316,6 +329,8 @@ export function init(root, ctx) {
 
     } catch (e) {
       console.error('[wallet] load:', e);
+    } finally {
+      loadInFlight = false;
     }
   }
 
@@ -325,10 +340,10 @@ export function init(root, ctx) {
     let filtered = allTransactions;
     if (filter === 'incoming') filtered = allTransactions.filter(t => t.direction === 'incoming');
     else if (filter === 'outgoing') filtered = allTransactions.filter(t => t.direction === 'outgoing');
-    else if (filter === 'subsidies') filtered = allTransactions.filter(t => t.type === 'validation_subsidy');
-    else if (filter === 'fees') filtered = allTransactions.filter(t => t.type.startsWith('fee_'));
-    else if (filter === 'transfers') filtered = allTransactions.filter(t => t.type.startsWith('payment_'));
-    else if (filter === 'documents') filtered = allTransactions.filter(t => t.type === 'doc_registration');
+    else if (filter === 'subsidies') filtered = allTransactions.filter(t => t.tx_type === TX_TYPES.COINBASE);
+    else if (filter === 'fees') filtered = allTransactions.filter(t => t.tx_type === TX_TYPES.FEE_DISTRIBUTION);
+    else if (filter === 'transfers') filtered = allTransactions.filter(t => t.tx_type === TX_TYPES.TRANSFER);
+    else if (filter === 'documents') filtered = allTransactions.filter(t => t.tx_type === TX_TYPES.NOTARIZATION || t.tx_type === TX_TYPES.LOCKED || t.tx_type === TX_TYPES.UNLOCKING);
 
     wTxCount.textContent = `${filtered.length} transactions`;
 
@@ -338,27 +353,25 @@ export function init(root, ctx) {
 
     wTransactions.innerHTML = '';
     for (const tx of page) {
-      const isIn = tx.direction === 'incoming';
+      const isIn = tx.direction === 'incoming' || tx.direction === 'self';
       const color = isIn ? 'var(--success)' : 'var(--error)';
       const sign = isIn ? '+' : '-';
-      const icon = typeIcon(tx.type);
-      const confText = tx.confirmations >= 6
-        ? `<span style="color:var(--success)">${formatNumber(tx.confirmations)}</span>`
-        : tx.confirmations > 0
-          ? `<span style="color:var(--warning)">${tx.confirmations} / 6</span>`
-          : `<span style="color:var(--text-muted)">pending</span>`;
+      const icon = txIcon(tx.tx_type);
+      const label = TX_TYPE_NAMES[tx.tx_type] || tx.type || 'Unknown';
+      const statusHtml = txStatusHtml(tx.status, tx.confirmations);
+      const counterparty = tx.counterparty || '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-size:var(--font-size-base);text-align:center">${icon}</td>
-        <td><span class="badge ${isIn ? 'inbound' : 'outbound'}">${typeLabel(tx.type)}</span></td>
+        <td><span class="badge ${isIn ? 'inbound' : 'outbound'}">${label}</span></td>
         <td>
-          <div style="font-size:var(--font-size-sm)">${tx.description}</div>
+          <div style="font-size:var(--font-size-sm)">${counterparty}</div>
           ${tx.tx_id ? `<div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(tx.tx_id, 8)}</div>` : ''}
         </td>
-        <td class="mono" style="font-weight:600;color:${color};white-space:nowrap">${sign}${formatNoble(tx.amount)}</td>
-        <td class="mono" style="font-size:var(--font-size-xs)">${formatNoble(tx.running_balance)}</td>
-        <td style="font-size:var(--font-size-xs)">${confText}</td>
+        <td class="mono" style="font-weight:600;color:${color};white-space:nowrap">${sign}${formatNoble(tx.amount || 0)}</td>
+        <td style="font-size:var(--font-size-xs)">${statusHtml}</td>
+        <td style="font-size:var(--font-size-xs)">${tx.confirmations > 0 ? formatNumber(tx.confirmations) : '--'}</td>
         <td style="font-size:var(--font-size-xs);white-space:nowrap">${timeAgo(tx.timestamp)}</td>
       `;
       wTransactions.appendChild(tr);
@@ -598,27 +611,38 @@ function formatNoble(atomicUnits) {
   return `${display} NOBLE`;
 }
 
-function typeIcon(type) {
-  switch (type) {
-    case 'validation_subsidy': return '&#9670;';  // diamond — block reward
-    case 'fee_validation':     return '&#9733;';  // star — validator fee share
-    case 'fee_gateway':        return '&#9672;';  // outlined diamond — gateway fee share
-    case 'payment_received':   return '&#8595;';  // down arrow — received
-    case 'payment_sent':       return '&#8593;';  // up arrow — sent
-    case 'doc_registration':   return '&#10003;'; // checkmark — document registration
+function txIcon(txType) {
+  switch (txType) {
+    case TX_TYPES.COINBASE:          return '&#9670;';  // diamond — block reward
+    case TX_TYPES.FEE_DISTRIBUTION:  return '&#9733;';  // star — fee income
+    case TX_TYPES.TRANSFER:          return '&#8596;';  // left-right arrow — transfer
+    case TX_TYPES.NOTARIZATION:      return '&#10003;'; // checkmark — document
+    case TX_TYPES.LOCKED:            return '&#x1F512;'; // lock
+    case TX_TYPES.UNLOCKING:         return '&#x1F511;'; // key
+    case TX_TYPES.KEY_ROTATION:      return '&#x1F504;'; // rotation
+    case TX_TYPES.BADGE_PROPOSAL:
+    case TX_TYPES.BADGE_VOTE:
+    case TX_TYPES.BADGE_REVOCATION:  return '&#x1F3C5;'; // medal — governance
     default: return '&#8226;';
   }
 }
 
-function typeLabel(type) {
-  switch (type) {
-    case 'validation_subsidy': return 'Validation Subsidy';
-    case 'fee_validation':     return 'Fee (Validator)';
-    case 'fee_gateway':        return 'Fee (Gateway)';
-    case 'payment_received':   return 'Payment Received';
-    case 'payment_sent':       return 'Payment Sent';
-    case 'doc_registration':   return 'Doc Registration';
-    default: return type;
+function txStatusHtml(status, confirmations) {
+  switch (status) {
+    case 'complete':
+      return `<span style="color:var(--success)">Complete</span>`;
+    case 'maturing':
+      return `<span style="color:var(--warning)">Maturing (${confirmations || 0}/6)</span>`;
+    case 'admitted':
+      return `<span style="color:var(--info, #60a5fa)">Admitted</span>`;
+    case 'pending':
+      return `<span style="color:var(--text-muted)">Pending</span>`;
+    default:
+      return confirmations >= 6
+        ? `<span style="color:var(--success)">${formatNumber(confirmations)}</span>`
+        : confirmations > 0
+          ? `<span style="color:var(--warning)">${confirmations} / 6</span>`
+          : `<span style="color:var(--text-muted)">pending</span>`;
   }
 }
 

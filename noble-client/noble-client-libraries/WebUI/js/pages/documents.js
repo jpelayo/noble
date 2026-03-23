@@ -13,7 +13,7 @@ export function init(root, ctx) {
     const state = ctx.state;
 
     // Wizard state
-    let step = -1; // -1 = landing page
+    let step = 0; // start directly on wizard step 0
     let files = [];
     let hashes = {};       // path → hash
     let previousChecksum = '';
@@ -97,7 +97,7 @@ export function init(root, ctx) {
     }
 
     function resetWizard() {
-        step = -1;
+        step = 0;
         files = [];
         hashes = {};
         previousChecksum = '';
@@ -199,6 +199,14 @@ export function init(root, ctx) {
         topBar.appendChild(nextHint);
 
         root.appendChild(topBar);
+
+        // Page header on first step
+        if (step === 0) {
+            const header = document.createElement('div');
+            header.className = 'page-header';
+            header.innerHTML = '<h1>Register a document checksum in the blockchain</h1><p>The document itself is never uploaded to the blockchain.</p>';
+            root.appendChild(header);
+        }
 
         // Step title
         const title = document.createElement('h2');
