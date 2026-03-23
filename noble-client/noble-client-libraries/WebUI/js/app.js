@@ -143,7 +143,7 @@ const App = {
         banner.id = 'disconnected-banner';
         banner.setAttribute('role', 'alert');
         banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:var(--gap-sm) var(--gap);background:var(--error);color:#fff;text-align:center;font-size:var(--font-size-sm);z-index:2000;display:flex;align-items:center;justify-content:center;gap:var(--gap-sm)';
-        banner.innerHTML = '<span>Node offline. Reconnecting...</span><button id="disconnected-retry" style="background:#fff3;border:1px solid #fff6;color:#fff;padding:2px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Retry Now</button>';
+        banner.innerHTML = '<span>Disconnected from node. Reconnecting...</span><button id="disconnected-retry" style="background:#fff3;border:1px solid #fff6;color:#fff;padding:2px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Retry Now</button>';
         document.body.appendChild(banner);
         document.getElementById('disconnected-retry').addEventListener('click', () => App._checkConnectivity());
     },
@@ -160,7 +160,7 @@ const App = {
         if (appState.chainId) {
             bar.hidden = false;
             const dotClass = appState.isConnected ? 'chain-dot' : 'chain-dot chain-dot-offline';
-            const connLabel = appState.isConnected ? 'Chain' : 'Offline';
+            const connLabel = appState.isConnected ? 'Chain' : 'Disconnected';
             let html = `<span class="${dotClass}"></span><span class="chain-label">${connLabel}</span> ${appState.chainId}`;
             // Node alignment badge — only shown when NOT "Aligned" (the normal state).
             const ns = appState.nodeState;
@@ -263,7 +263,7 @@ async function boot() {
             // Only show offline after 2 consecutive heartbeat failures
             if (!App._heartbeatFailures) App._heartbeatFailures = 0;
             App._heartbeatFailures++;
-            if (App._heartbeatFailures >= 2 && appState.isConnected) {
+            if (App._heartbeatFailures >= 3 && appState.isConnected) {
                 appState.isConnected = false;
                 appState._confirmedDisconnected = true;
                 App._updateChainBar();

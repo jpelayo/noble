@@ -101,8 +101,12 @@ final class AppState {
     /// Reconnect timer — retries connectToNode every 10s after initial failure.
     private var reconnectTimer: Timer?
 
-    /// Consecutive poll failures — disconnect after 3.
+    /// Consecutive poll failures — disconnect after 5.
     private var pollFailureCount = 0
+
+    /// Cached state from last successful poll — served by getState bridge handler
+    /// instead of making a live RPC call (eliminates JS heartbeat timeout vector).
+    var lastPollState: [String: Any] = [:]
 
     // MARK: - Security Settings
 
@@ -416,36 +420,41 @@ final class AppState {
                 }
             }
 
+            // Cache state for getState bridge handler (avoids live RPC in heartbeat)
+            lastPollState = stateUpdate
+
             // Push to WebView
             pushStateToWebView(stateUpdate)
 
         } catch {
-            pollFailureCount += 1
-            if pollFailureCount >= 3 && isConnected {
-                isConnected = false
-                pushStateToWebView(["isConnected": false])
-            }
-            // Auto-reconnect: create a FRESH client (old NWConnection may be dead
-            // after node restart). Retry every 2 ticks while disconnected.
-            if !isConnected, pollFailureCount % 2 == 0 {
-                guard let url = URL(string: nodeURL) else { return }
+            // Before counting a failure, retry ONCE with a fresh client.
+            // NWConnection-per-call can fail if TLS state is stale or the OS
+            // recycled the connection parameters. A fresh client eliminates this.
+            if let url = URL(string: nodeURL) {
                 let freshClient = JSONRPCClient(baseURL: url)
                 let freshService = LiveNobleAPIService(client: freshClient)
-                do {
-                    let nodeInfo = try await freshService.getNodeInfo()
-                    apiService = freshService  // Replace dead service
-                    isConnected = true
+                if let nodeInfo = try? await freshService.getNodeInfo() {
+                    // Fresh client works — replace dead service, no failure counted.
+                    apiService = freshService
                     pollFailureCount = 0
-                    chainId = nodeInfo.chainId
                     blockHeight = nodeInfo.blockHeight
-                    pushStateToWebView([
+                    chainId = nodeInfo.chainId
+                    let retryState: [String: Any] = [
                         "isConnected": true,
                         "blockHeight": nodeInfo.blockHeight,
                         "chainId": nodeInfo.chainId,
-                    ])
-                } catch {
-                    // Still down — will retry on next poll tick.
+                    ]
+                    lastPollState = retryState
+                    pushStateToWebView(retryState)
+                    return
                 }
+            }
+
+            // Fresh client also failed — genuine connection problem.
+            pollFailureCount += 1
+            if pollFailureCount >= 5 && isConnected {
+                isConnected = false
+                pushStateToWebView(["isConnected": false])
             }
         }
     }

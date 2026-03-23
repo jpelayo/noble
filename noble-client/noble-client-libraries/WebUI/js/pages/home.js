@@ -357,12 +357,11 @@ function renderAlignmentBanner(container, state) {
         return;
     }
     const ns = state.nodeState;
-    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown') {
+    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown' || ns === 'Isolated') {
         container.innerHTML = '';
         return;
     }
     const messages = {
-        'Isolated': { text: 'Node has no peers. Waiting for network connections.', cls: 'danger' },
         'Syncing': { text: 'Node is syncing with the network...', cls: 'warning' },
         'Catching Up': { text: 'Node is catching up with peers...', cls: 'warning' },
         'Diverged': { text: 'Node is on a minority fork. Healing in progress.', cls: 'warning' },

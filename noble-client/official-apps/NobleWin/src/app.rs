@@ -259,7 +259,7 @@ pub fn start_polling(
                     let should_disconnect = {
                         let mut st = state.lock().expect("app state lock poisoned");
                         st.poll_failure_count += 1;
-                        st.poll_failure_count >= 3
+                        st.poll_failure_count >= 5
                     };
 
                     if should_disconnect {

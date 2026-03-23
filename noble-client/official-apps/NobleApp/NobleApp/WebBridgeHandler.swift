@@ -984,15 +984,11 @@ final class WebBridgeHandler {
     private func handleApp(action: String, params: [String: Any]) async throws -> Any {
         switch action {
         case "getState":
-            // Include node alignment state (Aligned/Syncing/Diverged/etc.).
-            let nodeState: String
-            if appState.isConnected, let svc = appState.apiService {
-                let sync = try? await svc.getSyncStatus()
-                nodeState = sync?.state ?? "Connected"
-            } else {
-                nodeState = appState.isConnected ? "Connected" : "Offline"
-            }
-            return [
+            // Return cached state from last successful pollTick.
+            // No live RPC call here — eliminates JS heartbeat timeout vector.
+            let nodeState = (appState.lastPollState["nodeState"] as? String)
+                ?? (appState.isConnected ? "Connected" : "Offline")
+            var result: [String: Any] = [
                 "isConnected": appState.isConnected,
                 "hasWallet": appState.hasWallet,
                 "walletAddress": appState.walletAddress ?? "",
@@ -1000,7 +996,11 @@ final class WebBridgeHandler {
                 "blockHeight": appState.blockHeight,
                 "selectedSection": appState.selectedSection?.webRoute ?? "home",
                 "nodeState": nodeState,
-            ] as [String: Any]
+            ]
+            for (key, value) in appState.lastPollState where result[key] == nil {
+                result[key] = value
+            }
+            return result as [String: Any]
 
         case "navigateTo":
             guard let section = params["section"] as? String,
