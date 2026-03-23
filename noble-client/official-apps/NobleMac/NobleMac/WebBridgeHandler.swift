@@ -1010,6 +1010,10 @@ final class WebBridgeHandler {
             }
             return result as [String: Any]
 
+        case "reportBridgeTimeout":
+            appState.reportBridgeTimeout()
+            return ["ok": true]
+
         case "navigateTo":
             guard let section = params["section"] as? String,
                   let target = SidebarSection(rawValue: section)

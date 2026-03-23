@@ -179,10 +179,19 @@ const App = {
     onBridgeError(handler, action, error) {
         // Ignore timeouts on getState itself (heartbeat handles that)
         if (action === 'getState') return;
-        // Bridge timeout is strong evidence the node is down
         if (error.message.includes('timeout') && appState.isConnected) {
-            // Don't set disconnected immediately on one timeout — verify with getState
-            App._checkConnectivity();
+            // Report to Swift so pollFailureCount escalates faster
+            Bridge.call('noble_app', 'reportBridgeTimeout').catch(e => console.warn('[bridge] reportBridgeTimeout failed:', e.message));
+            // Track JS-side consecutive timeouts
+            if (!App._bridgeTimeouts) App._bridgeTimeouts = 0;
+            App._bridgeTimeouts++;
+            if (App._bridgeTimeouts >= 2) {
+                // 2 page-level timeouts — mark disconnected from JS side
+                appState.isConnected = false;
+                appState._confirmedDisconnected = true;
+                App._updateChainBar();
+                App._showDisconnectedBanner();
+            }
         }
     },
 
@@ -195,6 +204,7 @@ const App = {
             if (state.isConnected) {
                 App._hideDisconnectedBanner();
                 App._heartbeatFailures = 0;
+                App._bridgeTimeouts = 0;
             }
         } catch {
             // getState failed — don't panic on one failure, heartbeat will catch sustained outage
@@ -250,6 +260,7 @@ async function boot() {
             if (state.isConnected) {
                 App._hideDisconnectedBanner();
                 App._heartbeatFailures = 0;
+                App._bridgeTimeouts = 0;
                 appState._confirmedDisconnected = false;
                 // If we just reconnected, refresh the current page
                 if (connChanged && currentPage && currentPage.refresh) {

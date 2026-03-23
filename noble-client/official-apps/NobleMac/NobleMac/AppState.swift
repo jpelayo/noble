@@ -459,6 +459,16 @@ final class AppState {
         }
     }
 
+    /// Called by JS when a page-level bridge RPC times out.
+    /// Escalates pollFailureCount so dead-node detection is faster.
+    func reportBridgeTimeout() {
+        pollFailureCount = pollFailureCount.advanced(by: 2)
+        if pollFailureCount >= 5 && isConnected {
+            isConnected = false
+            pushStateToWebView(["isConnected": false])
+        }
+    }
+
     /// Push a state dictionary to the WebView via evaluateJavaScript.
     private func pushStateToWebView(_ state: [String: Any]) {
         guard let coordinator = webViewCoordinator else { return }

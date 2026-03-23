@@ -357,7 +357,7 @@ function renderAlignmentBanner(container, state) {
         return;
     }
     const ns = state.nodeState;
-    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown' || ns === 'Isolated') {
+    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown' || ns === 'Isolated' || ns === 'Offline') {
         container.innerHTML = '';
         return;
     }

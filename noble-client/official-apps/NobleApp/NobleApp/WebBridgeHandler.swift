@@ -421,6 +421,9 @@ final class WebBridgeHandler {
             case .badgeProposal, .badgeVote, .badgeRevocation:
                 dict["direction"] = "self"
                 dict["counterparty"] = dict["counterparty"] ?? "Governance"
+            case .feeDistribution:
+                dict["direction"] = "incoming"
+                dict["counterparty"] = dict["counterparty"] ?? "Fee Distribution"
             }
         }
 
@@ -1001,6 +1004,10 @@ final class WebBridgeHandler {
                 result[key] = value
             }
             return result as [String: Any]
+
+        case "reportBridgeTimeout":
+            appState.reportBridgeTimeout()
+            return ["ok": true]
 
         case "navigateTo":
             guard let section = params["section"] as? String,
