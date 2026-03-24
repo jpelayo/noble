@@ -339,6 +339,38 @@ pub trait StorageEngine {
         Ok(Vec::new()) // default no-op
     }
 
+    // ── DAO Poll Storage ──
+
+    /// Store a DAO poll (keyed by poll_id hex).
+    fn store_dao_poll(&self, poll_id: &[u8], poll_cbor: &[u8]) -> Result<(), StorageError> {
+        let _ = (poll_id, poll_cbor);
+        Ok(())
+    }
+
+    /// List all DAO polls: (poll_id_bytes, cbor_bytes).
+    fn list_dao_polls(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    // ── Proposal Cooldown Storage ──
+
+    /// Store last proposal cycle for a proposer (rate limit).
+    fn store_proposal_cooldown(&self, proposer_wire: &[u8], cycle: u64) -> Result<(), StorageError> {
+        let _ = (proposer_wire, cycle);
+        Ok(())
+    }
+
+    /// Get last proposal cycle for a proposer.
+    fn get_proposal_cooldown(&self, proposer_wire: &[u8]) -> Result<Option<u64>, StorageError> {
+        let _ = proposer_wire;
+        Ok(None)
+    }
+
+    /// List all cooldowns: (proposer_wire, last_cycle).
+    fn list_proposal_cooldowns(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError> {
+        Ok(Vec::new())
+    }
+
     // ── Evidence Storage ──
 
     /// Store misbehavior evidence, keyed by evidence hash (SHA-256 of CBOR).

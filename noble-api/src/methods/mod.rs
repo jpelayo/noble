@@ -6,6 +6,7 @@
 pub mod address;
 pub mod badge;
 pub mod block;
+pub mod dao;
 pub mod consensus;
 pub mod document;
 pub mod mempool;

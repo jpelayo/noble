@@ -537,6 +537,41 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     tracing::warn!(task = "init", "failed to load badge proposals from storage: {}", e);
                 }
             }
+            // Load DAO polls.
+            match s.list_dao_polls() {
+                Ok(polls) => {
+                    for (id_bytes, cbor_data) in polls {
+                        let poll_id = String::from_utf8_lossy(&id_bytes).to_string();
+                        match noble_codec::NobleCbor::from_cbor::<noble_consensus::dao::DaoPoll>(&cbor_data) {
+                            Ok(mut poll) => {
+                                poll.poll_id = poll_id;
+                                engine.dao_store_mut().insert(poll);
+                            }
+                            Err(e) => {
+                                tracing::warn!(task = "init", "failed to decode DAO poll {poll_id}: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task = "init", "failed to load DAO polls: {e}");
+                }
+            }
+            // Load proposal cooldowns.
+            match s.list_proposal_cooldowns() {
+                Ok(cooldowns) => {
+                    for (wire, cycle) in cooldowns {
+                        engine.proposal_cooldowns_mut().insert(wire, cycle);
+                    }
+                    let count = engine.proposal_cooldowns().len();
+                    if count > 0 {
+                        tracing::info!(task = "init", "loaded {} proposal cooldown(s) from storage", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task = "init", "failed to load proposal cooldowns: {e}");
+                }
+            }
         }
         // Restore finality state from storage.
         if let Ok(Some(data)) = storage.read().load_finality_state() {
@@ -3644,6 +3679,26 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             "persisted {} badge(s) + {} proposal(s) to storage",
                             badges.len(),
                             proposals.len()
+                        );
+                    }
+                }
+                CycleIo::PersistDaoState { polls, cooldowns } => {
+                    let storage = self.storage.read();
+                    for (poll_id, cbor_data) in &polls {
+                        if let Err(e) = storage.store_dao_poll(poll_id.as_bytes(), cbor_data) {
+                            tracing::warn!(task = "dao", "failed to persist DAO poll: {e}");
+                        }
+                    }
+                    for (proposer_wire, cycle) in &cooldowns {
+                        if let Err(e) = storage.store_proposal_cooldown(proposer_wire, *cycle) {
+                            tracing::warn!(task = "dao", "failed to persist proposal cooldown: {e}");
+                        }
+                    }
+                    if !polls.is_empty() || !cooldowns.is_empty() {
+                        tracing::debug!(
+                            task = "dao",
+                            "persisted {} DAO poll(s) + {} cooldown(s) to storage",
+                            polls.len(), cooldowns.len()
                         );
                     }
                 }

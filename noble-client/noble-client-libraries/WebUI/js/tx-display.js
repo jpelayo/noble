@@ -12,6 +12,7 @@ export const TX_TYPES = {
     UNLOCKING:         0x07,
     COINBASE:          0x10,
     FEE_DISTRIBUTION:  0x11,
+    DAO:               0x12,
 };
 
 export const TX_TYPE_NAMES = {
@@ -25,6 +26,7 @@ export const TX_TYPE_NAMES = {
     0x07: 'Unlocking',
     0x10: 'Block Reward',
     0x11: 'Fee Distribution',
+    0x12: 'DAO Poll',
 };
 
 /**
@@ -59,6 +61,12 @@ export function txDisplayAmount(tx) {
             return {
                 label: 'Fee Income',
                 amount: tx.total_output ?? 0,
+                showFee: false,
+            };
+        case TX_TYPES.DAO:
+            return {
+                label: 'Governance',
+                amount: 0,
                 showFee: false,
             };
         default:

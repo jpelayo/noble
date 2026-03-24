@@ -54,6 +54,10 @@ pub struct ReputationData {
     /// Whether this validator holds the voting capability badge.
     #[serde(default)]
     pub has_voting_badge: bool,
+    /// Current consensus cycle number (set each cycle boundary).
+    /// Used to determine if the chain is in bootstrap mode.
+    #[serde(default)]
+    pub current_cycle: u64,
 }
 
 impl ReputationData {
@@ -61,7 +65,7 @@ impl ReputationData {
     ///
     /// Formula: `raw × badge_modifier × penalty`
     /// - raw = 0.20×acceptance + 0.20×votes + 0.05×uptime + 0.45×presence
-    /// - badge_modifier = 1.0 if has_voting_badge, 0.5 otherwise
+    /// - badge_modifier = 1.0 if has_voting_badge OR in bootstrap mode, 0.5 otherwise
     /// - penalty = linear 10% per misbehavior incident (0 at 10)
     pub fn score(&self) -> f64 {
         let acceptance = if self.blocks_accepted + self.blocks_rejected > 0 {
@@ -93,7 +97,8 @@ impl ReputationData {
                 + W_UPTIME * uptime
                 + W_PRESENCE * presence;
 
-        let badge_modifier = if self.has_voting_badge { 1.0 } else { 0.5 };
+        let in_bootstrap = self.current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+        let badge_modifier = if in_bootstrap || self.has_voting_badge { 1.0 } else { 0.5 };
         let penalty = (1.0 - 0.1 * self.misbehavior_count.min(10) as f64).max(0.0);
 
         (raw * badge_modifier * penalty).clamp(0.0, 1.0)
@@ -240,6 +245,7 @@ impl ReputationEngine {
             entry.listers_count = listers.get(wire).copied().unwrap_or(0);
             entry.total_peers_with_lists = total_peers_with_lists;
             entry.has_voting_badge = badge_holders.contains(wire);
+            entry.current_cycle = cycle;
         }
     }
 
@@ -291,6 +297,7 @@ mod tests {
             listers_count: 5,
             total_peers_with_lists: 5, // 5/5 = 1.0
             has_voting_badge: true,
+            current_cycle: 10_000, // past bootstrap (4,320)
         }
     }
 
@@ -314,6 +321,17 @@ mod tests {
         let score = data.score();
         // 0.90 × 0.5 = 0.45
         assert!((score - 0.45).abs() < 1e-10, "no badge: {score}");
+    }
+
+    #[test]
+    fn bootstrap_bypasses_badge_penalty() {
+        let mut data = make_perfect_data();
+        data.has_voting_badge = false;
+        data.current_cycle = 100; // within bootstrap (< 4,320)
+        let score = data.score();
+        // During bootstrap, badge_modifier = 1.0 even without badge
+        // 0.90 × 1.0 × 1.0 = 0.90
+        assert!((score - 0.90).abs() < 1e-10, "bootstrap no badge: {score}");
     }
 
     #[test]

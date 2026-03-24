@@ -98,6 +98,11 @@ pub const TX_TYPE_COINBASE: u8 = 0x10;
 /// Block transaction index 1 (omitted if total fees == 0).
 pub const TX_TYPE_FEE: u8 = 0x11;
 
+/// Transaction type: DAO governance poll (create or vote).
+/// Badge holders only (or any validator during bootstrap mode).
+/// Zero inputs/outputs. Metadata carries question + votes.
+pub const TX_TYPE_DAO: u8 = 0x12;
+
 /// Number of confirmations before coinbase outputs are spendable.
 /// Prevents cascading invalidation if a reorg orphans the coinbase block.
 /// Bitcoin uses 100; NOBLE uses 6 (aligned with finality threshold).
@@ -110,8 +115,14 @@ pub const BADGE_MIN_PRESENCE_SECS: u64 = 604_800;
 /// Short-chain minimum presence (2 days).
 pub const BADGE_MIN_PRESENCE_SHORT_SECS: u64 = 172_800;
 
-/// Bootstrap mode duration in cycles (60 days at 30-min cycles = 2,880 cycles).
-pub const BOOTSTRAP_MODE_CYCLES: u64 = 2_880;
+/// Bootstrap mode duration in cycles (60 days at 20-min cycles = 4,320 cycles).
+/// During bootstrap, the voting badge requirement is waived for governance.
+pub const BOOTSTRAP_MODE_CYCLES: u64 = 4_320;
+
+/// Proposal cooldown in cycles (30 days at 20-min cycles = 2,160 cycles).
+/// Each proposer can submit at most 1 governance proposal per cooldown period.
+/// Exception: provable-ban revocations (DuplicateProposal, ProtocolAbuse) bypass this.
+pub const PROPOSAL_COOLDOWN_CYCLES: u64 = 2_160;
 
 /// Suspension threshold: offline for this many seconds triggers local suspension.
 /// 15 days = 1,296,000 seconds.

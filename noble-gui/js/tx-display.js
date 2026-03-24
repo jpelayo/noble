@@ -14,6 +14,7 @@ export const TX_TYPES = {
     UNLOCKING:         0x07,
     COINBASE:          0x10,
     FEE_DISTRIBUTION:  0x11,
+    DAO:               0x12,
 };
 
 export const TX_TYPE_NAMES = {
@@ -27,6 +28,7 @@ export const TX_TYPE_NAMES = {
     0x07: 'Unlocking',
     0x10: 'Block Reward',
     0x11: 'Fee Distribution',
+    0x12: 'DAO Poll',
 };
 
 /** Short labels for compact displays (mempool stream, block tx list). */
@@ -34,7 +36,7 @@ export const TX_TYPE_SHORT = {
     0x00: 'Doc', 0x01: 'Transfer', 0x02: 'Key Rot.',
     0x03: 'Badge', 0x04: 'Vote', 0x05: 'Revoke',
     0x06: 'Locked', 0x07: 'Unlock', 0x10: 'Reward',
-    0x11: 'Fees',
+    0x11: 'Fees', 0x12: 'DAO',
 };
 
 /**
@@ -62,6 +64,12 @@ export function txDisplayAmount(tx) {
                 amount: tx.total_output ?? 0,
                 showFee: false,
             };
+        case TX_TYPES.DAO:
+            return {
+                label: 'Governance',
+                amount: 0,
+                showFee: false,
+            };
         default:
             return {
                 label: 'Fee',
@@ -74,6 +82,7 @@ export function txDisplayAmount(tx) {
 export function formatTxType(txType) {
     if (txType === TX_TYPES.COINBASE) return '<span class="badge coinbase">Block Reward</span>';
     if (txType === TX_TYPES.FEE_DISTRIBUTION) return '<span class="badge tx-fee-distribution">Fee Distribution</span>';
+    if (txType === TX_TYPES.DAO) return '<span class="badge tx-dao">DAO Poll</span>';
     return TX_TYPE_NAMES[txType] || `Type 0x${(txType ?? 0).toString(16).padStart(2, '0')}`;
 }
 

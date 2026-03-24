@@ -328,6 +328,40 @@ final class WebBridgeHandler {
             }
             return try await handleFaucetHopRequest(faucetURL: urlStr, address: address)
 
+        // ── Governance RPCs (badge + DAO) ──
+
+        case "getBadgeHolders":
+            return try await rpcPassthrough("noble_getBadgeHolders")
+
+        case "getActiveProposals":
+            return try await rpcPassthrough("noble_getActiveProposals")
+
+        case "getProposalHistory":
+            let propLimit = params["limit"] as? Int ?? 50
+            return try await rpcPassthrough("noble_getProposalHistory", params: ["limit": propLimit])
+
+        case "getMyBadgeStatus":
+            return try await rpcPassthrough("noble_getMyBadgeStatus")
+
+        case "proposeBadge":
+            return try await rpcPassthrough("noble_proposeBadge", params: params)
+
+        case "voteBadgeProposal":
+            return try await rpcPassthrough("noble_voteBadgeProposal", params: params)
+
+        case "getActivePolls":
+            return try await rpcPassthrough("noble_getActivePolls")
+
+        case "getPollHistory":
+            let pollLimit = params["limit"] as? Int ?? 50
+            return try await rpcPassthrough("noble_getPollHistory", params: ["limit": pollLimit])
+
+        case "createPoll":
+            return try await rpcPassthrough("noble_createPoll", params: params)
+
+        case "votePoll":
+            return try await rpcPassthrough("noble_votePoll", params: params)
+
         default:
             throw BridgeError.unknownAction(action)
         }
@@ -420,6 +454,38 @@ final class WebBridgeHandler {
             throw BridgeError.faucetError(msg)
         }
         return json
+    }
+
+    /// Generic RPC passthrough — calls the node JSON-RPC and returns raw JSON result.
+    private func rpcPassthrough(_ method: String, params: [String: Any]? = nil) async throws -> Any {
+        guard !appState.nodeURL.isEmpty, let baseURL = URL(string: appState.nodeURL) else {
+            throw BridgeError.notConnected
+        }
+        let rpcParams = params ?? [:]
+        let body: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": [rpcParams],
+        ]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let url = baseURL.appendingPathComponent("rpc")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
+        request.httpBody = bodyData
+        request.timeoutInterval = 10
+
+        let (data, _) = try await Self.faucetSession.data(for: request)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw BridgeError.faucetUnavailable
+        }
+        if let error = json["error"] as? [String: Any] {
+            let msg = error["message"] as? String ?? "RPC error"
+            throw BridgeError.faucetError(msg)
+        }
+        return json["result"] ?? [String: Any]()
     }
 
     // MARK: - Serialization Helpers

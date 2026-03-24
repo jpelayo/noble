@@ -7,6 +7,7 @@ pub mod alignment;
 pub mod badge;
 pub mod candidate;
 pub mod checkpoint;
+pub mod dao;
 pub mod config;
 pub mod cycle;
 pub mod engine;

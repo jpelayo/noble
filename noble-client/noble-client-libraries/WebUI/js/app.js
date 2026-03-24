@@ -9,17 +9,19 @@ import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
 import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
+import { init as initGovernance } from './pages/governance.js';
 import { init as initTxDetail } from './pages/tx-detail.js';
 
 const pages = {
-    home:      initHome,
-    documents: initDocuments,
-    drafts:    initDrafts,
-    verify:    initVerify,
-    payments:  initPayments,
-    contacts:  initContacts,
-    settings:  initSettings,
-    faucet:    initFaucet,
+    home:       initHome,
+    documents:  initDocuments,
+    drafts:     initDrafts,
+    verify:     initVerify,
+    payments:   initPayments,
+    contacts:   initContacts,
+    settings:   initSettings,
+    faucet:     initFaucet,
+    governance: initGovernance,
     'tx-detail': initTxDetail,
 };
 

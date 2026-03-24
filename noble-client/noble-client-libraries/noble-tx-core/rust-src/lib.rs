@@ -19,6 +19,10 @@ extern "C" {
     fn noble_sign_badge_revocation(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_locked(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_unlocking(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_dao_create(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_dao_vote(params_json: *const c_char) -> *mut c_char;
+    fn noble_build_coinbase(params_json: *const c_char) -> *mut c_char;
+    fn noble_build_fee_distribution(params_json: *const c_char) -> *mut c_char;
     fn noble_select_utxos(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_encode(tx_json: *const c_char) -> *mut c_char;
     fn noble_estimate_tx_size(params_json: *const c_char) -> *mut c_char;
@@ -83,6 +87,26 @@ pub fn sign_locked(params_json: &str) -> Result<String, String> {
 /// Build, sign, and CBOR-encode an unlocking transaction (0x07).
 pub fn sign_unlocking(params_json: &str) -> Result<String, String> {
     call_ffi(noble_sign_unlocking, params_json)
+}
+
+/// Build, sign, and CBOR-encode a DAO poll creation transaction (0x12).
+pub fn sign_dao_create(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_dao_create, params_json)
+}
+
+/// Build, sign, and CBOR-encode a DAO poll vote transaction (0x12).
+pub fn sign_dao_vote(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_dao_vote, params_json)
+}
+
+/// Build, sign, and CBOR-encode a coinbase (block reward) transaction (0x10).
+pub fn build_coinbase(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_build_coinbase, params_json)
+}
+
+/// Build, sign, and CBOR-encode a fee distribution transaction (0x11).
+pub fn build_fee_distribution(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_build_fee_distribution, params_json)
 }
 
 /// Run 5-pass coin selection on UTXOs.

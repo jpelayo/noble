@@ -24,6 +24,7 @@ mod coinbase;
 mod fee_distribution;
 mod locked;
 mod unlocking;
+mod dao;
 
 pub use notarization::Notarization;
 pub use transfer::Transfer;
@@ -35,6 +36,7 @@ pub use coinbase::Coinbase;
 pub use fee_distribution::FeeDistribution;
 pub use locked::Locked;
 pub use unlocking::Unlocking;
+pub use dao::Dao;
 
 use crate::constants::*;
 
@@ -98,6 +100,7 @@ pub fn handler_for(tx_type: u8) -> Option<&'static dyn TxTypeHandler> {
         TX_TYPE_FEE => Some(&FeeDistribution),
         TX_TYPE_LOCKED => Some(&Locked),
         TX_TYPE_UNLOCKING => Some(&Unlocking),
+        TX_TYPE_DAO => Some(&Dao),
         _ => None,
     }
 }

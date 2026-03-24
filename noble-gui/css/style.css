@@ -1294,6 +1294,12 @@ body {
   color: #eab308;
 }
 
+/* DAO Poll badge */
+.badge.tx-dao {
+  background: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+}
+
 /* Confirmed badge (matches API status "complete") */
 .badge-confirmed,
 .badge.confirmed {

@@ -25,6 +25,9 @@
 #define TX_TYPE_BADGE_REVOCATION 0x05
 #define TX_TYPE_LOCKED          0x06
 #define TX_TYPE_UNLOCKING       0x07
+#define TX_TYPE_COINBASE        0x10
+#define TX_TYPE_FEE             0x11
+#define TX_TYPE_DAO             0x12
 #define PROTOCOL_VERSION        1
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -551,7 +554,7 @@ char *noble_tx_encode(const char *tx_json) {
     return result;
 }
 
-// ── Shared helper: build a metadata-only tx (0x02–0x05) ─────────────
+// ── Shared helper: build a metadata-only tx (0x02–0x05, 0x12) ───────
 
 static char *sign_metadata_tx(
     const char *params_json,
@@ -563,15 +566,29 @@ static char *sign_metadata_tx(
     json_value_t *params = json_parse(params_json);
     if (!params) return json_emit_error("invalid JSON");
 
-    uint64_t fee              = json_get_uint(params, "fee");
-    const char *change_hex    = json_get_string(params, "change_address");
     const char *privkey_hex   = json_get_string(params, "private_key");
     uint32_t chain_id         = json_get_uint32(params, "chain_id");
-    const json_value_t *utxos = json_get(params, "utxos");
 
-    if (!change_hex || !privkey_hex || !utxos) {
+    // Governance types (0x02-0x05, 0x12) are zero-fee: no inputs, no outputs, no UTXOs.
+    int is_governance = (tx_type >= 0x02 && tx_type <= 0x05) || tx_type == TX_TYPE_DAO;
+
+    uint64_t fee              = 0;
+    const char *change_hex    = NULL;
+    const json_value_t *utxos = NULL;
+
+    if (!is_governance) {
+        fee        = json_get_uint(params, "fee");
+        change_hex = json_get_string(params, "change_address");
+        utxos      = json_get(params, "utxos");
+        if (!change_hex || !utxos) {
+            json_free(params);
+            return json_emit_error("missing required field (change_address, utxos)");
+        }
+    }
+
+    if (!privkey_hex) {
         json_free(params);
-        return json_emit_error("missing required field");
+        return json_emit_error("missing private_key");
     }
 
     uint8_t private_key[32];
@@ -584,7 +601,6 @@ static char *sign_metadata_tx(
     memset(&tx, 0, sizeof(tx));
     tx.version = PROTOCOL_VERSION;
     tx.tx_type = tx_type;
-    // checksum = ZERO for these types
     memset(tx.checksum, 0, HASH256_LEN);
 
     // Metadata
@@ -598,61 +614,66 @@ static char *sign_metadata_tx(
         tx.metadata_count++;
     }
 
-    // Inputs
-    if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
-        json_free(params);
-        return json_emit_error("invalid utxos");
-    }
-
-    // Compute input total
-    uint64_t input_total = 0;
-    for (uint8_t i = 0; i < tx.input_count; i++) {
-        const json_value_t *u = &utxos->array.items[i];
-        input_total += json_get_uint(u, "value");
-    }
-
-    noble_address_t change_addr;
-    if (parse_address_wire(change_hex, &change_addr) != 0) {
-        json_free(params);
-        return json_emit_error("invalid change_address");
-    }
-
     tx.timestamp = json_get_uint(params, "timestamp");
 
-    // Two-pass fee computation: fee_rate takes precedence over absolute fee.
-    uint64_t fee_rate = json_get_uint(params, "fee_rate");
-    uint64_t actual_fee = fee;
-
-    if (fee_rate > 0) {
-        uint64_t change0 = input_total;
-        if (change0 > 0) {
-            tx.outputs[0].address = change_addr;
-            tx.outputs[0].value = change0;
-            tx.output_count = 1;
-        }
-        noble_buf_t probe;
-        uint8_t dummy_id[HASH256_LEN];
-        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
-            json_free(params);
-            return json_emit_error("signing failed (size probe)");
-        }
-        actual_fee = (uint64_t)probe.len * fee_rate;
-        noble_buf_free(&probe);
-    }
-
-    if (actual_fee > input_total) {
-        json_free(params);
-        return json_emit_error("insufficient funds for fee");
-    }
-
-    // Output: change only
-    uint64_t change_val = input_total - actual_fee;
-    if (change_val > 0) {
-        tx.outputs[0].address = change_addr;
-        tx.outputs[0].value = change_val;
-        tx.output_count = 1;
-    } else {
+    if (is_governance) {
+        // Governance: zero inputs, zero outputs, zero fee.
+        tx.input_count = 0;
         tx.output_count = 0;
+    } else {
+        // Non-governance: parse UTXOs, compute fee, add change output.
+        if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
+            json_free(params);
+            return json_emit_error("invalid utxos");
+        }
+
+        uint64_t input_total = 0;
+        for (uint8_t i = 0; i < tx.input_count; i++) {
+            const json_value_t *u = &utxos->array.items[i];
+            input_total += json_get_uint(u, "value");
+        }
+
+        noble_address_t change_addr;
+        if (parse_address_wire(change_hex, &change_addr) != 0) {
+            json_free(params);
+            return json_emit_error("invalid change_address");
+        }
+
+        uint64_t fee_rate = json_get_uint(params, "fee_rate");
+        uint64_t actual_fee = fee;
+
+        if (fee_rate > 0) {
+            uint64_t change0 = input_total;
+            if (change0 > 0) {
+                tx.outputs[0].address = change_addr;
+                tx.outputs[0].value = change0;
+                tx.output_count = 1;
+            }
+            noble_buf_t probe;
+            uint8_t dummy_id[HASH256_LEN];
+            if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+                json_free(params);
+                return json_emit_error("signing failed (size probe)");
+            }
+            actual_fee = (uint64_t)probe.len * fee_rate;
+            noble_buf_free(&probe);
+        }
+
+        if (actual_fee > input_total) {
+            json_free(params);
+            return json_emit_error("insufficient funds for fee");
+        }
+
+        uint64_t change_val = input_total - actual_fee;
+        if (change_val > 0) {
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = change_val;
+            tx.output_count = 1;
+        } else {
+            tx.output_count = 0;
+        }
+
+        fee = actual_fee;
     }
 
     noble_buf_t cbor;
@@ -668,8 +689,8 @@ static char *sign_metadata_tx(
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);
 
-    char *result = fee_rate > 0
-        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+    char *result = (!is_governance && json_get_uint(params, "fee_rate") > 0)
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, fee, cbor.len)
         : json_emit_result(tx_hex, tx_id_hex);
 
     free(tx_hex);
@@ -733,6 +754,174 @@ char *noble_sign_badge_revocation(const char *params_json) {
     const char *keys[1] = { "badge_id" };
     const char *vals[1] = { badge_id };
     char *result = sign_metadata_tx(params_json, TX_TYPE_BADGE_REVOCATION, keys, vals, 1);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_dao_create (0x12) ────────────────────────────────────
+
+char *noble_sign_dao_create(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *question = json_get_string(params, "question");
+    const char *expires  = json_get_string(params, "expires_cycles");
+    if (!question) { json_free(params); return json_emit_error("missing question"); }
+    const char *keys[3] = { "dao:action", "dao:question", "dao:expires_cycles" };
+    const char *vals[3] = { "create", question, expires ? expires : "72" };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_DAO, keys, vals, 3);
+    json_free(params);
+    return result;
+}
+
+// ── noble_sign_dao_vote (0x12) ─────────────────────────────────────
+
+char *noble_sign_dao_vote(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+    const char *poll_id = json_get_string(params, "poll_id");
+    const char *vote    = json_get_string(params, "vote");
+    if (!poll_id || !vote) { json_free(params); return json_emit_error("missing poll_id or vote"); }
+    const char *keys[3] = { "dao:action", "dao:poll_id", "dao:vote" };
+    const char *vals[3] = { "vote", poll_id, vote };
+    char *result = sign_metadata_tx(params_json, TX_TYPE_DAO, keys, vals, 3);
+    json_free(params);
+    return result;
+}
+
+// ── noble_build_coinbase (0x10) ─────────────────────────────────────
+// Params: { private_key, chain_id, validator_address, subsidy_amount, timestamp }
+// Builds block reward tx: 1 null input (COINBASE_PREVOUT) + 1 output to validator.
+
+char *noble_build_coinbase(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *privkey_hex = json_get_string(params, "private_key");
+    uint32_t chain_id       = json_get_uint32(params, "chain_id");
+    const char *val_addr    = json_get_string(params, "validator_address");
+    uint64_t subsidy        = json_get_uint(params, "subsidy_amount");
+    uint64_t timestamp      = json_get_uint(params, "timestamp");
+
+    if (!privkey_hex || !val_addr) {
+        json_free(params);
+        return json_emit_error("missing private_key or validator_address");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = TX_TYPE_COINBASE;
+    memset(tx.checksum, 0, HASH256_LEN);
+    tx.timestamp = timestamp;
+
+    // Null input (COINBASE_PREVOUT): txid=zeros, vout=0xFFFFFFFF
+    memset(tx.inputs[0].prev_output.txid, 0, HASH256_LEN);
+    tx.inputs[0].prev_output.vout = 0xFFFFFFFF;
+    tx.input_count = 1;
+
+    // Output: subsidy to validator
+    noble_address_t addr;
+    if (parse_address_wire(val_addr, &addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid validator_address");
+    }
+    tx.outputs[0].address = addr;
+    tx.outputs[0].value = subsidy;
+    tx.output_count = 1;
+
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("signing failed");
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+    char *result = json_emit_result(tx_hex, tx_id_hex);
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
+// ── noble_build_fee_distribution (0x11) ─────────────────────────────
+// Params: { private_key, chain_id, outputs: [{address, value}], timestamp }
+// Builds fee distribution tx: 1 null input + N outputs (validator + gateways).
+
+char *noble_build_fee_distribution(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *privkey_hex   = json_get_string(params, "private_key");
+    uint32_t chain_id         = json_get_uint32(params, "chain_id");
+    uint64_t timestamp        = json_get_uint(params, "timestamp");
+    const json_value_t *outs  = json_get(params, "outputs");
+
+    if (!privkey_hex || !outs) {
+        json_free(params);
+        return json_emit_error("missing private_key or outputs");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = TX_TYPE_FEE;
+    memset(tx.checksum, 0, HASH256_LEN);
+    tx.timestamp = timestamp;
+
+    // Null input
+    memset(tx.inputs[0].prev_output.txid, 0, HASH256_LEN);
+    tx.inputs[0].prev_output.vout = 0xFFFFFFFF;
+    tx.input_count = 1;
+
+    // Parse outputs array
+    tx.output_count = 0;
+    for (size_t i = 0; i < outs->array.count && i < MAX_OUTPUTS; i++) {
+        const json_value_t *out = &outs->array.items[i];
+        const char *addr_hex = json_get_string(out, "address");
+        uint64_t value = json_get_uint(out, "value");
+        if (!addr_hex || value == 0) continue;
+        noble_address_t addr;
+        if (parse_address_wire(addr_hex, &addr) != 0) continue;
+        tx.outputs[tx.output_count].address = addr;
+        tx.outputs[tx.output_count].value = value;
+        tx.output_count++;
+    }
+
+    if (tx.output_count == 0) {
+        json_free(params);
+        return json_emit_error("no valid outputs");
+    }
+
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
+        json_free(params);
+        return json_emit_error("signing failed");
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+    char *result = json_emit_result(tx_hex, tx_id_hex);
+    free(tx_hex);
+    noble_buf_free(&cbor);
     json_free(params);
     return result;
 }
@@ -1731,6 +1920,9 @@ char *noble_estimate_tx_size(const char *params_json) {
     else if (strcmp(tx_type_str, "badge_proposal") == 0) tx_type = TX_TYPE_BADGE_PROPOSAL;
     else if (strcmp(tx_type_str, "badge_vote") == 0) tx_type = TX_TYPE_BADGE_VOTE;
     else if (strcmp(tx_type_str, "badge_revocation") == 0) tx_type = TX_TYPE_BADGE_REVOCATION;
+    else if (strcmp(tx_type_str, "dao") == 0) tx_type = TX_TYPE_DAO;
+    else if (strcmp(tx_type_str, "coinbase") == 0) tx_type = TX_TYPE_COINBASE;
+    else if (strcmp(tx_type_str, "fee_distribution") == 0) tx_type = TX_TYPE_FEE;
     if (tx_type == 0xFF) { json_free(params); return json_emit_error("unknown tx_type"); }
 
     const char *change_hex  = json_get_string(params, "change_address");

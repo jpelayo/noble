@@ -1951,6 +1951,73 @@ impl StorageEngine for RocksDbStorage {
         Ok(proposals)
     }
 
+    fn store_dao_poll(&self, poll_id: &[u8], poll_cbor: &[u8]) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BADGE_STATE)?;
+        let mut key = b"d:".to_vec();
+        key.extend_from_slice(poll_id);
+        self.db.put_cf(cf, &key, poll_cbor)
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn list_dao_polls(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BADGE_STATE)?;
+        let prefix = b"d:";
+        let mut polls = Vec::new();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.starts_with(prefix) {
+                polls.push((key[2..].to_vec(), value.to_vec()));
+            } else {
+                break;
+            }
+        }
+        Ok(polls)
+    }
+
+    fn store_proposal_cooldown(&self, proposer_wire: &[u8], cycle: u64) -> Result<(), StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BADGE_STATE)?;
+        let mut key = b"c:".to_vec();
+        key.extend_from_slice(proposer_wire);
+        self.db.put_cf(cf, &key, &cycle.to_be_bytes())
+            .map_err(|e| StorageError::Database(e.to_string()))
+    }
+
+    fn get_proposal_cooldown(&self, proposer_wire: &[u8]) -> Result<Option<u64>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BADGE_STATE)?;
+        let mut key = b"c:".to_vec();
+        key.extend_from_slice(proposer_wire);
+        match self.db.get_cf(cf, &key).map_err(|e| StorageError::Database(e.to_string()))? {
+            Some(bytes) if bytes.len() == 8 => {
+                Ok(Some(u64::from_be_bytes(bytes[..8].try_into().unwrap())))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn list_proposal_cooldowns(&self) -> Result<Vec<(Vec<u8>, u64)>, StorageError> {
+        self.check_open()?;
+        let cf = self.cf(CF_BADGE_STATE)?;
+        let prefix = b"c:";
+        let mut cooldowns = Vec::new();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Database(e.to_string()))?;
+            if key.starts_with(prefix) && value.len() == 8 {
+                let wire = key[2..].to_vec();
+                let cycle = u64::from_be_bytes(value[..8].try_into().unwrap());
+                cooldowns.push((wire, cycle));
+            } else if !key.starts_with(prefix) {
+                break;
+            }
+        }
+        Ok(cooldowns)
+    }
+
     fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
         self.check_open()?;
         Ok(StorageStats {

@@ -529,6 +529,21 @@ pub async fn handle_api_action(
             client.faucet_request(url, address).await
         }
 
+        // ── Governance RPCs (badge + DAO) ──
+        "getBadgeHolders" | "getActiveProposals" | "getMyBadgeStatus"
+        | "getActivePolls" => {
+            client.call_rpc(&format!("noble_{action}"), serde_json::json!([])).await
+        }
+
+        "getProposalHistory" | "getPollHistory" => {
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50);
+            client.call_rpc(&format!("noble_{action}"), serde_json::json!([limit])).await
+        }
+
+        "proposeBadge" | "voteBadgeProposal" | "createPoll" | "votePoll" => {
+            client.call_rpc(&format!("noble_{action}"), serde_json::json!([params])).await
+        }
+
         _ => Err(format!("Unknown action: {action}")),
     }
 }

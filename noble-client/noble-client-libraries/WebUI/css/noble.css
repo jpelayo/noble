@@ -161,6 +161,8 @@ body {
 .node-state-diverged { background: #f97316; color: #fff; }
 /* Fee Distribution transaction type */
 .tx-fee-distribution { color: #22d3ee; }
+/* DAO Poll transaction type */
+.tx-dao { color: #a855f7; }
 /* Alignment status card on home page */
 .alignment-card {
   padding: var(--gap);

@@ -313,7 +313,7 @@ impl<S: StorageEngine> noble_mempool::UtxoLookup for BadgeUtxoLookup<'_, S> {
 }
 
 /// Build a badge transaction, sign it, admit to mempool, and broadcast.
-fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
+pub(crate) fn build_badge_tx<S: StorageEngine + Send + Sync + 'static>(
     state: &Arc<ApiState<S>>,
     tx_type: u8,
     metadata: Vec<noble_core::MetadataEntry>,

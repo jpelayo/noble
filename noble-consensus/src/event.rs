@@ -76,6 +76,11 @@ pub enum CycleIo {
         badges: Vec<(Vec<u8>, Vec<u8>)>,
         proposals: Vec<(String, Vec<u8>)>,
     },
+    /// Persist DAO poll state + proposal cooldowns.
+    PersistDaoState {
+        polls: Vec<(String, Vec<u8>)>,
+        cooldowns: Vec<(Vec<u8>, u64)>,
+    },
     /// Store per-block vote witness data.
     /// Emitted alongside CommitBlock so each committed block has a permanent
     /// record of which validators voted for it (survives ClearCycleHistory).

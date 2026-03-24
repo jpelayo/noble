@@ -1502,6 +1502,30 @@ pub struct BadgeProposalResponse {
 }
 
 /// Response for `noble_getDetectedForks`.
+/// Response for DAO poll queries.
+#[derive(Debug, Clone, Serialize)]
+pub struct DaoPollResponse {
+    pub poll_id: String,
+    pub question: String,
+    pub proposer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposer_name: Option<String>,
+    pub created_at_cycle: u64,
+    pub expires_at_cycle: u64,
+    pub votes_yes: u32,
+    pub votes_no: u32,
+    pub votes_abstain: u32,
+    pub total_eligible: u32,
+    pub status: String,
+}
+
+/// Convert wire pubkey bytes to bech32m address string.
+pub fn wire_to_address(wire: &[u8]) -> String {
+    noble_crypto::NoblePublicKey::from_wire_bytes(wire)
+        .map(|pk| pk.to_address())
+        .unwrap_or_else(|_| hex::encode(wire))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectedForksResponse {
     /// Local chain height.

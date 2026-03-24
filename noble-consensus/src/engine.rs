@@ -108,6 +108,10 @@ pub struct CycleEngine {
     badge_store: BadgeStore,
     /// Active badge proposals (keyed by proposal hash hex).
     badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
+    /// DAO governance polls.
+    dao_store: crate::dao::DaoStore,
+    /// Proposal cooldowns: proposer wire → last proposal cycle (rate limit).
+    proposal_cooldowns: std::collections::HashMap<Vec<u8>, u64>,
     /// Phase 1: Finality tracker — counts consecutive clean cycles for finality.
     finality_tracker: FinalityTracker,
     /// Block 1's validator public key (the chain owner).
@@ -183,6 +187,8 @@ impl CycleEngine {
             voting_enabled: true,   // default; call set_voting_enabled(false) for propose-only
             badge_store: BadgeStore::new(),
             badge_proposals: std::collections::HashMap::new(),
+            dao_store: crate::dao::DaoStore::new(),
+            proposal_cooldowns: std::collections::HashMap::new(),
             finality_tracker: FinalityTracker::new(confirmation_threshold),
             chain_owner_key: None,
             delivered_block_log: DeliveredBlockLog::new(2048),
@@ -384,6 +390,26 @@ impl CycleEngine {
         &self.badge_proposals
     }
 
+    /// Get a reference to the DAO store.
+    pub fn dao_store(&self) -> &crate::dao::DaoStore {
+        &self.dao_store
+    }
+
+    /// Get a mutable reference to the DAO store.
+    pub fn dao_store_mut(&mut self) -> &mut crate::dao::DaoStore {
+        &mut self.dao_store
+    }
+
+    /// Get a reference to the proposal cooldowns.
+    pub fn proposal_cooldowns(&self) -> &std::collections::HashMap<Vec<u8>, u64> {
+        &self.proposal_cooldowns
+    }
+
+    /// Get a mutable reference to the proposal cooldowns.
+    pub fn proposal_cooldowns_mut(&mut self) -> &mut std::collections::HashMap<Vec<u8>, u64> {
+        &mut self.proposal_cooldowns
+    }
+
     /// Get a mutable reference to the active badge proposals.
     pub fn badge_proposals_mut(&mut self) -> &mut std::collections::HashMap<String, badge::BadgeProposal> {
         &mut self.badge_proposals
@@ -454,6 +480,8 @@ impl CycleEngine {
             self.chain_owner_key = None;
             self.badge_store = BadgeStore::new();
             self.badge_proposals.clear();
+            self.dao_store = crate::dao::DaoStore::new();
+            self.proposal_cooldowns.clear();
             self.finality_tracker.reset_full();
             self.checkpoint_mgr.reset();
         } else {
@@ -1050,6 +1078,7 @@ impl CycleEngine {
                             }
 
                             self.process_badge_transactions(&block, completed_cycle);
+                            self.process_dao_transactions(&block, completed_cycle);
                             outputs.push(CycleIo::CommitBlock(block));
                             outputs.push(CycleIo::EmitMetric {
                                 name: "block_committed".to_string(),
@@ -1253,6 +1282,11 @@ impl CycleEngine {
 
         // Check badge proposal expirations at cycle boundary.
         self.expire_badge_proposals(completed_cycle);
+        // Close expired DAO polls.
+        let dao_closed = self.dao_store.expire_polls(completed_cycle);
+        if dao_closed > 0 {
+            tracing::info!(task = "dao", "closed {dao_closed} expired DAO poll(s) at cycle {completed_cycle}");
+        }
 
         // Persist badge state to storage if there are any badges or proposals.
         if !self.badge_store.is_empty() || !self.badge_proposals.is_empty() {
@@ -1286,6 +1320,26 @@ impl CycleEngine {
             if !badges.is_empty() || !proposals.is_empty() {
                 outputs.push(CycleIo::PersistBadgeState { badges, proposals });
             }
+        }
+
+        // Persist DAO polls + cooldowns.
+        if !self.dao_store.is_empty() || !self.proposal_cooldowns.is_empty() {
+            let polls: Vec<(String, Vec<u8>)> = self.dao_store.list_all()
+                .iter()
+                .filter_map(|p| {
+                    match noble_codec::cbor_ser::to_cbor(p) {
+                        Ok(cbor) => Some((p.poll_id.clone(), cbor)),
+                        Err(e) => {
+                            warn!("DAO poll CBOR encode failed for {}: {e}", p.poll_id);
+                            None
+                        }
+                    }
+                })
+                .collect();
+            let cooldowns: Vec<(Vec<u8>, u64)> = self.proposal_cooldowns.iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            outputs.push(CycleIo::PersistDaoState { polls, cooldowns });
         }
 
         // Clear state for next cycle.
@@ -1368,6 +1422,17 @@ impl CycleEngine {
 
                     let mut proposer_wire = vec![tx.issuer_sig.scheme_id];
                     proposer_wire.extend_from_slice(&tx.issuer_sig.public_key);
+
+                    // Rate limit: 1 proposal per PROPOSAL_COOLDOWN_CYCLES.
+                    // Exception: provable-ban revocations (DuplicateProposal, ProtocolAbuse).
+                    let is_ban = proposal_type == BadgeProposalType::Revoke
+                        && matches!(revocation_reason, Some(badge::RevocationReason::DuplicateProposal) | Some(badge::RevocationReason::ProtocolAbuse));
+                    let last_proposal = self.proposal_cooldowns.get(&proposer_wire).copied().unwrap_or(0);
+                    if !is_ban && current_cycle < last_proposal + noble_core::PROPOSAL_COOLDOWN_CYCLES {
+                        debug!("badge proposal rejected: proposer on cooldown (last: {last_proposal}, current: {current_cycle})");
+                        continue;
+                    }
+
                     let proposal = badge::BadgeProposal::new(
                         proposal_type,
                         target_entry.value.clone(),
@@ -1391,6 +1456,7 @@ impl CycleEngine {
                         &tx_hash[..8]
                     );
                     self.badge_proposals.insert(tx_hash, proposal);
+                    self.proposal_cooldowns.insert(proposer_wire, current_cycle);
                 }
                 noble_core::TX_TYPE_BADGE_VOTE => {
                     let phash = tx.metadata.iter().find(|m| m.key == "proposal_hash");
@@ -1498,6 +1564,128 @@ impl CycleEngine {
                     proposal.votes_against.len(),
                     total_eligible
                 );
+            }
+        }
+    }
+
+    /// Process DAO governance transactions from a committed block.
+    fn process_dao_transactions(&mut self, block: &Block, current_cycle: u64) {
+        use noble_core::TX_TYPE_DAO;
+
+        for tx in &block.transactions {
+            if tx.tx_type != TX_TYPE_DAO {
+                continue;
+            }
+
+            // Extract proposer/voter wire pubkey from issuer_sig.
+            let wire = match tx.issuer_sig.to_noble_public_key() {
+                Ok(pk) => {
+                    let mut w = vec![tx.issuer_sig.scheme_id()];
+                    w.extend_from_slice(pk.as_bytes());
+                    w
+                }
+                Err(_) => continue,
+            };
+
+            // Read action from metadata.
+            let action = tx.metadata.iter()
+                .find(|m| m.key == "dao:action")
+                .and_then(|m| std::str::from_utf8(&m.value).ok())
+                .unwrap_or("");
+
+            match action {
+                "create" => {
+                    // Check badge eligibility (or bootstrap).
+                    let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+                    if !in_bootstrap && !self.badge_store.is_active(&wire) {
+                        tracing::warn!(task = "dao", "poll create rejected: proposer has no badge");
+                        continue;
+                    }
+
+                    // Rate limit: 1 proposal per PROPOSAL_COOLDOWN_CYCLES (shared with badge proposals).
+                    let last = self.proposal_cooldowns.get(&wire).copied().unwrap_or(0);
+                    if current_cycle < last + noble_core::PROPOSAL_COOLDOWN_CYCLES {
+                        tracing::warn!(task = "dao", "poll create rejected: proposer on cooldown (last: {last}, current: {current_cycle})");
+                        continue;
+                    }
+
+                    let question = tx.metadata.iter()
+                        .find(|m| m.key == "dao:question")
+                        .and_then(|m| std::str::from_utf8(&m.value).ok())
+                        .unwrap_or("")
+                        .to_string();
+
+                    if question.is_empty() || question.len() > 500 {
+                        tracing::warn!(task = "dao", "poll create rejected: question empty or too long ({})", question.len());
+                        continue;
+                    }
+
+                    let expires_str = tx.metadata.iter()
+                        .find(|m| m.key == "dao:expires_cycles")
+                        .and_then(|m| std::str::from_utf8(&m.value).ok())
+                        .unwrap_or("48");
+                    let expires_cycles: u64 = expires_str.parse().unwrap_or(48).min(720);
+
+                    // Compute poll_id = SHA-256(question || proposer_wire || cycle_be)
+                    use noble_crypto::double_sha256;
+                    let mut preimage = question.as_bytes().to_vec();
+                    preimage.extend_from_slice(&wire);
+                    preimage.extend_from_slice(&current_cycle.to_be_bytes());
+                    let poll_id = hex::encode(double_sha256(&preimage).as_bytes());
+
+                    let poll = crate::dao::DaoPoll {
+                        poll_id: poll_id.clone(),
+                        question: question.clone(),
+                        proposer: wire.clone(),
+                        created_at_cycle: current_cycle,
+                        expires_at_cycle: current_cycle + expires_cycles,
+                        votes_yes: vec![],
+                        votes_no: vec![],
+                        votes_abstain: vec![],
+                        status: "active".into(),
+                    };
+
+                    if self.dao_store.create_poll(poll) {
+                        self.proposal_cooldowns.insert(wire, current_cycle);
+                        tracing::info!(
+                            task = "dao",
+                            "DAO poll created: id={}, question=\"{}\" (expires cycle {})",
+                            poll_id, question, current_cycle + expires_cycles
+                        );
+                    }
+                }
+
+                "vote" => {
+                    // Check badge eligibility (or bootstrap).
+                    let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+                    if !in_bootstrap && !self.badge_store.is_active(&wire) {
+                        tracing::warn!(task = "dao", "poll vote rejected: voter has no badge");
+                        continue;
+                    }
+
+                    let poll_id = tx.metadata.iter()
+                        .find(|m| m.key == "dao:poll_id")
+                        .and_then(|m| std::str::from_utf8(&m.value).ok())
+                        .unwrap_or("");
+
+                    let vote = tx.metadata.iter()
+                        .find(|m| m.key == "dao:vote")
+                        .and_then(|m| std::str::from_utf8(&m.value).ok())
+                        .unwrap_or("");
+
+                    match self.dao_store.record_vote(poll_id, wire, vote) {
+                        Ok(()) => {
+                            tracing::debug!(task = "dao", "DAO vote recorded: poll={poll_id}, vote={vote}");
+                        }
+                        Err(e) => {
+                            tracing::warn!(task = "dao", "DAO vote rejected: {e}");
+                        }
+                    }
+                }
+
+                _ => {
+                    tracing::warn!(task = "dao", "unknown DAO action: {action}");
+                }
             }
         }
     }
