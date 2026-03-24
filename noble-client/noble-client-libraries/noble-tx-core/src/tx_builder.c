@@ -240,6 +240,92 @@ void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t 
     cbor_write_uint(buf, (uint64_t)tx->version);
 }
 
+// ── Wire-format full transaction encoder ────────────────────────────────
+// Produces CBOR matching noble-core/src/wire/v1.rs exactly.
+// Used ONLY for tx_id computation (double_sha256(chain_id || wire_full)).
+// Key differences from tx_encode_full (serde format):
+//   - SignatureEnvelope → flat CBOR byte string, NOT map(3)
+//   - NobleAddress → raw wire bytes, NOT serde enum map
+
+// SignatureEnvelope in wire format: CBOR bytes([scheme_id || pk_len || pk || sig])
+static void encode_sig_envelope_wire(noble_buf_t *buf, const noble_sig_envelope_t *sig) {
+    size_t total = 1 + 1 + sig->public_key_len + sig->signature_len;
+    uint8_t wire[1 + 1 + PUBKEY_LEN + SIG_LEN];
+    wire[0] = sig->scheme_id;
+    wire[1] = sig->public_key_len;
+    memcpy(wire + 2, sig->public_key, sig->public_key_len);
+    memcpy(wire + 2 + sig->public_key_len, sig->signature, sig->signature_len);
+    cbor_write_bytes(buf, wire, total);
+}
+
+void tx_encode_wire_full(noble_buf_t *buf, const noble_tx_t *tx) {
+    size_t field_count = 9;
+    if (tx->expires_at != 0)          field_count++;
+    if (tx->gateway_address_len > 0)  field_count++;
+
+    cbor_write_map(buf, field_count);
+
+    // "additional_sigs" — wire format
+    cbor_write_text(buf, "additional_sigs", 15);
+    cbor_write_array(buf, tx->additional_sig_count);
+    for (uint8_t i = 0; i < tx->additional_sig_count; i++) {
+        encode_sig_envelope_wire(buf, &tx->additional_sigs[i]);
+    }
+
+    // "checksum"
+    cbor_write_text(buf, "checksum", 8);
+    encode_hash256(buf, tx->checksum);
+
+    // "expires_at" — omitted when 0
+    if (tx->expires_at != 0) {
+        cbor_write_text(buf, "expires_at", 10);
+        cbor_write_uint(buf, tx->expires_at);
+    }
+
+    // "gateway_address" — omitted when empty
+    if (tx->gateway_address_len > 0) {
+        cbor_write_text(buf, "gateway_address", 15);
+        cbor_write_bytes(buf, tx->gateway_address, tx->gateway_address_len);
+    }
+
+    // "inputs"
+    cbor_write_text(buf, "inputs", 6);
+    cbor_write_array(buf, tx->input_count);
+    for (uint8_t i = 0; i < tx->input_count; i++) {
+        encode_txin(buf, &tx->inputs[i]);
+    }
+
+    // "issuer_sig" — wire format
+    cbor_write_text(buf, "issuer_sig", 10);
+    encode_sig_envelope_wire(buf, &tx->issuer_sig);
+
+    // "metadata"
+    cbor_write_text(buf, "metadata", 8);
+    cbor_write_array(buf, tx->metadata_count);
+    for (uint8_t i = 0; i < tx->metadata_count; i++) {
+        encode_metadata(buf, &tx->metadata[i]);
+    }
+
+    // "outputs" — wire format addresses
+    cbor_write_text(buf, "outputs", 7);
+    cbor_write_array(buf, tx->output_count);
+    for (uint8_t i = 0; i < tx->output_count; i++) {
+        encode_txout(buf, &tx->outputs[i]);
+    }
+
+    // "timestamp"
+    cbor_write_text(buf, "timestamp", 9);
+    cbor_write_uint(buf, tx->timestamp);
+
+    // "tx_type"
+    cbor_write_text(buf, "tx_type", 7);
+    cbor_write_uint(buf, (uint64_t)tx->tx_type);
+
+    // "version"
+    cbor_write_text(buf, "version", 7);
+    cbor_write_uint(buf, (uint64_t)tx->version);
+}
+
 // ── Address serde encoding (for JSON/bridge compatibility) ──────────────
 
 void tx_encode_address_serde(noble_buf_t *buf, const noble_address_t *addr) {

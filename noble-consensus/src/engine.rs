@@ -1436,7 +1436,7 @@ impl CycleEngine {
                     let proposal = badge::BadgeProposal::new(
                         proposal_type,
                         target_entry.value.clone(),
-                        proposer_wire,
+                        proposer_wire.clone(),
                         revocation_reason,
                         current_cycle,
                     );
@@ -1580,8 +1580,8 @@ impl CycleEngine {
             // Extract proposer/voter wire pubkey from issuer_sig.
             let wire = match tx.issuer_sig.to_noble_public_key() {
                 Ok(pk) => {
-                    let mut w = vec![tx.issuer_sig.scheme_id()];
-                    w.extend_from_slice(pk.as_bytes());
+                    let mut w = vec![tx.issuer_sig.scheme_id];
+                    w.extend_from_slice(pk.key_bytes());
                     w
                 }
                 Err(_) => continue,

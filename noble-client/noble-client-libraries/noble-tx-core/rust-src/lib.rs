@@ -24,7 +24,6 @@ extern "C" {
     fn noble_build_coinbase(params_json: *const c_char) -> *mut c_char;
     fn noble_build_fee_distribution(params_json: *const c_char) -> *mut c_char;
     fn noble_select_utxos(params_json: *const c_char) -> *mut c_char;
-    fn noble_tx_encode(tx_json: *const c_char) -> *mut c_char;
     fn noble_estimate_tx_size(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode_locked(params_json: *const c_char) -> *mut c_char;
@@ -134,126 +133,6 @@ pub fn verify_tx(params_json: &str) -> Result<String, String> {
     call_ffi(noble_verify_tx, params_json)
 }
 
-/// Encode a Transaction to CBOR bytes using the canonical C encoder.
-///
-/// This is the ONLY transaction encoder in the protocol. Both clients and
-/// the node use this function (directly or indirectly) to produce transaction
-/// CBOR. The mempool validates fees against the byte count of this encoding.
-pub fn encode_transaction(tx: &noble_core::Transaction) -> Result<Vec<u8>, String> {
-    let json = tx_to_json(tx);
-    let result_str = call_ffi(noble_tx_encode, &json)?;
-    let result: serde_json::Value = serde_json::from_str(&result_str)
-        .map_err(|e| format!("parse C result: {e}"))?;
-    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
-        return Err(err.to_string());
-    }
-    let tx_hex = result
-        .get("tx_hex")
-        .and_then(|v| v.as_str())
-        .ok_or("missing tx_hex in C result")?;
-    hex::decode(tx_hex).map_err(|e| format!("hex decode: {e}"))
-}
-
-/// Return the CBOR byte size of a transaction as encoded by the C library.
-pub fn transaction_cbor_size(tx: &noble_core::Transaction) -> Result<usize, String> {
-    let json = tx_to_json(tx);
-    let result_str = call_ffi(noble_tx_encode, &json)?;
-    let result: serde_json::Value = serde_json::from_str(&result_str)
-        .map_err(|e| format!("parse C result: {e}"))?;
-    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
-        return Err(err.to_string());
-    }
-    result
-        .get("size")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .ok_or_else(|| "missing size in C result".to_string())
-}
-
-/// Convert a noble_core::Transaction to the JSON format expected by the C library.
-fn tx_to_json(tx: &noble_core::Transaction) -> String {
-    let inputs: Vec<serde_json::Value> = tx
-        .inputs
-        .iter()
-        .map(|inp| {
-            serde_json::json!({
-                "prev_output": {
-                    "txid": hex::encode(inp.prev_output.txid.as_bytes()),
-                    "vout": inp.prev_output.vout,
-                }
-            })
-        })
-        .collect();
-
-    let outputs: Vec<serde_json::Value> = tx
-        .outputs
-        .iter()
-        .map(|out| {
-            let addr_hex = hex::encode(out.address.to_wire_bytes());
-            serde_json::json!({
-                "value": out.value,
-                "address": addr_hex,
-            })
-        })
-        .collect();
-
-    let metadata: Vec<serde_json::Value> = tx
-        .metadata
-        .iter()
-        .map(|m| {
-            // UTF-8 metadata → string as-is; binary (e.g. encrypted) → hex fallback
-            let value_str = match String::from_utf8(m.value.clone()) {
-                Ok(s) => s,
-                Err(_) => hex::encode(&m.value),
-            };
-            serde_json::json!({
-                "key": m.key,
-                "value": value_str,
-            })
-        })
-        .collect();
-
-    let sig = &tx.issuer_sig;
-    let issuer_sig = serde_json::json!({
-        "scheme_id": sig.scheme_id,
-        "public_key": hex::encode(&sig.public_key),
-        "signature": hex::encode(&sig.signature),
-    });
-
-    let additional_sigs: Vec<serde_json::Value> = tx
-        .additional_sigs
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "scheme_id": s.scheme_id,
-                "public_key": hex::encode(&s.public_key),
-                "signature": hex::encode(&s.signature),
-            })
-        })
-        .collect();
-
-    let mut json = serde_json::json!({
-        "version": tx.version,
-        "tx_type": tx.tx_type,
-        "inputs": inputs,
-        "outputs": outputs,
-        "checksum": hex::encode(tx.checksum.as_bytes()),
-        "timestamp": tx.timestamp,
-        "issuer_sig": issuer_sig,
-        "additional_sigs": additional_sigs,
-        "metadata": metadata,
-    });
-
-    // Optional fields — only include when present
-    if let Some(ref gw) = tx.gateway_address {
-        json["gateway_address"] = serde_json::json!(hex::encode(gw));
-    }
-    if let Some(exp) = tx.expires_at {
-        json["expires_at"] = serde_json::json!(exp);
-    }
-
-    json.to_string()
-}
 
 #[cfg(test)]
 mod tests {

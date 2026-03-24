@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_core::{
     OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
+    wire::WireFormat,
 };
 use noble_crypto::{is_recognized_scheme, Hash256};
 
@@ -369,14 +370,12 @@ impl Mempool {
     ) -> Result<Hash256, MempoolError> {
         // Step 1: Size check
         // Uses the submitted byte count when available (RPC path), or the
-        // canonical C encoder size (gossip/internal path). Both produce the
-        // same CBOR encoding — noble-tx-core is the single source of truth.
+        // frozen wire format encoder (noble-core::wire::WireFormat) otherwise.
         tracing::trace!("mempool step 1: size check");
         let size_bytes = if let Some(sz) = submitted_size {
             sz
         } else {
-            noble_tx_core::transaction_cbor_size(tx)
-                .map_err(|e| MempoolError::Internal(format!("C encoder size: {e}")))?
+            tx.wire_bytes().len()
         };
         if size_bytes > MAX_TX_SIZE {
             return Err(MempoolError::TxTooLarge {

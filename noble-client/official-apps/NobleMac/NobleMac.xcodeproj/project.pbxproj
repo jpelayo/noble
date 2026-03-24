@@ -15,6 +15,11 @@
 		3EE5A47A2F702DB300690522 /* NobleClientDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3EE5A4792F702DB300690522 /* NobleClientDesignSystem */; };
 		3EE5A47D2F702DBE00690522 /* NobleClientSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = 3EE5A47C2F702DBE00690522 /* NobleClientSecurity */; };
 		3EE5A4802F702DC400690522 /* NobleClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3EE5A47F2F702DC400690522 /* NobleClientCore */; };
+		3EE5A4BD2F71D17F00690522 /* NobleClientCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D322F5BBB0000D8F7D6 /* NobleClientCore */; };
+		3EE5A4BE2F71D17F00690522 /* NobleClientAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D332F5BBB0000D8F7D6 /* NobleClientAPI */; };
+		3EE5A4BF2F71D17F00690522 /* NobleClientCrypto in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D342F5BBB0000D8F7D6 /* NobleClientCrypto */; };
+		3EE5A4C02F71D17F00690522 /* NobleClientSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D352F5BBB0000D8F7D6 /* NobleClientSecurity */; };
+		3EE5A4C12F71D17F00690522 /* NobleClientDesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = 3E1C2D362F5BBB0000D8F7D6 /* NobleClientDesignSystem */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,6 +94,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3EE5A4C12F71D17F00690522 /* NobleClientDesignSystem in Frameworks */,
+				3EE5A4C02F71D17F00690522 /* NobleClientSecurity in Frameworks */,
+				3EE5A4BF2F71D17F00690522 /* NobleClientCrypto in Frameworks */,
+				3EE5A4BE2F71D17F00690522 /* NobleClientAPI in Frameworks */,
+				3EE5A4BD2F71D17F00690522 /* NobleClientCore in Frameworks */,
 				3EE5A4742F702DA200690522 /* NobleClientAPI in Frameworks */,
 				3EE5A4772F702DAA00690522 /* NobleClientCrypto in Frameworks */,
 				3EE5A4802F702DC400690522 /* NobleClientCore in Frameworks */,

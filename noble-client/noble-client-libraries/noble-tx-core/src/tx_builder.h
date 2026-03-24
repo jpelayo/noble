@@ -91,7 +91,12 @@ void tx_encode_signing_payload(noble_buf_t *buf, const noble_tx_t *tx, uint32_t 
 //   BitcoinTaproot  → {"BitcoinTaproot": <bytes>}
 void tx_encode_address_serde(noble_buf_t *buf, const noble_address_t *addr);
 
-// Encode a SignatureEnvelope as a CBOR byte string (wire format).
+// Encode a SignatureEnvelope as a serde-compatible CBOR map (transport format).
 void tx_encode_sig_envelope(noble_buf_t *buf, const noble_sig_envelope_t *sig);
+
+// Encode a full Transaction in wire format (for tx_id computation).
+// Matches noble-core/src/wire/v1.rs exactly: SignatureEnvelope as byte string,
+// NobleAddress as raw wire bytes. NOT for transport (use tx_encode_full for that).
+void tx_encode_wire_full(noble_buf_t *buf, const noble_tx_t *tx);
 
 #endif // NOBLE_TX_BUILDER_H

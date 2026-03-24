@@ -542,7 +542,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 Ok(polls) => {
                     for (id_bytes, cbor_data) in polls {
                         let poll_id = String::from_utf8_lossy(&id_bytes).to_string();
-                        match noble_codec::NobleCbor::from_cbor::<noble_consensus::dao::DaoPoll>(&cbor_data) {
+                        match noble_codec::cbor_de::from_cbor::<noble_consensus::dao::DaoPoll>(&cbor_data) {
                             Ok(mut poll) => {
                                 poll.poll_id = poll_id;
                                 engine.dao_store_mut().insert(poll);

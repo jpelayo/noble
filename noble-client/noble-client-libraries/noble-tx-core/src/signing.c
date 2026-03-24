@@ -84,9 +84,10 @@ void compute_tx_id(
 ) {
     noble_buf_t cbor;
     noble_buf_init(&cbor, 512);
-    tx_encode_full(&cbor, tx);
+    tx_encode_wire_full(&cbor, tx);
 
-    // tx_id = SHA-256(chain_id_be || full_cbor)
+    // tx_id = double_sha256(chain_id_be || wire_cbor)
+    // Matches noble-core: Transaction::compute_tx_id() in transaction.rs
     noble_buf_t preimage;
     noble_buf_init(&preimage, 4 + cbor.len);
 
@@ -99,7 +100,7 @@ void compute_tx_id(
     noble_buf_append(&preimage, cid, 4);
     noble_buf_append(&preimage, cbor.data, cbor.len);
 
-    sha256(preimage.data, preimage.len, out);
+    double_sha256(preimage.data, preimage.len, out);
 
     noble_buf_free(&preimage);
     noble_buf_free(&cbor);

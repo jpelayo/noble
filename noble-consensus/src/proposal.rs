@@ -6,6 +6,7 @@
 use noble_core::{
     compute_merkle_root, Block, BlockHeader, NobleAddress, OutPoint, Transaction, TxIn, TxOut,
     PROTOCOL_VERSION, TX_TYPE_COINBASE, TX_TYPE_FEE, subsidy_at_height,
+    wire::WireFormat,
 };
 use noble_crypto::{Hash256, NoblePrivateKey, NoblePublicKey, NobleSigner, SignatureEnvelope};
 use tracing;
@@ -51,8 +52,7 @@ pub fn propose_block(
     let mut gateway_shares: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
 
     for tx in mempool_txs {
-        let tx_size = noble_tx_core::transaction_cbor_size(tx)
-            .map_err(|e| format!("failed to measure tx size: {e}"))?;
+        let tx_size = tx.wire_bytes().len();
         if total_size + tx_size > max_size {
             break;
         }
@@ -345,7 +345,7 @@ mod tests {
         let txs = vec![tx1.clone(), tx2];
 
         // Set max_size to only fit one transaction
-        let tx1_size = noble_tx_core::transaction_cbor_size(&tx1).unwrap();
+        let tx1_size = tx1.wire_bytes().len();
         let block = propose_block(
             &txs,
             Hash256::ZERO,
