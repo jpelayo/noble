@@ -1281,11 +1281,17 @@ body {
 .coverflow-nav--left { left: 4px; }
 .coverflow-nav--right { right: 4px; }
 
-/* Coinbase badge */
+/* Coinbase / Block Reward badge */
 .badge.coinbase,
 .badge-coinbase {
   background: rgba(59, 130, 246, 0.15);
   color: var(--accent);
+}
+
+/* Fee Distribution badge */
+.badge.tx-fee-distribution {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
 }
 
 /* Confirmed badge (matches API status "complete") */

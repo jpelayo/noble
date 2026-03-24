@@ -177,6 +177,35 @@ export function init(root, ctx) {
           </div>
           <span id="s-faucet-listen-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
         </div>
+        <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-xs);font-weight:600;margin:0 0 var(--gap-sm)">Distribution Settings</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap-sm)">
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Drip Amount (NOBLE)</label>
+              <input id="s-faucet-drip" type="number" step="0.01" min="0" placeholder="1.00"
+                style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Daily Cap (NOBLE)</label>
+              <input id="s-faucet-cap" type="number" step="1" min="0" placeholder="50"
+                style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">IP Cooldown (hours)</label>
+              <input id="s-faucet-ip-cd" type="number" step="1" min="0" placeholder="24"
+                style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+            <div>
+              <label style="font-size:var(--font-size-xs);color:var(--text-secondary);display:block;margin-bottom:2px">Address Cooldown (hours)</label>
+              <input id="s-faucet-addr-cd" type="number" step="1" min="0" placeholder="24"
+                style="width:100%;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+            </div>
+          </div>
+          <div style="margin-top:var(--gap-sm);display:flex;align-items:center;gap:var(--gap-sm)">
+            <button id="s-faucet-dist-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save Distribution Settings</button>
+            <span id="s-faucet-dist-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1385,6 +1414,46 @@ export function init(root, ctx) {
     }
   });
 
+  // ── Faucet distribution settings ──
+  const faucetDripInput = root.querySelector('#s-faucet-drip');
+  const faucetCapInput = root.querySelector('#s-faucet-cap');
+  const faucetIpCdInput = root.querySelector('#s-faucet-ip-cd');
+  const faucetAddrCdInput = root.querySelector('#s-faucet-addr-cd');
+  const faucetDistSave = root.querySelector('#s-faucet-dist-save');
+  const faucetDistMsg = root.querySelector('#s-faucet-dist-msg');
+
+  // Load defaults (faucet binary defaults: 1 NOBLE drip, 50 NOBLE cap, 24h cooldowns)
+  faucetDripInput.value = '1';
+  faucetCapInput.value = '50';
+  faucetIpCdInput.value = '24';
+  faucetAddrCdInput.value = '24';
+
+  faucetDistSave.addEventListener('click', async () => {
+    faucetDistSave.disabled = true;
+    faucetDistMsg.style.color = 'var(--text-muted)';
+    faucetDistMsg.textContent = 'Saving...';
+    try {
+      const GROATS = 100_000_000;
+      const drip = Math.round(parseFloat(faucetDripInput.value || '1') * GROATS);
+      const cap = Math.round(parseFloat(faucetCapInput.value || '50') * GROATS);
+      const ipCd = Math.round(parseFloat(faucetIpCdInput.value || '24') * 3600);
+      const addrCd = Math.round(parseFloat(faucetAddrCdInput.value || '24') * 3600);
+      await Promise.all([
+        rpc.call('noble_setConfigValue', { section: 'faucet', key: 'drip_amount', value: String(drip) }),
+        rpc.call('noble_setConfigValue', { section: 'faucet', key: 'daily_cap', value: String(cap) }),
+        rpc.call('noble_setConfigValue', { section: 'faucet', key: 'ip_cooldown_secs', value: String(ipCd) }),
+        rpc.call('noble_setConfigValue', { section: 'faucet', key: 'address_cooldown_secs', value: String(addrCd) }),
+      ]);
+      faucetDistMsg.style.color = 'var(--success)';
+      faucetDistMsg.textContent = 'Saved. Restart faucet to apply.';
+    } catch (e) {
+      faucetDistMsg.style.color = 'var(--error)';
+      faucetDistMsg.textContent = e.message || 'Failed';
+    } finally {
+      faucetDistSave.disabled = false;
+    }
+  });
+
   // Auto-poll faucet balance every 30s.
   const faucetPollInterval = setInterval(loadFaucet, 30_000);
 
@@ -1519,6 +1588,8 @@ export function init(root, ctx) {
   }
 
   loadSettings();
+  // Auto-refresh settings every 30s
+  const settingsRefreshId = setInterval(() => loadSettings(), 30_000);
 
   // --- Chain Management ---
   let cachedNodeInfo = null;
@@ -1860,6 +1931,7 @@ export function init(root, ctx) {
   return {
     destroy() {
       clearInterval(faucetPollInterval);
+      clearInterval(settingsRefreshId);
       clearInterval(forkTimer);
       clearInterval(forkResTimer);
       clearInterval(cpTimer);

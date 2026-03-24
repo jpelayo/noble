@@ -38,8 +38,10 @@ export function init(root, ctx) {
         // Page header
         const header = document.createElement('div');
         header.className = 'page-header';
-        header.innerHTML = '<h1>Payments</h1><p>Send, receive, and track NOBLE transfers</p>';
+        header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
+        header.innerHTML = '<div><h1>Payments</h1><p>Send, receive, and track NOBLE transfers</p></div><button id="payments-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>';
         root.appendChild(header);
+        root.querySelector('#payments-refresh').addEventListener('click', () => loadData(balanceContainer, historyContainer));
 
         // Balance card placeholder with skeleton
         const balanceContainer = document.createElement('div');
@@ -79,8 +81,10 @@ export function init(root, ctx) {
         await loadData(balanceContainer, historyContainer);
     }
 
+    let loadInFlight = false;
     async function loadData(balanceContainer, historyContainer) {
-        if (!alive) return;
+        if (!alive || loadInFlight) return;
+        loadInFlight = true;
         const address = state.walletAddress;
         if (!address) return;
 
@@ -109,6 +113,8 @@ export function init(root, ctx) {
                 loadData(balanceContainer, historyContainer);
             });
             balanceContainer.appendChild(errDiv);
+        } finally {
+            loadInFlight = false;
         }
     }
 
@@ -695,12 +701,16 @@ export function init(root, ctx) {
     // Track last known balance to detect changes that warrant a tx list refresh.
     let lastKnownBalance = state.walletBalance;
 
+    // Auto-refresh every 30s
+    const autoRefreshId = setInterval(() => {
+        if (alive) loadData(balanceContainer, historyContainer);
+    }, 30_000);
+
     return {
-        destroy() { alive = false; closeModal(); },
+        destroy() { alive = false; clearInterval(autoRefreshId); closeModal(); },
         refresh(newState) {
             const prevBalance = lastKnownBalance;
             Object.assign(state, newState);
-            // Re-fetch tx list when balance changes (new tx confirmed or new mempool entry).
             if (newState.walletBalance !== undefined && newState.walletBalance !== prevBalance) {
                 lastKnownBalance = newState.walletBalance;
                 loadData(balanceContainer, historyContainer);

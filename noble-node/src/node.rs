@@ -2250,6 +2250,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             let _ = cycle_phase_tx.send(evt);
         }
 
+        // --- Initial faucet probe (don't wait for first interval) ---
+        if self.faucet_config.discovery_enabled {
+            let peer_addrs: Vec<String> = self.peer_info.read()
+                .values()
+                .map(|p| p.addr.clone())
+                .collect();
+            let ips = crate::faucet_probe::extract_peer_ips(&peer_addrs);
+            let port = self.faucet_config.probe_port;
+            let cache = self.faucet_cache.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::faucet_probe::probe_all(&ips, port, true, &cache);
+            });
+            tracing::info!(task = "faucet_probe", "initial faucet probe triggered on startup");
+        }
+
         // --- Main event loop ---
         loop {
             tokio::select! {

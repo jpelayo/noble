@@ -16,8 +16,9 @@ export function init(root, ctx) {
         <div style="margin-bottom:var(--gap)">
             <button class="btn btn-sm" id="tx-back">&larr; Back</button>
         </div>
-        <div class="page-header">
+        <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
             <h2 style="margin:0">Transaction Detail</h2>
+            <button id="tx-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>
         </div>
         <div id="tx-loading" class="empty-state">Loading...</div>
     `;
@@ -25,8 +26,12 @@ export function init(root, ctx) {
     root.querySelector('#tx-back').addEventListener('click', () => {
         if (window.App) App.navigateTo('payments');
     });
+    root.querySelector('#tx-refresh').addEventListener('click', () => load());
 
+    let loadInFlight = false;
     async function load() {
+        if (loadInFlight) return;
+        loadInFlight = true;
         let tx = null;
         let receipt = null;
 
@@ -193,10 +198,14 @@ export function init(root, ctx) {
             locEl.innerHTML = '<span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Encrypted Locator</span> Available';
             root.appendChild(locEl);
         }
+        loadInFlight = false;
     }
 
     load();
-    return { destroy() {} };
+    // Auto-refresh every 15s (track confirmation progress)
+    let alive = true;
+    const autoRefreshId = setInterval(() => { if (alive) load(); }, 15_000);
+    return { destroy() { alive = false; clearInterval(autoRefreshId); } };
 }
 
 // ── Helpers ──

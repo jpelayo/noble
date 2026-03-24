@@ -6,7 +6,7 @@ import NobleClientCore
 
 /// Live implementation of ``NobleAPIService`` backed by ``JSONRPCClient``.
 public struct LiveNobleAPIService: NobleAPIService {
-    private let client: JSONRPCClient
+    public let client: JSONRPCClient
 
     public init(client: JSONRPCClient) {
         self.client = client

@@ -11,6 +11,18 @@ import NobleTxCore
 import UIKit
 import UniformTypeIdentifiers
 
+private struct FaucetListDTO: Decodable, Sendable {
+    let faucets: [FaucetEntryDTO]
+}
+private struct FaucetEntryDTO: Decodable, Sendable {
+    let url: String
+    let faucet_address: String
+    let faucet_balance: UInt64
+    let drip_amount: UInt64
+    let network: String
+    let last_probed: UInt64
+}
+
 /// Routes bridge messages from the web UI to Swift services.
 @MainActor
 final class WebBridgeHandler {
@@ -285,6 +297,30 @@ final class WebBridgeHandler {
             }
             return try await handleFaucetRequest(address: address)
 
+        case "getAvailableFaucets":
+            guard let svc = appState.apiService as? LiveNobleAPIService else {
+                return ["faucets": [Any]()] as [String: Any]
+            }
+            let dto = try await svc.client.call(method: "noble_getAvailableFaucets", expecting: FaucetListDTO.self)
+            let entries: [[String: Any]] = dto.faucets.map { f in
+                [
+                    "url": f.url,
+                    "faucet_address": f.faucet_address,
+                    "faucet_balance": f.faucet_balance,
+                    "drip_amount": f.drip_amount,
+                    "network": f.network,
+                    "last_probed": f.last_probed,
+                ]
+            }
+            return ["faucets": entries] as [String: Any]
+
+        case "faucetHopRequest":
+            guard let urlStr = params["url"] as? String,
+                  let address = params["address"] as? String else {
+                throw BridgeError.missingParam("url, address")
+            }
+            return try await handleFaucetHopRequest(faucetURL: urlStr, address: address)
+
         default:
             throw BridgeError.unknownAction(action)
         }
@@ -350,6 +386,31 @@ final class WebBridgeHandler {
             throw BridgeError.faucetError(msg)
         }
 
+        return json
+    }
+
+    private func handleFaucetHopRequest(faucetURL: String, address: String) async throws -> Any {
+        guard let url = URL(string: faucetURL)?.appendingPathComponent("api/faucet") else {
+            throw BridgeError.faucetUnavailable
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
+        let body = try JSONSerialization.data(withJSONObject: ["address": address])
+        request.httpBody = body
+
+        let (data, response) = try await Self.faucetSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw BridgeError.faucetUnavailable
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw BridgeError.faucetUnavailable
+        }
+        if http.statusCode == 429 || http.statusCode >= 400 {
+            let msg = json["message"] as? String ?? "Faucet request failed"
+            throw BridgeError.faucetError(msg)
+        }
         return json
     }
 

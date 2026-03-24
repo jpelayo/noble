@@ -93,8 +93,10 @@ export function init(root, ctx) {
     // Page header
     const header = document.createElement('div');
     header.className = 'page-header';
-    header.innerHTML = '<h1>Home</h1><p>Dashboard overview</p>';
+    header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
+    header.innerHTML = '<div><h1>Home</h1><p>Dashboard overview</p></div><button id="home-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>';
     root.appendChild(header);
+    root.querySelector('#home-refresh').addEventListener('click', () => loadDashboard());
 
     // Node alignment status card (shown when node is not fully aligned)
     const alignmentBanner = document.createElement('div');
@@ -131,8 +133,10 @@ export function init(root, ctx) {
 
     loadDashboard();
 
+    let loadInFlight = false;
     async function loadDashboard() {
-        if (!alive) return;
+        if (!alive || loadInFlight) return;
+        loadInFlight = true;
         const address = state.walletAddress;
         if (!address) {
             balanceContainer.innerHTML = '';
@@ -185,6 +189,8 @@ export function init(root, ctx) {
             balanceContainer.appendChild(errDiv);
             docsContainer.innerHTML = '';
             txsContainer.innerHTML = '';
+        } finally {
+            loadInFlight = false;
         }
     }
 
@@ -340,11 +346,15 @@ export function init(root, ctx) {
         return card;
     }
 
+    // Auto-refresh every 30s
+    const autoRefreshId = setInterval(() => { if (alive) loadDashboard(); }, 30_000);
+
     return {
-        destroy() { alive = false; },
+        destroy() { alive = false; clearInterval(autoRefreshId); },
         refresh(newState) {
             Object.assign(state, newState);
             renderAlignmentBanner(alignmentBanner, state);
+            loadDashboard();
         }
     };
 }

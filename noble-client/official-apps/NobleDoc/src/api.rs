@@ -509,6 +509,23 @@ pub async fn handle_api_action(
             client.faucet_request(&faucet_base, address).await
         }
 
+        "getAvailableFaucets" => {
+            let result = client.call_rpc("noble_getAvailableFaucets", serde_json::json!([])).await?;
+            Ok(result)
+        }
+
+        "faucetHopRequest" => {
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: url")?;
+            let address = params
+                .get("address")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: address")?;
+            client.faucet_request(url, address).await
+        }
+
         _ => Err(format!("Unknown action: {action}")),
     }
 }

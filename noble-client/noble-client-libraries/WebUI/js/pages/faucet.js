@@ -1,5 +1,5 @@
 // NOBLE Document Client — Faucet Page
-// Request test tokens from the NOBLE faucet (0.1 NOBLE per day limit).
+// Request coins from the NOBLE faucet.
 import { Bridge } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { emptyState } from '../components/empty-state.js';
@@ -26,7 +26,7 @@ export function init(root, ctx) {
         root.appendChild(emptyState({
             icon: '\u{1F4B0}',
             title: 'No Wallet',
-            subtitle: 'Set up a wallet to request tokens.'
+            subtitle: 'Set up a wallet to request coins from the faucet.'
         }));
         return { destroy() { alive = false; }, refresh() {} };
     }
@@ -36,11 +36,12 @@ export function init(root, ctx) {
     // Header
     const header = document.createElement('div');
     header.className = 'page-header';
-    header.innerHTML = '<h1>Faucet</h1><p>Request test tokens for your wallet</p>';
+    header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
+    header.innerHTML = '<div><h1>Faucet</h1><p>Request coins for your wallet</p></div><button id="faucet-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>';
     root.appendChild(header);
+    root.querySelector('#faucet-refresh').addEventListener('click', () => loadFaucetStatus());
 
     const container = document.createElement('div');
-    container.style.maxWidth = '520px';
     root.appendChild(container);
 
     let requesting = false;
@@ -50,6 +51,7 @@ export function init(root, ctx) {
 
     render();
     loadFaucetStatus();
+    loadPeerFaucets();
 
     function getCooldownRemaining() {
         const last = localStorage.getItem(COOLDOWN_KEY);
@@ -117,7 +119,7 @@ export function init(root, ctx) {
         // Info section
         cardHtml += '<div class="faucet-info">';
         cardHtml += '<div class="faucet-icon">\u{1F4A7}</div>';
-        cardHtml += '<p class="faucet-desc">Request a small amount of NOBLE tokens for testing. Limited to <strong>one request per day</strong>.</p>';
+        cardHtml += '<p class="faucet-desc">Request a small amount of NOBLE coins. Limited to <strong>one request per day</strong>.</p>';
         cardHtml += '</div>';
 
         // Faucet availability indicator
@@ -133,7 +135,7 @@ export function init(root, ctx) {
             } else {
                 cardHtml += `<div class="faucet-available">
                     <span>\u2705</span>
-                    <span>Faucet has tokens available</span>
+                    <span>Faucet has coins available to distribute</span>
                 </div>`;
             }
 
@@ -180,7 +182,7 @@ export function init(root, ctx) {
         const btnLabel = requesting ? 'Requesting\u2026'
             : isDry ? 'Faucet Dry'
             : onCooldown ? 'On Cooldown'
-            : 'Request Tokens';
+            : 'Request Coins';
         cardHtml += `<button class="btn btn-primary faucet-btn"
             ${btnDisabled ? 'disabled' : ''}>
             ${btnLabel}
@@ -188,20 +190,139 @@ export function init(root, ctx) {
 
         cardHtml += '</div>';
 
-        const card = nobleCard('Request Tokens', cardHtml);
+        const card = nobleCard('Request Coins', cardHtml);
         const btn = card.querySelector('.faucet-btn');
         if (btn && !btnDisabled) {
             btn.addEventListener('click', requestTokens);
         }
         container.appendChild(card);
 
-        // Faucet stats card (if available)
-        if (faucetInfo) {
-            const statsHtml = buildStatsHtml(faucetInfo);
-            const statsCard = nobleCard('Faucet Info', statsHtml);
-            statsCard.style.marginTop = 'var(--gap)';
-            container.appendChild(statsCard);
+        // Faucet stats card (always shown)
+        const statsHtml = faucetInfo
+            ? buildStatsHtml(faucetInfo)
+            : '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">Faucet service not detected. Start the faucet on this node or check Settings.</p>';
+        const statsCard = nobleCard('Faucet Info', statsHtml);
+        statsCard.style.marginTop = 'var(--gap)';
+        container.appendChild(statsCard);
+
+        // Peer faucets table (collapsible)
+        renderPeerFaucets();
+    }
+
+    // ── Peer Faucets ──
+
+    let peerFaucets = [];
+
+    async function loadPeerFaucets() {
+        try {
+            const res = await Bridge.call('noble_api', 'getAvailableFaucets');
+            peerFaucets = (res.faucets || [])
+                .sort((a, b) => (b.faucet_balance || 0) - (a.faucet_balance || 0));
+        } catch {
+            peerFaucets = [];
         }
+        if (alive) renderPeerFaucets();
+    }
+
+    function renderPeerFaucets() {
+        let panel = container.querySelector('#faucet-peers-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'faucet-peers-panel';
+            panel.style.marginTop = 'var(--gap)';
+            container.appendChild(panel);
+        }
+
+        const count = peerFaucets.length;
+        const now = Date.now() / 1000;
+        const STALE_THRESHOLD = 48 * 3600; // 48 hours
+
+        let html = `<details class="panel" style="border:1px solid var(--border);border-radius:var(--radius)">
+            <summary style="padding:var(--gap-sm) var(--gap);cursor:pointer;font-weight:600;font-size:var(--font-size-sm);user-select:none;list-style:none;display:flex;justify-content:space-between;align-items:center">
+                <span>\u25B6 Faucets on This Chain (${count})</span>
+            </summary>
+            <div style="padding:0 var(--gap) var(--gap)">`;
+
+        if (count === 0) {
+            html += '<p style="color:var(--text-muted);font-size:var(--font-size-sm);margin:var(--gap-sm) 0 0">No peer faucets discovered yet. Faucets are discovered automatically from network peers.</p>';
+        } else {
+            html += `<div class="table-scroll-wrapper"><table class="data-table" style="font-size:var(--font-size-xs)">
+                <thead><tr>
+                    <th>Status</th><th>Balance</th><th>Drip</th><th>Address</th><th>Last Seen</th><th></th>
+                </tr></thead><tbody>`;
+
+            for (let i = 0; i < count; i++) {
+                const f = peerFaucets[i];
+                const bal = f.faucet_balance || 0;
+                const drip = f.drip_amount || 0;
+                const isOnline = f.last_probed && (now - f.last_probed) < STALE_THRESHOLD;
+                const isDry = bal < drip;
+                const statusBadge = isOnline
+                    ? '<span class="badge" style="background:var(--success);color:#fff;font-size:0.7em">Online</span>'
+                    : '<span class="badge" style="background:var(--text-muted);color:#fff;font-size:0.7em">Stale</span>';
+                const balColor = isDry ? 'var(--error)' : 'var(--success)';
+                const addr = f.faucet_address || '';
+                const addrShort = addr.length > 20 ? addr.slice(0, 10) + '\u2026' + addr.slice(-8) : addr;
+                const lastSeen = f.last_probed ? timeAgo(f.last_probed) : '--';
+                const hopDisabled = isDry || !isOnline;
+                const hopBtn = hopDisabled
+                    ? '<span style="color:var(--text-muted)">\u2014</span>'
+                    : `<button class="btn btn-sm faucet-hop-btn" data-idx="${i}" style="padding:2px 10px;font-size:var(--font-size-xs)">Hop</button>`;
+
+                html += `<tr>
+                    <td>${statusBadge}</td>
+                    <td class="mono" style="color:${balColor}">${formatAmount(bal)} NOBLE</td>
+                    <td class="mono">${formatAmount(drip)}</td>
+                    <td class="mono" title="${esc(addr)}">${esc(addrShort)}</td>
+                    <td>${lastSeen}</td>
+                    <td id="faucet-hop-cell-${i}">${hopBtn}</td>
+                </tr>`;
+            }
+            html += '</tbody></table></div>';
+        }
+
+        html += `<div style="margin-top:var(--gap-sm);text-align:center">
+            <a href="#" id="faucet-back-local" style="font-size:var(--font-size-xs);color:var(--accent);text-decoration:none">\u2191 Back to local faucet</a>
+        </div></div></details>`;
+
+        panel.innerHTML = html;
+
+        // Wire hop buttons
+        panel.querySelectorAll('.faucet-hop-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const idx = parseInt(btn.dataset.idx, 10);
+                const f = peerFaucets[idx];
+                const cell = panel.querySelector(`#faucet-hop-cell-${idx}`);
+                cell.innerHTML = '<span style="color:var(--text-muted)">Requesting\u2026</span>';
+                try {
+                    const res = await Bridge.call('noble_api', 'faucetHopRequest', {
+                        url: f.url,
+                        address: state.walletAddress,
+                    });
+                    const msg = res.message || `Received ${formatAmount(res.amount || 0)} NOBLE`;
+                    cell.innerHTML = `<span style="color:var(--success);font-size:var(--font-size-xs)">\u2705 ${esc(msg)}</span>`;
+                } catch (err) {
+                    cell.innerHTML = `<span style="color:var(--error);font-size:var(--font-size-xs)">\u274C ${esc(err.message || 'Failed')}</span>`;
+                }
+            });
+        });
+
+        // Wire back-to-local link
+        const backLink = panel.querySelector('#faucet-back-local');
+        if (backLink) {
+            backLink.addEventListener('click', e => {
+                e.preventDefault();
+                root.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+        }
+    }
+
+    function timeAgo(unix) {
+        const diff = Math.floor(Date.now() / 1000 - unix);
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+        return `${Math.floor(diff / 86400)}d ago`;
     }
 
     function buildStatsHtml(info) {
@@ -240,8 +361,11 @@ export function init(root, ctx) {
         return html;
     }
 
+    // Auto-refresh every 30s
+    const autoRefreshId = setInterval(() => { if (alive) { loadFaucetStatus(); loadPeerFaucets(); } }, 30_000);
+
     return {
-        destroy() { alive = false; },
+        destroy() { alive = false; clearInterval(autoRefreshId); },
         refresh(newState) { Object.assign(state, newState); }
     };
 }

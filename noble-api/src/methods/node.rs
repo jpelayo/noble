@@ -1061,6 +1061,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("consensus", "voting_subset"),
             ("faucet", "server_enabled"),
             ("faucet", "listen_addr"),
+            ("faucet", "drip_amount"),
+            ("faucet", "daily_cap"),
+            ("faucet", "ip_cooldown_secs"),
+            ("faucet", "address_cooldown_secs"),
             ("consensus", "min_fee_rate"),
         ];
 

@@ -463,7 +463,7 @@ pub struct FaucetConfig {
     /// Enable faucet peer discovery. When false, `noble_getAvailableFaucets` returns empty.
     #[serde(default = "default_true")]
     pub discovery_enabled: bool,
-    /// Probe interval in consensus cycles. 72 cycles ≈ 24h at 20min/cycle.
+    /// Probe interval in consensus cycles. 36 cycles ≈ 12h at 20min/cycle.
     #[serde(default = "default_faucet_probe_interval")]
     pub probe_interval_cycles: u64,
     /// Port to probe on peers.
@@ -481,14 +481,14 @@ pub struct FaucetConfig {
 }
 
 fn default_true() -> bool { true }
-fn default_faucet_probe_interval() -> u64 { 72 }
+fn default_faucet_probe_interval() -> u64 { 36 }
 fn default_faucet_port() -> u16 { 8786 }
 
 impl Default for FaucetConfig {
     fn default() -> Self {
         Self {
             discovery_enabled: true,
-            probe_interval_cycles: 72,
+            probe_interval_cycles: 36,
             probe_port: 8786,
             server_enabled: true,
             server_port: 8786,
