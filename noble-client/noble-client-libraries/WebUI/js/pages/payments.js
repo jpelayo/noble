@@ -22,11 +22,9 @@ export function init(root, ctx) {
     let loadInFlight = false;
     let loadRetries = 0;
 
-    nlog('[PAY] calling render()');
     render();
 
     async function render() {
-        nlog('[PAY] render() start');
         if (!alive) return;
         root.innerHTML = '';
         root.classList.add('page-content');
@@ -82,19 +80,14 @@ export function init(root, ctx) {
         historyContainer.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
         root.appendChild(historyContainer);
 
-        nlog('[PAY] render() calling loadData');
         await loadData(balanceContainer, historyContainer);
-        nlog('[PAY] render() loadData returned');
     }
 
     async function loadData(balanceContainer, historyContainer) {
-        nlog('[PAY] loadData called, alive=', alive, 'loadInFlight=', loadInFlight);
-        if (!alive || loadInFlight) { nlog('[PAY] loadData SKIPPED (alive/inflight)'); return; }
+        if (!alive || loadInFlight) return;
         loadInFlight = true;
         const address = state.walletAddress;
-        nlog(`[PAY] loadData address=${address}`);
         if (!address) {
-            nlog('[PAY] loadData: no address');
             loadInFlight = false;
             balanceContainer.innerHTML = `<div class="info-card" role="status">
                 <p>Wallet not loaded. Connect to a running node to view your balance and transactions.</p>
@@ -104,25 +97,17 @@ export function init(root, ctx) {
         }
 
         try {
-            nlog('[PAY] loadData: calling RPCs for address=', address);
             const [balance, history] = await Promise.all([
                 Bridge.call('noble_api', 'getBalance', { address }),
                 Bridge.call('noble_api', 'getWalletTransactions'),
             ]);
-            nlog(`[PAY] RPCs OK balance=${JSON.stringify(balance).slice(0,80)} history.txs=${(history?.transactions||[]).length}`);
             if (!alive) return;
             loadRetries = 0;
             balanceData = balance;
             historyData = history;
-            try {
-                renderBalance(balanceContainer, balance);
-                renderHistory(historyContainer, history);
-                nlog('[PAY] RENDERED OK');
-            } catch (renderErr) {
-                nlog(`[PAY] RENDER THREW: ${renderErr.message}`);
-            }
+            renderBalance(balanceContainer, balance);
+            renderHistory(historyContainer, history);
         } catch (err) {
-            nlog('[PAY] loadData CATCH:', err.message || err);
             if (!alive) return;
             const msg = (err.message || '').toLowerCase();
             const isOffline = msg.includes('timeout') || msg.includes('not connected') || msg.includes('cancelled');
@@ -735,14 +720,12 @@ export function init(root, ctx) {
 
     // Auto-refresh every 30s
     const autoRefreshId = setInterval(() => {
-        nlog('[PAY] auto-refresh 30s');
         if (alive) loadData(balanceContainer, historyContainer);
     }, 30_000);
 
     return {
         destroy() { alive = false; clearInterval(autoRefreshId); closeModal(); },
         refresh(newState) {
-            nlog('[PAY] refresh() called, walletAddress=', newState?.walletAddress);
             Object.assign(state, newState);
             if (newState.walletBalance !== undefined) lastKnownBalance = newState.walletBalance;
             loadData(balanceContainer, historyContainer);
