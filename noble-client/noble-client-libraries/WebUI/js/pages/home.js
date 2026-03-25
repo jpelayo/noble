@@ -131,9 +131,10 @@ export function init(root, ctx) {
     docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
     txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
 
+    let loadInFlight = false;
+
     loadDashboard();
 
-    let loadInFlight = false;
     async function loadDashboard() {
         if (!alive || loadInFlight) return;
         loadInFlight = true;

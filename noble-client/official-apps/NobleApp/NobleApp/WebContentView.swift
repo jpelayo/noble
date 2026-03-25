@@ -232,6 +232,12 @@ struct WebContentView: UIViewRepresentable {
 
             let params = body["params"] as? [String: Any] ?? [:]
 
+            // JS→Native log pipe (no callback needed)
+            if callbackId == "_log", let msg = params["msg"] as? String {
+                print("[JS] \(msg)")
+                return
+            }
+
             Task { @MainActor in
                 await self.bridgeHandler.handle(
                     handler: message.name,

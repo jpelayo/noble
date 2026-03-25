@@ -38,8 +38,9 @@ struct NobleAppApp: App {
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
-                    appState.startPolling()
-                    if !appState.isConnected && !appState.nodeURL.isEmpty {
+                    if appState.isConnected {
+                        appState.startPolling()
+                    } else if !appState.nodeURL.isEmpty {
                         Task { await appState.connectToNode() }
                     }
                 case .background, .inactive:

@@ -64,6 +64,10 @@ final class WebBridgeHandler {
         callbackId: String,
         coordinator: WebContentView.Coordinator
     ) async {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"
+        let ts = f.string(from: Date())
+        print("[\(ts)] [BRIDGE] \(handler).\(action) cb=\(callbackId)")
         do {
             let result: Any
             switch handler {
@@ -83,9 +87,13 @@ final class WebBridgeHandler {
 
             let json = try serializeToJSON(result)
             let escaped = json.replacingOccurrences(of: "'", with: "\\'")
+            let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            print("[\(f.string(from: Date()))] [BRIDGE] \(handler).\(action) OK \(ms)ms → cb=\(callbackId)")
             coordinator.evaluateJS("NativeBridge._handleCallback('\(callbackId)', null, '\(escaped)')")
         } catch {
+            let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
             let msg = error.localizedDescription.replacingOccurrences(of: "'", with: "\\'")
+            print("[\(f.string(from: Date()))] [BRIDGE] \(handler).\(action) ERR \(ms)ms: \(msg) → cb=\(callbackId)")
             coordinator.evaluateJS("NativeBridge._handleCallback('\(callbackId)', '\(msg)', null)")
         }
     }

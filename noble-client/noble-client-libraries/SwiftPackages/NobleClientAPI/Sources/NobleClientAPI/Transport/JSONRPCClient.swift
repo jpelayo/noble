@@ -87,6 +87,14 @@ public actor JSONRPCClient {
     private let path: String
     private var nextId = 1
 
+    /// HH:mm:ss.SSS timestamp for logs.
+    private static var ts: String {
+        let d = Date()
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f.string(from: d)
+    }
+
     public init(
         baseURL: URL,
         bearerToken: String? = nil,
@@ -100,6 +108,7 @@ public actor JSONRPCClient {
         self.host = baseURL.host ?? "localhost"
         self.port = UInt16(baseURL.port ?? 8783)
         self.path = baseURL.path.isEmpty ? "/" : baseURL.path
+        print("[\(Self.ts)] [RPC] NEW JSONRPCClient → \(baseURL.absoluteString)")
     }
 
     /// Calls a JSON-RPC method with typed parameters and returns typed result.
@@ -110,15 +119,19 @@ public actor JSONRPCClient {
     ) async throws -> R {
         let requestId = nextId
         nextId += 1
+        let t0 = CFAbsoluteTimeGetCurrent()
 
         let rpcRequest = JSONRPCRequest(id: requestId, method: method, params: params)
         let bodyData = try JSONEncoder().encode(rpcRequest)
 
-        let responseData = try await performHTTPS(body: bodyData)
+        let responseData = try await performHTTPS(body: bodyData, method: method, requestId: requestId)
+        let tNet = CFAbsoluteTimeGetCurrent()
 
         let rpcResponse = try JSONDecoder().decode(JSONRPCResponse<R>.self, from: responseData)
 
         if let error = rpcResponse.error {
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+            print("[\(Self.ts)] [RPC] #\(requestId) \(method) ERROR \(error.code) in \(elapsed)ms")
             throw error
         }
 
@@ -126,6 +139,9 @@ public actor JSONRPCClient {
             throw RPCClientError.emptyResult(method: method)
         }
 
+        let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        let netMs = Int((tNet - t0) * 1000)
+        print("[\(Self.ts)] [RPC] #\(requestId) \(method) OK net=\(netMs)ms total=\(elapsed)ms body=\(responseData.count)B")
         return result
     }
 
@@ -155,7 +171,11 @@ public actor JSONRPCClient {
     // MARK: - Network.framework HTTPS transport
 
     /// Perform a raw HTTPS POST using NWConnection. Bypasses ATS entirely.
-    private func performHTTPS(body: Data) async throws -> Data {
+    private func performHTTPS(body: Data, method: String = "?", requestId: Int = 0) async throws -> Data {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let tag = "#\(requestId) \(method)"
+        print("[\(Self.ts)] [NET] \(tag) start conn to \(host):\(port)")
+
         let tlsOptions = NWProtocolTLS.Options()
         let pinnedFP = trustedFingerprint
         let tofu = trustOnFirstUse
@@ -163,14 +183,13 @@ public actor JSONRPCClient {
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
             { metadata, trust, completion in
-                // TOFU without pinned fingerprint: accept any cert immediately.
-                // TLS is transport-only; node authentication uses transaction signatures.
+                let tlsT0 = CFAbsoluteTimeGetCurrent()
                 if tofu && pinnedFP == nil {
+                    let ms = Int((CFAbsoluteTimeGetCurrent() - tlsT0) * 1000)
+                    print("[\(Self.ts)] [NET] \(tag) TLS verify TOFU accept in \(ms)ms")
                     completion(true)
                     return
                 }
-
-                // Pinned fingerprint: verify cert matches.
                 if let pinned = pinnedFP {
                     let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
                     SecTrustSetNetworkFetchAllowed(secTrust, false)
@@ -179,11 +198,14 @@ public actor JSONRPCClient {
                         let der = SecCertificateCopyData(cert) as Data
                         let digest = SHA256.hash(data: der)
                         let fp = digest.map { String(format: "%02x", $0) }.joined()
-                        completion(fp.lowercased() == pinned.lowercased())
+                        let match = fp.lowercased() == pinned.lowercased()
+                        let ms = Int((CFAbsoluteTimeGetCurrent() - tlsT0) * 1000)
+                        print("[\(Self.ts)] [NET] \(tag) TLS verify pinned \(match ? "OK" : "REJECT") in \(ms)ms")
+                        completion(match)
                         return
                     }
                 }
-
+                print("[\(Self.ts)] [NET] \(tag) TLS verify REJECT (no TOFU, no pin)")
                 completion(false)
             },
             .global(qos: .userInitiated)
@@ -194,20 +216,19 @@ public actor JSONRPCClient {
             throw RPCClientError.connectionFailed(underlying: "Invalid port: \(port)")
         }
 
-        // Capture values outside the actor for use in Sendable closures
         let reqHost = host
         let reqPort = port
         let reqPath = path
         let reqBearer = bearerToken
         let connection = NWConnection(to: .hostPort(host: NWEndpoint.Host(reqHost), port: nwPort), using: params)
-
-        // Thread-safe one-shot guard for the continuation
         let guard_ = ContinuationGuard()
 
         return try await withCheckedThrowingContinuation { continuation in
             connection.stateUpdateHandler = { [guard_] state in
+                let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 switch state {
                 case .ready:
+                    print("[\(Self.ts)] [NET] \(tag) .ready at +\(elapsed)ms")
                     var headers = "POST \(reqPath) HTTP/1.1\r\n"
                     headers += "Host: \(reqHost):\(reqPort)\r\n"
                     headers += "Content-Type: application/json\r\n"
@@ -222,23 +243,44 @@ public actor JSONRPCClient {
                     var payload = Data(headers.utf8)
                     payload.append(body)
 
+                    let sendT0 = CFAbsoluteTimeGetCurrent()
                     connection.send(content: payload, completion: .contentProcessed { [guard_] error in
+                        let sendMs = Int((CFAbsoluteTimeGetCurrent() - sendT0) * 1000)
                         if let error {
+                            print("[\(Self.ts)] [NET] \(tag) send FAILED in \(sendMs)ms: \(error)")
                             connection.cancel()
                             guard_.resume(continuation, throwing: error)
                             return
                         }
+                        print("[\(Self.ts)] [NET] \(tag) sent \(payload.count)B in \(sendMs)ms, reading response...")
+                        let readT0 = CFAbsoluteTimeGetCurrent()
                         Self.readFullResponse(connection: connection) { [guard_] result in
+                            let readMs = Int((CFAbsoluteTimeGetCurrent() - readT0) * 1000)
+                            let totalMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                            switch result {
+                            case .success(let data):
+                                print("[\(Self.ts)] [NET] \(tag) response \(data.count)B read=\(readMs)ms total=\(totalMs)ms")
+                            case .failure(let err):
+                                print("[\(Self.ts)] [NET] \(tag) read FAILED in \(readMs)ms: \(err)")
+                            }
                             connection.cancel()
                             guard_.resume(continuation, with: result)
                         }
                     })
 
+                case .preparing:
+                    print("[\(Self.ts)] [NET] \(tag) .preparing at +\(elapsed)ms")
+
+                case .waiting(let error):
+                    print("[\(Self.ts)] [NET] \(tag) .waiting at +\(elapsed)ms: \(error)")
+
                 case .failed(let error):
+                    print("[\(Self.ts)] [NET] \(tag) .failed at +\(elapsed)ms: \(error)")
                     connection.cancel()
                     guard_.resume(continuation, throwing: error)
 
                 case .cancelled:
+                    print("[\(Self.ts)] [NET] \(tag) .cancelled at +\(elapsed)ms")
                     guard_.resume(continuation, throwing: RPCClientError.connectionFailed(underlying: "Connection cancelled"))
 
                 default:
@@ -248,6 +290,8 @@ public actor JSONRPCClient {
 
             // Timeout
             DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [guard_] in
+                let elapsed = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                print("[\(Self.ts)] [NET] \(tag) TIMEOUT at +\(elapsed)ms")
                 connection.cancel()
                 guard_.resume(continuation, throwing: RPCClientError.connectionFailed(underlying: "Connection timed out"))
             }

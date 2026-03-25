@@ -126,6 +126,9 @@ final class AppState {
     /// Live API service for the connected node.
     var apiService: (any NobleAPIService)?
 
+    /// Guard against concurrent connectToNode() calls.
+    private var isConnecting = false
+
     /// Keychain service for secure key storage.
     let keychainService: any KeychainService = LiveKeychainService(service: "com.infinitecontext.nobleapp")
 
@@ -317,7 +320,12 @@ final class AppState {
     }
 
     /// Test connection to the node and update state.
+    /// Serialized: concurrent calls are deduplicated via isConnecting guard.
     func connectToNode() async {
+        guard !isConnecting else { return }
+        isConnecting = true
+        defer { isConnecting = false }
+
         connectionError = nil
         reconnectTimer?.invalidate()
         reconnectTimer = nil
