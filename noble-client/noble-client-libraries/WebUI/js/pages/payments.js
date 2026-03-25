@@ -17,7 +17,8 @@ export function init(root, ctx) {
     const historyLimit = 20;
     let historyData = null;
     let balanceData = null;
-    // expandedTx removed — tx-detail page used instead
+    let balanceContainer = null;
+    let historyContainer = null;
 
     render();
 
@@ -44,7 +45,7 @@ export function init(root, ctx) {
         root.querySelector('#payments-refresh').addEventListener('click', () => loadData(balanceContainer, historyContainer));
 
         // Balance card placeholder with skeleton
-        const balanceContainer = document.createElement('div');
+        balanceContainer = document.createElement('div');
         balanceContainer.style.marginBottom = 'var(--gap)';
         balanceContainer.setAttribute('aria-live', 'polite');
         balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
@@ -72,16 +73,16 @@ export function init(root, ctx) {
         root.appendChild(actions);
 
         // Transaction history placeholder with skeleton
-        const historyContainer = document.createElement('div');
+        historyContainer = document.createElement('div');
         historyContainer.id = 'payment-history';
         historyContainer.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
         root.appendChild(historyContainer);
 
-        // Load data
         await loadData(balanceContainer, historyContainer);
     }
 
     let loadInFlight = false;
+    let loadRetries = 0;
     async function loadData(balanceContainer, historyContainer) {
         if (!alive || loadInFlight) return;
         loadInFlight = true;
@@ -96,25 +97,34 @@ export function init(root, ctx) {
         }
 
         try {
-            // Single RPC — server returns fully enriched list (all address variants, mempool).
             const [balance, history] = await Promise.all([
                 Bridge.call('noble_api', 'getBalance', { address }),
                 Bridge.call('noble_api', 'getWalletTransactions'),
             ]);
             if (!alive) return;
+            loadRetries = 0;
             balanceData = balance;
             historyData = history;
             renderBalance(balanceContainer, balance);
             renderHistory(historyContainer, history);
         } catch (err) {
             if (!alive) return;
+            const msg = (err.message || '').toLowerCase();
+            const isOffline = msg.includes('timeout') || msg.includes('not connected') || msg.includes('cancelled');
+            if (isOffline && loadRetries < 5) {
+                loadRetries++;
+                setTimeout(() => { if (alive) loadData(balanceContainer, historyContainer); }, 3000);
+                return;
+            }
+            loadRetries = 0;
             balanceContainer.innerHTML = '';
             historyContainer.innerHTML = '';
             const errDiv = document.createElement('div');
             errDiv.className = 'error-card';
             errDiv.setAttribute('role', 'alert');
-            errDiv.innerHTML = `<p>${err.message}</p><button type="button">Retry</button>`;
+            errDiv.innerHTML = `<p>${err.message || String(err)}</p><button type="button">Retry</button>`;
             errDiv.querySelector('button').addEventListener('click', () => {
+                loadRetries = 0;
                 balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
                 historyContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
                 loadData(balanceContainer, historyContainer);

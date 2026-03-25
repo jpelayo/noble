@@ -163,25 +163,27 @@ public actor JSONRPCClient {
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
             { metadata, trust, completion in
-                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                // Disable network fetch (OCSP/CRL) — self-signed certs have no revocation server.
-                // Without this, iOS waits ~15s for the OCSP timeout on every connection.
-                SecTrustSetNetworkFetchAllowed(secTrust, false)
-                if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
-                   let cert = chain.first {
-                    let der = SecCertificateCopyData(cert) as Data
-                    let digest = SHA256.hash(data: der)
-                    let fp = digest.map { String(format: "%02x", $0) }.joined()
+                // TOFU without pinned fingerprint: accept any cert immediately.
+                // TLS is transport-only; node authentication uses transaction signatures.
+                if tofu && pinnedFP == nil {
+                    completion(true)
+                    return
+                }
 
-                    if let pinned = pinnedFP {
+                // Pinned fingerprint: verify cert matches.
+                if let pinned = pinnedFP {
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    SecTrustSetNetworkFetchAllowed(secTrust, false)
+                    if let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                       let cert = chain.first {
+                        let der = SecCertificateCopyData(cert) as Data
+                        let digest = SHA256.hash(data: der)
+                        let fp = digest.map { String(format: "%02x", $0) }.joined()
                         completion(fp.lowercased() == pinned.lowercased())
                         return
                     }
-                    if tofu {
-                        completion(true)
-                        return
-                    }
                 }
+
                 completion(false)
             },
             .global(qos: .userInitiated)

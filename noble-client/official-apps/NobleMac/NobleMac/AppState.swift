@@ -471,12 +471,13 @@ final class AppState {
     }
 
     /// Push a state dictionary to the WebView via evaluateJavaScript.
+    /// Guarded: App may not exist yet if ES modules are still loading.
     private func pushStateToWebView(_ state: [String: Any]) {
         guard let coordinator = webViewCoordinator else { return }
         if let jsonData = try? JSONSerialization.data(withJSONObject: state),
            let jsonString = String(data: jsonData, encoding: .utf8)
         {
-            coordinator.evaluateJS("App.handleEvent('stateUpdate', \(jsonString))")
+            coordinator.evaluateJS("if (typeof App !== 'undefined') App.handleEvent('stateUpdate', \(jsonString))")
         }
     }
 
