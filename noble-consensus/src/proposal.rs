@@ -374,10 +374,12 @@ mod tests {
         let tx = make_test_tx(b"validated_doc", MIN_TX_FEE);
 
         let now = now_secs();
+        // Use height=1 (not 0) — subsidy_at_height(0)=0 produces a zero-value
+        // coinbase output which fails U8 validation ("outputs must be > 0").
         let block = propose_block(
             &[tx],
             Hash256::ZERO,
-            0,
+            1,
             now,
             test_chain_id(),
             &val_priv,

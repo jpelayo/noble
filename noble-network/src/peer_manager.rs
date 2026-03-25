@@ -24,7 +24,7 @@ pub enum Direction {
 /// - InvalidBlock: 50
 /// - InvalidTransaction: 20
 /// - ProtocolViolation: 30
-/// - DuplicateProposal: 100 (instant ban)
+/// - DuplicateProposal: 30 (one-hiccup tolerance — accumulates, not instant ban)
 /// - ExcessiveConnections: 25
 /// - Unresponsive: 10
 /// - InvalidVote: 20 (GAP-M6: standardized to 20)
@@ -88,7 +88,7 @@ impl BanCategory {
             Self::InvalidBlock => 50,
             Self::InvalidTransaction => 20,
             Self::ProtocolViolation => 30,
-            Self::DuplicateProposal => 100,
+            Self::DuplicateProposal => 30,
             Self::ExcessiveConnections => 25,
             Self::Unresponsive => 10,
             Self::InvalidVote => 20,
@@ -900,14 +900,15 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_proposal_instant_ban() {
+    fn duplicate_proposal_scores_penalty() {
         let mut pm = PeerManager::new(&test_config());
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
 
-        // DuplicateProposal = 100 = instant ban.
-        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test")).is_banned());
-        assert!(pm.is_banned(&p));
+        // DuplicateProposal = 30 points (one-hiccup tolerance: not instant ban).
+        let outcome = pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
+        assert!(!outcome.is_banned(), "single DuplicateProposal should not instant-ban (30 < 100)");
+        assert!(!pm.is_banned(&p));
     }
 
     #[test]
@@ -915,12 +916,12 @@ mod tests {
         let mut pm = PeerManager::new(&test_config());
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
-        pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
+        // Use ManualBan (100 points = instant ban) for this test.
+        pm.record_misbehavior(&p, BanReason::new(BanCategory::ManualBan, "test"));
 
         // Try to reconnect — should be rejected.
         let err = pm.on_connected(p, Direction::Inbound).unwrap_err();
         assert!(err.contains("peer is banned"), "expected 'peer is banned', got: {err}");
-        assert!(err.contains("0x04"), "expected category code 0x04 (DuplicateProposal), got: {err}");
     }
 
     #[test]
@@ -929,18 +930,17 @@ mod tests {
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
 
-        // DuplicateProposal = 100 = instant ban (within 50-pt rate limit window
-        // because first offense has window_total=0)
-        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "double block")).is_banned());
+        // EvidenceReceived = 100 = instant ban
+        assert!(pm.record_misbehavior(&p, BanReason::new(BanCategory::EvidenceReceived, "double block evidence")).is_banned());
         assert!(pm.is_banned(&p));
 
         let entry = pm.get_ban_entry(&p).unwrap();
-        assert_eq!(entry.categories, vec![BanCategory::DuplicateProposal]);
+        assert_eq!(entry.categories, vec![BanCategory::EvidenceReceived]);
         assert_eq!(entry.score, 100);
 
         // Verify the rejection message includes the category code
         let err = pm.on_connected(p, Direction::Inbound).unwrap_err();
-        assert!(err.contains("0x04"), "expected code 0x04, got: {err}");
+        assert!(err.contains("0x0A"), "expected code 0x0A (EvidenceReceived), got: {err}");
     }
 
     #[test]
@@ -996,7 +996,7 @@ mod tests {
         assert_eq!(BanCategory::InvalidBlock.penalty(), 50);
         assert_eq!(BanCategory::InvalidTransaction.penalty(), 20);
         assert_eq!(BanCategory::ProtocolViolation.penalty(), 30);
-        assert_eq!(BanCategory::DuplicateProposal.penalty(), 100);
+        assert_eq!(BanCategory::DuplicateProposal.penalty(), 30);
         assert_eq!(BanCategory::ExcessiveConnections.penalty(), 25);
         assert_eq!(BanCategory::Unresponsive.penalty(), 10);
         assert_eq!(BanCategory::InvalidVote.penalty(), 20);
@@ -1040,7 +1040,7 @@ mod tests {
         let mut pm = PeerManager::new(&test_config());
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
-        pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
+        pm.record_misbehavior(&p, BanReason::new(BanCategory::EvidenceReceived, "test"));
 
         let expiry = pm.get_ban_expiry(&p);
         assert!(expiry.is_some());
@@ -1363,18 +1363,18 @@ mod tests {
             pm.on_connected(p, Direction::Outbound);
         }
 
-        // Ban 3 of 4 (>50%): each with DuplicateProposal(100) = instant ban.
+        // Score 3 of 4 (>50%): each with DuplicateProposal(30).
         pm.record_misbehavior(
             &peers[0],
-            BanReason::new(BanCategory::DuplicateProposal, "test"),
+            BanReason::new(BanCategory::EvidenceReceived, "test"),
         );
         pm.record_misbehavior(
             &peers[1],
-            BanReason::new(BanCategory::DuplicateProposal, "test"),
+            BanReason::new(BanCategory::EvidenceReceived, "test"),
         );
         pm.record_misbehavior(
             &peers[2],
-            BanReason::new(BanCategory::DuplicateProposal, "test"),
+            BanReason::new(BanCategory::EvidenceReceived, "test"),
         );
         // After 3 bans: banned_count=3, total_ever_seen=4, 3 > 4/2=2 → mass-ban detected.
         assert!(pm.check_mass_ban());
@@ -1454,9 +1454,9 @@ mod tests {
         let p = random_peer();
         pm.on_connected(p, Direction::Outbound);
 
-        // DuplicateProposal = 100 = instant ban. No time for decay.
+        // EvidenceReceived = 100 = instant ban. No time for decay.
         let outcome =
-            pm.record_misbehavior(&p, BanReason::new(BanCategory::DuplicateProposal, "test"));
+            pm.record_misbehavior(&p, BanReason::new(BanCategory::EvidenceReceived, "test"));
         assert!(outcome.is_banned(), "instant ban should still work with decay enabled");
         assert!(pm.is_banned(&p));
     }

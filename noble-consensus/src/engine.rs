@@ -1892,9 +1892,9 @@ impl CycleEngine {
         // Record proposer hint for name resolution (survives candidate pruning).
         self.vote_mgr.record_proposer(block_hash, new_header.validator_id.to_wire_bytes());
 
-        // Add to candidate tracker
+        // Add to candidate tracker (one-hiccup tolerance: 2nd replaces, 3rd bans)
         match self.candidate_tracker.add_candidate(block, block_hash, 0) {
-            Ok(()) => {
+            Ok(crate::candidate::AddCandidateResult::Accepted) => {
                 self.delivered_block_log.insert(*block_hash.as_bytes());
                 outputs.push(CycleIo::Log(format!(
                     "accepted candidate block {{{}}} from validator {}",
@@ -1903,6 +1903,12 @@ impl CycleEngine {
                         .get(&block_hash)
                         .map(|e| format!("{:?}", e.block.header.validator_id))
                         .unwrap_or_default()
+                )));
+            }
+            Ok(crate::candidate::AddCandidateResult::Replaced(old_hash)) => {
+                self.delivered_block_log.insert(*block_hash.as_bytes());
+                outputs.push(CycleIo::Log(format!(
+                    "replacement proposal from validator: old {{{old_hash}}}, new {{{block_hash}}}"
                 )));
             }
             Err(existing_hash) if existing_hash == block_hash => {
@@ -1915,34 +1921,36 @@ impl CycleEngine {
                 )));
             }
             Err(existing_hash) => {
-                // Potential double proposal: same validator, different block hash.
-                // Only ban if we have cryptographically verified evidence — both
-                // block headers with valid signatures from the same validator key.
-                // This prevents trigger-happy bans from edge cases not caught by
-                // the stale-delivery guard (e.g., clock skew, relay races).
+                // Triple proposal (3rd+ from same validator): evidence + penalty.
+                // Use first_block_header (1st) + new_header (3rd) for evidence.
+                // Fallback to existing candidate (2nd) if first_blocks unavailable.
                 let new_ts = new_header.timestamp;
                 let new_validator = hex::encode(new_header.validator_id.to_wire_bytes());
+                let validator_wire = new_header.validator_id.to_wire_bytes();
                 let mut evidence_verified = false;
-                let mut existing_ts = 0u64;
+                let mut evidence_ts = 0u64;
 
-                if let Some(existing_entry) = self.candidate_tracker.get(&existing_hash) {
-                    existing_ts = existing_entry.block.header.timestamp;
+                // Prefer the retained 1st block header for evidence
+                let evidence_header = self.candidate_tracker.first_block_header(&validator_wire)
+                    .cloned()
+                    .or_else(|| {
+                        self.candidate_tracker.get(&existing_hash)
+                            .map(|e| e.block.header.clone())
+                    });
 
-                    // Cross-cycle guard: compute the cycle number for each block's
-                    // timestamp.  If they fall in different cycles, this is NOT a
-                    // double proposal — it happens when a block arrives between tick
-                    // fires and the candidate_tracker hasn't been cleared yet.
-                    let existing_cycle = self.cycle_mgr.current_cycle(existing_ts);
+                if let Some(ref partner_header) = evidence_header {
+                    evidence_ts = partner_header.timestamp;
+                    let existing_cycle = self.cycle_mgr.current_cycle(evidence_ts);
                     let new_cycle = self.cycle_mgr.current_cycle(new_ts);
                     if existing_cycle != new_cycle {
                         debug!(
-                            "cross-cycle proposal from same validator — NOT a double proposal \
+                            "cross-cycle triple proposal — NOT penalizing \
                              (existing ts {} cycle {}, new ts {} cycle {})",
-                            existing_ts, existing_cycle, new_ts, new_cycle
+                            evidence_ts, existing_cycle, new_ts, new_cycle
                         );
                     } else {
                         let evidence = noble_core::DoubleProposalEvidence::new(
-                            existing_entry.block.header.clone(),
+                            partner_header.clone(),
                             new_header,
                         );
                         if evidence.verify().is_ok() {
@@ -1959,25 +1967,21 @@ impl CycleEngine {
                         peer_id: from_peer,
                         category: noble_core::BanCategoryCode::DuplicateProposal,
                         reason: format!(
-                            "double proposal (evidence verified): existing {} (ts {}), \
+                            "triple proposal (evidence verified): existing {} (ts {}), \
                              new {} (ts {}), validator {}",
-                            existing_hash, existing_ts, block_hash, new_ts, new_validator,
+                            existing_hash, evidence_ts, block_hash, new_ts, new_validator,
                         ),
                     });
                     outputs.push(CycleIo::Log(format!(
-                        "banned peer for verified double proposal \
+                        "scored penalty for verified triple proposal \
                          (existing: {}, new: {}, validator: {})",
                         existing_hash, block_hash, new_validator,
                     )));
                 } else {
-                    // Insufficient evidence — could be a stale delivery edge case,
-                    // relay race, cross-cycle proposal, or tracker state inconsistency.
-                    // Reject the block but do NOT ban the peer.  Log with full forensic
-                    // detail so operators can investigate.
                     outputs.push(CycleIo::Log(format!(
-                        "rejected potential double proposal without ban \
+                        "rejected potential triple proposal without penalty \
                          (existing: {} ts {}, new: {} ts {}, validator: {})",
-                        existing_hash, existing_ts, block_hash, new_ts, new_validator,
+                        existing_hash, evidence_ts, block_hash, new_ts, new_validator,
                     )));
                 }
             }
@@ -2769,14 +2773,13 @@ mod tests {
     // --- Double proposal ban ---
 
     #[test]
-    fn double_proposal_bans_peer() {
+    fn double_proposal_no_ban() {
+        // 2nd proposal from same validator = replacement, NOT a ban.
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
 
         let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
-        // Second block must have a DIFFERENT hash to trigger the double-proposal
-        // ban.  Use a different timestamp so the signing message differs.
         let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         block2.header.timestamp += 1;
         let msg = block2.header.compute_signing_message().unwrap();
@@ -2792,7 +2795,43 @@ mod tests {
             from_peer: b"peer1".to_vec(),
         });
 
-        assert!(has_ban(&outputs), "double proposal should ban peer");
+        assert!(!has_ban(&outputs), "double proposal should NOT ban (one-hiccup tolerance)");
+        assert!(has_log_containing(&outputs, "replacement proposal"));
+        assert_eq!(engine.candidate_tracker.len(), 1);
+    }
+
+    #[test]
+    fn triple_proposal_bans_peer() {
+        // 3rd proposal from same validator = evidence + penalty.
+        let (vp, vpub) = make_validator();
+        let mut engine = make_engine(None, &[vpub.clone()], 5);
+        engine.tracked_phase = CyclePhase::Proposal;
+
+        let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        block2.header.timestamp += 1;
+        let msg2 = block2.header.compute_signing_message().unwrap();
+        block2.header.validator_sig = vp.sign(&msg2).unwrap();
+        let (mut block3, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        block3.header.timestamp += 2;
+        let msg3 = block3.header.compute_signing_message().unwrap();
+        block3.header.validator_sig = vp.sign(&msg3).unwrap();
+
+        engine.step(CycleEvent::BlockProposed {
+            block: block1,
+            from_peer: b"peer1".to_vec(),
+        });
+        engine.step(CycleEvent::BlockProposed {
+            block: block2,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        let outputs = engine.step(CycleEvent::BlockProposed {
+            block: block3,
+            from_peer: b"peer1".to_vec(),
+        });
+
+        assert!(has_ban(&outputs), "triple proposal should ban peer");
         assert_eq!(engine.candidate_tracker.len(), 1);
     }
 
@@ -3252,15 +3291,20 @@ mod tests {
     fn validator_requests_mempool_on_proposal_entry() {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(Some((vp, vpub.clone())), &[vpub], 5);
-        let outputs = engine.step(CycleEvent::PhaseTransition {
+        // PhaseTransition sets the phase; RequestMempoolTransactions is emitted
+        // by handle_tick after VOTE_CAST_DELAY (30s) into the Proposal phase.
+        engine.step(CycleEvent::PhaseTransition {
             cycle: 1,
             new_phase: CyclePhase::Proposal,
         });
+        // Tick at 31s into cycle 1's Proposal phase.
+        let now = noble_core::GENESIS_TIMESTAMP + 1200 + 31;
+        let outputs = engine.step(CycleEvent::Tick { now });
         assert!(
             outputs
                 .iter()
                 .any(|o| matches!(o, CycleIo::RequestMempoolTransactions { .. })),
-            "validator should request mempool txs on Proposal entry"
+            "validator should request mempool txs on tick after VOTE_CAST_DELAY"
         );
     }
 
@@ -3704,8 +3748,8 @@ mod tests {
     }
 
     #[test]
-    fn true_double_proposal_still_bans_with_delivered_log() {
-        // Same cycle, same validator, two different blocks → still bans.
+    fn triple_proposal_still_bans_with_delivered_log() {
+        // Same cycle, same validator, three different blocks → bans on 3rd.
         // The delivered_block_log should NOT interfere.
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
@@ -3714,22 +3758,30 @@ mod tests {
         let (block1, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         let (mut block2, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
         block2.header.timestamp += 1;
-        let msg = block2.header.compute_signing_message().unwrap();
-        block2.header.validator_sig = vp.sign(&msg).unwrap();
+        let msg2 = block2.header.compute_signing_message().unwrap();
+        block2.header.validator_sig = vp.sign(&msg2).unwrap();
+        let (mut block3, _) = make_valid_block(&vp, &vpub, 1, Hash256::ZERO);
+        block3.header.timestamp += 2;
+        let msg3 = block3.header.compute_signing_message().unwrap();
+        block3.header.validator_sig = vp.sign(&msg3).unwrap();
 
         engine.step(CycleEvent::BlockProposed {
             block: block1,
             from_peer: b"peer1".to_vec(),
         });
+        engine.step(CycleEvent::BlockProposed {
+            block: block2,
+            from_peer: b"peer1".to_vec(),
+        });
 
         let outputs = engine.step(CycleEvent::BlockProposed {
-            block: block2,
+            block: block3,
             from_peer: b"peer1".to_vec(),
         });
 
         assert!(
             has_ban(&outputs),
-            "true double proposal should still ban even with delivered_block_log"
+            "triple proposal should still ban even with delivered_block_log"
         );
     }
 }

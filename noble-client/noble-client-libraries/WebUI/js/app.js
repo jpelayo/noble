@@ -66,6 +66,11 @@ const App = {
             }
         } else {
             // First visit — create page root and mount
+            // Defensive: remove any orphaned children not tracked in mountedPages
+            const tracked = new Set(Object.values(mountedPages).map(e => e.root));
+            for (const child of [...container.children]) {
+                if (!tracked.has(child)) child.remove();
+            }
             const root = document.createElement('div');
             root.className = '';
             container.appendChild(root);
@@ -97,8 +102,10 @@ const App = {
         // so they re-mount fresh on next visit (pages check isConnected on init).
         if (bootComplete && (wasConnected !== appState.isConnected || hadWallet !== appState.hasWallet)) {
             for (const [key, entry] of Object.entries(mountedPages)) {
-                if (entry.page && entry.page.destroy) entry.page.destroy();
-                entry.root.remove();
+                try {
+                    if (entry.page && entry.page.destroy) entry.page.destroy();
+                    entry.root.remove();
+                } catch { /* ensure all entries are cleaned even if one throws */ }
             }
             for (const key of Object.keys(mountedPages)) delete mountedPages[key];
             if (currentRoute) {

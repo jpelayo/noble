@@ -183,10 +183,10 @@ pub struct VoteManager {
     r2_votes: HashMap<Hash256, HashSet<Vec<u8>>>,
     /// Set of `(voter_pubkey_wire_bytes, round)` that have already voted.
     voted_validators: HashSet<(Vec<u8>, u8)>,
-    /// Equivocation tracker: `(voter_wire, round) → candidate_hash`.
-    /// Detects when the same validator votes for different candidates in the
-    /// same round — a protocol violation analogous to double-proposal.
-    vote_commitments: HashMap<(Vec<u8>, u8), Hash256>,
+    /// Equivocation tracker: `(voter_wire, round) → (candidate_hash, vote_count)`.
+    /// One-hiccup tolerance: 2nd different candidate replaces the 1st (count=2).
+    /// 3rd different candidate triggers equivocation error (count≥2 → reject).
+    vote_commitments: HashMap<(Vec<u8>, u8), (Hash256, u8)>,
     /// First vote per (voter_key, round) — retained for evidence construction.
     /// Cleared on `clear()`.
     first_votes: HashMap<(Vec<u8>, u8), PorVote>,
@@ -273,29 +273,67 @@ impl VoteManager {
         let voter_key = vote.voter_pubkey.to_wire_bytes();
         let dedup_key = (voter_key.clone(), vote.round);
 
-        // Equivocation detection: if the same validator already voted in this
-        // round, check whether it's a duplicate (same candidate) or an
-        // equivocation (different candidate).
-        if let Some(&first_candidate) = self.vote_commitments.get(&dedup_key) {
-            if first_candidate == vote.candidate_hash {
+        // Equivocation detection with one-hiccup tolerance:
+        // - Same candidate → duplicate (ignored)
+        // - 2nd different candidate (count=1) → replacement (take youngest)
+        // - 3rd different candidate (count≥2) → equivocation error
+        if let Some(&(committed_candidate, count)) = self.vote_commitments.get(&dedup_key) {
+            if committed_candidate == vote.candidate_hash {
                 debug!(
                     "duplicate vote from validator round {} (ignored)",
                     vote.round
                 );
                 return Ok(false);
-            } else {
+            }
+            if count >= 2 {
+                // 3rd+ different candidate — equivocation
+                // Use first_vote (original 1st) for evidence construction
                 return Err(VoteError::Equivocation {
                     voter: voter_key,
                     round: vote.round,
-                    first_candidate,
+                    first_candidate: self.first_votes.get(&dedup_key)
+                        .map(|v| v.candidate_hash)
+                        .unwrap_or(committed_candidate),
                     second_candidate: vote.candidate_hash,
                     first_vote: self.first_votes.get(&dedup_key).cloned(),
                 });
             }
+            // 2nd different candidate — replacement (take youngest)
+            // Remove voter from old candidate's tally
+            let old_map = if vote.round == 2 {
+                &mut self.r2_votes
+            } else {
+                &mut self.votes
+            };
+            if let Some(voters) = old_map.get_mut(&committed_candidate) {
+                voters.remove(&voter_key);
+                if voters.is_empty() {
+                    old_map.remove(&committed_candidate);
+                }
+            }
+            // Update commitment with new candidate, count=2
+            self.vote_commitments.insert(dedup_key.clone(), (vote.candidate_hash, 2));
+            // DO NOT update first_votes — keep the original for evidence
+            // Insert voter into new candidate's tally
+            let target_map = if vote.round == 2 {
+                &mut self.r2_votes
+            } else {
+                &mut self.votes
+            };
+            target_map
+                .entry(vote.candidate_hash)
+                .or_default()
+                .insert(voter_key);
+            debug!(
+                "vote replacement from validator round {} (old: {}, new: {})",
+                vote.round, committed_candidate, vote.candidate_hash
+            );
+            return Ok(true);
         }
 
+        // 1st vote — accepted
         self.vote_commitments
-            .insert(dedup_key.clone(), vote.candidate_hash);
+            .insert(dedup_key.clone(), (vote.candidate_hash, 1));
         // Store first vote for evidence construction.
         self.first_votes
             .entry(dedup_key.clone())
@@ -1036,7 +1074,8 @@ mod tests {
     }
 
     #[test]
-    fn vote_equivocation_returns_first_vote() {
+    fn double_vote_replaces_tally() {
+        // 2nd vote for different candidate = replacement (one-hiccup tolerance).
         let mut mgr = VoteManager::new();
         let candidate_a = hash_n(1);
         let candidate_b = hash_n(2);
@@ -1047,10 +1086,39 @@ mod tests {
         // First vote for candidate A
         let v1 = PorVote::sign(0, candidate_a, &priv_key, pub_key.clone()).unwrap();
         assert!(mgr.record_vote(b"p1", &v1).unwrap());
+        assert_eq!(mgr.unique_voter_count_for_candidate(&candidate_a), 1);
 
-        // Second vote for candidate B — equivocation
-        let v2 = PorVote::sign(0, candidate_b, &priv_key, pub_key).unwrap();
+        // Second vote for candidate B — replacement, not equivocation
+        let v2 = PorVote::sign(0, candidate_b, &priv_key, pub_key.clone()).unwrap();
         let result = mgr.record_vote(b"p1", &v2);
+        assert!(result.is_ok(), "2nd vote should be accepted as replacement");
+        assert!(result.unwrap(), "replacement should return true (new vote)");
+        assert_eq!(mgr.unique_voter_count_for_candidate(&candidate_a), 0, "old candidate loses vote");
+        assert_eq!(mgr.unique_voter_count_for_candidate(&candidate_b), 1, "new candidate gains vote");
+    }
+
+    #[test]
+    fn triple_vote_equivocation_returns_first_vote() {
+        // 3rd vote for yet another candidate = equivocation.
+        let mut mgr = VoteManager::new();
+        let candidate_a = hash_n(1);
+        let candidate_b = hash_n(2);
+        let candidate_c = hash_n(3);
+        let (sk, _) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = priv_key.public_key();
+
+        // 1st vote for A
+        let v1 = PorVote::sign(0, candidate_a, &priv_key, pub_key.clone()).unwrap();
+        assert!(mgr.record_vote(b"p1", &v1).unwrap());
+
+        // 2nd vote for B — replacement
+        let v2 = PorVote::sign(0, candidate_b, &priv_key, pub_key.clone()).unwrap();
+        assert!(mgr.record_vote(b"p1", &v2).unwrap());
+
+        // 3rd vote for C — equivocation
+        let v3 = PorVote::sign(0, candidate_c, &priv_key, pub_key).unwrap();
+        let result = mgr.record_vote(b"p1", &v3);
         match result {
             Err(VoteError::Equivocation {
                 first_candidate,
@@ -1058,8 +1126,8 @@ mod tests {
                 first_vote,
                 ..
             }) => {
-                assert_eq!(first_candidate, candidate_a);
-                assert_eq!(second_candidate, candidate_b);
+                assert_eq!(first_candidate, candidate_a, "evidence should use 1st vote");
+                assert_eq!(second_candidate, candidate_c, "evidence should use 3rd vote");
                 assert!(first_vote.is_some(), "first_vote must be retained");
                 let fv = first_vote.unwrap();
                 assert_eq!(fv.candidate_hash, candidate_a);

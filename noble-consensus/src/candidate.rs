@@ -8,9 +8,18 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use noble_core::{Block, Transaction};
+use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::Hash256;
 use tracing::{debug, trace};
+
+/// Result of adding a candidate to the tracker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddCandidateResult {
+    /// First proposal from this validator — accepted.
+    Accepted,
+    /// Second proposal — replaced the previous one. Contains old hash.
+    Replaced(Hash256),
+}
 
 /// Long-lived FIFO-bounded block hash memory.
 ///
@@ -87,12 +96,17 @@ pub struct CandidateEntry {
 }
 
 /// Tracks proposed blocks within a single consensus cycle.
+///
+/// Allows one free replacement per validator per cycle ("one-hiccup tolerance"):
+/// - 1st proposal: accepted
+/// - 2nd proposal: replaces the 1st (take youngest), no ban
+/// - 3rd proposal: rejected, evidence published, penalty scored
 #[derive(Default)]
 pub struct CandidateTracker {
     /// block_hash → candidate entry.
     candidates: HashMap<Hash256, CandidateEntry>,
-    /// validator wire bytes → block_hash (enforces one-block-per-validator).
-    by_validator: HashMap<Vec<u8>, Hash256>,
+    /// validator wire bytes → (block_hash, proposal_count).
+    by_validator: HashMap<Vec<u8>, (Hash256, u8)>,
     /// Monotonic counter for insertion order.
     next_order: usize,
     /// Block hashes from the previous cycle.  Used to detect stale
@@ -102,6 +116,9 @@ pub struct CandidateTracker {
     /// with the validator's new proposal and trigger a false 0x04
     /// DuplicateProposal ban.
     previous_hashes: HashSet<Hash256>,
+    /// First block header per validator — retained for evidence construction
+    /// if a 3rd proposal arrives (uses 1st + 3rd headers for evidence).
+    first_blocks: HashMap<Vec<u8>, BlockHeader>,
 }
 
 impl CandidateTracker {
@@ -112,13 +129,16 @@ impl CandidateTracker {
             by_validator: HashMap::new(),
             next_order: 0,
             previous_hashes: HashSet::new(),
+            first_blocks: HashMap::new(),
         }
     }
 
     /// Add a candidate block.
     ///
-    /// Returns `Err` with the validator's existing block hash if the validator
-    /// already proposed a block this cycle (double-proposal).
+    /// One-hiccup tolerance: allows one free replacement per validator per cycle.
+    /// - 1st proposal → `Ok(Accepted)`
+    /// - 2nd proposal → `Ok(Replaced(old_hash))` — old candidate removed, new inserted
+    /// - 3rd proposal → `Err(existing_hash)` — caller creates evidence and scores penalty
     ///
     /// Stale re-deliveries (blocks from a previous cycle arriving after the
     /// tracker was cleared) are detected via `previous_hashes` and returned as
@@ -129,7 +149,7 @@ impl CandidateTracker {
         block: Box<Block>,
         block_hash: Hash256,
         received_at: u64,
-    ) -> Result<(), Hash256> {
+    ) -> Result<AddCandidateResult, Hash256> {
         // Stale re-delivery: this block was tracked in the previous cycle.
         // Return Err(block_hash) so the caller treats it as a duplicate
         // delivery (same hash) rather than a double proposal.
@@ -143,14 +163,44 @@ impl CandidateTracker {
 
         let validator_wire = block.header.validator_id.to_wire_bytes();
 
-        // Enforce one block per validator per cycle.
-        // Only triggers for blocks NOT in previous_hashes (true current-cycle
-        // conflicts), so delayed re-deliveries from prior cycles cannot cause
-        // a false double-proposal ban.
-        if let Some(existing) = self.by_validator.get(&validator_wire) {
-            return Err(*existing);
+        if let Some(&(existing_hash, count)) = self.by_validator.get(&validator_wire) {
+            if count >= 2 {
+                // 3rd+ proposal — reject for evidence + penalty scoring
+                return Err(existing_hash);
+            }
+            // 2nd proposal — replacement (take youngest)
+            let old_hash = existing_hash;
+            // Retain 1st block header for evidence if a 3rd arrives
+            if let Some(old_entry) = self.candidates.remove(&old_hash) {
+                self.first_blocks
+                    .entry(validator_wire.clone())
+                    .or_insert_with(|| old_entry.block.header.clone());
+            }
+            // Add old hash to previous_hashes for stale re-delivery guard
+            self.previous_hashes.insert(old_hash);
+
+            let order = self.next_order;
+            self.next_order += 1;
+
+            debug!(
+                "replacement proposal at height {} (old: {})",
+                block.header.height, old_hash
+            );
+
+            self.by_validator.insert(validator_wire, (block_hash, 2));
+            self.candidates.insert(
+                block_hash,
+                CandidateEntry {
+                    block,
+                    block_hash,
+                    received_at,
+                    order,
+                },
+            );
+            return Ok(AddCandidateResult::Replaced(old_hash));
         }
 
+        // 1st proposal — accepted
         let order = self.next_order;
         self.next_order += 1;
 
@@ -159,7 +209,7 @@ impl CandidateTracker {
             block.header.height
         );
 
-        self.by_validator.insert(validator_wire, block_hash);
+        self.by_validator.insert(validator_wire, (block_hash, 1));
         self.candidates.insert(
             block_hash,
             CandidateEntry {
@@ -173,7 +223,12 @@ impl CandidateTracker {
             "candidate tracker: {} candidates for cycle",
             self.candidates.len()
         );
-        Ok(())
+        Ok(AddCandidateResult::Accepted)
+    }
+
+    /// Return the retained first block header for a validator (for triple-proposal evidence).
+    pub fn first_block_header(&self, validator_wire: &[u8]) -> Option<&BlockHeader> {
+        self.first_blocks.get(validator_wire)
     }
 
     /// Get a candidate by its block hash.
@@ -276,6 +331,7 @@ impl CandidateTracker {
         }
         self.candidates.clear();
         self.by_validator.clear();
+        self.first_blocks.clear();
         self.next_order = 0;
     }
 
@@ -287,6 +343,7 @@ impl CandidateTracker {
         self.candidates.clear();
         self.by_validator.clear();
         self.previous_hashes.clear();
+        self.first_blocks.clear();
         self.next_order = 0;
     }
 }
@@ -350,16 +407,48 @@ mod tests {
     }
 
     #[test]
-    fn double_proposal_rejected() {
+    fn double_proposal_replaces() {
         let mut tracker = CandidateTracker::new();
         let (priv_key, pub_key) = make_validator();
-        let (block1, hash1) = make_candidate_block(&pub_key, &priv_key, vec![]);
-        let (block2, hash2) = make_candidate_block(&pub_key, &priv_key, vec![]);
+        let (block1, hash1) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let (block2, hash2) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_001);
+        assert_ne!(hash1, hash2);
 
         tracker.add_candidate(block1, hash1, 1000).unwrap();
-        let err = tracker.add_candidate(block2, hash2, 1001).unwrap_err();
-        assert_eq!(err, hash1, "should return the existing block hash");
+        let result = tracker.add_candidate(block2, hash2, 1001).unwrap();
+        assert_eq!(result, AddCandidateResult::Replaced(hash1));
         assert_eq!(tracker.len(), 1);
+        assert!(tracker.get(&hash1).is_none(), "old candidate should be removed");
+        assert!(tracker.get(&hash2).is_some(), "new candidate should be present");
+        assert!(tracker.has_proposed(&pub_key.to_wire_bytes()));
+    }
+
+    #[test]
+    fn triple_proposal_rejected() {
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+        let (block1, hash1) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let (block2, hash2) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_001);
+        let (block3, hash3) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_002);
+
+        tracker.add_candidate(block1, hash1, 1000).unwrap();
+        tracker.add_candidate(block2, hash2, 1001).unwrap();
+        let err = tracker.add_candidate(block3, hash3, 1002).unwrap_err();
+        assert_eq!(err, hash2, "should return the current (2nd) block hash");
+        assert_eq!(tracker.len(), 1);
+    }
+
+    #[test]
+    fn replacement_preserves_first_block_header() {
+        let mut tracker = CandidateTracker::new();
+        let (priv_key, pub_key) = make_validator();
+        let (block1, hash1) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
+        let (block2, hash2) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_001);
+        let wire = pub_key.to_wire_bytes();
+
+        let _ = tracker.add_candidate(block1, hash1, 1000);
+        let _ = tracker.add_candidate(block2, hash2, 1001);
+        assert!(tracker.first_block_header(&wire).is_some(), "should retain 1st header for evidence");
     }
 
     #[test]
@@ -531,20 +620,25 @@ mod tests {
     }
 
     #[test]
-    fn true_double_proposal_still_detected() {
-        // Same cycle, same validator, two different blocks → real double proposal.
+    fn true_triple_proposal_detected() {
+        // Same cycle, same validator, three different blocks → triple proposal → reject 3rd.
         let mut tracker = CandidateTracker::new();
         let (priv_key, pub_key) = make_validator();
 
         let (block1, hash1) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_000);
         let (block2, hash2) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_001);
+        let (block3, hash3) = make_candidate_block_at(&pub_key, &priv_key, 1_700_000_002);
         assert_ne!(hash1, hash2);
+        assert_ne!(hash2, hash3);
 
         tracker.add_candidate(block1, hash1, 1000).unwrap();
-        let err = tracker.add_candidate(block2, hash2, 1001).unwrap_err();
-        // Returns the EXISTING hash (different from new) → double proposal → ban
-        assert_eq!(err, hash1);
-        assert_ne!(err, hash2, "double proposal: existing != new");
+        // 2nd: replacement
+        let result = tracker.add_candidate(block2, hash2, 1001).unwrap();
+        assert_eq!(result, AddCandidateResult::Replaced(hash1));
+        assert_eq!(tracker.len(), 1);
+        // 3rd: rejected
+        let err = tracker.add_candidate(block3, hash3, 1002).unwrap_err();
+        assert_eq!(err, hash2, "should return current (2nd) hash");
         assert_eq!(tracker.len(), 1);
     }
 

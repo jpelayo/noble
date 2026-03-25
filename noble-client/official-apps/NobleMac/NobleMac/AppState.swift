@@ -95,7 +95,7 @@ final class AppState {
 
     // MARK: - Polling
 
-    /// RPC poll timer for live data refresh (30s interval).
+    /// RPC poll timer for live data refresh (10s interval).
     private var pollTimer: Timer?
 
     /// Reconnect timer — retries connectToNode every 10s after initial failure.
@@ -356,7 +356,7 @@ final class AppState {
     func startPolling() {
         stopPolling()
         pollFailureCount = 0
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.pollTick()
             }
@@ -379,6 +379,7 @@ final class AppState {
             let cycleStatus = try? await service.getCycleStatus()
 
             // Update local state
+            isConnected = true
             blockHeight = nodeInfo.blockHeight
             chainId = nodeInfo.chainId
             pollFailureCount = 0
@@ -440,6 +441,7 @@ final class AppState {
                 if let nodeInfo = try? await freshService.getNodeInfo() {
                     // Fresh client works — replace dead service, no failure counted.
                     apiService = freshService
+                    isConnected = true
                     pollFailureCount = 0
                     blockHeight = nodeInfo.blockHeight
                     chainId = nodeInfo.chainId
