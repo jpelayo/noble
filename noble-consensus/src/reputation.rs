@@ -463,6 +463,7 @@ mod tests {
             uptime_cycles: u64::MAX,
             total_cycles: u64::MAX,
             last_cycle: 0,
+            current_cycle: 10_000,
             misbehavior_count: 0,
             total_network_votes: 1,
             listers_count: u64::MAX,

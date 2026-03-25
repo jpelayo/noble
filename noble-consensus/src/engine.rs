@@ -89,6 +89,8 @@ pub struct CycleEngine {
     r1_retry_logged: bool,
     /// P1.2: Whether an R2 confirmation vote has been cast this cycle.
     r2_vote_cast: bool,
+    /// R1 produced a Strong majority (>50%) — R2 is skipped this cycle.
+    r1_decisive: bool,
     /// Suppresses repeated "no candidate for R2 vote" log after first emission per cycle.
     r2_retry_logged: bool,
     /// Whether the early commit (120s before cycle boundary) has fired this cycle.
@@ -180,6 +182,7 @@ impl CycleEngine {
             r1_retry_logged: false,
             r2_vote_cast: false,
             r2_retry_logged: false,
+            r1_decisive: false,
             early_commit_done: false,
             reputation: ReputationEngine::new(),
             first_tick: true,
@@ -459,6 +462,7 @@ impl CycleEngine {
         self.r1_retry_logged = false;
         self.r2_vote_cast = false;
         self.r2_retry_logged = false;
+        self.r1_decisive = false;
         self.epoch_reset_cycle = None;
         // When hopping to a new chain (height 0), clear the cycle epoch.
         // Next tick sets a wall-clock-aligned epoch; the new chain's block 1
@@ -594,6 +598,7 @@ impl CycleEngine {
             // with the same number — re-voting would trigger equivocation.
             self.r1_vote_cast = true;
             self.r2_vote_cast = true;
+            self.r1_decisive = true;
             self.r1_retry_logged = true;
             self.r2_retry_logged = true;
             // One-shot guard for the next handle_cycle_boundary cleanup.
@@ -749,8 +754,30 @@ impl CycleEngine {
             }
         }
 
+        // Conditional R2: evaluate R1 at Reflection entry. If R1 has Strong
+        // majority (>50%), skip R2 — it would just echo the R1 winner.
+        if new_phase == CyclePhase::Reflection && !self.r1_decisive && !self.r2_vote_cast {
+            let tallies = self.vote_mgr.current_tallies();
+            let voter_count = self.vote_mgr.unique_voter_count();
+            if voter_count > 0 {
+                let leader = tallies.iter().max_by_key(|(_, c)| *c);
+                if let Some((hash, count)) = leader {
+                    if *count * 2 > voter_count {
+                        self.r1_decisive = true;
+                        self.r2_vote_cast = true;
+                        info!(
+                            "cycle {new_cycle}: R1 decisive ({count}/{voter_count} = {:.0}% for {}) — R2 skipped",
+                            (*count as f64 / voter_count as f64) * 100.0,
+                            &hex::encode(hash.as_bytes())[..8],
+                        );
+                    }
+                }
+            }
+        }
+
         // Cast R2 confirmation vote after VOTE_CAST_DELAY seconds into Reflection.
         // R1 votes had the rest of the Voting phase + delay to propagate.
+        // Gated on !r2_vote_cast — which is set to true when R1 is decisive (above).
         if new_phase == CyclePhase::Reflection && !self.r2_vote_cast {
             let phase_offset = self.cycle_mgr.phase_offset(now);
             let remaining = self.cycle_mgr.seconds_until_phase_change(now);
@@ -809,6 +836,7 @@ impl CycleEngine {
                 self.r1_retry_logged = false;
                 self.r2_vote_cast = false;
                 self.r2_retry_logged = false;
+                self.r1_decisive = false;
                 self.early_commit_done = false;
                 outputs.push(CycleIo::Log(format!(
                     "cycle {cl}: entering Proposal phase"
@@ -1361,6 +1389,7 @@ impl CycleEngine {
             self.r1_retry_logged = false;
             self.r2_vote_cast = false;
             self.r2_retry_logged = false;
+            self.r1_decisive = false;
         }
 
         outputs
@@ -2526,7 +2555,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         // Sign the coinbase
         let chain_id = test_chain_id();
