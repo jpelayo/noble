@@ -573,6 +573,79 @@ body {
 }
 .btn-danger:hover { background: color-mix(in srgb, var(--error) 85%, #000); }
 
+.btn-success {
+  background: var(--success);
+  color: #fff;
+}
+.btn-success:hover { background: color-mix(in srgb, var(--success) 85%, #000); }
+
+.btn-outline {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn-outline:hover { background: var(--bg-tertiary); }
+
+/* ── Badge variants (governance) ── */
+.badge-success { background: var(--success); color: #fff; }
+.badge-muted { background: var(--bg-tertiary); color: var(--text-muted); }
+.badge-warning { background: var(--warning, #f59e0b); color: #000; }
+.badge-info { background: var(--accent); color: #fff; }
+.badge-accent { background: #8b5cf6; color: #fff; }
+
+/* ── Utility classes ── */
+.text-muted { color: var(--text-muted); }
+
+.inline-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--gap-xs) var(--gap);
+  font-size: var(--font-size-sm);
+}
+.inline-dl .dt { color: var(--text-muted); font-weight: 600; }
+.inline-dl .dd { color: var(--text-primary); }
+
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+.mini-table thead th {
+  text-align: left;
+  padding: var(--gap-xs) var(--gap-sm);
+  border-bottom: 2px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.mini-table tbody td {
+  padding: var(--gap-xs) var(--gap-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.input {
+  width: 100%;
+  padding: var(--gap-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-sans);
+  outline: none;
+}
+.input:focus { border-color: var(--accent); }
+
+.info-card {
+  padding: var(--gap);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .form-select {
   padding: var(--gap-sm) var(--gap);
   background: var(--bg-surface);

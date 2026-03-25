@@ -11,16 +11,40 @@ import NobleTxCore
 import UIKit
 import UniformTypeIdentifiers
 
-private struct FaucetListDTO: Decodable, Sendable {
+private struct FaucetListDTO: Sendable {
     let faucets: [FaucetEntryDTO]
 }
-private struct FaucetEntryDTO: Decodable, Sendable {
+
+extension FaucetListDTO: Decodable {
+    nonisolated init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.faucets = try container.decode([FaucetEntryDTO].self, forKey: .faucets)
+    }
+    private enum CodingKeys: String, CodingKey { case faucets }
+}
+
+private struct FaucetEntryDTO: Sendable {
     let url: String
     let faucet_address: String
     let faucet_balance: UInt64
     let drip_amount: UInt64
     let network: String
     let last_probed: UInt64
+}
+
+extension FaucetEntryDTO: Decodable {
+    nonisolated init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.url = try container.decode(String.self, forKey: .url)
+        self.faucet_address = try container.decode(String.self, forKey: .faucet_address)
+        self.faucet_balance = try container.decode(UInt64.self, forKey: .faucet_balance)
+        self.drip_amount = try container.decode(UInt64.self, forKey: .drip_amount)
+        self.network = try container.decode(String.self, forKey: .network)
+        self.last_probed = try container.decode(UInt64.self, forKey: .last_probed)
+    }
+    private enum CodingKeys: String, CodingKey {
+        case url, faucet_address, faucet_balance, drip_amount, network, last_probed
+    }
 }
 
 /// Routes bridge messages from the web UI to Swift services.
@@ -320,18 +344,6 @@ final class WebBridgeHandler {
                 throw BridgeError.missingParam("url, address")
             }
             return try await handleFaucetHopRequest(faucetURL: urlStr, address: address)
-
-        // ── Governance RPCs (badge + DAO) ──
-        case "getBadgeHolders":      return try await rpcPassthrough("noble_getBadgeHolders")
-        case "getActiveProposals":   return try await rpcPassthrough("noble_getActiveProposals")
-        case "getProposalHistory":   return try await rpcPassthrough("noble_getProposalHistory", params: ["limit": params["limit"] ?? 50])
-        case "getMyBadgeStatus":     return try await rpcPassthrough("noble_getMyBadgeStatus")
-        case "proposeBadge":         return try await rpcPassthrough("noble_proposeBadge", params: params)
-        case "voteBadgeProposal":    return try await rpcPassthrough("noble_voteBadgeProposal", params: params)
-        case "getActivePolls":       return try await rpcPassthrough("noble_getActivePolls")
-        case "getPollHistory":       return try await rpcPassthrough("noble_getPollHistory", params: ["limit": params["limit"] ?? 50])
-        case "createPoll":           return try await rpcPassthrough("noble_createPoll", params: params)
-        case "votePoll":             return try await rpcPassthrough("noble_votePoll", params: params)
 
         default:
             throw BridgeError.unknownAction(action)

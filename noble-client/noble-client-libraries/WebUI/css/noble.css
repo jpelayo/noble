@@ -1908,6 +1908,15 @@ body {
 }
 .error-card button:hover { opacity: 0.85; }
 
+.info-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  text-align: center;
+  color: var(--text-muted);
+}
+
 /* ── Page content constraints ── */
 .page-content {
   max-width: 960px;

@@ -139,6 +139,7 @@ export function init(root, ctx) {
         loadInFlight = true;
         const address = state.walletAddress;
         if (!address) {
+            loadInFlight = false;
             balanceContainer.innerHTML = '';
             balanceContainer.appendChild(emptyState({
                 icon: '\u{1F4B0}',

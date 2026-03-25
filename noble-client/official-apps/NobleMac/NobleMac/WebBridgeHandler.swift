@@ -328,40 +328,6 @@ final class WebBridgeHandler {
             }
             return try await handleFaucetHopRequest(faucetURL: urlStr, address: address)
 
-        // ── Governance RPCs (badge + DAO) ──
-
-        case "getBadgeHolders":
-            return try await rpcPassthrough("noble_getBadgeHolders")
-
-        case "getActiveProposals":
-            return try await rpcPassthrough("noble_getActiveProposals")
-
-        case "getProposalHistory":
-            let propLimit = params["limit"] as? Int ?? 50
-            return try await rpcPassthrough("noble_getProposalHistory", params: ["limit": propLimit])
-
-        case "getMyBadgeStatus":
-            return try await rpcPassthrough("noble_getMyBadgeStatus")
-
-        case "proposeBadge":
-            return try await rpcPassthrough("noble_proposeBadge", params: params)
-
-        case "voteBadgeProposal":
-            return try await rpcPassthrough("noble_voteBadgeProposal", params: params)
-
-        case "getActivePolls":
-            return try await rpcPassthrough("noble_getActivePolls")
-
-        case "getPollHistory":
-            let pollLimit = params["limit"] as? Int ?? 50
-            return try await rpcPassthrough("noble_getPollHistory", params: ["limit": pollLimit])
-
-        case "createPoll":
-            return try await rpcPassthrough("noble_createPoll", params: params)
-
-        case "votePoll":
-            return try await rpcPassthrough("noble_votePoll", params: params)
-
         default:
             throw BridgeError.unknownAction(action)
         }

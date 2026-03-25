@@ -343,6 +343,7 @@ final class AppState {
         chainId = ""
         blockHeight = 0
         walletBalance = nil
+        walletAddress = nil
         connectionError = nil
     }
 

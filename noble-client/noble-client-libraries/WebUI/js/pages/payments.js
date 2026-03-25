@@ -86,7 +86,14 @@ export function init(root, ctx) {
         if (!alive || loadInFlight) return;
         loadInFlight = true;
         const address = state.walletAddress;
-        if (!address) return;
+        if (!address) {
+            loadInFlight = false;
+            balanceContainer.innerHTML = `<div class="info-card" role="status">
+                <p>Wallet not loaded. Connect to a running node to view your balance and transactions.</p>
+            </div>`;
+            historyContainer.innerHTML = '';
+            return;
+        }
 
         try {
             // Single RPC — server returns fully enriched list (all address variants, mempool).
@@ -709,9 +716,12 @@ export function init(root, ctx) {
     return {
         destroy() { alive = false; clearInterval(autoRefreshId); closeModal(); },
         refresh(newState) {
+            const prevAddr = state.walletAddress;
             const prevBalance = lastKnownBalance;
             Object.assign(state, newState);
-            if (newState.walletBalance !== undefined && newState.walletBalance !== prevBalance) {
+            const addrArrived = !prevAddr && state.walletAddress;
+            const balanceChanged = newState.walletBalance !== undefined && newState.walletBalance !== prevBalance;
+            if (addrArrived || balanceChanged) {
                 lastKnownBalance = newState.walletBalance;
                 loadData(balanceContainer, historyContainer);
             }

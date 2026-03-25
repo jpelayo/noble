@@ -22,7 +22,7 @@ const { formatNumber, formatChainLabel } = await import(_m('./utils.js'));
 const [
   overviewPage, blocksPage, blockDetailPage, transactionsPage,
   txDetailPage, verifyPage, mempoolPage, networkPage,
-  consensusPage, walletPage, healthPage, identityPage,
+  consensusPage, governancePage, walletPage, healthPage, identityPage,
   tracePage, storagePage, settingsPage, setupPage,
 ] = await Promise.all([
   import(_m('./pages/overview.js')),
@@ -34,6 +34,7 @@ const [
   import(_m('./pages/mempool.js')),
   import(_m('./pages/network.js')),
   import(_m('./pages/consensus.js')),
+  import(_m('./pages/governance.js')),
   import(_m('./pages/wallet.js')),
   import(_m('./pages/health.js')),
   import(_m('./pages/identity.js')),
@@ -248,6 +249,7 @@ router
   .add('/mempool', mempoolPage)
   .add('/network', networkPage)
   .add('/consensus', consensusPage)
+  .add('/governance', governancePage)
   .add('/wallet', walletPage)
   .add('/health', healthPage)
   .add('/storage', storagePage)

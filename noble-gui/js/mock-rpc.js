@@ -902,6 +902,71 @@ export class MockRpcClient {
         };
       }
 
+      // ── Governance RPCs (mock) ──
+
+      case 'noble_getMyBadgeStatus':
+        return { has_badge: true, bootstrap_mode: false };
+
+      case 'noble_getBadgeHolders':
+        return this.#validators.map(v => ({
+          pubkey: v.public_key,
+          node_name: v.name,
+          status: 'active',
+          granted_at_height: 1,
+          last_seen: Math.floor(Date.now() / 1000),
+        }));
+
+      case 'noble_getActiveProposals':
+        return [{
+          proposal_hash: 'abcd1234',
+          proposal_type: 'grant',
+          target_pubkey: 'nbl1pmockproposal00000000000000000000000mock',
+          reason: 'Reliable uptime',
+          votes_for: 1,
+          votes_against: 0,
+          cycle: 100,
+        }];
+
+      case 'noble_getProposalHistory':
+        return [{
+          proposal_type: 'grant',
+          target_pubkey: 'nbl1pmockhistory000000000000000000000000mock',
+          votes_for: 2,
+          votes_against: 0,
+          result: 'accepted',
+          cycle: 50,
+        }];
+
+      case 'noble_getActivePolls':
+        return [{
+          poll_id: 'poll_mock_001',
+          question: 'Should we increase the block size limit?',
+          votes_yes: 1,
+          votes_no: 0,
+          votes_abstain: 0,
+          total_eligible: 2,
+          expires_at_cycle: 200,
+          status: 'active',
+          created_at_cycle: 100,
+        }];
+
+      case 'noble_getPollHistory':
+        return [{
+          poll_id: 'poll_mock_old',
+          question: 'Should we reduce cycle duration?',
+          votes_yes: 2,
+          votes_no: 1,
+          votes_abstain: 0,
+          status: 'closed',
+          created_at_cycle: 20,
+        }];
+
+      case 'noble_voteBadgeProposal':
+      case 'noble_proposeBadge':
+      case 'noble_votePoll':
+      case 'noble_createPoll':
+        return { ok: true };
+
       case 'noble_getCycleHistory': {
         const now = Math.floor(Date.now() / 1000);
         const currentCycle = Math.floor(now / CYCLE_DURATION_SECS);

@@ -9,7 +9,6 @@ import { init as initPayments } from './pages/payments.js';
 import { init as initContacts } from './pages/contacts.js';
 import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
-import { init as initGovernance } from './pages/governance.js';
 import { init as initTxDetail } from './pages/tx-detail.js';
 
 const pages = {
@@ -21,7 +20,6 @@ const pages = {
     contacts:   initContacts,
     settings:   initSettings,
     faucet:     initFaucet,
-    governance: initGovernance,
     'tx-detail': initTxDetail,
 };
 
@@ -257,6 +255,7 @@ async function boot() {
             const state = await Bridge.call('noble_app', 'getState');
             // Silently update state fields WITHOUT triggering page invalidation
             const connChanged = appState.isConnected !== state.isConnected;
+            const walletArrived = !appState.walletAddress && state.walletAddress;
             Object.assign(appState, state);
             App._updateChainBar();
             if (state.isConnected) {
@@ -264,8 +263,8 @@ async function boot() {
                 App._heartbeatFailures = 0;
                 App._bridgeTimeouts = 0;
                 appState._confirmedDisconnected = false;
-                // If we just reconnected, refresh the current page
-                if (connChanged && currentPage && currentPage.refresh) {
+                // Refresh page on reconnect or when wallet address first arrives
+                if ((connChanged || walletArrived) && currentPage && currentPage.refresh) {
                     currentPage.refresh(appState);
                 }
             } else if (connChanged) {
