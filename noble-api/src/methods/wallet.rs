@@ -234,7 +234,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let mut taproot_bal = 0u64;
 
         // Scan UTXOs per address to separate mature from immature coinbase.
-        let mut scan_address = |addr: &noble_core::NobleAddress| -> (u64, u64) {
+        let scan_address = |addr: &noble_core::NobleAddress| -> (u64, u64) {
             let mut bal = 0u64;
             let mut immature = 0u64;
             for (_, entry) in storage.get_address_utxos(addr).unwrap_or_default() {
