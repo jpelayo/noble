@@ -100,7 +100,7 @@ export function init(root, ctx) {
                 <div style="width:${100 - r1Pct}%;background:var(--error-bg, rgba(239,68,68,0.3))"></div>
               </div>
             </div>
-            <div style="margin-bottom:var(--gap)">
+            ${r2For > 0 ? `<div style="margin-bottom:var(--gap)">
               <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px">
                 <span><span class="badge consensus-r2">R2</span> Round 2</span>
                 <span>${r2For} FOR / ${r2Against} against &mdash; <strong>${r2Pct}%</strong></span>
@@ -109,7 +109,12 @@ export function init(root, ctx) {
                 <div style="width:${r2Pct}%;background:var(--success);transition:width 0.3s"></div>
                 <div style="width:${100 - r2Pct}%;background:var(--error-bg, rgba(239,68,68,0.3))"></div>
               </div>
-            </div>
+            </div>` : `<div style="margin-bottom:var(--gap)">
+              <div style="display:flex;justify-content:space-between;font-size:var(--font-size-sm);margin-bottom:4px;opacity:0.5">
+                <span><span class="badge consensus-r2">R2</span> Skipped</span>
+                <span>R1 decisive</span>
+              </div>
+            </div>`}
             <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)">
               ${totalWitnesses} unique witnesses out of ${total} voters &middot; ${strengthBadge}
             </div>

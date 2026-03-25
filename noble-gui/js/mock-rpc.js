@@ -880,16 +880,19 @@ export class MockRpcClient {
 
       case 'noble_getBlockVotes': {
         const height = params[0] || 1;
+        // R1 decisive (>50%) → R2 skipped (empty r2_voters).
+        // Simulate: even heights have R2 skipped, odd heights have R2 voters.
+        const r1Decisive = height % 2 === 0;
         return {
           height,
           cycle_number: Math.max(0, height - 1),
           voter_count: 2,
-          strength: 'Unanimous',
+          strength: 'Strong',
           r1_voters: this.#validators.slice(0, 2).map(v => ({
             validator_key: v.public_key,
             name: v.name,
           })),
-          r2_voters: this.#validators.slice(0, 1).map(v => ({
+          r2_voters: r1Decisive ? [] : this.#validators.slice(0, 2).map(v => ({
             validator_key: v.public_key,
             name: v.name,
           })),

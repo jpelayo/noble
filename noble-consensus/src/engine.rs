@@ -944,6 +944,7 @@ impl CycleEngine {
             self.r1_retry_logged = false;
             self.r2_vote_cast = false;
             self.r2_retry_logged = false;
+            self.r1_decisive = false;
             outputs.push(CycleIo::Log(format!(
                 "cycle {cl}: no connected peers — genesis requires live witnesses"
             )));
