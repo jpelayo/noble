@@ -83,7 +83,7 @@ export function init(root, ctx) {
         <table class="data-table trace-table">
           <thead>
             <tr>
-              <th style="width:80px">Time</th>
+              <th style="width:140px">Time</th>
               <th style="width:60px">Level</th>
               <th style="width:200px">Target</th>
               <th>Message</th>
@@ -218,7 +218,8 @@ export function init(root, ctx) {
       return;
     }
     entriesBody.innerHTML = entries.map(entry => {
-      const time = new Date(entry.timestamp * 1000).toLocaleTimeString();
+      const d = new Date(entry.timestamp * 1000);
+      const time = d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString();
       const levelColor = LEVEL_COLORS[entry.level] || '#9ca3af';
       const task = entry.fields?.task || '';
       const target = entry.target.length > 30 ? '...' + entry.target.slice(-27) : entry.target;

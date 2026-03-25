@@ -127,6 +127,9 @@ final class AppState {
     /// Live API service for the connected node.
     var apiService: (any NobleAPIService)?
 
+    /// Guard against concurrent connectToNode() calls.
+    private var isConnecting = false
+
     /// Keychain service for secure key storage.
     let keychainService: any KeychainService = LiveKeychainService(service: "com.infinitecontext.noblemac")
 

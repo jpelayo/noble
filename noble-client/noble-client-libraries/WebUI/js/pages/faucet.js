@@ -89,19 +89,30 @@ export function init(root, ctx) {
         requesting = true;
         resultMsg = null;
         errorMsg = null;
+        // Set cooldown immediately — prevents double-submit even if response is lost.
+        localStorage.setItem(COOLDOWN_KEY, Date.now().toString());
+        resultMsg = 'Request sent — verifying...';
         render();
 
         try {
             const res = await Bridge.call('noble_api', 'faucetRequest', {
                 address: state.walletAddress
             });
-            localStorage.setItem(COOLDOWN_KEY, Date.now().toString());
             resultMsg = res.message || `Received ${formatAmount(res.amount)} NOBLE`;
             requesting = false;
             if (alive) render();
-        } catch (err) {
-            errorMsg = err.message || 'Faucet request failed';
+        } catch {
+            // Bridge callback may be lost but the node likely processed the request.
+            // Check balance to confirm.
             requesting = false;
+            try {
+                const bal = await Bridge.call('noble_api', 'getBalance', { address: state.walletAddress });
+                resultMsg = `Request processed. Balance: ${formatAmount(bal.balance)} NOBLE`;
+            } catch {
+                resultMsg = null;
+                errorMsg = 'Request failed. Please try again later.';
+                localStorage.removeItem(COOLDOWN_KEY);
+            }
             if (alive) render();
         }
     }

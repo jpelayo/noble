@@ -483,7 +483,8 @@ ws.subscribe('peerUpdates', (data) => {
   // Filter out non-connectivity events (status updates belong in Protocol Activity, not here).
   const _connEvents = new Set(['disconnected', 'banned', 'rejected']);
   if (data && data.event && _connEvents.has(data.event)) {
-    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const d = new Date();
+    const time = d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     window._connLog.push({ time, ...data });
     if (window._connLog.length > CONN_LOG_MAX) window._connLog.shift();
     // Notify network page if it's mounted.
