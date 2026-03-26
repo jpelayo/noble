@@ -1815,6 +1815,7 @@ mod tests {
             timestamp: 1700000000,
             tx_count: 3,
             validator_id: "dd".repeat(16),
+            validator_name: None,
             transactions: vec![],
         };
 
