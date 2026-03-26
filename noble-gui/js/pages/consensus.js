@@ -27,7 +27,7 @@ const PHASE_COLORS = {
 
 const STATE_STYLES = {
   complete: 'opacity:1',
-  active:   'opacity:1;box-shadow:0 0 0 2px var(--accent)',
+  active:   'opacity:1',
   pending:  'opacity:0.3',
   skipped:  'opacity:0.2',
 };
@@ -1169,7 +1169,7 @@ export function init(root, ctx) {
         csTimeline.innerHTML = creating
           ? '<div class="empty-state">Chain created — waiting for first consensus cycle</div>'
           : '<div class="empty-state">No consensus cycles yet</div>';
-        return;
+        return false;
       }
 
       // Fetch recent blocks from the chain — enough to fill TIMELINE_LIMIT cycles.
@@ -1377,9 +1377,11 @@ export function init(root, ctx) {
       } catch (_) { /* getCheckpoints not available */ }
 
       renderTimeline(cycles, finalityStatus, checkpointData);
+      return true;
     } catch (e) {
       console.error('[consensus] load timeline:', e);
       csTimeline.innerHTML = '<div class="empty-state">Failed to load cycle history</div>';
+      return false;
     }
   }
 
@@ -1481,7 +1483,7 @@ export function init(root, ctx) {
         seg.style.cssText = `flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;background:${color.bg};color:${color.fg};font-size:var(--font-size-xs);${stateStyle};position:relative;padding:2px 4px;transition:opacity 0.3s`;
 
         if (isActive) {
-          seg.style.animation = 'pulse 2s infinite';
+          seg.style.opacity = '0.85';
         }
 
         // Phase label
@@ -1938,8 +1940,10 @@ export function init(root, ctx) {
     try {
       const status = await rpc.call('noble_getCycleStatus');
       updateCycleDisplay(status);
+      return true;
     } catch (e) {
       console.error('[consensus] load cycle:', e);
+      return false;
     }
   }
 
@@ -2949,11 +2953,16 @@ export function init(root, ctx) {
   });
 
   // ── Bootstrap ──
-  // Load voting strategy first so checkbox/radio state is correct when validators render.
-  // Then load validators (populates name lookup), then timeline and tallies use friendly names.
-  loadVotingStrategy().then(() => loadValidators()).then(() => { loadTimeline(); loadVoteTallies(); });
-  loadCycle();
+  // Fire all loads immediately (no serial chain gating timeline/tallies).
+  // Validator name lookup may not be ready on first render — WS-triggered
+  // reloads will re-render with friendly names within seconds.
+  loadVotingStrategy().then(() => loadValidators());
+  let _retryTimers = [];
+  loadCycle().then(ok => { if (!ok) _retryTimers.push(setTimeout(loadCycle, 3000)); });
+  loadTimeline().then(ok => { if (!ok) _retryTimers.push(setTimeout(loadTimeline, 3000)); });
+  loadVoteTallies();
   loadCandidates();
+  unsubs.push(() => _retryTimers.forEach(t => clearTimeout(t)));
 
   // Refresh buttons + 30s auto-refresh for validator registry and candidates.
   const refreshValBtn = root.querySelector('#cs-refresh-validators');
