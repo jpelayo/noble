@@ -1769,7 +1769,7 @@ export function init(root, ctx) {
                 checksum: hash,
                 fee,
                 fee_rate: feeRate,
-                metadata: allMeta,
+                metadata: allMeta.map(m => ({ key: m.key, value: m.value, mode: m.mode || 'plaintext' })),
                 utxos,
                 previousChecksum: previousChecksum || undefined
             });

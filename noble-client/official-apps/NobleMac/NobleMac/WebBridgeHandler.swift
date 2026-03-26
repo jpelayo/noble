@@ -580,7 +580,9 @@ final class WebBridgeHandler {
             }
             let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
             let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
-            let metadata = params["metadata"] as? [[String: String]] ?? []
+            let metadata = (params["metadata"] as? [[String: Any]] ?? []).map {
+                ["key": $0["key"] as? String ?? "", "value": $0["value"] as? String ?? ""]
+            }
             let metadataItems = metadata.map {
                 MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
             }
@@ -663,8 +665,8 @@ final class WebBridgeHandler {
             let chainId = appState.resolvedChainId
             let txType = params["tx_type"] as? String ?? "notarization"
             let checksum = params["checksum"] as? String ?? String(repeating: "00", count: 32)
-            let metaArr = (params["metadata"] as? [[String: String]] ?? []).map {
-                ["key": $0["key"] ?? "", "value": $0["value"] ?? ""]
+            let metaArr = (params["metadata"] as? [[String: Any]] ?? []).map {
+                ["key": $0["key"] as? String ?? "", "value": $0["value"] as? String ?? ""]
             }
             let recipient = params["recipient"] as? String ?? changeAddress.map { String(format: "%02x", $0) }.joined()
 
