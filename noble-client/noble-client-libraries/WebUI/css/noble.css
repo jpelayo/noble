@@ -468,6 +468,15 @@ input, textarea, select, button {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--gap);
+  align-items: stretch;
+}
+.split-layout > * > .panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.split-layout > * > .panel > .panel-body {
+  flex: 1;
 }
 
 @media (max-width: 768px) {

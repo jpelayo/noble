@@ -104,9 +104,9 @@ pub const TX_TYPE_FEE: u8 = 0x11;
 pub const TX_TYPE_DAO: u8 = 0x12;
 
 /// Number of confirmations before coinbase outputs are spendable.
-/// Prevents cascading invalidation if a reorg orphans the coinbase block.
-/// Bitcoin uses 100; NOBLE uses 6 (aligned with finality threshold).
-pub const COINBASE_MATURITY: u64 = 6;
+/// ALL UTXOs (coinbase and non-coinbase) require this many confirmations
+/// before they can be spent. Aligned with finality threshold (3 cycles).
+pub const COINBASE_MATURITY: u64 = 3;
 
 /// Minimum presence time (seconds) before a node can be proposed for a badge.
 /// Default: 7 days = 604,800 seconds. Short-lived chains: 2 days = 172,800 seconds.

@@ -29,7 +29,7 @@ export function init(root, ctx) {
     <!-- Active Items (proposals + polls) -->
     <div class="panel" id="gov-active">
       <div class="panel-header">Active Governance Items</div>
-      <div class="panel-body" id="gov-active-body">Loading...</div>
+      <div class="panel-body" id="gov-active-body" style="max-height:500px;overflow-y:auto">Loading...</div>
     </div>
 
     <!-- Badge Holders -->
@@ -53,7 +53,7 @@ export function init(root, ctx) {
     <!-- History -->
     <div class="panel" id="gov-history">
       <div class="panel-header">History</div>
-      <div class="panel-body" id="gov-history-body">Loading...</div>
+      <div class="panel-body" id="gov-history-body" style="max-height:500px;overflow-y:auto">Loading...</div>
     </div>
   `;
 

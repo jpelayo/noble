@@ -58,64 +58,76 @@ pub trait BadgeApi {
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S>> {
     async fn get_badge_holders(&self) -> Result<Vec<BadgeHolderResponse>, ErrorObjectOwned> {
-        let engine = self.consensus.read();
-        let store = engine.badge_store();
-        let peer_info = self.peer_info.read();
-        let current_cycle = engine.current_cycle();
-        let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+        // Collect data under consensus lock, then release before resolving names.
+        let current_cycle;
+        let in_bootstrap;
+        let badge_wires: Vec<(Vec<u8>, u64, u64, String)>;
+        {
+            let engine = self.consensus.read();
+            current_cycle = engine.current_cycle();
+            in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+            let store = engine.badge_store();
+            badge_wires = store.list_all().into_iter().map(|(wire, b)| {
+                (wire.to_vec(), b.granted_at_height, b.last_seen, format!("{:?}", b.status).to_lowercase())
+            }).collect();
+        }
 
-        let mut holders: Vec<BadgeHolderResponse> = store
-            .list_all()
-            .into_iter()
-            .map(|(pubkey_wire, badge)| {
-                let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(pubkey_wire)
-                    .unwrap_or_else(|| hex::encode(pubkey_wire));
-                let node_name = peer_info.values().find_map(|p| {
-                    if p.identity_key.as_deref() == Some(pubkey_wire) {
-                        Some(p.peer_id.clone())
-                    } else {
-                        None
-                    }
-                });
-                BadgeHolderResponse {
-                    pubkey: pubkey_hex,
-                    node_name,
-                    status: format!("{:?}", badge.status).to_lowercase(),
-                    granted_at_height: badge.granted_at_height,
-                    last_seen: badge.last_seen,
-                }
-            })
-            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut holders = Vec::new();
 
-        // During bootstrap, include all validators as implicit badge holders.
+        // 1. Explicit badge holders from store
+        for (wire, granted, last_seen, status) in &badge_wires {
+            let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(wire)
+                .unwrap_or_else(|| hex::encode(wire));
+            let node_name = self.resolve_friendly_name(wire);
+            seen.insert(pubkey_hex.clone());
+            holders.push(BadgeHolderResponse {
+                pubkey: pubkey_hex, node_name,
+                status: status.clone(),
+                granted_at_height: *granted, last_seen: *last_seen,
+            });
+        }
+
+        // 2. During bootstrap: all voting-capable peers (registry + connected peers with identity_key)
         if in_bootstrap {
-            let registry = self.validator_registry.read();
-            let existing: std::collections::HashSet<String> =
-                holders.iter().map(|h| h.pubkey.clone()).collect();
-            for (pubkey, _weight) in registry.list_validators() {
-                let wire = pubkey.to_wire_bytes();
-                let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(&wire)
-                    .unwrap_or_else(|| hex::encode(&wire));
-                if !existing.contains(&pubkey_hex) {
-                    let node_name = peer_info.values().find_map(|p| {
-                        if p.identity_key.as_deref() == Some(wire.as_slice()) {
-                            Some(p.peer_id.clone())
-                        } else {
-                            None
+            // Local validator registry
+            {
+                let registry = self.validator_registry.read();
+                for (pubkey, _) in registry.list_validators() {
+                    let wire = pubkey.to_wire_bytes();
+                    let hex = noble_crypto::noble_addr::encode_wire_bytes(&wire)
+                        .unwrap_or_else(|| hex::encode(&wire));
+                    if seen.insert(hex.clone()) {
+                        let node_name = self.resolve_friendly_name(&wire);
+                        holders.push(BadgeHolderResponse {
+                            pubkey: hex, node_name,
+                            status: "bootstrap".to_string(),
+                            granted_at_height: 0, last_seen: 0,
+                        });
+                    }
+                }
+            }
+            // Connected peers that announced as validators
+            {
+                let peer_info = self.peer_info.read();
+                for p in peer_info.values() {
+                    if let Some(ref ik) = p.identity_key {
+                        let hex = noble_crypto::noble_addr::encode_wire_bytes(ik)
+                            .unwrap_or_else(|| hex::encode(ik));
+                        if seen.insert(hex.clone()) {
+                            let node_name = self.resolve_friendly_name(ik);
+                            holders.push(BadgeHolderResponse {
+                                pubkey: hex, node_name,
+                                status: "bootstrap".to_string(),
+                                granted_at_height: 0, last_seen: 0,
+                            });
                         }
-                    });
-                    holders.push(BadgeHolderResponse {
-                        pubkey: pubkey_hex,
-                        node_name,
-                        status: "bootstrap".to_string(),
-                        granted_at_height: 0,
-                        last_seen: 0,
-                    });
+                    }
                 }
             }
         }
 
-        holders.sort_by(|a, b| a.granted_at_height.cmp(&b.granted_at_height));
+        holders.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
         Ok(holders)
     }
 

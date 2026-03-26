@@ -91,14 +91,11 @@ pub struct UtxoEntry {
 }
 
 impl UtxoEntry {
-    /// Whether this coinbase output has reached maturity and can be spent.
+    /// Whether this UTXO has reached maturity and can be spent.
     ///
-    /// Non-coinbase outputs are always mature. Coinbase outputs require
-    /// `COINBASE_MATURITY` confirmations before they can be referenced as inputs.
+    /// ALL outputs (coinbase and non-coinbase) require `COINBASE_MATURITY`
+    /// confirmations before they can be referenced as inputs.
     pub fn is_mature(&self, current_height: u64) -> bool {
-        if !self.is_coinbase {
-            return true;
-        }
         current_height >= self.height + crate::constants::COINBASE_MATURITY
     }
 }

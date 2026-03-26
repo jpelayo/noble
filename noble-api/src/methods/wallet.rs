@@ -239,7 +239,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             let mut immature = 0u64;
             for (_, entry) in storage.get_address_utxos(addr).unwrap_or_default() {
                 bal = bal.saturating_add(entry.value);
-                if entry.is_coinbase && !entry.is_mature(tip_height) {
+                if !entry.is_mature(tip_height) {
                     immature = immature.saturating_add(entry.value);
                 }
             }
