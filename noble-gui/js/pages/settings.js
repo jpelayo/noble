@@ -1463,23 +1463,9 @@ export function init(root, ctx) {
       faucetDistMsg.style.color = 'var(--text-muted)';
       faucetDistMsg.textContent = 'Resetting...';
       try {
-        // Derive faucet URL from node info (same host, port 8786)
-        const info = await rpc.call('noble_getNodeInfo');
-        const listen = info.faucet_listen || '0.0.0.0:8786';
-        const port = listen.split(':').pop() || '8786';
-        const host = window.location.hostname;
-        const proto = window.location.protocol === 'https:' ? 'https' : 'http';
-        const res = await fetch(`${proto}://${host}:${port}/api/faucet/reset-limits`, {
-          method: 'POST',
-          headers: { 'Gatekeeper': 'noble' },
-        });
-        const json = await res.json();
-        if (json.success) {
-          faucetDistMsg.style.color = 'var(--success)';
-          faucetDistMsg.textContent = `Rate limits cleared (${json.cleared} records)`;
-        } else {
-          throw new Error(json.message || 'Failed');
-        }
+        const json = await rpc.call('noble_resetFaucetLimits');
+        faucetDistMsg.style.color = 'var(--success)';
+        faucetDistMsg.textContent = `Rate limits cleared (${json.cleared || 0} records)`;
       } catch (e) {
         faucetDistMsg.style.color = 'var(--error)';
         faucetDistMsg.textContent = e.message || 'Failed to reset';

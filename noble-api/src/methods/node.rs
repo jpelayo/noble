@@ -202,6 +202,10 @@ pub trait NodeApi {
         faucet_address: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Reset faucet rate limits by calling the faucet's HTTP API internally.
+    #[method(name = "resetFaucetLimits")]
+    async fn reset_faucet_limits(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Detect the node's external (public) IP address by querying public services.
     ///
     /// Tries multiple IP-detection services in order; returns the first successful result.
@@ -1173,6 +1177,32 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         }
 
         Ok(serde_json::json!({ "success": true }))
+    }
+
+    async fn reset_faucet_limits(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let listen = self.faucet_listen.read().clone();
+        if listen.is_empty() {
+            return Err(ApiError::Internal("Faucet not configured".into()).into());
+        }
+        let port = listen.rsplit(':').next().unwrap_or("8786");
+        let url = format!("http://127.0.0.1:{port}/api/faucet/reset-limits");
+
+        let json = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let resp = ureq::post(&url)
+                .set("Gatekeeper", "noble")
+                .call()
+                .map_err(|e| format!("faucet request failed: {e}"))?;
+            let body = resp
+                .into_string()
+                .map_err(|e| format!("faucet response: {e}"))?;
+            serde_json::from_str(&body)
+                .map_err(|e| format!("faucet json: {e}"))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("task join: {e}")))?
+        .map_err(|e| ApiError::Internal(e))?;
+
+        Ok(json)
     }
 
     async fn detect_external_ip(&self) -> Result<DetectIpResponse, ErrorObjectOwned> {
