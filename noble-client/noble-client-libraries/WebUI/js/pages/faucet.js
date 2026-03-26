@@ -48,6 +48,7 @@ export function init(root, ctx) {
     let faucetInfo = null;
     let resultMsg = null;
     let errorMsg = null;
+    let peerFaucets = [];
 
     render();
     loadFaucetStatus();
@@ -89,7 +90,6 @@ export function init(root, ctx) {
         requesting = true;
         resultMsg = null;
         errorMsg = null;
-        // Set cooldown immediately — prevents double-submit even if response is lost.
         localStorage.setItem(COOLDOWN_KEY, Date.now().toString());
         resultMsg = 'Request sent — verifying...';
         render();
@@ -98,21 +98,37 @@ export function init(root, ctx) {
             const res = await Bridge.call('noble_api', 'faucetRequest', {
                 address: state.walletAddress
             });
-            resultMsg = res.message || `Received ${formatAmount(res.amount)} NOBLE`;
-            requesting = false;
-            if (alive) render();
-        } catch {
-            // Bridge callback may be lost but the node likely processed the request.
-            // Check balance to confirm.
-            requesting = false;
-            try {
-                const bal = await Bridge.call('noble_api', 'getBalance', { address: state.walletAddress });
-                resultMsg = `Request processed. Balance: ${formatAmount(bal.balance)} NOBLE`;
-            } catch {
-                resultMsg = null;
-                errorMsg = 'Request failed. Please try again later.';
-                localStorage.removeItem(COOLDOWN_KEY);
+            const txId = res.tx_id || res.txId || '';
+            const amt = res.amount ? formatAmount(res.amount) : '';
+
+            if (!txId) {
+                resultMsg = res.message || 'Request accepted';
+                requesting = false;
+                if (alive) render();
+                return;
             }
+
+            const short = txId.length > 16 ? txId.slice(0, 8) + '\u2026' + txId.slice(-8) : txId;
+            resultMsg = 'Coins sent! Checking mempool...';
+            requesting = false;
+            render();
+
+            const pollId = setInterval(async () => {
+                if (!alive) { clearInterval(pollId); return; }
+                try {
+                    const st = await Bridge.call('noble_api', 'getTransactionStatus', { txId });
+                    if (st.status === 'pending' || st.status === 'confirmed') {
+                        clearInterval(pollId);
+                        resultMsg = `${amt} NOBLE on the way! (tx ${short})`;
+                        if (alive) render();
+                    }
+                } catch { /* keep polling */ }
+            }, 2000);
+        } catch (e) {
+            requesting = false;
+            resultMsg = null;
+            errorMsg = e.message || 'Faucet request failed.';
+            localStorage.removeItem(COOLDOWN_KEY);
             if (alive) render();
         }
     }
@@ -221,8 +237,6 @@ export function init(root, ctx) {
     }
 
     // ── Peer Faucets ──
-
-    let peerFaucets = [];
 
     async function loadPeerFaucets() {
         try {

@@ -362,6 +362,7 @@ async fn main() {
     let mut app = Router::new()
         .route("/api/faucet", post(handlers::handle_faucet))
         .route("/api/faucet/status", get(handlers::handle_status))
+        .route("/api/faucet/reset-limits", post(handlers::handle_reset_limits))
         .with_state(state)
         .layer(gatekeeper)
         .layer(cors);

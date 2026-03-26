@@ -203,6 +203,7 @@ export function init(root, ctx) {
           </div>
           <div style="margin-top:var(--gap-sm);display:flex;align-items:center;gap:var(--gap-sm)">
             <button id="s-faucet-dist-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save Distribution Settings</button>
+            <button id="s-faucet-reset-limits" class="btn-sm" style="padding:6px 14px;background:var(--warning, #f59e0b);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset Rate Limits</button>
             <span id="s-faucet-dist-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
           </div>
         </div>
@@ -1453,6 +1454,40 @@ export function init(root, ctx) {
       faucetDistSave.disabled = false;
     }
   });
+
+  // Reset rate limits button
+  const faucetResetBtn = root.querySelector('#s-faucet-reset-limits');
+  if (faucetResetBtn) {
+    faucetResetBtn.addEventListener('click', async () => {
+      faucetResetBtn.disabled = true;
+      faucetDistMsg.style.color = 'var(--text-muted)';
+      faucetDistMsg.textContent = 'Resetting...';
+      try {
+        // Derive faucet URL from node info (same host, port 8786)
+        const info = await rpc.call('noble_getNodeInfo');
+        const listen = info.faucet_listen || '0.0.0.0:8786';
+        const port = listen.split(':').pop() || '8786';
+        const host = window.location.hostname;
+        const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+        const res = await fetch(`${proto}://${host}:${port}/api/faucet/reset-limits`, {
+          method: 'POST',
+          headers: { 'Gatekeeper': 'noble' },
+        });
+        const json = await res.json();
+        if (json.success) {
+          faucetDistMsg.style.color = 'var(--success)';
+          faucetDistMsg.textContent = `Rate limits cleared (${json.cleared} records)`;
+        } else {
+          throw new Error(json.message || 'Failed');
+        }
+      } catch (e) {
+        faucetDistMsg.style.color = 'var(--error)';
+        faucetDistMsg.textContent = e.message || 'Failed to reset';
+      } finally {
+        faucetResetBtn.disabled = false;
+      }
+    });
+  }
 
   // Auto-poll faucet balance every 30s.
   const faucetPollInterval = setInterval(loadFaucet, 30_000);

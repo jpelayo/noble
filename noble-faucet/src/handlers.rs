@@ -283,3 +283,16 @@ pub async fn handle_status(
         daily_cap: state.config.daily_cap,
     }))
 }
+
+/// POST /api/faucet/reset-limits — clear all rate limit history.
+pub async fn handle_reset_limits(
+    State(state): State<Arc<FaucetState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let db = state.db.clone();
+    let deleted = db_blocking(move || db.clear_distributions()).await?;
+    tracing::info!(task = "faucet", "Rate limits reset: {deleted} records cleared");
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "cleared": deleted
+    })))
+}

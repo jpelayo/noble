@@ -145,6 +145,15 @@ impl FaucetDb {
         Ok(total)
     }
 
+    /// Clear all distribution records (resets rate limits).
+    pub fn clear_distributions(&self) -> Result<usize, FaucetError> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn
+            .execute("DELETE FROM distributions", [])
+            .map_err(|e| FaucetError::Database(e.to_string()))?;
+        Ok(deleted)
+    }
+
     /// Count of total distributions.
     pub fn distribution_count(&self) -> Result<u64, FaucetError> {
         let conn = self.conn.lock().unwrap();
