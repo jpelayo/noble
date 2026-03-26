@@ -180,10 +180,10 @@ export function decodeMetadataValue(value) {
  * 4-state lifecycle: Pending → Admitted → Maturing → Complete.
  * @param {number|null|undefined} confirmations — null/undefined = pending (mempool)
  * @param {string} status — "pending", "confirmed", etc. from RPC
- * @param {number} maturity — COINBASE_MATURITY (default 6)
+ * @param {number} maturity — COINBASE_MATURITY (default 3)
  * @returns {{ html: string, cls: string }}
  */
-export function txStatusBadge(confirmations, status, maturity = 6) {
+export function txStatusBadge(confirmations, status, maturity = 3) {
     if (status === 'pending' || confirmations == null || confirmations < 0) {
         return { html: '\u25D4 Pending', cls: 'badge-pending' };
     }
