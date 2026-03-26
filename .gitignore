@@ -104,3 +104,8 @@ Secrets.swift
 
 
 .build/
+.swiftpm
+.swiftpm*
+project.xcworkspace
+xcuserdata
+project.pbxproj
