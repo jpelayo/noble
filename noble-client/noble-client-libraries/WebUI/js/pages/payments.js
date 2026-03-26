@@ -148,6 +148,7 @@ export function init(root, ctx) {
                 <div class="kpi-card">
                     <div class="kpi-label">Available</div>
                     <div class="kpi-value">${formatAmount(balance.available)}</div>
+                    ${balance.immature_value > 0 ? `<div class="kpi-sub" style="color:var(--warning)">\u25C6 ${formatAmount(balance.immature_value)} maturing</div>` : ''}
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Pending</div>

@@ -118,7 +118,7 @@ pub trait WalletApi {
     /// to include in the search. Useful when the client's wallet key differs
     /// from the node's keystore (e.g., remote client with its own Keychain).
     #[method(name = "getWalletTransactions")]
-    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
+    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>, addresses_only: Option<bool>) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
 }
 
 /// Collect all public keys the wallet considers "ours":
@@ -540,31 +540,33 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         })
     }
 
-    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
+    async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>, addresses_only: Option<bool>) -> Result<WalletTransactionsResponse, ErrorObjectOwned> {
         use noble_core::NobleAddress;
 
-        // Collect all keys: wallet keystore + validator (same universe as get_wallet_info).
-        let all_keys = collect_wallet_keys(self);
-
-        // Derive ALL 3 address variants for EACH key.
         let mut all_addrs: Vec<NobleAddress> = Vec::new();
         let mut my_wires: Vec<Vec<u8>> = Vec::new();
-        for pk in &all_keys {
-            let noble_addr = NobleAddress::Noble(pk.clone());
-            my_wires.push(noble_addr.to_wire_bytes());
-            all_addrs.push(noble_addr);
 
-            if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
-                my_wires.push(h160.to_wire_bytes());
-                all_addrs.push(h160);
-            }
-            if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
-                my_wires.push(tap.to_wire_bytes());
-                all_addrs.push(tap);
+        // When addresses_only=true, ONLY scan the provided addresses — skip node keystore/validator.
+        // Used by client apps whose wallet key differs from the node's validator key.
+        if !addresses_only.unwrap_or(false) {
+            let all_keys = collect_wallet_keys(self);
+            for pk in &all_keys {
+                let noble_addr = NobleAddress::Noble(pk.clone());
+                my_wires.push(noble_addr.to_wire_bytes());
+                all_addrs.push(noble_addr);
+
+                if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                    my_wires.push(h160.to_wire_bytes());
+                    all_addrs.push(h160);
+                }
+                if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                    my_wires.push(tap.to_wire_bytes());
+                    all_addrs.push(tap);
+                }
             }
         }
 
-        // Include additional client-provided addresses (bech32m or hex wire).
+        // Include client-provided addresses (bech32m or hex wire).
         if let Some(extra_addrs) = addresses {
             for addr_str in &extra_addrs {
                 if let Ok(addr) = crate::types::parse_address(addr_str) {

@@ -109,6 +109,8 @@ final class WebBridgeHandler {
                 "available": balance.available.atomic,
                 "pending": balance.pending.atomic,
                 "txCount": balance.txCount,
+                "immature_count": balance.immatureCount,
+                "immature_value": balance.immatureValue,
             ] as [String: Any]
 
         case "getSyncStatus":

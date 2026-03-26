@@ -25,6 +25,8 @@ struct AddressBalanceDTO: Decodable, Sendable {
     let available: UInt64?
     let pending: UInt64?
     let tx_count: UInt64?
+    let immature_count: UInt64?
+    let immature_value: UInt64?
 }
 
 // MARK: - noble_getAddressUtxos

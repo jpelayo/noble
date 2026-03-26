@@ -5,10 +5,10 @@
 /**
  * Transaction status badge with pie-chart icon.
  * @param {number|null} confirmations — null = pending (mempool)
- * @param {number} maturity — COINBASE_MATURITY (default 6)
+ * @param {number} maturity — COINBASE_MATURITY (default 3)
  * @returns {string} HTML span with icon + label
  */
-export function txStatusBadge(confirmations, maturity = 6) {
+export function txStatusBadge(confirmations, maturity = 3) {
   if (confirmations == null || confirmations < 0) {
     // Pending — in mempool, not yet in a block
     return '<span title="Pending (in mempool)" style="color:var(--warning)">◔ Pending</span>';

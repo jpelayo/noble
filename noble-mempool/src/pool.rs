@@ -482,14 +482,14 @@ impl Mempool {
 
             // Verify UTXO exists on-chain and is mature
             match utxos.get_utxo(outpoint) {
-                Some((value, is_coinbase, creation_height)) => {
-                    // Coinbase maturity check
-                    if is_coinbase && chain_height < creation_height + noble_core::COINBASE_MATURITY {
+                Some((value, _is_coinbase, creation_height)) => {
+                    // Maturity check — ALL UTXOs need COINBASE_MATURITY confirmations.
+                    if chain_height < creation_height + noble_core::COINBASE_MATURITY {
                         let blocks_remaining = (creation_height + noble_core::COINBASE_MATURITY).saturating_sub(chain_height);
                         return Err(MempoolError::StructuralValidation(
                             format!(
-                                "Block reward not yet spendable. Mining rewards require {} confirmations \
-                                before they can be used. This reward was earned at block {} and will be \
+                                "Output not yet spendable. Transactions require {} confirmations \
+                                before they can be used. This output was created at block {} and will be \
                                 available at block {} ({} block{} remaining).",
                                 noble_core::COINBASE_MATURITY,
                                 creation_height,

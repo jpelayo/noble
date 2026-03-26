@@ -1415,8 +1415,24 @@ export function init(root, ctx) {
             const balDiv = document.createElement('div');
             balDiv.style.cssText = 'margin-top:var(--gap-sm);text-align:center;';
 
+            const immature = balanceData.immature_value || 0;
             if (sufficient) {
                 balDiv.innerHTML = `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">Available balance: \u25C6 ${formatAmount(available)}</div>`;
+            } else if (immature > 0 && (available + immature) >= total) {
+                balDiv.innerHTML = `
+                    <div style="font-size:var(--font-size-sm);color:var(--warning);margin-bottom:var(--gap-xs)">
+                        Funds maturing: \u25C6 ${formatAmount(immature)} confirming
+                    </div>
+                    <div style="font-size:var(--font-size-xs);color:var(--text-secondary)">
+                        Your funds will be available after ${3 - (balanceData.immature_count > 0 ? 1 : 0)} more block(s). Save as draft and submit later.
+                    </div>
+                `;
+                const draftBtn2 = document.createElement('button');
+                draftBtn2.className = 'btn btn-secondary btn-sm';
+                draftBtn2.textContent = 'Save to Drafts';
+                draftBtn2.style.marginTop = 'var(--gap-sm)';
+                draftBtn2.addEventListener('click', () => saveDraft('Funds maturing'));
+                balDiv.appendChild(draftBtn2);
             } else {
                 balDiv.innerHTML = `
                     <div style="font-size:var(--font-size-sm);color:var(--error);margin-bottom:var(--gap-xs)">

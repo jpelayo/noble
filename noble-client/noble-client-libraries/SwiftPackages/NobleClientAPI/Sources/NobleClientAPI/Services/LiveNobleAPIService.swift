@@ -116,7 +116,9 @@ public struct LiveNobleAPIService: NobleAPIService {
             balance: NobleAmount(atomic: dto.balance),
             available: NobleAmount(atomic: dto.available ?? dto.balance),
             pending: NobleAmount(atomic: dto.pending ?? 0),
-            txCount: dto.tx_count ?? 0
+            txCount: dto.tx_count ?? 0,
+            immatureCount: dto.immature_count ?? 0,
+            immatureValue: dto.immature_value ?? 0
         )
     }
 
@@ -258,10 +260,10 @@ public struct LiveNobleAPIService: NobleAPIService {
     }
 
     public func getWalletTransactions(addresses: [String]) async throws -> [TransactionRecord] {
-        struct Params: Encodable, Sendable { let addresses: [String] }
+        struct Params: Encodable, Sendable { let addresses: [String]; let addresses_only: Bool }
         let dto = try await client.call(
             method: "noble_getWalletTransactions",
-            params: Params(addresses: addresses),
+            params: Params(addresses: addresses, addresses_only: true),
             expecting: WalletTransactionsDTO.self
         )
         return dto.transactions.map { e in

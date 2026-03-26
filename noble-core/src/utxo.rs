@@ -194,11 +194,11 @@ mod tests {
             height: 10,
             is_coinbase: true,
         };
-        // COINBASE_MATURITY = 6, created at height 10
-        // Mature at height 10 + 6 = 16
+        // COINBASE_MATURITY = 3, created at height 10
+        // Mature at height 10 + 3 = 13
         assert!(!entry.is_mature(10));
-        assert!(!entry.is_mature(15));
-        assert!(entry.is_mature(16));
+        assert!(!entry.is_mature(12));
+        assert!(entry.is_mature(13));
         assert!(entry.is_mature(100));
     }
 
