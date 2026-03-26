@@ -222,7 +222,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let key_count = all_keys.len();
 
         // Sum balances across all wallet keys and all address buckets.
-        // Also compute immature coinbase total (same pattern as getAddressBalance in address.rs).
+        // Also compute immature UTXO total (same pattern as getAddressBalance in address.rs).
         let storage = self.storage.read();
         let mempool = self.mempool.lock();
         let tip_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
@@ -233,7 +233,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let mut hash160_bal = 0u64;
         let mut taproot_bal = 0u64;
 
-        // Scan UTXOs per address to separate mature from immature coinbase.
+        // Scan UTXOs per address to separate mature from immature.
         let scan_address = |addr: &noble_core::NobleAddress| -> (u64, u64) {
             let mut bal = 0u64;
             let mut immature = 0u64;

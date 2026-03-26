@@ -187,10 +187,10 @@ impl StorageEngine for MemoryStorage {
                         ))
                     })?;
 
-                    // Check coinbase maturity using UtxoEntry::is_mature()
-                    if utxo.is_coinbase && !utxo.is_mature(height) {
+                    // Check UTXO maturity (ALL outputs need COINBASE_MATURITY confirmations)
+                    if !utxo.is_mature(height) {
                         return Err(StorageError::Database(format!(
-                            "coinbase UTXO not mature: created at {}, current {}, need {}",
+                            "UTXO not mature: created at {}, current {}, need {}",
                             utxo.height,
                             height,
                             utxo.height + COINBASE_MATURITY

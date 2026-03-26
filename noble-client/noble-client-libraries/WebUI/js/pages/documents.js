@@ -1791,7 +1791,7 @@ export function init(root, ctx) {
                 const pending = allUtxos.filter(u => u.status === 'pending_spend').length;
                 const immature = allUtxos.filter(u => u.status === 'immature').length;
                 throw new Error(
-                    `No spendable UTXOs available. ${pending ? pending + ' locked by pending transactions. ' : ''}${immature ? immature + ' immature coinbase outputs.' : ''}Wait for pending transactions to confirm.`
+                    `No spendable UTXOs available. ${pending ? pending + ' locked by pending transactions. ' : ''}${immature ? immature + ' immature outputs.' : ''}Wait for pending transactions to confirm.`
                 );
             }
 

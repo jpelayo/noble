@@ -227,7 +227,7 @@ export function init(root, ctx) {
       }
       if (wPendSub) {
         wPendSub.textContent = immature > 0
-          ? `${formatNoble(immature)} coinbase maturing + ${formatNoble(info.pending)} mempool`
+          ? `${formatNoble(immature)} maturing + ${formatNoble(info.pending)} mempool`
           : info.pending > 0 ? 'In mempool' : 'No pending';
       }
 

@@ -627,9 +627,9 @@ impl StorageEngine for RocksDbStorage {
                             })?
                     };
 
-                    // Check coinbase maturity
-                    if entry.is_coinbase && !entry.is_mature(height) {
-                        return Err(StorageError::ImmatureCoinbase {
+                    // Check UTXO maturity (ALL outputs need COINBASE_MATURITY confirmations)
+                    if !entry.is_mature(height) {
+                        return Err(StorageError::ImmatureUtxo {
                             created_height: entry.height,
                             current_height: height,
                             maturity: COINBASE_MATURITY,
@@ -2530,16 +2530,16 @@ mod tests {
             &db, 1, Hash256::ZERO, 1_700_000_000, &sender_sk, &sender_pk,
         );
 
-        // Wait for maturity (block at height 1 + COINBASE_MATURITY = 7)
+        // Wait for maturity (block at height 1 + COINBASE_MATURITY = 4)
         let mut prev = hash0;
-        for h in 2..=7u64 {
+        for h in 2..=4u64 {
             let (hash, _) = commit_block_with_coinbase(
                 &db, h, prev, 1_700_000_000 + h, &sender_sk, &sender_pk,
             );
             prev = hash;
         }
 
-        // Block 8: transfer from sender to recipient
+        // Block 5: transfer from sender to recipient (coinbase at height 1 is now mature)
         let (_, recip_pk) = secp256k1::generate_keypair();
         let recipient = NoblePublicKey::Secp256k1(recip_pk);
         let recip_addr = NobleAddress::Noble(recipient.clone());
@@ -2549,18 +2549,18 @@ mod tests {
         let input_outpoint = OutPoint { txid: coinbase_id, vout: 0 };
         let (tx, tx_id) = make_transfer_tx_utxo(
             &sender_sk, &sender_pk, &recip_addr, input_outpoint, INITIAL_SUBSIDY,
-            amount, fee, 1_700_000_008,
+            amount, fee, 1_700_000_005,
         );
         let (block, block_hash, tx_ids) =
-            make_block_with_validator(vec![(tx, tx_id)], 8, prev, 1_700_000_008, &sender_sk, &sender_pk);
+            make_block_with_validator(vec![(tx, tx_id)], 5, prev, 1_700_000_005, &sender_sk, &sender_pk);
         db.commit_block(&block, &block_hash, &tx_ids).unwrap();
 
         assert_eq!(db.get_balance(&addr(&recipient)).unwrap(), amount);
-        // Sender has: coinbase from blocks 2-7 (6 UTXOs) + change from transfer
+        // Sender has: coinbase from blocks 2-4 (3 UTXOs) + change from transfer
         let sender_balance = db.get_balance(&addr(&sender_pub)).unwrap();
         let expected_change = INITIAL_SUBSIDY - amount - fee;
-        // Block 8 has no coinbase, only the transfer tx
-        let expected = INITIAL_SUBSIDY * 6 + expected_change;
+        // Block 5 has no coinbase, only the transfer tx
+        let expected = INITIAL_SUBSIDY * 3 + expected_change;
         assert_eq!(sender_balance, expected);
     }
 

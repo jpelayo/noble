@@ -291,7 +291,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             .map_err(ApiError::from)?;
         let tip = storage.get_chain_tip().map_err(ApiError::from)?;
 
-        let confirmations = tip.map(|t| t.height - height + 1);
+        let confirmations = tip.map(|t| t.height.saturating_sub(height));
 
         let mut tx_resp = tx_to_response(&tx, &tx_id);
         tx_resp.confirmations = confirmations;

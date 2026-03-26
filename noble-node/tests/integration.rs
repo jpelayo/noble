@@ -121,7 +121,7 @@ fn storage_only_indexes_notarization_checksums() {
     // ── Block 8: notarization + key rotation spending mature coinbase ──
 
     // Notarization tx (real checksum — should be indexed)
-    // Spends the coinbase output from block 1 (now mature after 7 blocks)
+    // Spends the coinbase output from block 1 (mature after COINBASE_MATURITY=3 blocks)
     let doc_hash = sha256(b"test-document-for-integration");
     let mut notarization = noble_core::Transaction {
         version: PROTOCOL_VERSION,

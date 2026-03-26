@@ -44,7 +44,7 @@ public struct JSONRPCError: Decodable, Sendable, LocalizedError {
         case -32025:          return "NE-615" // TX fee too low
         case -32026:          return "NE-616" // TX sender rate limit
         case -32027:          return "NE-617" // TX mempool full
-        case -32028:          return "NE-618" // TX immature coinbase
+        case -32028:          return "NE-618" // TX immature UTXO
         case -32029:          return "NE-619" // TX double spend
         case -32030:          return "NE-620" // TX missing input (spent/unknown)
         case -32031:          return "NE-621" // TX insufficient input value

@@ -34,7 +34,7 @@ pub const TX_BAD_SIGNATURE: i32 = -32024;
 pub const TX_FEE_TOO_LOW: i32 = -32025;
 pub const TX_SENDER_LIMIT: i32 = -32026;
 pub const TX_MEMPOOL_FULL: i32 = -32027;
-pub const TX_IMMATURE_COINBASE: i32 = -32028;
+pub const TX_IMMATURE_UTXO: i32 = -32028;
 pub const TX_DOUBLE_SPEND: i32 = -32029;
 pub const TX_MISSING_INPUT: i32 = -32030;
 pub const TX_INSUFFICIENT_INPUT: i32 = -32031;
@@ -75,7 +75,7 @@ pub enum ApiError {
     TxMempoolFull(String),
 
     #[error("{0}")]
-    TxImmatureCoinbase(String),
+    TxImmatureUtxo(String),
 
     #[error("{0}")]
     TxDoubleSpend(String),
@@ -147,7 +147,7 @@ impl From<ApiError> for ErrorObjectOwned {
             ApiError::TxFeeTooLow(m) => (TX_FEE_TOO_LOW, m.clone()),
             ApiError::TxSenderLimit(m) => (TX_SENDER_LIMIT, m.clone()),
             ApiError::TxMempoolFull(m) => (TX_MEMPOOL_FULL, m.clone()),
-            ApiError::TxImmatureCoinbase(m) => (TX_IMMATURE_COINBASE, m.clone()),
+            ApiError::TxImmatureUtxo(m) => (TX_IMMATURE_UTXO, m.clone()),
             ApiError::TxDoubleSpend(m) => (TX_DOUBLE_SPEND, m.clone()),
             ApiError::TxMissingInput(m) => (TX_MISSING_INPUT, m.clone()),
             ApiError::TxInsufficientInput(m) => (TX_INSUFFICIENT_INPUT, m.clone()),
@@ -187,8 +187,8 @@ impl From<noble_mempool::MempoolError> for ApiError {
             ),
             StructuralValidation(msg) => {
                 // Route to more specific codes based on message content.
-                if msg.contains("Block reward not yet spendable") {
-                    ApiError::TxImmatureCoinbase(msg.clone())
+                if msg.contains("Output not yet spendable") {
+                    ApiError::TxImmatureUtxo(msg.clone())
                 } else if msg.contains("Double spend") {
                     ApiError::TxDoubleSpend(msg.clone())
                 } else if msg.contains("does not exist or has already been spent") {
@@ -251,7 +251,7 @@ mod tests {
             (ApiError::TxFeeTooLow("r".into()), TX_FEE_TOO_LOW),
             (ApiError::TxSenderLimit("r".into()), TX_SENDER_LIMIT),
             (ApiError::TxMempoolFull("r".into()), TX_MEMPOOL_FULL),
-            (ApiError::TxImmatureCoinbase("r".into()), TX_IMMATURE_COINBASE),
+            (ApiError::TxImmatureUtxo("r".into()), TX_IMMATURE_UTXO),
             (ApiError::TxDoubleSpend("r".into()), TX_DOUBLE_SPEND),
             (ApiError::TxMissingInput("r".into()), TX_MISSING_INPUT),
             (ApiError::TxInsufficientInput("r".into()), TX_INSUFFICIENT_INPUT),

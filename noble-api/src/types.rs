@@ -647,9 +647,9 @@ pub struct AddressPendingResponse {
 pub struct AddressUtxosResponse {
     pub address: String,
     pub utxos: Vec<UtxoResponse>,
-    /// Number of UTXOs excluded because they are immature coinbase outputs.
+    /// Number of UTXOs excluded because they are immature (< COINBASE_MATURITY confirmations).
     pub immature_count: usize,
-    /// Total value locked in immature coinbase UTXOs (groats).
+    /// Total value locked in immature UTXOs (groats).
     pub immature_value: u64,
 }
 
@@ -664,7 +664,7 @@ pub struct UtxoResponse {
     /// UTXO lifecycle status for client coin selection:
     /// - `"available"`: spendable, mature, not consumed by a pending tx
     /// - `"pending_spend"`: consumed by a pending mempool transaction
-    /// - `"immature"`: coinbase output not yet mature (< COINBASE_MATURITY confirmations)
+    /// - `"immature"`: output not yet mature (< COINBASE_MATURITY confirmations)
     pub status: String,
 }
 
@@ -687,7 +687,7 @@ pub struct WalletInfoResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
-    /// Immature coinbase outputs (depth < COINBASE_MATURITY). Not yet spendable.
+    /// Immature UTXO value (depth < COINBASE_MATURITY). Not yet spendable.
     #[serde(skip_serializing_if = "is_zero")]
     pub immature: u64,
     /// Balance held in Noble (secp256k1) address buckets.

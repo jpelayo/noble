@@ -65,9 +65,9 @@ pub enum StorageError {
     #[error("UTXO not found: txid={txid}, vout={vout}")]
     UtxoNotFound { txid: String, vout: u32 },
 
-    /// A transaction input tries to spend an immature coinbase output.
-    #[error("immature coinbase: created at height {created_height}, current height {current_height}, need {maturity} confirmations")]
-    ImmatureCoinbase {
+    /// A transaction input tries to spend an immature UTXO.
+    #[error("immature UTXO: created at height {created_height}, current height {current_height}, need {maturity} confirmations")]
+    ImmatureUtxo {
         created_height: u64,
         current_height: u64,
         maturity: u64,

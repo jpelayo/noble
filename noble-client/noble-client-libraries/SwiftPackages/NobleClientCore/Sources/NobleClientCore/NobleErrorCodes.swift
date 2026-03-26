@@ -147,8 +147,8 @@ public enum NE {
     public static let txSenderLimit         = "NE-616"
     /// Mempool is full — try again later or increase fee.
     public static let txMempoolFull         = "NE-617"
-    /// Block reward not yet spendable — needs more confirmations.
-    public static let txImmatureCoinbase    = "NE-618"
+    /// UTXO not yet spendable — needs more confirmations.
+    public static let txImmatureUtxo        = "NE-618"
     /// Double spend — input already used by another pending transaction.
     public static let txDoubleSpend         = "NE-619"
     /// Input references a coin that doesn't exist or was already spent.

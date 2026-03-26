@@ -175,10 +175,13 @@ mod tests {
             height: 100,
             is_coinbase: false,
         };
-        // Non-coinbase is always mature
-        assert!(entry.is_mature(0));
-        assert!(entry.is_mature(100));
-        assert!(entry.is_mature(1000));
+        // ALL UTXOs require COINBASE_MATURITY (3) confirmations.
+        // Created at height 100 → mature at height 103.
+        assert!(!entry.is_mature(0));    // way below creation
+        assert!(!entry.is_mature(100));  // 0 confs (same height)
+        assert!(!entry.is_mature(102));  // 2 confs
+        assert!(entry.is_mature(103));   // 3 confs ✓
+        assert!(entry.is_mature(1000));  // well past
     }
 
     #[test]
