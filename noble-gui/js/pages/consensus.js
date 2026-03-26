@@ -2774,9 +2774,9 @@ export function init(root, ctx) {
     badgeModal.style.display = 'none';
     if (badgePollInterval) { clearInterval(badgePollInterval); badgePollInterval = null; }
   }
-  badgeGear.addEventListener('click', openBadgeModal);
-  badgeModalClose.addEventListener('click', closeBadgeModal);
-  badgeModal.addEventListener('click', (e) => { if (e.target === badgeModal) closeBadgeModal(); });
+  if (badgeGear) badgeGear.addEventListener('click', openBadgeModal);
+  if (badgeModalClose) badgeModalClose.addEventListener('click', closeBadgeModal);
+  if (badgeModal) badgeModal.addEventListener('click', (e) => { if (e.target === badgeModal) closeBadgeModal(); });
 
   // Tab switching
   root.querySelectorAll('.badge-tab-btn').forEach(btn => {
