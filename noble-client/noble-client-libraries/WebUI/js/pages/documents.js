@@ -90,10 +90,13 @@ export function init(root, ctx) {
         };
         try {
             await Bridge.call('noble_app', 'saveDraft', { draft });
-        } catch { /* best effort */ }
-        editingDraftId = null;
-        resetWizard();
-        render();
+            editingDraftId = null;
+            resetWizard();
+            render();
+        } catch {
+            // Save failed — keep wizard state so user doesn't lose work
+            alert('Could not save draft. Please try again.');
+        }
     }
 
     function resetWizard() {
@@ -184,6 +187,10 @@ export function init(root, ctx) {
             const dot = document.createElement('div');
             dot.className = 'step-indicator' + (i === step ? ' active' : '') + (i < step ? ' completed' : '');
             dot.title = STEP_NAMES[i];
+            if (i <= step && i !== step) {
+                dot.style.cursor = 'pointer';
+                dot.addEventListener('click', () => { step = i; render(); });
+            }
             dots.appendChild(dot);
         }
         topBar.appendChild(dots);
@@ -1271,6 +1278,14 @@ export function init(root, ctx) {
         container.appendChild(toggle);
 
         if (!wantsLocking) return;
+
+        // Prompt to re-enter password when resuming a draft
+        if (editingDraftId && !lockingPassword) {
+            const notice = document.createElement('div');
+            notice.style.cssText = 'padding:8px 12px;background:var(--bg-warning, #fef3c7);border:1px solid var(--border-warning, #f59e0b);border-radius:var(--radius-sm);color:var(--text-warning, #92400e);font-size:var(--font-size-xs);margin-bottom:var(--gap)';
+            notice.textContent = 'Re-enter your encryption password to continue (passwords are not saved in drafts).';
+            container.appendChild(notice);
+        }
 
         // Password fields
         const pwGroup = document.createElement('div');
