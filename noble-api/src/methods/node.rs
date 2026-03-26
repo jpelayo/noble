@@ -1180,15 +1180,40 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     }
 
     async fn reset_faucet_limits(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        /// Accepts any TLS cert — safe for localhost loopback only.
+        #[derive(Debug)]
+        struct NoCertVerify;
+        impl rustls::client::danger::ServerCertVerifier for NoCertVerify {
+            fn verify_server_cert(&self, _: &rustls_pki_types::CertificateDer<'_>, _: &[rustls_pki_types::CertificateDer<'_>], _: &rustls_pki_types::ServerName<'_>, _: &[u8], _: rustls_pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(&self, _: &[u8], _: &rustls_pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(&self, _: &[u8], _: &rustls_pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+                Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+            }
+        }
         let listen = self.faucet_listen.read().clone();
         if listen.is_empty() {
             return Err(ApiError::Internal("Faucet not configured".into()).into());
         }
         let port = listen.rsplit(':').next().unwrap_or("8786");
-        let url = format!("http://127.0.0.1:{port}/api/faucet/reset-limits");
+        let url = format!("https://127.0.0.1:{port}/api/faucet/reset-limits");
 
         let json = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-            let resp = ureq::post(&url)
+            let agent = ureq::AgentBuilder::new()
+                .tls_config(std::sync::Arc::new(
+                    rustls::ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerify))
+                        .with_no_client_auth(),
+                ))
+                .build();
+            let resp = agent.post(&url)
                 .set("Gatekeeper", "noble")
                 .call()
                 .map_err(|e| format!("faucet request failed: {e}"))?;
