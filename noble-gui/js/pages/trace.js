@@ -151,26 +151,27 @@ export function init(root, ctx) {
 
   function startCountdown(seconds) {
     stopCountdown();
-    let remaining = seconds;
-    updateCountdown(remaining);
-    countdownId = setInterval(() => {
-      remaining--;
-      if (remaining <= 0) {
+    const endTime = Date.now() + seconds * 1000;
+    updateCountdown(seconds);
+    countdownId = () => {
+      const left = Math.max(0, Math.round((endTime - Date.now()) / 1000));
+      if (left <= 0) {
         stopCountdown();
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
         countdownEl.textContent = 'Expired';
         stopAutoRefresh();
       } else {
-        updateCountdown(remaining);
+        updateCountdown(left);
       }
-    }, 1000);
-    unsubs.push(() => clearInterval(countdownId));
+    };
+    window._nobleTick.add(countdownId);
+    unsubs.push(() => stopCountdown());
   }
 
   function stopCountdown() {
     if (countdownId) {
-      clearInterval(countdownId);
+      window._nobleTick.remove(countdownId);
       countdownId = null;
     }
   }

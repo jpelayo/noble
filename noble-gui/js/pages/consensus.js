@@ -35,7 +35,7 @@ const STATE_STYLES = {
 export function init(root, ctx) {
   const { rpc, ws, getState } = ctx;
   const unsubs = [];
-  let countdownInterval = null;
+  let tickFn = null;
 
   // Helper: extract display key from ValidatorEntry.public_key
   // Both live API and mock return nbl1… bech32 strings. Legacy object format handled for safety.
@@ -189,7 +189,11 @@ export function init(root, ctx) {
         <span>Live Vote Tallies</span>
         <span id="cs-tally-meta" style="font-weight:400;font-size:var(--font-size-xs);color:var(--text-muted)"></span>
       </div>
-      <div class="panel-body" id="cs-tallies-body" style="max-height:340px;overflow-y:auto">
+      <div style="display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 var(--gap)">
+        <button class="cs-tally-tab" data-round="r1" style="background:none;border:none;border-bottom:2px solid var(--accent);padding:6px 16px;cursor:pointer;font-size:var(--font-size-sm);font-weight:700;color:var(--text-primary)">Round 1</button>
+        <button class="cs-tally-tab" data-round="r2" style="background:none;border:none;border-bottom:2px solid transparent;padding:6px 16px;cursor:pointer;font-size:var(--font-size-sm);font-weight:400;color:var(--text-muted)">Round 2</button>
+      </div>
+      <div class="panel-body" id="cs-tallies-body" style="max-height:400px;overflow-y:auto">
         <div class="empty-state">No votes recorded for the current cycle.</div>
       </div>
     </div>
@@ -215,9 +219,9 @@ export function init(root, ctx) {
           <div class="kpi-card"><div class="kpi-label">Avg Reputation</div><div class="kpi-value" id="cs-val-avg-rep">--</div></div>
         </div>
       </div>
-      <div style="overflow-x:auto">
+      <div style="overflow-x:auto;max-height:500px;overflow-y:auto">
         <table class="data-table">
-          <thead><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th id="cs-strategy-col-header" style="width:52px"></th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Minimum fee rate (groats/byte)">Min Fee</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th title="Connection stability: stability (reconnections), uptime, and latency">Connectivity</th><th></th></tr></thead>
+          <thead style="position:sticky;top:0;z-index:1;background:var(--bg-secondary)"><tr><th style="width:32px" title="Drag to set priority order">&#9776;</th><th>#</th><th id="cs-strategy-col-header" style="width:52px"></th><th>Validator</th><th>IP</th><th>Country</th><th>Status</th><th>Reputation</th><th title="Minimum fee rate (groats/byte)">Min Fee</th><th title="Uptime ratio (weight 0.3)">Uptime</th><th title="Trust score (weight 0.3)">Trust</th><th>Blocks</th><th title="Validators listing this peer">Listers</th><th>Last Active</th><th title="Connection stability: stability (reconnections), uptime, and latency">Connectivity</th><th></th></tr></thead>
           <tbody id="cs-validators"></tbody>
         </table>
         <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Drag rows to set priority order &mdash; used by Round Robin and Weighted Probability strategies.</p>
@@ -239,9 +243,9 @@ export function init(root, ctx) {
           Peers discovered via GossipSub that want to participate in consensus. Add them to your accepted validator list after out-of-band verification.
         </p>
       </div>
-      <div style="overflow-x:auto">
+      <div style="overflow-x:auto;max-height:500px;overflow-y:auto">
         <table class="data-table">
-          <thead><tr><th>Node Name</th><th>IP</th><th>Country</th><th>Min Fee</th><th>Org Type</th><th>Role</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
+          <thead style="position:sticky;top:0;z-index:1;background:var(--bg-secondary)"><tr><th>Node Name</th><th>IP</th><th>Country</th><th>Min Fee</th><th>Org Type</th><th>Role</th><th>Last Seen</th><th>First Seen</th><th>Connections</th><th></th></tr></thead>
           <tbody id="cs-candidates"></tbody>
         </table>
       </div>
@@ -371,6 +375,21 @@ export function init(root, ctx) {
   const strategyModalClose = root.querySelector('#cs-strategy-modal-close');
   const tallyMeta = root.querySelector('#cs-tally-meta');
   const talliesBody = root.querySelector('#cs-tallies-body');
+  let tallyRound = 'r1';
+  let lastTallyResult = null;
+
+  // Tab switching for vote tallies
+  root.querySelectorAll('.cs-tally-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      tallyRound = tab.dataset.round;
+      root.querySelectorAll('.cs-tally-tab').forEach(t => {
+        t.style.borderBottom = t === tab ? '2px solid var(--accent)' : '2px solid transparent';
+        t.style.fontWeight = t === tab ? '700' : '400';
+        t.style.color = t === tab ? 'var(--text-primary)' : 'var(--text-muted)';
+      });
+      renderTallies();
+    });
+  });
 
   // Strategy state: current params loaded from RPC (for checkbox/radio initial state)
   let currentStrategyParams = { r1: null, r2: null };
@@ -981,59 +1000,68 @@ export function init(root, ctx) {
 
   async function loadVoteTallies() {
     try {
-      const result = await rpc.call('noble_getVoteTallies');
-      tallyMeta.textContent = `Cycle #${formatNumber(result.cycle ?? 0)} — ${result.phase || '--'}`;
-
-      if (!result.tallies || result.tallies.length === 0) {
-        talliesBody.innerHTML = '<div class="empty-state">No votes recorded for the current cycle.</div>';
-        return;
-      }
-      const total = result.tallies.reduce((s, t) => s + t.vote_count, 0);
-      const isManual = r1Select.value === 'manual' || r2Select.value === 'manual';
-      talliesBody.innerHTML = result.tallies.map(t => {
-        const pct = total > 0 ? Math.round(t.vote_count / total * 100) : 0;
-        const name = t.validator || truncateHash(t.validator_key || t.block_hash, 8);
-        const r2 = t.r2_vote_count ? ` <span style="color:var(--text-muted);font-size:10px">R2: ${t.r2_vote_count}</span>` : '';
-        const voteBtn = isManual
-          ? `<button class="btn btn-sm cs-inline-vote-btn" data-hash="${t.block_hash}" style="flex-shrink:0;padding:2px 8px;font-size:11px">Vote</button>`
-          : '';
-        return `<div style="display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap-sm)">
-          <span style="font-weight:600;font-size:var(--font-size-xs);width:${isManual ? '32%' : '40%'};flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.block_hash}">${name}</span>
-          <div style="flex:1;min-width:40px;height:8px;background:var(--bg-tertiary);border-radius:4px">
-            <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s"></div>
-          </div>
-          <span style="font-weight:600;flex-shrink:0;text-align:right;min-width:70px">${t.vote_count} (${pct}%)${r2}</span>
-          ${voteBtn}
-        </div>`;
-      }).join('');
-
-      // Wire inline vote buttons (Manual strategy).
-      if (isManual) {
-        talliesBody.querySelectorAll('.cs-inline-vote-btn').forEach(btn => {
-          btn.addEventListener('click', async (e) => {
-            const hash = btn.dataset.hash;
-            btn.disabled = true;
-            btn.textContent = '...';
-            try {
-              await rpc.call('noble_castVote', [hash]);
-              btn.textContent = 'Voted';
-              btn.classList.remove('btn-sm');
-              btn.classList.add('btn-sm');
-              btn.style.background = 'var(--success)';
-              btn.style.color = '#fff';
-              setTimeout(() => loadVoteTallies(), 2000);
-            } catch (err) {
-              btn.textContent = 'Error';
-              btn.style.background = 'var(--error)';
-              btn.style.color = '#fff';
-              setTimeout(() => { btn.textContent = 'Vote'; btn.disabled = false; btn.style.background = ''; btn.style.color = ''; }, 3000);
-            }
-          });
-        });
-      }
-
+      lastTallyResult = await rpc.call('noble_getVoteTallies');
+      tallyMeta.textContent = `Cycle #${formatNumber(lastTallyResult.cycle ?? 0)} — ${lastTallyResult.phase || '--'}`;
+      renderTallies();
     } catch (e) {
       console.error('[consensus] load tallies:', e);
+    }
+  }
+
+  function renderTallies() {
+    const result = lastTallyResult;
+    if (!result || !result.tallies || result.tallies.length === 0) {
+      talliesBody.innerHTML = '<div class="empty-state">No votes recorded for the current cycle.</div>';
+      return;
+    }
+
+    const isR2 = tallyRound === 'r2';
+    const entries = result.tallies
+      .map(t => ({
+        ...t,
+        count: isR2 ? (t.r2_vote_count || 0) : t.vote_count,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const total = entries.reduce((s, t) => s + t.count, 0);
+    const isManual = !isR2 && (r1Select.value === 'manual' || r2Select.value === 'manual');
+
+    talliesBody.innerHTML = entries.map(t => {
+      const pct = total > 0 ? Math.round(t.count / total * 100) : 0;
+      const name = t.validator || truncateHash(t.validator_key || t.block_hash, 8);
+      const voteBtn = isManual
+        ? `<button class="btn btn-sm cs-inline-vote-btn" data-hash="${t.block_hash}" style="flex-shrink:0;padding:2px 8px;font-size:11px">Vote</button>`
+        : '';
+      return `<div style="display:flex;align-items:center;gap:var(--gap-sm);padding:4px 0">
+        <span style="font-weight:600;font-size:var(--font-size-xs);width:${isManual ? '30%' : '38%'};flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.block_hash}">${escapeHtml(name)}</span>
+        <div style="flex:1;min-width:40px;height:8px;background:var(--bg-tertiary);border-radius:4px">
+          <div style="height:100%;width:${pct}%;background:${isR2 ? 'var(--success)' : 'var(--accent)'};border-radius:4px;transition:width 0.3s"></div>
+        </div>
+        <span style="font-weight:600;flex-shrink:0;text-align:right;min-width:60px;font-size:var(--font-size-xs)">${t.count} (${pct}%)</span>
+        ${voteBtn}
+      </div>`;
+    }).join('');
+
+    if (isManual) {
+      talliesBody.querySelectorAll('.cs-inline-vote-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const hash = btn.dataset.hash;
+          btn.disabled = true;
+          btn.textContent = '...';
+          try {
+            await rpc.call('noble_castVote', [hash]);
+            btn.textContent = 'Voted';
+            btn.style.background = 'var(--success)';
+            btn.style.color = '#fff';
+            setTimeout(() => loadVoteTallies(), 2000);
+          } catch {
+            btn.textContent = 'Error';
+            btn.style.background = 'var(--error)';
+            btn.style.color = '#fff';
+            setTimeout(() => { btn.textContent = 'Vote'; btn.disabled = false; btn.style.background = ''; btn.style.color = ''; }, 3000);
+          }
+        });
+      });
     }
   }
 
@@ -1854,18 +1882,19 @@ export function init(root, ctx) {
       csCycleRemaining.textContent = formatCountdown(status.cycle_remaining_secs || 0);
       csValidator.textContent = '—';
       csPipeline.innerHTML = `<div style="text-align:center;padding:var(--gap);color:var(--text-muted);font-size:var(--font-size-sm)">Chain created — waiting for first consensus cycle</div>`;
-      clearInterval(countdownInterval);
-      let rem = status.cycle_remaining_secs || 0;
-      countdownInterval = setInterval(() => {
-        rem = Math.max(0, rem - 1);
-        csPhaseRemaining.textContent = formatCountdown(rem);
-        csCycleRemaining.textContent = formatCountdown(rem);
-        if (rem <= 0 && countdownInterval) {
-          clearInterval(countdownInterval); countdownInterval = null;
+      if (tickFn) window._nobleTick.remove(tickFn);
+      const creatingEnd = Date.now() + (status.cycle_remaining_secs || 0) * 1000;
+      tickFn = () => {
+        const left = Math.max(0, Math.round((creatingEnd - Date.now()) / 1000));
+        csPhaseRemaining.textContent = formatCountdown(left);
+        csCycleRemaining.textContent = formatCountdown(left);
+        if (left <= 0) {
+          window._nobleTick.remove(tickFn); tickFn = null;
           loadCycle(); loadTimeline(); loadVoteTallies();
           setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
         }
-      }, 1000);
+      };
+      window._nobleTick.add(tickFn);
       return;
     }
 
@@ -1885,20 +1914,24 @@ export function init(root, ctx) {
 
       csPipeline.innerHTML = renderPipeline(activeIdx, phaseRemaining);
 
-      clearInterval(countdownInterval);
-      countdownInterval = setInterval(() => {
-        phaseRemaining = Math.max(0, phaseRemaining - 1);
-        cycleRemaining = Math.max(0, cycleRemaining - 1);
-        csPhaseRemaining.textContent = formatCountdown(phaseRemaining);
-        csCycleRemaining.textContent = formatCountdown(cycleRemaining);
+      if (tickFn) window._nobleTick.remove(tickFn);
+      const bootPhaseEnd = Date.now() + phaseRemaining * 1000;
+      const bootCycleEnd = Date.now() + cycleRemaining * 1000;
+      tickFn = () => {
+        const t = Date.now();
+        const pLeft = Math.max(0, Math.round((bootPhaseEnd - t) / 1000));
+        const cLeft = Math.max(0, Math.round((bootCycleEnd - t) / 1000));
+        csPhaseRemaining.textContent = formatCountdown(pLeft);
+        csCycleRemaining.textContent = formatCountdown(cLeft);
         const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
-        if (activeTimer) activeTimer.textContent = formatCountdown(phaseRemaining);
-        if ((phaseRemaining <= 0 || cycleRemaining <= 0) && countdownInterval) {
-          clearInterval(countdownInterval); countdownInterval = null;
+        if (activeTimer) activeTimer.textContent = formatCountdown(pLeft);
+        if (pLeft <= 0 || cLeft <= 0) {
+          window._nobleTick.remove(tickFn); tickFn = null;
           loadCycle(); loadTimeline(); loadVoteTallies();
           setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
         }
-      }, 1000);
+      };
+      window._nobleTick.add(tickFn);
       return;
     }
 
@@ -1912,28 +1945,27 @@ export function init(root, ctx) {
     // Pipeline header
     csPipeline.innerHTML = renderPipeline(activeIdx, status.phase_remaining_secs);
 
-    // Countdown ticker
-    let remaining = status.phase_remaining_secs;
-    let cycleRemaining = status.cycle_remaining_secs;
-    clearInterval(countdownInterval);
-    countdownInterval = setInterval(() => {
-      remaining = Math.max(0, remaining - 1);
-      cycleRemaining = Math.max(0, cycleRemaining - 1);
-      csPhaseRemaining.textContent = formatCountdown(remaining);
-      csCycleRemaining.textContent = formatCountdown(cycleRemaining);
-      // Update active timer in pipeline
+    // Countdown — wall-clock based via global tick
+    if (tickFn) window._nobleTick.remove(tickFn);
+    const phaseEnd = Date.now() + status.phase_remaining_secs * 1000;
+    const cycleEnd = Date.now() + status.cycle_remaining_secs * 1000;
+    tickFn = () => {
+      const t = Date.now();
+      const phaseLeft = Math.max(0, Math.round((phaseEnd - t) / 1000));
+      const cycleLeft = Math.max(0, Math.round((cycleEnd - t) / 1000));
+      csPhaseRemaining.textContent = formatCountdown(phaseLeft);
+      csCycleRemaining.textContent = formatCountdown(cycleLeft);
       const activeTimer = root.querySelector(`#cs-phase-time-${activeIdx}`);
-      if (activeTimer) activeTimer.textContent = formatCountdown(remaining);
-      if (remaining <= 0 && countdownInterval) {
-        clearInterval(countdownInterval);
-        countdownInterval = null;
+      if (activeTimer) activeTimer.textContent = formatCountdown(phaseLeft);
+      if (phaseLeft <= 0) {
+        window._nobleTick.remove(tickFn); tickFn = null;
         loadCycle(); loadTimeline(); loadVoteTallies();
-        // Retry after 3s in case the boundary hasn't processed yet.
         setTimeout(() => { loadCycle(); loadTimeline(); loadVoteTallies(); }, 3000);
       }
-    }, 1000);
-    csPhaseRemaining.textContent = formatCountdown(remaining);
-    csCycleRemaining.textContent = formatCountdown(cycleRemaining);
+    };
+    window._nobleTick.add(tickFn);
+    csPhaseRemaining.textContent = formatCountdown(status.phase_remaining_secs);
+    csCycleRemaining.textContent = formatCountdown(status.cycle_remaining_secs);
   }
 
   async function loadCycle() {
@@ -2987,7 +3019,7 @@ export function init(root, ctx) {
 
   return {
     destroy() {
-      clearInterval(countdownInterval);
+      if (tickFn) { window._nobleTick.remove(tickFn); tickFn = null; }
       if (badgePollInterval) clearInterval(badgePollInterval);
       if (_reloadTimer) clearTimeout(_reloadTimer);
       for (const entry of deferredPeerEvents.values()) clearTimeout(entry.timer);

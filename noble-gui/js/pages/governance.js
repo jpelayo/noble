@@ -35,7 +35,7 @@ export function init(root, ctx) {
     <!-- Badge Holders -->
     <div class="panel" id="gov-holders">
       <div class="panel-header">Badge Holders</div>
-      <div class="panel-body" id="gov-holders-body">Loading...</div>
+      <div class="panel-body" id="gov-holders-body" style="max-height:500px;overflow-y:auto">Loading...</div>
     </div>
 
     <!-- Create -->

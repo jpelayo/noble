@@ -107,25 +107,25 @@ export function init(root, ctx) {
   ovMempool.textContent = formatNumber(state.mempoolSize);
   ovPhase.textContent = state.cyclePhase;
 
-  // Cycle countdown
-  let countdownInterval = null;
+  // Cycle countdown — uses global clock
+  let ovTickFn = null;
   async function updateCycleCountdown() {
     try {
       const cs = await rpc.call('noble_getCycleStatus');
-      // null cycle_number = bootstrapping (no blocks beyond genesis).
       if (cs.cycle_number == null) {
         ovPhase.textContent = 'Awaiting genesis';
         ovPhaseTimer.textContent = '';
         return;
       }
-      let remaining = cs.phase_remaining_secs;
-      ovPhaseTimer.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')} remaining`;
-      clearInterval(countdownInterval);
-      countdownInterval = setInterval(() => {
-        remaining--;
-        if (remaining <= 0) { updateCycleCountdown(); return; }
-        ovPhaseTimer.textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')} remaining`;
-      }, 1000);
+      const phaseEnd = Date.now() + cs.phase_remaining_secs * 1000;
+      ovPhaseTimer.textContent = `${Math.floor(cs.phase_remaining_secs / 60)}:${String(cs.phase_remaining_secs % 60).padStart(2, '0')} remaining`;
+      if (ovTickFn) window._nobleTick.remove(ovTickFn);
+      ovTickFn = () => {
+        const left = Math.max(0, Math.round((phaseEnd - Date.now()) / 1000));
+        if (left <= 0) { window._nobleTick.remove(ovTickFn); ovTickFn = null; updateCycleCountdown(); return; }
+        ovPhaseTimer.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} remaining`;
+      };
+      window._nobleTick.add(ovTickFn);
     } catch { /* ignore */ }
   }
   updateCycleCountdown();
@@ -234,7 +234,7 @@ export function init(root, ctx) {
 
   return {
     destroy() {
-      clearInterval(countdownInterval);
+      if (ovTickFn) { window._nobleTick.remove(ovTickFn); ovTickFn = null; }
       unsubs.forEach(fn => { try { fn(); } catch {} });
     },
   };

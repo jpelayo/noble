@@ -505,6 +505,19 @@ window.addEventListener('offline', () => {
   console.warn('[app] network offline');
 });
 
+// ── Global 1-second clock ──
+// Any page can subscribe a callback. One setInterval, zero drift, zero orphans.
+const _tickCallbacks = new Set();
+setInterval(() => {
+  for (const cb of _tickCallbacks) {
+    try { cb(); } catch {}
+  }
+}, 1000);
+window._nobleTick = {
+  add(cb) { _tickCallbacks.add(cb); },
+  remove(cb) { _tickCallbacks.delete(cb); },
+};
+
 // ── Start ──
 bootstrap();
 ws.connect();

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
+use noble_consensus::ConsensusStateMachine;
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
@@ -60,6 +61,8 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
         let engine = self.consensus.read();
         let store = engine.badge_store();
         let peer_info = self.peer_info.read();
+        let current_cycle = engine.current_cycle();
+        let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
 
         let mut holders: Vec<BadgeHolderResponse> = store
             .list_all()
@@ -67,7 +70,6 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
             .map(|(pubkey_wire, badge)| {
                 let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(pubkey_wire)
                     .unwrap_or_else(|| hex::encode(pubkey_wire));
-                // Try to find the node name from connected peers.
                 let node_name = peer_info.values().find_map(|p| {
                     if p.identity_key.as_deref() == Some(pubkey_wire) {
                         Some(p.peer_id.clone())
@@ -84,6 +86,34 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
                 }
             })
             .collect();
+
+        // During bootstrap, include all validators as implicit badge holders.
+        if in_bootstrap {
+            let registry = self.validator_registry.read();
+            let existing: std::collections::HashSet<String> =
+                holders.iter().map(|h| h.pubkey.clone()).collect();
+            for (pubkey, _weight) in registry.list_validators() {
+                let wire = pubkey.to_wire_bytes();
+                let pubkey_hex = noble_crypto::noble_addr::encode_wire_bytes(&wire)
+                    .unwrap_or_else(|| hex::encode(&wire));
+                if !existing.contains(&pubkey_hex) {
+                    let node_name = peer_info.values().find_map(|p| {
+                        if p.identity_key.as_deref() == Some(wire.as_slice()) {
+                            Some(p.peer_id.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    holders.push(BadgeHolderResponse {
+                        pubkey: pubkey_hex,
+                        node_name,
+                        status: "bootstrap".to_string(),
+                        granted_at_height: 0,
+                        last_seen: 0,
+                    });
+                }
+            }
+        }
 
         holders.sort_by(|a, b| a.granted_at_height.cmp(&b.granted_at_height));
         Ok(holders)
@@ -140,6 +170,8 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
     async fn get_my_badge_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let engine = self.consensus.read();
         let store = engine.badge_store();
+        let current_cycle = engine.current_cycle();
+        let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
 
         if let Some(ref pubkey_hex) = *self.validator_pubkey.read() {
             let wire =
@@ -151,17 +183,26 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
                     "granted_at_height": badge.granted_at_height,
                     "granted_at_cycle": badge.granted_at_cycle,
                     "last_seen": badge.last_seen,
+                    "bootstrap_mode": in_bootstrap,
+                }))
+            } else if in_bootstrap {
+                Ok(serde_json::json!({
+                    "has_badge": true,
+                    "status": "bootstrap",
+                    "bootstrap_mode": true,
                 }))
             } else {
                 Ok(serde_json::json!({
                     "has_badge": false,
                     "status": "none",
+                    "bootstrap_mode": false,
                 }))
             }
         } else {
             Ok(serde_json::json!({
                 "has_badge": false,
                 "status": "no_validator_key",
+                "bootstrap_mode": in_bootstrap,
             }))
         }
     }
