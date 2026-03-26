@@ -167,9 +167,9 @@ export function init(root, ctx) {
         panel.className = 'panel';
         panel.innerHTML = `
           <div class="panel-header">Transactions (${block.transactions.length})</div>
-          <div class="panel-body" style="padding:0">
+          <div class="panel-body" style="padding:0;max-height:500px;overflow-y:auto">
             <table class="data-table">
-              <thead><tr><th>#</th><th>Tx ID</th><th>Amount</th><th>Type</th><th>Inputs / Outputs</th></tr></thead>
+              <thead style="position:sticky;top:0;z-index:1;background:var(--bg-secondary)"><tr><th>#</th><th>Tx ID</th><th>Amount</th><th>Type</th><th>Inputs / Outputs</th></tr></thead>
               <tbody id="block-txs"></tbody>
             </table>
           </div>

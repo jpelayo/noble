@@ -112,9 +112,9 @@ export function init(root, ctx) {
         html += `
           <div class="panel" style="margin-top:var(--gap)">
             <div class="panel-header">Transaction History (${txIds.length})</div>
-            <div class="panel-body" style="padding:0">
+            <div class="panel-body" style="padding:0;max-height:500px;overflow-y:auto">
               <table class="data-table">
-                <thead><tr><th>Tx ID</th><th>Type</th><th>Amount</th><th>Time</th></tr></thead>
+                <thead style="position:sticky;top:0;z-index:1;background:var(--bg-secondary)"><tr><th>Tx ID</th><th>Type</th><th>Amount</th><th>Time</th></tr></thead>
                 <tbody>
         `;
         for (const r of txResults) {
