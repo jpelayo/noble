@@ -120,36 +120,36 @@ struct WalletTransactionsDTO: Decodable, Sendable {
     let transactions: [WalletTxEntryDTO]
 }
 
-struct WalletTxEntryDTO: Decodable, Sendable {
-    let tx_id: String
-    let tx_type: UInt8
-    let type_label: String?
-    let direction: String
-    let amount: UInt64
-    let transfer_value: UInt64?
-    let fee: UInt64?
-    let total_output: UInt64?
-    let confirmations: UInt64
-    let block_height: UInt64?
-    let timestamp: UInt64?
-    let counterparty: String?
-    let signer: String?
-    let status: String?
-    let checksum: String?
-    let inputs: [TxInputDTO]?
-    let outputs: [TxOutputDTO]?
-    let metadata: [MetadataDTO]?
-    let has_encrypted_locator: Bool?
+public struct WalletTxEntryDTO: Decodable, Sendable {
+    public let tx_id: String
+    public let tx_type: UInt8
+    public let type_label: String?
+    public let direction: String
+    public let amount: UInt64
+    public let transfer_value: UInt64?
+    public let fee: UInt64?
+    public let total_output: UInt64?
+    public let confirmations: UInt64
+    public let block_height: UInt64?
+    public let timestamp: UInt64?
+    public let counterparty: String?
+    public let signer: String?
+    public let status: String?
+    public let checksum: String?
+    public let inputs: [TxInputDTO]?
+    public let outputs: [TxOutputDTO]?
+    public let metadata: [MetadataDTO]?
+    public let has_encrypted_locator: Bool?
 }
 
 // MARK: - noble_getWalletSnapshot
 
-struct WalletSnapshotDTO: Decodable, Sendable {
-    let chain_height: UInt64
-    let balance: UInt64
-    let available: UInt64
-    let pending: UInt64
-    let immature_count: UInt64?
-    let immature_value: UInt64?
-    let transactions: [WalletTxEntryDTO]
+public struct WalletSnapshotDTO: Decodable, Sendable {
+    public let chain_height: UInt64
+    public let balance: UInt64
+    public let available: UInt64
+    public let pending: UInt64
+    public let immature_count: UInt64?
+    public let immature_value: UInt64?
+    public let transactions: [WalletTxEntryDTO]
 }
