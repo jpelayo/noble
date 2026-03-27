@@ -1,0 +1,5 @@
+module NobleMCPServer {
+    header "noble_mcp.h"
+    link "noble_mcp"
+    export *
+}

@@ -3168,6 +3168,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "noble-mcp"
+version = "0.99.0"
+dependencies = [
+ "axum",
+ "http 1.4.0",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+]
+
+[[package]]
 name = "noble-mempool"
 version = "0.99.0"
 dependencies = [

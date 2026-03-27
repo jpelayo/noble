@@ -66,6 +66,7 @@ export function init(root, ctx) {
         renderBlockchainSection();
         renderSecuritySection();
         renderBackupSection();
+        if (state.platform !== 'ios') renderDeveloperApiSection();
         renderAboutSection();
     }
 
@@ -594,6 +595,89 @@ export function init(root, ctx) {
                 } catch { /* handled by bridge */ }
             });
         }
+    }
+
+    // ── Developer API ──
+
+    function renderDeveloperApiSection() {
+        const rpcEnabled = settings.rpcApiEnabled || false;
+        const rpcPort = settings.rpcApiPort || 8788;
+        const mcpEnabled = settings.mcpServerEnabled || false;
+        const mcpPort = settings.mcpServerPort || 8789;
+
+        const card = document.createElement('div');
+        card.className = 'panel';
+        card.innerHTML = `
+            <div class="panel-header">Developer API</div>
+            <div class="panel-body">
+                <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap)">
+                    Enable local servers so external software can control this application.
+                    Both bind to 127.0.0.1 (localhost only).
+                </p>
+
+                <div style="display:flex;flex-direction:column;gap:var(--gap)">
+                    <div class="panel" style="padding:var(--gap-sm) var(--gap)">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--gap-xs)">
+                            <strong style="font-size:var(--font-size-sm)">RPC API Server</strong>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="settings-rpc-enabled" ${rpcEnabled ? 'checked' : ''}>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap-xs)">
+                            Plain JSON-RPC for scripts and automation.
+                        </div>
+                        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+                            <label style="font-size:var(--font-size-xs)">Port</label>
+                            <input type="number" class="form-input" id="settings-rpc-port" value="${rpcPort}" min="1024" max="65535" style="width:80px;font-size:var(--font-size-xs);padding:2px 6px">
+                        </div>
+                        <div style="margin-top:var(--gap-xs)">
+                            <code style="font-size:var(--font-size-xs);color:var(--text-muted)">curl -X POST http://127.0.0.1:${rpcPort} -d '{"method":"noble.getBalance",...}'</code>
+                        </div>
+                    </div>
+
+                    <div class="panel" style="padding:var(--gap-sm) var(--gap)">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--gap-xs)">
+                            <strong style="font-size:var(--font-size-sm)">MCP Server</strong>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="settings-mcp-enabled" ${mcpEnabled ? 'checked' : ''}>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap-xs)">
+                            Model Context Protocol for AI agents (Claude Code, Cursor).
+                            Provides tool discovery, resources, prompts, and notifications.
+                        </div>
+                        <div style="display:flex;align-items:center;gap:var(--gap-sm)">
+                            <label style="font-size:var(--font-size-xs)">Port</label>
+                            <input type="number" class="form-input" id="settings-mcp-port" value="${mcpPort}" min="1024" max="65535" style="width:80px;font-size:var(--font-size-xs);padding:2px 6px">
+                        </div>
+                    </div>
+                </div>
+
+                <button class="btn btn-primary" id="settings-save-api" style="margin-top:var(--gap);width:100%">Save API Settings</button>
+            </div>
+        `;
+        root.appendChild(card);
+
+        card.querySelector('#settings-save-api').addEventListener('click', async () => {
+            const btn = card.querySelector('#settings-save-api');
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+            try {
+                await Bridge.call('noble_app', 'saveSettings', {
+                    rpcApiEnabled: card.querySelector('#settings-rpc-enabled').checked,
+                    rpcApiPort: parseInt(card.querySelector('#settings-rpc-port').value, 10) || 8788,
+                    mcpServerEnabled: card.querySelector('#settings-mcp-enabled').checked,
+                    mcpServerPort: parseInt(card.querySelector('#settings-mcp-port').value, 10) || 8789,
+                });
+                btn.textContent = 'Saved \u2713';
+                setTimeout(() => { btn.textContent = 'Save API Settings'; btn.disabled = false; }, 1200);
+            } catch (e) {
+                btn.textContent = 'Save API Settings';
+                btn.disabled = false;
+            }
+        });
     }
 
     // ── About ──

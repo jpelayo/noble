@@ -54,6 +54,14 @@ pub struct Settings {
     pub re_auth_for_sends: bool,
     #[serde(default)]
     pub onboarding_complete: bool,
+    #[serde(default)]
+    pub rpc_api_enabled: Option<bool>,
+    #[serde(default)]
+    pub rpc_api_port: Option<u16>,
+    #[serde(default)]
+    pub mcp_server_enabled: Option<bool>,
+    #[serde(default)]
+    pub mcp_server_port: Option<u16>,
 }
 
 fn default_node_url() -> String {

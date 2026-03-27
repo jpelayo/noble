@@ -1244,6 +1244,10 @@ final class WebBridgeHandler {
                 "tlsFingerprint": "",
                 "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0",
                 "autoConnect": appState.autoConnect,
+                "rpcApiEnabled": appState.rpcApiEnabled,
+                "rpcApiPort": appState.rpcApiPort,
+                "mcpServerEnabled": appState.mcpServerEnabled,
+                "mcpServerPort": appState.mcpServerPort,
             ] as [String: Any]
 
         case "saveSettings":
@@ -1253,6 +1257,11 @@ final class WebBridgeHandler {
             if let auto = params["autoConnect"] as? Bool {
                 appState.autoConnect = auto
             }
+            // Developer API settings
+            if let v = params["rpcApiEnabled"] as? Bool { appState.rpcApiEnabled = v }
+            if let v = params["rpcApiPort"] as? Int { appState.rpcApiPort = v }
+            if let v = params["mcpServerEnabled"] as? Bool { appState.mcpServerEnabled = v }
+            if let v = params["mcpServerPort"] as? Int { appState.mcpServerPort = v }
             appState.saveSecuritySettings()
             return ["ok": true]
 

@@ -419,6 +419,10 @@ pub async fn handle_app_action(
                 "tlsFingerprint": "",
                 "appVersion": "1.0.0",
                 "autoConnect": st.settings.auto_connect,
+                "rpcApiEnabled": st.settings.rpc_api_enabled.unwrap_or(false),
+                "rpcApiPort": st.settings.rpc_api_port.unwrap_or(8788),
+                "mcpServerEnabled": st.settings.mcp_server_enabled.unwrap_or(false),
+                "mcpServerPort": st.settings.mcp_server_port.unwrap_or(8789),
             }))
         }
 

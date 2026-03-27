@@ -1,0 +1,22 @@
+# Copyright 2026 InfiniteContext.com <blockchain@infinitecontext.com>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "noble-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Embedded RPC + MCP server for Noble client applications"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.5", features = ["cors"] }
+libc = "0.2"
+http = "1"

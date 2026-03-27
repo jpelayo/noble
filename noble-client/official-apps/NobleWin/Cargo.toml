@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 sha2 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa"] }
 include_dir = "0.7"
+noble-mcp = { path = "../../noble-client-libraries/noble-mcp" }
 dirs = "6"
 keyring = "3"
 bip39 = { version = "2", features = ["rand"] }

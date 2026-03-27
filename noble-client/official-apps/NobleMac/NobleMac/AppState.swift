@@ -93,6 +93,25 @@ final class AppState {
     /// Contact store with UserDefaults persistence.
     var contacts: [Contact] = []
 
+    // MARK: - Developer API (RPC + MCP servers)
+
+    var rpcApiEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "rpcApiEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "rpcApiEnabled") }
+    }
+    var rpcApiPort: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "rpcApiPort"); return v > 0 ? v : 8788 }
+        set { UserDefaults.standard.set(newValue, forKey: "rpcApiPort") }
+    }
+    var mcpServerEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "mcpServerEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "mcpServerEnabled") }
+    }
+    var mcpServerPort: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "mcpServerPort"); return v > 0 ? v : 8789 }
+        set { UserDefaults.standard.set(newValue, forKey: "mcpServerPort") }
+    }
+
     // MARK: - Polling
 
     /// RPC poll timer for live data refresh (10s interval).
@@ -282,6 +301,7 @@ final class AppState {
                 "chainId": nodeInfo.chainId,
             ])
             startPolling()
+            startDeveloperApiServers()
         } catch {
             isConnected = false
             let desc = error.localizedDescription
@@ -341,6 +361,7 @@ final class AppState {
     /// Disconnect from the current node.
     func disconnect() {
         stopPolling()
+        stopDeveloperApiServers()
         apiService = nil
         isConnected = false
         chainId = ""
@@ -348,6 +369,83 @@ final class AppState {
         walletBalance = nil
         walletAddress = nil
         connectionError = nil
+    }
+
+    /// Start RPC + MCP servers if enabled in settings.
+    private func startDeveloperApiServers() {
+        // Set up the handler that routes incoming API requests to the node's RPC.
+        // The Rust server calls this synchronously from a background thread.
+        if MCPServerBridge.handler == nil {
+            let nodeURLCapture = self.nodeURL
+            MCPServerBridge.handler = { requestJSON in
+                // Parse the request: { handler, action, params }
+                guard let data = requestJSON.data(using: .utf8),
+                      let req = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let handler = req["handler"] as? String,
+                      let action = req["action"] as? String else {
+                    return "{\"error\":\"invalid request\"}"
+                }
+                let params = req["params"] as? [String: Any] ?? [:]
+
+                // For noble_api actions, forward to the node as JSON-RPC.
+                if handler == "noble_api" {
+                    guard let baseURL = URL(string: nodeURLCapture) else {
+                        return "{\"error\":\"not connected\"}"
+                    }
+                    let sem = DispatchSemaphore(value: 0)
+                    var resultJSON = "{\"error\":\"timeout\"}"
+                    let rpcBody: [String: Any] = [
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "noble_\(action)",
+                        "params": [params],
+                    ]
+                    guard let bodyData = try? JSONSerialization.data(withJSONObject: rpcBody) else {
+                        return "{\"error\":\"encode failed\"}"
+                    }
+                    var request = URLRequest(url: baseURL.appendingPathComponent("rpc"))
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
+                    request.httpBody = bodyData
+                    request.timeoutInterval = 10
+
+                    let task = URLSession.shared.dataTask(with: request) { data, _, _ in
+                        defer { sem.signal() }
+                        guard let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                        if let result = json["result"] {
+                            resultJSON = (try? String(data: JSONSerialization.data(withJSONObject: ["result": result]), encoding: .utf8)) ?? "{}"
+                        } else if let error = json["error"] {
+                            resultJSON = (try? String(data: JSONSerialization.data(withJSONObject: ["error": error]), encoding: .utf8)) ?? "{\"error\":\"rpc error\"}"
+                        }
+                    }
+                    task.resume()
+                    _ = sem.wait(timeout: .now() + 10)
+                    return resultJSON
+                }
+
+                // For non-API handlers (noble_app, noble_crypto, etc.),
+                // return a stub — full bridge routing requires @MainActor context.
+                // Future: dispatch to main thread via DispatchQueue.main.sync.
+                if handler == "noble_app" && action == "getState" {
+                    return "{\"result\":{\"isConnected\":true,\"nodeURL\":\"\(nodeURLCapture)\"}}"
+                }
+
+                return "{\"error\":\"handler '\(handler).\(action)' not yet routed via MCP\"}"
+            }
+        }
+
+        if rpcApiEnabled {
+            MCPServerBridge.startRPC(port: UInt16(rpcApiPort))
+        }
+        if mcpServerEnabled {
+            MCPServerBridge.startMCP(port: UInt16(mcpServerPort))
+        }
+    }
+
+    /// Stop both developer API servers.
+    private func stopDeveloperApiServers() {
+        MCPServerBridge.stopRPC()
+        MCPServerBridge.stopMCP()
     }
 
     // MARK: - RPC Polling

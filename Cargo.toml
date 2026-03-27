@@ -19,6 +19,7 @@ members = [
     "noble-wire",
     "noble-client/noble-client-libraries/noble-tx-core",
     "noble-client/noble-client-libraries/noble-cms-core",
+    "noble-client/noble-client-libraries/noble-mcp",
 ]
 resolver = "2"
 
