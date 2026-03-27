@@ -8,6 +8,26 @@ import { esc, formatBytes } from '../utils.js';
 
 const STEP_NAMES = ['Files', 'Metadata', 'Version', 'Locking', 'Fee', 'Review', 'Submit'];
 
+// AES-256-GCM password-based field encryption via Web Crypto API.
+// Wire format: hex(salt(16) || nonce(12) || ciphertext || tag(16))
+// Key derivation: SHA-256(password_utf8 || salt) — matches noble-core locked_tx.
+async function encryptFieldWithPassword(plaintext, password) {
+    const enc = new TextEncoder();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const keyMaterial = new Uint8Array([...enc.encode(password), ...salt]);
+    const keyHash = await crypto.subtle.digest('SHA-256', keyMaterial);
+    const key = await crypto.subtle.importKey('raw', keyHash, 'AES-GCM', false, ['encrypt']);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertextBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, enc.encode(plaintext));
+    // SubtleCrypto appends the 16-byte tag to ciphertext
+    const ct = new Uint8Array(ciphertextBuf);
+    const result = new Uint8Array(salt.length + nonce.length + ct.length);
+    result.set(salt, 0);
+    result.set(nonce, salt.length);
+    result.set(ct, salt.length + nonce.length);
+    return Array.from(result).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function init(root, ctx) {
     let alive = true;
     const state = ctx.state;
@@ -21,7 +41,11 @@ export function init(root, ctx) {
     let versionMode = 'checksum'; // checksum | file | locator
     let versionFile = null;     // selected file for version lookup
     let wantsMetadata = false;
-    let metadata = [];
+    let metadata = [];              // batch-wide (or single-file) metadata
+    let perFileMetadata = {};       // path → [{fieldKey, key, value, mode, ...}]
+    let metadataTab = 'batch';      // 'batch' | 'per-file' — active tab in batch mode
+    let selectedFilePath = null;    // file selected in per-file dropdown
+    let batchUUID = null;           // shared UUID for batch linking
     let selectedSigningKeyId = null; // default signing key for all signed fields
     let myCardKeys = [];             // signing keys from My Card
     let wantsLocking = false;
@@ -54,9 +78,14 @@ export function init(root, ctx) {
     }
 
     function getWizardState() {
+        // Strip fieldPassword from metadata before persisting (security — same as locking password).
+        const stripPwd = arr => arr.map(m => { const { fieldPassword, ...rest } = m; return rest; });
+        const safePerFile = {};
+        for (const [k, v] of Object.entries(perFileMetadata)) { safePerFile[k] = stripPwd(v); }
         return {
             files, hashes, previousChecksum, isNewVersion, versionMode,
-            wantsMetadata, metadata, selectedSigningKeyId, wantsLocking, feeLevel, step
+            wantsMetadata, metadata: stripPwd(metadata), perFileMetadata: safePerFile,
+            metadataTab, batchUUID, selectedSigningKeyId, wantsLocking, feeLevel, step
         };
     }
 
@@ -68,6 +97,10 @@ export function init(root, ctx) {
         versionMode = d.versionMode || 'checksum';
         wantsMetadata = d.wantsMetadata || false;
         metadata = d.metadata || [];
+        perFileMetadata = d.perFileMetadata || {};
+        metadataTab = d.metadataTab || 'batch';
+        batchUUID = d.batchUUID || null;
+        selectedFilePath = null;
         selectedSigningKeyId = d.selectedSigningKeyId || null;
         wantsLocking = d.wantsLocking || false;
         lockingPassword = '';
@@ -109,6 +142,10 @@ export function init(root, ctx) {
         versionFile = null;
         wantsMetadata = false;
         metadata = [];
+        perFileMetadata = {};
+        metadataTab = 'batch';
+        selectedFilePath = null;
+        batchUUID = null;
         selectedSigningKeyId = null;
         myCardKeys = [];
         wantsLocking = false;
@@ -280,7 +317,12 @@ export function init(root, ctx) {
 
     function canAdvance() {
         if (step === 0) return files.length > 0 && Object.keys(hashes).length === files.length;
-        if (step === 1) return true; // metadata optional
+        if (step === 1) {
+            // If any protected field (batch or per-file) has a value but no password, block.
+            const allMeta = [...metadata, ...Object.values(perFileMetadata).flat()];
+            const protectedMissing = allMeta.some(m => m.mode === 'protected' && m.value && !m.fieldPassword);
+            return !protectedMissing;
+        }
         if (step === 2) return true; // version optional
         if (step === 3) {            // locking: if enabled, passwords must match and be non-empty
             if (!wantsLocking) return true;
@@ -653,12 +695,31 @@ export function init(root, ctx) {
         { key: 'custom',          code: 'T99', label: 'Custom Field',      icon: '\u{2795}', placeholder: 'Value', customKey: true },
     ];
 
-    // Compute slot budget: schema(1) + fields + signature slots
-    function computeSlotBudget() {
-        const validMeta = metadata.filter(m => m.key && m.value);
-        const sigCount = validMeta.filter(m => m.signed).length;
-        const used = 1 + validMeta.length + sigCount; // schema + fields + sigs
-        return { used, remaining: 16 - used };
+    // Compute slot budget: schema(1) + batch fields + per-file fields + signatures.
+    // filePath=null → worst-case across all files (for batch-tab guards).
+    // filePath=string → budget for that specific file.
+    function computeSlotBudget(filePath) {
+        const batchMeta = metadata.filter(m => m.key && m.value);
+        const batchSigs = batchMeta.filter(m => m.signed).length;
+
+        if (filePath) {
+            const fileMeta = (perFileMetadata[filePath] || []).filter(m => m.key && m.value);
+            const fileSigs = fileMeta.filter(m => m.signed).length;
+            const total = batchMeta.length + fileMeta.length;
+            const sigs = batchSigs + fileSigs;
+            const used = (total > 0 ? 1 : 0) + total + sigs;
+            return { used, remaining: 16 - used, batchFields: batchMeta.length, fileFields: fileMeta.length, sigs };
+        }
+
+        // Worst-case: batch + the file with the most per-file metadata
+        const maxPerFile = Math.max(0, ...Object.values(perFileMetadata)
+            .map(arr => {
+                const fm = arr.filter(m => m.key && m.value);
+                return fm.length + fm.filter(m => m.signed).length;
+            }));
+        const total = batchMeta.length + maxPerFile;
+        const used = (total > 0 ? 1 : 0) + batchMeta.length + batchSigs + maxPerFile;
+        return { used, remaining: 16 - used, batchFields: batchMeta.length, fileFields: maxPerFile, sigs: batchSigs };
     }
 
     // Load signing keys from My Card (cached for the session)
@@ -681,23 +742,35 @@ export function init(root, ctx) {
     }
 
     function renderStepMetadata(container) {
+        const isBatch = files.length > 1;
+
         const question = document.createElement('p');
         question.style.cssText = 'font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)';
-        question.textContent = 'Do you want to add metadata to this registration?';
+        question.textContent = isBatch
+            ? `Add metadata to ${files.length} documents. Batch metadata applies to all files; per-file metadata is additive.`
+            : 'Do you want to add metadata to this registration?';
         container.appendChild(question);
 
-        // Yes / No toggle
+        // ── Toggle: No / Yes (single file) or No / Metadata (batch) ──
         const toggle = document.createElement('div');
         toggle.className = 'segmented-control';
         toggle.style.marginBottom = 'var(--gap)';
-        for (const opt of [{ key: false, label: 'No' }, { key: true, label: 'Yes' }]) {
+        for (const opt of [{ key: false, label: 'No Metadata' }, { key: true, label: isBatch ? 'Metadata' : 'Yes' }]) {
             const btn = document.createElement('button');
-            btn.className = wantsMetadata === opt.key ? 'active' : '';
+            btn.className = (!!wantsMetadata) === opt.key ? 'active' : '';
             btn.textContent = opt.label;
             btn.addEventListener('click', () => {
                 wantsMetadata = opt.key;
-                if (!wantsMetadata) metadata = [];
+                if (!wantsMetadata) { metadata = []; perFileMetadata = {}; }
                 if (wantsMetadata && myCardKeys.length === 0) loadMyCardKeys();
+                // Auto-populate batch linking for multi-file
+                if (wantsMetadata && isBatch && metadata.length === 0) {
+                    batchUUID = batchUUID || crypto.randomUUID();
+                    metadata = [
+                        { fieldKey: 'doc:relation', key: 'doc:relation', value: 'same batch', mode: 'plaintext' },
+                        { fieldKey: 'doc:bridge', key: 'doc:bridge', value: batchUUID, mode: 'plaintext' },
+                    ];
+                }
                 render();
             });
             toggle.appendChild(btn);
@@ -706,18 +779,81 @@ export function init(root, ctx) {
 
         if (!wantsMetadata) return;
 
+        // ── Batch mode: tabs (Batch / Per-File) ──
+        if (isBatch) {
+            const tabLabel = document.createElement('div');
+            tabLabel.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap-xs);margin-top:var(--gap-sm)';
+            tabLabel.textContent = 'Scope';
+            container.appendChild(tabLabel);
+
+            const tabs = document.createElement('div');
+            tabs.className = 'segmented-control segmented-control-sm';
+            tabs.style.marginBottom = 'var(--gap)';
+            for (const tab of [
+                { key: 'batch', label: `Batch (all ${files.length} files)` },
+                { key: 'per-file', label: 'Per-File' },
+            ]) {
+                const btn = document.createElement('button');
+                btn.className = metadataTab === tab.key ? 'active' : '';
+                btn.textContent = tab.label;
+                btn.addEventListener('click', () => { metadataTab = tab.key; render(); });
+                tabs.appendChild(btn);
+            }
+            container.appendChild(tabs);
+        }
+
+        // ── Determine which metadata array to edit ──
+        const isPerFile = isBatch && metadataTab === 'per-file';
+        let activeMeta; // reference to the array being edited
+
+        if (isPerFile) {
+            // File dropdown
+            if (!selectedFilePath || !files.some(f => f.path === selectedFilePath)) {
+                selectedFilePath = files[0]?.path || null;
+            }
+            const dropdown = document.createElement('select');
+            dropdown.className = 'form-input';
+            dropdown.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-sm);appearance:auto;cursor:pointer;padding-right:28px';
+            for (const f of files) {
+                const opt = document.createElement('option');
+                opt.value = f.path;
+                opt.textContent = f.name;
+                if (f.path === selectedFilePath) opt.selected = true;
+                dropdown.appendChild(opt);
+            }
+            dropdown.addEventListener('change', () => { selectedFilePath = dropdown.value; render(); });
+            container.appendChild(dropdown);
+
+            if (!perFileMetadata[selectedFilePath]) perFileMetadata[selectedFilePath] = [];
+            activeMeta = perFileMetadata[selectedFilePath];
+
+            // Note about additive
+            if (metadata.length > 0) {
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap);padding:4px 8px;background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:var(--radius-sm)';
+                note.textContent = `\u2139 ${metadata.filter(m => m.key && m.value).length} batch field(s) will also be applied to this file.`;
+                container.appendChild(note);
+            }
+        } else {
+            activeMeta = metadata;
+        }
+
         // ── Signing key selector + slot budget ──
         const metaHeader = document.createElement('div');
         metaHeader.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);margin-bottom:var(--gap);flex-wrap:wrap';
 
-        // Slot budget indicator
-        const budget = computeSlotBudget();
+        const budgetPath = isPerFile ? selectedFilePath : null;
+        const budget = computeSlotBudget(budgetPath);
         const budgetEl = document.createElement('span');
         budgetEl.style.cssText = 'font-size:var(--font-size-xs);padding:2px 8px;border-radius:var(--radius-sm)';
         const budgetColor = budget.remaining > 4 ? 'var(--success)' : budget.remaining > 1 ? 'var(--warning)' : 'var(--error)';
         budgetEl.style.background = `color-mix(in srgb, ${budgetColor} 12%, transparent)`;
         budgetEl.style.color = budgetColor;
-        budgetEl.textContent = `${budget.used} / 16 slots`;
+        const budgetParts = [];
+        if (budget.batchFields > 0) budgetParts.push(`${budget.batchFields} batch`);
+        if (budget.fileFields > 0) budgetParts.push(`${budget.fileFields} file`);
+        if (budget.sigs > 0) budgetParts.push(`${budget.sigs} sig`);
+        budgetEl.textContent = `${budget.used} / 16 slots` + (budgetParts.length ? ` (${budgetParts.join(' + ')})` : '');
         metaHeader.appendChild(budgetEl);
 
         // Signing key dropdown (if keys available)
@@ -743,28 +879,30 @@ export function init(root, ctx) {
 
         container.appendChild(metaHeader);
 
-        // Existing fields
-        if (metadata.length > 0) {
+        // ── Render fields from the active metadata array ──
+        if (activeMeta.length > 0) {
             const list = document.createElement('div');
             list.style.cssText = 'display:flex;flex-direction:column;gap:var(--gap-sm);margin-bottom:var(--gap);';
-            for (let i = 0; i < metadata.length; i++) {
-                list.appendChild(buildMetadataRow(i));
+            for (let i = 0; i < activeMeta.length; i++) {
+                list.appendChild(buildMetadataRow(i, activeMeta));
             }
             container.appendChild(list);
         }
 
         // Add button with dropdown (respect slot budget)
-        const budget2 = computeSlotBudget();
-        if (budget2.remaining > 1) { // need at least 1 field slot + potentially 1 sig slot
-            renderAddFieldButton(container);
+        const budget2 = computeSlotBudget(budgetPath);
+        if (budget2.remaining > 1) {
+            renderAddFieldButton(container, activeMeta);
         }
     }
 
-    function buildMetadataRow(index) {
-        const m = metadata[index];
+    function buildMetadataRow(index, metaArr) {
+        const arr = metaArr || metadata;
+        const m = arr[index];
         if (!m.recipients) m.recipients = [];
         const fieldDef = METADATA_FIELDS.find(f => f.key === m.fieldKey) || METADATA_FIELDS[METADATA_FIELDS.length - 1];
         const isEncrypted = m.mode === 'encrypted';
+        const isProtected = m.mode === 'protected';
 
         const row = document.createElement('div');
         row.className = 'panel metadata-row';
@@ -787,7 +925,7 @@ export function init(root, ctx) {
         rmBtn.className = 'btn btn-sm';
         rmBtn.textContent = '\u2715';
         rmBtn.style.cssText = 'color:var(--text-muted);min-height:auto;padding:2px 6px;';
-        rmBtn.addEventListener('click', () => { metadata.splice(index, 1); render(); });
+        rmBtn.addEventListener('click', () => { arr.splice(index, 1); render(); });
         header.appendChild(rmBtn);
         row.appendChild(header);
 
@@ -838,6 +976,20 @@ export function init(root, ctx) {
             valRow.appendChild(pickBtn);
         }
 
+        // UUID generator button for Linked Document (doc:bridge) fields
+        if (m.fieldKey === 'doc:bridge') {
+            const uuidBtn = document.createElement('button');
+            uuidBtn.className = 'btn btn-secondary btn-sm';
+            uuidBtn.textContent = 'UUID';
+            uuidBtn.title = 'Generate a unique identifier';
+            uuidBtn.style.cssText = 'min-height:auto;padding:4px 8px;font-size:var(--font-size-xs);';
+            uuidBtn.addEventListener('click', () => {
+                m.value = crypto.randomUUID();
+                valInput.value = m.value;
+            });
+            valRow.appendChild(uuidBtn);
+        }
+
         row.appendChild(valRow);
 
         // ── Visibility toggle: Public / Encrypted (segmented) ──
@@ -863,15 +1015,35 @@ export function init(root, ctx) {
             const seg = document.createElement('div');
             seg.className = 'segmented-control segmented-control-sm';
             for (const opt of [
-                { key: 'plaintext', label: 'Public',    icon: '\u{1F513}' },
-                { key: 'encrypted', label: 'Encrypted', icon: '\u{1F512}' },
+                { key: 'plaintext',  label: 'Public',    icon: '\u{1F513}' },
+                { key: 'protected',  label: 'Protected', icon: '\u{1F510}' },
+                { key: 'encrypted',  label: 'Encrypted', icon: '\u{1F512}' },
             ]) {
                 const btn = document.createElement('button');
                 btn.className = m.mode === opt.key ? 'active' : '';
                 btn.innerHTML = `${opt.icon} ${opt.label}`;
                 btn.addEventListener('click', () => {
                     m.mode = opt.key;
-                    if (opt.key === 'plaintext') m.recipients = [];
+                    if (opt.key === 'plaintext') {
+                        m.recipients = [];
+                        m.fieldPassword = '';
+                    } else if (opt.key === 'protected') {
+                        m.recipients = [];
+                        // Auto-inherit password from any other protected field.
+                        if (!m.fieldPassword) {
+                            const allFields = [...metadata, ...Object.values(perFileMetadata).flat()];
+                            const donor = allFields.find(other => other !== m && other.mode === 'protected' && other.fieldPassword);
+                            if (donor) m.fieldPassword = donor.fieldPassword;
+                        }
+                    } else if (opt.key === 'encrypted' && (!m.recipients || m.recipients.length === 0)) {
+                        m.fieldPassword = '';
+                        // Auto-inherit recipients from any other encrypted field.
+                        const allFields = [...metadata, ...Object.values(perFileMetadata).flat()];
+                        const donor = allFields.find(other => other !== m && other.mode === 'encrypted' && other.recipients && other.recipients.length > 0);
+                        if (donor) {
+                            m.recipients = donor.recipients.map(r => ({ ...r }));
+                        }
+                    }
                     render();
                 });
                 seg.appendChild(btn);
@@ -881,7 +1053,7 @@ export function init(root, ctx) {
         row.appendChild(visSection);
 
         // ── Public warning ──
-        if (!isEncrypted && !fieldDef.forceEncrypt) {
+        if (!isEncrypted && !isProtected && !fieldDef.forceEncrypt) {
             const pubWarn = document.createElement('div');
             pubWarn.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning);margin-top:var(--gap-xs);padding:4px 8px;background:color-mix(in srgb,var(--warning) 10%,transparent);border-radius:var(--radius-sm)';
             pubWarn.textContent = '\u26A0 Warning: By not encrypting this field, you are making this information public and available to anyone.';
@@ -939,6 +1111,43 @@ export function init(root, ctx) {
             row.appendChild(encBlock);
         }
 
+        // ── Protected: password input ──
+        if (isProtected) {
+            const pwdBlock = document.createElement('div');
+            pwdBlock.className = 'metadata-enc-block';
+
+            const notice = document.createElement('div');
+            notice.className = 'metadata-enc-notice';
+            notice.textContent = 'Anyone with this password can read this field.';
+            pwdBlock.appendChild(notice);
+
+            const pwdWrap = document.createElement('div');
+            pwdWrap.style.cssText = 'position:relative;display:flex;align-items:center';
+            const pwdInput = document.createElement('input');
+            pwdInput.type = 'password';
+            pwdInput.className = 'form-input';
+            pwdInput.style.cssText = 'flex:1;padding-right:36px;font-size:var(--font-size-sm)';
+            pwdInput.placeholder = 'Encryption password';
+            pwdInput.value = m.fieldPassword || '';
+            pwdInput.addEventListener('input', () => { m.fieldPassword = pwdInput.value; });
+            pwdWrap.appendChild(pwdInput);
+            const eye = document.createElement('button');
+            eye.type = 'button';
+            eye.style.cssText = 'position:absolute;right:6px;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:1rem;padding:2px';
+            eye.textContent = '\u25CE';
+            eye.title = 'Show password';
+            eye.addEventListener('click', () => {
+                const vis = pwdInput.type === 'text';
+                pwdInput.type = vis ? 'password' : 'text';
+                eye.textContent = vis ? '\u25CE' : '\u25C9';
+                eye.title = vis ? 'Show password' : 'Hide password';
+            });
+            pwdWrap.appendChild(eye);
+            pwdBlock.appendChild(pwdWrap);
+
+            row.appendChild(pwdBlock);
+        }
+
         // ── Signing toggle: Unsigned / Signed ──
         if (!m.signed) m.signed = false;
         if (!m.signingKeyId) m.signingKeyId = selectedSigningKeyId;
@@ -986,18 +1195,26 @@ export function init(root, ctx) {
                 });
                 if (opt.key === true && !canSign && hasKeys) {
                     btn.disabled = true;
-                    btn.title = 'No slots available for signature';
+                    btn.title = 'No metadata slots available for a signature';
                 }
                 sigSeg.appendChild(btn);
             }
             sigSection.appendChild(sigSeg);
+
+            if (!canSign && hasKeys && !m.signed) {
+                const slotWarn = document.createElement('div');
+                slotWarn.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs);padding:4px 8px';
+                slotWarn.textContent = `Signing unavailable \u2014 no free metadata slots. Remove a field or signature to free a slot.`;
+                sigSection.appendChild(slotWarn);
+            }
             row.appendChild(sigSection);
 
             if (m.signed && hasKeys) {
                 const sigNote = document.createElement('div');
-                sigNote.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs);padding:4px 8px';
+                sigNote.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-xs);padding:4px 8px;background:color-mix(in srgb,var(--accent) 8%,transparent);border-radius:var(--radius-sm)';
                 const keyName = myCardKeys.find(k => k.id === m.signingKeyId);
-                sigNote.textContent = `CMS signature using ${keyName ? keyName.label || keyName.certificateSubject || 'key' : 'selected key'} (+1 slot)`;
+                const name = keyName ? keyName.label || keyName.certificateSubject || 'Noble Key' : 'selected key';
+                sigNote.textContent = `Signing with ${name}. This signature will use one additional metadata slot.`;
                 row.appendChild(sigNote);
             }
         }
@@ -1011,37 +1228,92 @@ export function init(root, ctx) {
 
         const panel = document.createElement('div');
         panel.className = 'modal-panel';
+        panel.style.padding = 'var(--gap)';
 
         const title = document.createElement('h3');
         title.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-base);';
-        title.textContent = 'Select Recipient';
+        title.textContent = 'Select Recipients';
         panel.appendChild(title);
 
-        for (const c of contacts) {
-            const already = metaEntry.recipients.some(r => r.email === c.email || r.publicKey === c.publicKey);
+        // Multi-select: track toggled contacts
+        const selected = new Set();
+
+        const list = document.createElement('div');
+        list.style.cssText = 'max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--gap)';
+
+        for (let ci = 0; ci < contacts.length; ci++) {
+            const c = contacts[ci];
+            const already = metaEntry.recipients.some(r =>
+                (r.publicKey && r.publicKey === c.publicKey) || (r.email && r.email === c.email));
             const row = document.createElement('button');
-            row.className = 'modal-list-item';
-            if (already) row.classList.add('modal-list-item-disabled');
-            row.innerHTML = `<span style="font-weight:500;">${esc(c.displayName || c.name || 'Unknown')}</span><span style="font-size:var(--font-size-xs);color:var(--text-secondary);">${esc(c.email || c.publicKey || '')}</span>`;
+            row.style.cssText = 'display:flex;align-items:center;gap:var(--gap-sm);width:100%;padding:var(--gap-sm) var(--gap);border:none;background:none;color:var(--text-primary);font-size:var(--font-size-sm);cursor:pointer;text-align:left;';
+            if (already) row.style.opacity = '0.4';
+
+            const check = document.createElement('span');
+            check.style.cssText = 'width:18px;height:18px;border:2px solid var(--border);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.7rem;flex-shrink:0;';
+            if (already) { check.textContent = '\u2713'; check.style.borderColor = 'var(--text-muted)'; }
+            row.appendChild(check);
+
+            const info = document.createElement('div');
+            info.style.cssText = 'display:flex;flex-direction:column;gap:1px;min-width:0;';
+            const name = c.displayName || c.name || c.email || 'Unknown';
+            const key = c.publicKey || c.email || '';
+            info.innerHTML = `<span style="font-weight:500">${esc(name)}</span><span class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);overflow:hidden;text-overflow:ellipsis">${esc(key.length > 30 ? key.slice(0, 12) + '\u2026' + key.slice(-8) : key)}</span>`;
+            row.appendChild(info);
+
             if (!already) {
+                row.addEventListener('mouseenter', () => { row.style.background = 'var(--bg-tertiary)'; });
+                row.addEventListener('mouseleave', () => { row.style.background = selected.has(ci) ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'none'; });
                 row.addEventListener('click', () => {
-                    metaEntry.recipients.push({
-                        displayName: c.displayName || c.name || c.email,
-                        email: c.email || '',
-                        publicKey: c.publicKey || ''
-                    });
-                    overlay.remove();
-                    render();
+                    if (selected.has(ci)) {
+                        selected.delete(ci);
+                        check.textContent = '';
+                        check.style.borderColor = 'var(--border)';
+                        check.style.background = 'none';
+                        row.style.background = 'none';
+                    } else {
+                        selected.add(ci);
+                        check.textContent = '\u2713';
+                        check.style.borderColor = 'var(--accent)';
+                        check.style.background = 'var(--accent)';
+                        check.style.color = '#fff';
+                        row.style.background = 'color-mix(in srgb, var(--accent) 10%, transparent)';
+                    }
+                    addSelectedBtn.textContent = selected.size > 0
+                        ? `Add ${selected.size} Recipient${selected.size > 1 ? 's' : ''}`
+                        : 'Add';
+                    addSelectedBtn.disabled = selected.size === 0;
                 });
             }
-            panel.appendChild(row);
+            list.appendChild(row);
         }
+        panel.appendChild(list);
+
+        // Add selected button
+        const addSelectedBtn = document.createElement('button');
+        addSelectedBtn.className = 'btn btn-primary';
+        addSelectedBtn.textContent = 'Add';
+        addSelectedBtn.disabled = true;
+        addSelectedBtn.style.cssText = 'width:100%;';
+        addSelectedBtn.addEventListener('click', () => {
+            for (const ci of selected) {
+                const c = contacts[ci];
+                metaEntry.recipients.push({
+                    displayName: c.displayName || c.name || c.email,
+                    email: c.email || '',
+                    publicKey: c.publicKey || ''
+                });
+            }
+            overlay.remove();
+            render();
+        });
+        panel.appendChild(addSelectedBtn);
 
         // Manual entry option
         const manualBtn = document.createElement('button');
         manualBtn.className = 'btn btn-secondary';
-        manualBtn.textContent = 'Enter manually...';
-        manualBtn.style.cssText = 'margin-top:var(--gap);width:100%;';
+        manualBtn.textContent = 'Enter manually\u2026';
+        manualBtn.style.cssText = 'margin-top:var(--gap-xs);width:100%;';
         manualBtn.addEventListener('click', () => {
             overlay.remove();
             showRecipientManualEntry(metaEntry);
@@ -1058,6 +1330,7 @@ export function init(root, ctx) {
         overlay.appendChild(panel);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         document.body.appendChild(overlay);
+        requestAnimationFrame(() => overlay.classList.add('visible'));
     }
 
     function showRecipientManualEntry(metaEntry) {
@@ -1066,11 +1339,63 @@ export function init(root, ctx) {
 
         const panel = document.createElement('div');
         panel.className = 'modal-panel';
+        panel.style.padding = 'var(--gap)';
 
+        // Header row: title + "Add from Contacts" button
+        const headerRow = document.createElement('div');
+        headerRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap)';
         const title = document.createElement('h3');
-        title.style.cssText = 'margin-bottom:var(--gap);font-size:var(--font-size-base);';
+        title.style.cssText = 'margin:0;font-size:var(--font-size-base);';
         title.textContent = 'Add Recipient';
-        panel.appendChild(title);
+        headerRow.appendChild(title);
+        const fromContactsBtn = document.createElement('button');
+        fromContactsBtn.className = 'btn btn-secondary btn-sm';
+        fromContactsBtn.textContent = '\u{1F4C7} Contacts';
+        fromContactsBtn.style.cssText = 'font-size:var(--font-size-xs);padding:2px 8px;';
+        fromContactsBtn.addEventListener('click', async () => {
+            // Remove any previous pick list or message
+            panel.querySelector('.contacts-pick')?.remove();
+            panel.querySelector('.contacts-msg')?.remove();
+
+            let contacts = [];
+            try {
+                const res = await Bridge.call('noble_storage', 'getContacts');
+                if (!alive) return;
+                contacts = (res.contacts || []).filter(c => c.publicKey || c.email);
+            } catch { /* bridge unavailable */ }
+
+            if (!contacts.length) {
+                const msg = document.createElement('div');
+                msg.className = 'contacts-msg';
+                msg.style.cssText = 'font-size:var(--font-size-xs);color:var(--warning);padding:6px 8px;margin-bottom:var(--gap);background:color-mix(in srgb,var(--warning) 10%,transparent);border-radius:var(--radius-sm)';
+                msg.textContent = 'No contacts with a public key found. Add contacts in the Contacts page first, or enter a public key manually below.';
+                nameGroup.parentNode.insertBefore(msg, nameGroup);
+                return;
+            }
+
+            // Build a quick-pick list inside the modal
+            const pick = document.createElement('div');
+            pick.className = 'contacts-pick';
+            pick.style.cssText = 'max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--gap)';
+            for (const c of contacts) {
+                const row = document.createElement('button');
+                row.style.cssText = 'display:flex;flex-direction:column;gap:2px;width:100%;padding:var(--gap-sm) var(--gap);border:none;background:none;color:var(--text-primary);font-size:var(--font-size-sm);cursor:pointer;text-align:left;';
+                row.addEventListener('mouseenter', () => { row.style.background = 'var(--bg-tertiary)'; });
+                row.addEventListener('mouseleave', () => { row.style.background = 'none'; });
+                const name = c.displayName || c.name || c.email || 'Unknown';
+                const key = c.publicKey || c.email || '';
+                row.innerHTML = `<span style="font-weight:500">${esc(name)}</span><span class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(key.length > 24 ? key.slice(0, 12) + '\u2026' + key.slice(-8) : key)}</span>`;
+                row.addEventListener('click', () => {
+                    nameInput.value = name;
+                    keyInput.value = c.publicKey || c.email || '';
+                    pick.remove();
+                });
+                pick.appendChild(row);
+            }
+            nameGroup.parentNode.insertBefore(pick, nameGroup);
+        });
+        headerRow.appendChild(fromContactsBtn);
+        panel.appendChild(headerRow);
 
         const nameGroup = document.createElement('div');
         nameGroup.className = 'form-group';
@@ -1118,9 +1443,11 @@ export function init(root, ctx) {
         overlay.appendChild(panel);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         document.body.appendChild(overlay);
+        requestAnimationFrame(() => overlay.classList.add('visible'));
     }
 
-    function renderAddFieldButton(container) {
+    function renderAddFieldButton(container, metaArr) {
+        const targetArr = metaArr || metadata;
         const wrapper = document.createElement('div');
         wrapper.style.position = 'relative';
 
@@ -1165,12 +1492,33 @@ export function init(root, ctx) {
                 item.appendChild(text);
 
                 item.addEventListener('click', () => {
-                    metadata.push({
+                    // Pre-populate doc:title with filename
+                    let prefill = '';
+                    if (field.key === 'doc:title') {
+                        const ctx = selectedFilePath ? files.find(f => f.path === selectedFilePath) : files[0];
+                        if (ctx) prefill = ctx.name.replace(/\.[^.]+$/, ''); // strip extension
+                    }
+                    targetArr.push({
                         fieldKey: field.key,
                         key: field.customKey ? '' : field.key,
-                        value: '',
+                        value: prefill,
                         mode: field.forceEncrypt ? 'encrypted' : 'plaintext',
                     });
+                    // Linked Document and Relation are always paired:
+                    // adding one auto-adds the other if not already present.
+                    const companion = field.key === 'doc:bridge' ? 'doc:relation'
+                                    : field.key === 'doc:relation' ? 'doc:bridge' : null;
+                    if (companion && !targetArr.some(m => m.fieldKey === companion)) {
+                        const cDef = METADATA_FIELDS.find(f => f.key === companion);
+                        if (cDef) {
+                            targetArr.push({
+                                fieldKey: cDef.key,
+                                key: cDef.key,
+                                value: '',
+                                mode: 'plaintext',
+                            });
+                        }
+                    }
                     dropdownOpen = false;
                     render();
                 });
@@ -1310,12 +1658,12 @@ export function init(root, ctx) {
             const eye = document.createElement('button');
             eye.type = 'button';
             eye.style.cssText = 'position:absolute;right:8px;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:1.1rem;padding:2px';
-            eye.textContent = '\u{1F441}';
+            eye.textContent = '\u25CE';
             eye.title = 'Show password';
             eye.addEventListener('click', () => {
                 const visible = inp.type === 'text';
                 inp.type = visible ? 'password' : 'text';
-                eye.textContent = visible ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}';
+                eye.textContent = visible ? '\u25CE' : '\u25C9';
                 eye.title = visible ? 'Show password' : 'Hide password';
             });
             wrap.appendChild(eye);
@@ -1564,22 +1912,49 @@ export function init(root, ctx) {
         filesSection.appendChild(filesList);
         container.appendChild(filesSection);
 
-        // Metadata summary
-        const validMeta = metadata.filter(m => m.key && m.value);
-        if (validMeta.length > 0) {
+        // Metadata summary — batch
+        const batchValid = metadata.filter(m => m.key && m.value);
+        if (batchValid.length > 0) {
             const metaSection = document.createElement('div');
             metaSection.className = 'summary-section';
-            metaSection.innerHTML = `<h3>Metadata (${validMeta.length} fields)</h3>`;
+            const isBatchMode = files.length > 1;
+            metaSection.innerHTML = `<h3>${isBatchMode ? 'Batch Metadata' : 'Metadata'} (${batchValid.length} field${batchValid.length > 1 ? 's' : ''}${isBatchMode ? ' \u2014 all files' : ''})</h3>`;
             const dl = document.createElement('dl');
             dl.className = 'detail-grid';
-            for (const m of validMeta) {
+            for (const m of batchValid) {
                 const fieldDef = METADATA_FIELDS.find(f => f.key === m.fieldKey);
                 const label = fieldDef ? fieldDef.label : m.key;
-                const encrypted = m.mode === 'encrypted' ? ' \u{1F512}' : '';
-                dl.innerHTML += `<dt>${esc(label)}${encrypted}</dt><dd>${esc(m.value)}</dd>`;
+                const modeBadge = m.mode === 'encrypted' ? ' \u{1F512}'
+                               : m.mode === 'protected' ? ' \u{1F510}' : '';
+                dl.innerHTML += `<dt>${esc(label)}${modeBadge}</dt><dd>${esc(m.value)}</dd>`;
             }
             metaSection.appendChild(dl);
             container.appendChild(metaSection);
+        }
+
+        // Metadata summary — per-file
+        const filesWithMeta = Object.entries(perFileMetadata)
+            .map(([path, arr]) => ({ path, fields: arr.filter(m => m.key && m.value) }))
+            .filter(e => e.fields.length > 0);
+        if (filesWithMeta.length > 0) {
+            const pfSection = document.createElement('div');
+            pfSection.className = 'summary-section';
+            let pfHtml = '<h3>Per-File Metadata</h3>';
+            for (const { path, fields } of filesWithMeta) {
+                const fname = files.find(f => f.path === path)?.name || path;
+                pfHtml += `<div style="margin-top:var(--gap-xs)"><strong style="font-size:var(--font-size-xs)">${esc(fname)}</strong></div>`;
+                pfHtml += '<dl class="detail-grid" style="margin-left:var(--gap-sm)">';
+                for (const m of fields) {
+                    const fieldDef = METADATA_FIELDS.find(f => f.key === m.fieldKey);
+                    const label = fieldDef ? fieldDef.label : m.key;
+                    const modeBadge = m.mode === 'encrypted' ? ' \u{1F512}'
+                                   : m.mode === 'protected' ? ' \u{1F510}' : '';
+                    pfHtml += `<dt>${esc(label)}${modeBadge}</dt><dd>${esc(m.value)}</dd>`;
+                }
+                pfHtml += '</dl>';
+            }
+            pfSection.innerHTML = pfHtml;
+            container.appendChild(pfSection);
         }
 
         // Version link
@@ -1643,6 +2018,11 @@ export function init(root, ctx) {
             summary.style.cssText = 'margin-top:var(--gap);text-align:center;';
 
             if (failures === 0) {
+                // Auto-delete the draft if this was a resumed draft — it's now submitted.
+                if (editingDraftId) {
+                    Bridge.call('noble_app', 'deleteDraft', { id: editingDraftId }).catch(() => {});
+                    editingDraftId = null;
+                }
                 summary.innerHTML = `
                     <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--success)">
                         ${successes === 1 ? 'Document Submitted' : `All ${successes} Documents Submitted`}
@@ -1716,7 +2096,10 @@ export function init(root, ctx) {
 
         try {
             const fee = getSelectedFee();
-            const validMeta = metadata.filter(m => m.key && m.value);
+            // Merge batch metadata + per-file metadata for this file (additive).
+            const batchMeta = metadata.filter(m => m.key && m.value);
+            const fileMeta = (perFileMetadata[f.path] || []).filter(m => m.key && m.value);
+            const validMeta = [...batchMeta, ...fileMeta];
 
             // ── Step 1: Sign fields BEFORE encryption (sign plaintext) ──
             // For each signed field, generate CMS detached signature over the plaintext value.
@@ -1751,7 +2134,7 @@ export function init(root, ctx) {
             for (let i = 0; i < validMeta.length; i++) {
                 const m = validMeta[i];
                 const def = METADATA_FIELDS.find(f => f.key === m.fieldKey) || { code: 'T99' };
-                const vis = m.mode === 'encrypted' ? 'priv' : 'pub';
+                const vis = m.mode === 'encrypted' ? 'priv' : m.mode === 'protected' ? 'pwd' : 'pub';
                 schemaLines.push(`${slotIndex}:${def.code}:${vis}:${m.key}`);
                 metaWithSigs.push(m);
                 const fieldSlot = slotIndex;
@@ -1769,6 +2152,16 @@ export function init(root, ctx) {
             const schemaEntry = schemaLines.length > 0
                 ? [{ key: 'schema', value: schemaLines.join('\n'), mode: 'plaintext' }]
                 : [];
+
+            // ── Step 2.5: Encrypt password-protected fields ──
+            // Protected fields use AES-256-GCM with SHA-256(password || salt) key derivation.
+            // Encryption happens here in JS; the native handler sees the ciphertext as plaintext hex.
+            for (const m of metaWithSigs) {
+                if (m.mode === 'protected' && m.fieldPassword && m.value) {
+                    m.value = await encryptFieldWithPassword(m.value, m.fieldPassword);
+                    m.mode = 'plaintext'; // native handler sees pre-encrypted hex
+                }
+            }
 
             // ── Step 3: Submit ──
             // NOTE: Metadata encryption (ECIES for mode:'encrypted' fields) is handled

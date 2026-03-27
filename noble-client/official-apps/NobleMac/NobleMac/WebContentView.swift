@@ -217,7 +217,6 @@ struct WebContentView: NSViewRepresentable {
 
     private func buildNativeConfigScript() -> String {
         let address = appState.walletAddress ?? ""
-        let connected = appState.isConnected
         let hasWallet = appState.hasWallet
         let chainId = appState.chainId
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1"

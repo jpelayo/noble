@@ -1237,7 +1237,7 @@ final class WebBridgeHandler {
             return ["text": text]
 
         case "getSettings":
-            let rpcClient = appState.apiService as? LiveNobleAPIService
+            let _ = appState.apiService as? LiveNobleAPIService
             return [
                 "nodeURL": appState.nodeURL,
                 "authMode": "none",

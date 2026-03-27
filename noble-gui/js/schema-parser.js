@@ -108,6 +108,9 @@ export function visibilityBadge(visibility) {
   if (visibility === 'priv') {
     return '<span class="badge-encrypted">ENCRYPTED</span>';
   }
+  if (visibility === 'pwd') {
+    return '<span class="badge-protected" style="background:color-mix(in srgb,var(--warning,#f59e0b) 15%,transparent);color:var(--warning,#f59e0b);padding:1px 6px;border-radius:4px;font-size:0.6rem;font-weight:600">PROTECTED</span>';
+  }
   return '<span class="badge-public">PUBLIC</span>';
 }
 
