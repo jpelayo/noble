@@ -2,7 +2,7 @@
 import { Bridge } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
-import { amountText, formatAmount } from '../components/amount-text.js';
+import { amountText, formatAmount, formatSignedAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { esc, timeAgo, showCopyFeedback } from '../utils.js';
@@ -212,7 +212,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Pending</div>
-                    <div class="kpi-value">${formatAmount(balance.pending)}</div>
+                    <div class="kpi-value"${balance.pending > 0 ? ' style="color:var(--warning)"' : ''}>${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Address</div>
@@ -296,11 +296,14 @@ export function init(root, ctx) {
         for (const tx of recent) {
             const typeName = formatTxType(tx.tx_type);
             const disp = txDisplayAmount(tx);
+            const signedAmt = formatSignedAmount(disp.amount, disp.direction);
+            const amtColor = disp.direction === 'outgoing' ? 'color:var(--warning)'
+                           : disp.direction === 'incoming' ? 'color:var(--success)' : '';
             const badge = txStatusBadge(tx.confirmations, tx.status);
             const ago = timeAgo(tx.timestamp);
             html += `<tr>
                 <td style="font-size:var(--font-size-xs);font-weight:600">${typeName}</td>
-                <td class="mono">\u25C6 ${formatAmount(disp.amount)}</td>
+                <td class="mono" style="${amtColor}">\u25C6 ${signedAmt}</td>
                 <td><span class="badge ${badge.cls}" style="font-size:0.7em">${badge.html}</span></td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;

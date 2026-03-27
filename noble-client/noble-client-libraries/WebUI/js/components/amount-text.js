@@ -25,3 +25,13 @@ export function formatAmount(atomic) {
     const frac = n % 100_000_000;
     return `${whole.toLocaleString()}.${formatFrac(frac)}`;
 }
+
+// Formatted string with directional sign prefix.
+// direction: "incoming" → "+", "outgoing" → "−" (U+2212), else no sign.
+export function formatSignedAmount(atomic, direction) {
+    const formatted = formatAmount(atomic);
+    if (!atomic || atomic === 0) return formatted;
+    if (direction === 'outgoing') return `\u2212${formatted}`;
+    if (direction === 'incoming') return `+${formatted}`;
+    return formatted;
+}

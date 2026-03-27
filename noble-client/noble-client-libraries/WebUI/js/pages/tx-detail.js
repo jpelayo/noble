@@ -1,7 +1,7 @@
 // NOBLE Client — Transaction Detail Page
 // Type-aware rendering adapted from node dashboard tx-detail.js.
 
-import { formatAmount } from '../components/amount-text.js';
+import { formatAmount, formatSignedAmount } from '../components/amount-text.js';
 import { TX_TYPES, TX_TYPE_NAMES, txDisplayAmount, classifyMetadata, isZeroChecksum, formatTxType, decodeMetadataValue, txStatusBadge } from '../tx-display.js';
 
 export function init(root, ctx) {
@@ -72,14 +72,15 @@ export function init(root, ctx) {
                 <div style="color:var(--text-muted);font-size:var(--font-size-xs);margin-top:4px">Checksum and metadata encrypted with AES-256-GCM</div>
             `;
         } else if (txType === TX_TYPES.TRANSFER) {
+            const heroColor = disp.direction === 'outgoing' ? 'color:var(--warning)' : disp.direction === 'incoming' ? 'color:var(--success)' : '';
             heroEl.innerHTML = `
-                <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer</div>
-                <div style="font-size:1.5rem;font-weight:700" class="mono">&diams; ${formatAmount(disp.amount)}</div>
+                <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${disp.label}</div>
+                <div style="font-size:1.5rem;font-weight:700;${heroColor}" class="mono">&diams; ${formatSignedAmount(disp.amount, disp.direction)}</div>
             `;
         } else if (txType === TX_TYPES.COINBASE) {
             heroEl.innerHTML = `
                 <div style="font-size:var(--font-size-xs);color:var(--text-muted)"><span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Coinbase</span> Block Reward</div>
-                <div style="font-size:1.5rem;font-weight:700" class="mono">&diams; ${formatAmount(disp.amount)}</div>
+                <div style="font-size:1.5rem;font-weight:700;color:var(--success)" class="mono">&diams; ${formatSignedAmount(disp.amount, 'incoming')}</div>
             `;
         } else if (txType === TX_TYPES.KEY_ROTATION) {
             heroEl.innerHTML = '<div style="font-size:1.2rem">&#x1F504; Key Rotation</div>';
@@ -113,10 +114,11 @@ export function init(root, ctx) {
         if (tx.timestamp) html += row('Time', formatTime(tx.timestamp));
 
         if (txType === TX_TYPES.TRANSFER) {
-            html += row('Amount Sent', `<span class="mono">&diams; ${formatAmount(disp.amount)}</span>`);
+            const amtStyle = disp.direction === 'outgoing' ? ' style="color:var(--warning)"' : disp.direction === 'incoming' ? ' style="color:var(--success)"' : '';
+            html += row(disp.label, `<span class="mono"${amtStyle}>&diams; ${formatSignedAmount(disp.amount, disp.direction)}</span>`);
             if (tx.fee != null) html += row('Fee', `<span class="mono">&diams; ${formatAmount(tx.fee)}</span>`);
         } else if (txType === TX_TYPES.COINBASE) {
-            html += row('Block Reward', `<span class="mono">&diams; ${formatAmount(disp.amount)}</span>`);
+            html += row('Block Reward', `<span class="mono" style="color:var(--success)">&diams; ${formatSignedAmount(disp.amount, 'incoming')}</span>`);
         } else {
             if (tx.fee != null) html += row('Fee', `<span class="mono">&diams; ${formatAmount(tx.fee)}</span>`);
             html += row('Total Output', `<span class="mono" style="color:var(--text-muted)">&diams; ${formatAmount(tx.total_output || 0)}</span>`);

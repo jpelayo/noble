@@ -43,31 +43,37 @@ export function txDisplayAmount(tx) {
     const t = tx.tx_type ?? tx.txType ?? tx.type;
     // Normalize type to number if it's a string
     const txType = typeof t === 'string' ? parseTypeString(t) : t;
+    // Direction from Rust RPC (available on wallet transactions).
+    const dir = tx.direction;
 
     switch (txType) {
         case TX_TYPES.TRANSFER:
             return {
-                label: 'Amount Sent',
+                label: dir === 'incoming' ? 'Amount Received' : 'Amount Sent',
                 amount: tx.transfer_value ?? tx.total_output ?? 0,
                 showFee: true,
+                direction: dir || 'outgoing',
             };
         case TX_TYPES.COINBASE:
             return {
                 label: 'Block Reward',
                 amount: tx.total_output ?? 0,
                 showFee: false,
+                direction: 'incoming',
             };
         case TX_TYPES.FEE_DISTRIBUTION:
             return {
                 label: 'Fee Income',
                 amount: tx.total_output ?? 0,
                 showFee: false,
+                direction: 'incoming',
             };
         case TX_TYPES.DAO:
             return {
                 label: 'Governance',
                 amount: 0,
                 showFee: false,
+                direction: 'self',
             };
         default:
             // Notarization, Locked, Unlocking, Key Rotation, Badge types
@@ -76,6 +82,7 @@ export function txDisplayAmount(tx) {
                 label: 'Fee',
                 amount: tx.fee ?? 0,
                 showFee: false,
+                direction: dir || 'outgoing',
             };
     }
 }

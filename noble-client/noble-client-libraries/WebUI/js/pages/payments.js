@@ -2,7 +2,7 @@
 import { Bridge } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
-import { formatAmount } from '../components/amount-text.js';
+import { formatAmount, formatSignedAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
@@ -152,7 +152,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Pending</div>
-                    <div class="kpi-value">${formatAmount(balance.pending)}</div>
+                    <div class="kpi-value"${balance.pending > 0 ? ' style="color:var(--warning)"' : ''}>${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Transactions</div>
@@ -187,7 +187,9 @@ export function init(root, ctx) {
             const typeName = formatTxType(tx.tx_type ?? parseTypeLabel(tx.type));
             const counterparty = tx.counterparty ? truncate(tx.counterparty, 12) : '';
             const disp = txDisplayAmount(tx);
-            const amount = formatAmount(disp.amount);
+            const amount = formatSignedAmount(disp.amount, disp.direction);
+            const amtColor = disp.direction === 'outgoing' ? 'color:var(--warning)'
+                           : disp.direction === 'incoming' ? 'color:var(--success)' : '';
             const badge = txStatusBadge(tx.confirmations, tx.status);
             const ago = timeAgo(tx.timestamp);
             html += `<tr class="tx-row" data-txid="${esc(tx.txId)}" style="cursor:pointer">
@@ -196,7 +198,7 @@ export function init(root, ctx) {
                     <div style="font-size:var(--font-size-xs);font-weight:600">${typeName}</div>
                     ${counterparty ? `<div class="mono" style="font-size:0.65rem;color:var(--text-muted)">${counterparty}</div>` : ''}
                 </td>
-                <td class="mono">\u25C6 ${amount}</td>
+                <td class="mono" style="${amtColor}">\u25C6 ${amount}</td>
                 <td><span class="badge ${badge.cls}">${badge.html}</span></td>
                 <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
             </tr>`;
