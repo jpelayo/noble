@@ -153,7 +153,7 @@ pub async fn handle_api_action(
                 .and_then(|v| v.as_str())
                 .ok_or("Missing parameter: address")?;
             let result = client
-                .call_rpc("noble_getWalletInfo", json!([address]))
+                .call_rpc("noble_getAddressBalance", json!([address]))
                 .await?;
             // Extract and reshape to match bridge contract
             Ok(json!({

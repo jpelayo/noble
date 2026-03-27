@@ -227,7 +227,7 @@ pub fn start_polling(
                     // Fetch balance if wallet exists
                     if !wallet_address.is_empty() {
                         if let Ok(balance) = client
-                            .call_rpc("noble_getWalletInfo", json!([wallet_address]))
+                            .call_rpc("noble_getAddressBalance", json!([wallet_address]))
                             .await
                         {
                             let bal = balance

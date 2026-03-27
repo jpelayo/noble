@@ -131,6 +131,50 @@ final class WebBridgeHandler {
                 "cycleRemainingSecs": cycle.cycleRemainingSecs,
             ] as [String: Any]
 
+        case "getWalletSnapshot":
+            // Atomic snapshot: balance + transactions under one chain_height.
+            guard let addr = appState.walletAddress, !addr.isEmpty else {
+                throw BridgeError.missingParam("walletAddress not set")
+            }
+            guard let liveSvc = api as? LiveNobleAPIService else {
+                throw BridgeError.notConnected
+            }
+            struct SnapshotParams: Encodable, Sendable { let address: String }
+            let snap = try await liveSvc.client.call(
+                method: "noble_getWalletSnapshot",
+                params: SnapshotParams(address: addr),
+                expecting: WalletSnapshotDTO.self
+            )
+            return [
+                "chain_height": snap.chain_height,
+                "balance": snap.balance,
+                "available": snap.available,
+                "pending": snap.pending,
+                "immature_count": snap.immature_count ?? 0,
+                "immature_value": snap.immature_value ?? 0,
+                "transactions": snap.transactions.map { e in
+                    var dict: [String: Any] = [
+                        "txId": e.tx_id,
+                        "tx_type": e.tx_type,
+                        "direction": e.direction,
+                        "amount": e.amount,
+                        "confirmations": e.confirmations,
+                        "status": e.status ?? "unknown",
+                        "timestamp": e.timestamp ?? 0,
+                    ]
+                    if let tl = e.type_label { dict["type_label"] = tl; dict["type"] = tl }
+                    if let tv = e.transfer_value { dict["transfer_value"] = tv }
+                    if let f = e.fee { dict["fee"] = f }
+                    if let to = e.total_output { dict["total_output"] = to }
+                    if let bh = e.block_height { dict["blockHeight"] = bh }
+                    if let cp = e.counterparty { dict["counterparty"] = cp }
+                    if let s = e.signer { dict["signer"] = s }
+                    if let cs = e.checksum { dict["checksum"] = cs }
+                    if let hel = e.has_encrypted_locator { dict["has_encrypted_locator"] = hel }
+                    return dict
+                }
+            ] as [String: Any]
+
         case "getWalletTransactions", "getTransactionHistory":
             // Pass client wallet address so server includes client-key txs.
             let txs: [TransactionRecord]

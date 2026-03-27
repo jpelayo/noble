@@ -1616,6 +1616,20 @@ pub struct WalletTransactionsResponse {
     pub transactions: Vec<WalletTransactionEntry>,
 }
 
+/// Atomic wallet snapshot: balance + transactions computed under a single
+/// storage read lock. Guarantees `chain_height` is identical for both the
+/// balance/immature classification and the confirmation counts on transactions.
+#[derive(Debug, Clone, Serialize)]
+pub struct WalletSnapshotResponse {
+    pub chain_height: u64,
+    pub balance: u64,
+    pub available: u64,
+    pub pending: u64,
+    pub immature_count: usize,
+    pub immature_value: u64,
+    pub transactions: Vec<WalletTransactionEntry>,
+}
+
 /// A single wallet transaction entry — fully enriched with all fields
 /// the client needs for display (absorbs TransactionResponse + receipt context).
 #[derive(Debug, Clone, Serialize)]

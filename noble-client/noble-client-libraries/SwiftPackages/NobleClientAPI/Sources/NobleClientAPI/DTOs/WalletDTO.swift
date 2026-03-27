@@ -141,3 +141,15 @@ struct WalletTxEntryDTO: Decodable, Sendable {
     let metadata: [MetadataDTO]?
     let has_encrypted_locator: Bool?
 }
+
+// MARK: - noble_getWalletSnapshot
+
+struct WalletSnapshotDTO: Decodable, Sendable {
+    let chain_height: UInt64
+    let balance: UInt64
+    let available: UInt64
+    let pending: UInt64
+    let immature_count: UInt64?
+    let immature_value: UInt64?
+    let transactions: [WalletTxEntryDTO]
+}

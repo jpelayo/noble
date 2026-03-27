@@ -39,8 +39,10 @@ pub trait WalletApi {
     async fn wallet_lock(&self) -> Result<bool, ErrorObjectOwned>;
 
     /// Get wallet info: unlock status, expiry, key count.
+    /// When `addresses_only=true`, skip the validator key — only include
+    /// wallet keystore keys. Used by client apps whose key differs from the node.
     #[method(name = "getWalletInfo")]
-    async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned>;
+    async fn get_wallet_info(&self, addresses_only: Option<bool>) -> Result<WalletInfoResponse, ErrorObjectOwned>;
 
     /// Build, sign, and submit a transfer transaction.
     ///
@@ -119,6 +121,11 @@ pub trait WalletApi {
     /// from the node's keystore (e.g., remote client with its own Keychain).
     #[method(name = "getWalletTransactions")]
     async fn get_wallet_transactions(&self, addresses: Option<Vec<String>>, addresses_only: Option<bool>) -> Result<WalletTransactionsResponse, ErrorObjectOwned>;
+
+    /// Atomic wallet snapshot: balance + transactions under a single storage read lock.
+    /// Guarantees chain_height is identical for immature classification and confirmation counts.
+    #[method(name = "getWalletSnapshot")]
+    async fn get_wallet_snapshot(&self, address: String) -> Result<WalletSnapshotResponse, ErrorObjectOwned>;
 }
 
 /// Collect all public keys the wallet considers "ours":
@@ -215,10 +222,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         Ok(true)
     }
 
-    async fn get_wallet_info(&self) -> Result<WalletInfoResponse, ErrorObjectOwned> {
+    async fn get_wallet_info(&self, addresses_only: Option<bool>) -> Result<WalletInfoResponse, ErrorObjectOwned> {
         let state = self.wallet_state.lock();
 
-        let all_keys = collect_wallet_keys(self);
+        let all_keys = if addresses_only.unwrap_or(false) {
+            // Client mode: wallet keystore keys only (skip validator key).
+            let ks = self.wallet_keystore.lock();
+            ks.list_keys().unwrap_or_default()
+        } else {
+            // Node mode: all keys (wallet + validator).
+            collect_wallet_keys(self)
+        };
         let key_count = all_keys.len();
 
         // Sum balances across all wallet keys and all address buckets.
@@ -874,6 +888,277 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 .into(),
         )
         .into())
+    }
+
+    async fn get_wallet_snapshot(&self, address: String) -> Result<WalletSnapshotResponse, ErrorObjectOwned> {
+        use noble_core::NobleAddress;
+
+        let addr = parse_address(&address)?;
+
+        // ── Single storage read lock for both balance and transactions ──
+        let storage = self.storage.read();
+        let chain_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
+
+        // ── Balance (same logic as getAddressBalance) ──
+        let total_balance = storage.get_balance(&addr).map_err(ApiError::from)?;
+        let all_utxos = storage.get_address_utxos(&addr).unwrap_or_default();
+        let mut immature_count: usize = 0;
+        let mut immature_value: u64 = 0;
+        for (_, entry) in &all_utxos {
+            if !entry.is_mature(chain_height) {
+                immature_count += 1;
+                immature_value += entry.value;
+            }
+        }
+        let pending = {
+            let mempool = self.mempool.lock();
+            mempool.pending_debit_for_address(&addr)
+        };
+        let available = total_balance.saturating_sub(pending).saturating_sub(immature_value);
+
+        // ── Transactions (same logic as getWalletTransactions, addresses_only mode) ──
+        let addr_wire = addr.to_wire_bytes();
+        let mut my_wires: Vec<Vec<u8>> = vec![addr_wire.clone()];
+
+        // Add Hash160/Taproot variants for secp256k1 keys.
+        if let NobleAddress::Noble(ref pk) = addr {
+            if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                my_wires.push(h160.to_wire_bytes());
+            }
+            if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                my_wires.push(tap.to_wire_bytes());
+            }
+        }
+        let is_ours = |wire: &[u8]| my_wires.iter().any(|w| w.as_slice() == wire);
+
+        // Query address history.
+        let mut all_addrs = vec![addr.clone()];
+        if let NobleAddress::Noble(ref pk) = addr {
+            if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                all_addrs.push(h160);
+            }
+            if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                all_addrs.push(tap);
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut all_tx_ids: Vec<(noble_crypto::Hash256, u64)> = Vec::new();
+        for a in &all_addrs {
+            let ids = match storage.get_address_history(a, 0, 1000) {
+                Ok(ids) => ids,
+                Err(_) => continue,
+            };
+            for id in ids {
+                if !seen.insert(id) { continue; }
+                match storage.get_transaction_location(&id) {
+                    Ok((h, _)) => all_tx_ids.push((id, h)),
+                    Err(_) => continue,
+                }
+            }
+        }
+        all_tx_ids.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut entries = Vec::new();
+        for (tx_id, height) in &all_tx_ids {
+            let tx = match storage.get_transaction(tx_id) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let tx_id_hex = hex::encode(tx_id.as_bytes());
+            let confirmations = chain_height.saturating_sub(*height);
+            let status = confirmation_status_label(Some(confirmations));
+
+            let mut resp = tx_to_response(&tx, &tx_id_hex);
+            resp.confirmations = Some(confirmations);
+            resp.confirmation_status = Some(status.clone());
+
+            if !tx.is_coinbase() {
+                let mut input_total: u64 = 0;
+                let mut all_resolved = true;
+                for inp in &tx.inputs {
+                    match storage.get_transaction(&inp.prev_output.txid) {
+                        Ok(prev_tx) => {
+                            if let Some(out) = prev_tx.outputs.get(inp.prev_output.vout as usize) {
+                                input_total += out.value;
+                            } else { all_resolved = false; }
+                        }
+                        Err(_) => { all_resolved = false; }
+                    }
+                }
+                if all_resolved && input_total > 0 {
+                    resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
+                }
+            }
+
+            let is_sender = tx.issuer_sig.to_noble_public_key().ok()
+                .map(|pk| is_ours(&NobleAddress::Noble(pk).to_wire_bytes()))
+                .unwrap_or(false);
+
+            let tx_type_names = [
+                (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
+                (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
+                (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Block Reward"),
+                (0x11, "Fee Distribution"),
+            ];
+            let type_label = tx_type_names.iter()
+                .find(|(code, _)| *code == tx.tx_type)
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_else(|| format!("Type 0x{:02x}", tx.tx_type));
+
+            let (direction, amount, counterparty) = if tx.tx_type == 0x11 {
+                let fee_income: u64 = tx.outputs.iter()
+                    .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                    .map(|o| o.value).sum();
+                ("incoming".to_string(), fee_income, Some("Fee Income".to_string()))
+            } else if tx.is_coinbase() {
+                let reward: u64 = tx.outputs.iter()
+                    .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                    .map(|o| o.value).sum();
+                ("incoming".to_string(), reward, Some("Block Reward".to_string()))
+            } else if tx.tx_type == 0x01 {
+                if is_sender {
+                    let sent: u64 = tx.outputs.iter()
+                        .filter(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.value).sum();
+                    let cp = tx.outputs.iter()
+                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.address.to_display_address());
+                    ("outgoing".to_string(), sent, cp)
+                } else {
+                    let received: u64 = tx.outputs.iter()
+                        .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.value).sum();
+                    let cp = tx.issuer_sig.to_noble_public_key().ok()
+                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
+                    ("incoming".to_string(), received, cp)
+                }
+            } else if tx.tx_type == 0x00 || tx.tx_type == 0x06 || tx.tx_type == 0x07 {
+                let fee_amount = resp.fee.unwrap_or(0);
+                if is_sender {
+                    ("outgoing".to_string(), fee_amount, Some("Self (Document)".to_string()))
+                } else {
+                    let cp = tx.issuer_sig.to_noble_public_key().ok()
+                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
+                    ("incoming".to_string(), fee_amount, cp)
+                }
+            } else if tx.tx_type == 0x02 {
+                ("self".to_string(), 0, Some("Key Rotation".to_string()))
+            } else {
+                ("self".to_string(), 0, Some("Governance".to_string()))
+            };
+
+            entries.push(WalletTransactionEntry {
+                tx_id: tx_id_hex,
+                tx_type: tx.tx_type,
+                type_label,
+                direction,
+                amount,
+                counterparty,
+                status,
+                total_output: resp.total_output,
+                transfer_value: resp.transfer_value,
+                fee: resp.fee,
+                checksum: resp.checksum.clone(),
+                timestamp: tx.timestamp,
+                signer: resp.signer.clone(),
+                inputs: resp.inputs.clone(),
+                outputs: resp.outputs.clone(),
+                metadata: resp.metadata.clone(),
+                has_encrypted_locator: resp.has_encrypted_locator,
+                confirmations,
+                block_height: Some(*height),
+            });
+        }
+
+        // Prepend pending mempool txs.
+        let mut pending_entries = Vec::new();
+        {
+            let mempool = self.mempool.lock();
+            for entry in mempool.iter_by_fee_rate_desc() {
+                let issuer_wire = entry.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| NobleAddress::Noble(pk).to_wire_bytes());
+                let sender_is_ours = issuer_wire.as_ref()
+                    .map(|w| is_ours(w)).unwrap_or(false);
+                let value_to_us: u64 = entry.tx.outputs.iter()
+                    .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                    .map(|o| o.value).sum();
+                if !sender_is_ours && value_to_us == 0 { continue; }
+
+                let (dir, amt, cp) = if sender_is_ours {
+                    let sent: u64 = entry.tx.outputs.iter()
+                        .filter(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.value).sum();
+                    let cp = entry.tx.outputs.iter()
+                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.address.to_display_address());
+                    ("outgoing", sent, cp)
+                } else {
+                    let cp = entry.tx.issuer_sig.to_noble_public_key().ok()
+                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
+                    ("incoming", value_to_us, cp)
+                };
+
+                let signer_display = entry.tx.issuer_sig.to_noble_public_key().ok()
+                    .map(|pk| noble_crypto::noble_addr::encode(&pk))
+                    .unwrap_or_default();
+
+                let type_label = [
+                    (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
+                    (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
+                    (0x06, "Locked"), (0x07, "Unlocking"), (0x10, "Block Reward"),
+                    (0x11, "Fee Distribution"),
+                ].iter()
+                    .find(|(code, _)| *code == entry.tx.tx_type)
+                    .map(|(_, name)| format!("Pending {name}"))
+                    .unwrap_or_else(|| "Pending".to_string());
+
+                pending_entries.push(WalletTransactionEntry {
+                    tx_id: hex::encode(entry.tx_id.as_bytes()),
+                    tx_type: entry.tx.tx_type,
+                    type_label,
+                    direction: dir.to_string(),
+                    amount: amt,
+                    counterparty: cp,
+                    status: "pending".to_string(),
+                    total_output: entry.tx.total_output_value(),
+                    transfer_value: amt,
+                    fee: Some(entry.fee),
+                    checksum: hex::encode(entry.tx.checksum.as_bytes()),
+                    timestamp: entry.tx.timestamp,
+                    signer: signer_display,
+                    inputs: entry.tx.inputs.iter().map(|i| TxInputResponse {
+                        txid: hex::encode(i.prev_output.txid.as_bytes()),
+                        vout: i.prev_output.vout,
+                    }).collect(),
+                    outputs: entry.tx.outputs.iter().map(|o| TxOutputResponse {
+                        value: o.value,
+                        address: o.address.to_display_address(),
+                    }).collect(),
+                    metadata: entry.tx.metadata.iter().map(|m| MetadataResponse {
+                        key: m.key.clone(),
+                        value: String::from_utf8(m.value.clone())
+                            .unwrap_or_else(|_| hex::encode(&m.value)),
+                    }).collect(),
+                    has_encrypted_locator: entry.tx.encrypted_locator.is_some(),
+                    confirmations: 0,
+                    block_height: None,
+                });
+            }
+        }
+
+        pending_entries.extend(entries);
+
+        Ok(WalletSnapshotResponse {
+            chain_height,
+            balance: total_balance,
+            available,
+            pending,
+            immature_count,
+            immature_value,
+            transactions: pending_entries,
+        })
     }
 }
 

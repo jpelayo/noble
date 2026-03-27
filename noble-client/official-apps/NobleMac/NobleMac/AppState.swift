@@ -411,17 +411,15 @@ final class AppState {
                 ]
             }
 
-            // Fetch total wallet balance (all keys: wallet + validator)
-            if let walletInfo = try? await service.getFullWalletInfo() {
-                walletBalance = walletInfo.balance.formatted
-                stateUpdate["walletBalance"] = walletInfo.balance.atomic
-                stateUpdate["walletAvailable"] = walletInfo.available.atomic
-            } else if let address = walletAddress {
-                // Fallback: query single address if getFullWalletInfo unavailable
+            // Fetch client wallet balance (own address only — NOT the node's full wallet).
+            // noble_getWalletInfo sums all keys including the validator; the client must
+            // query only its own address to avoid displaying someone else's funds.
+            if let address = walletAddress {
                 if let balance = try? await service.getBalance(address: address) {
                     walletBalance = balance.balance.formatted
                     stateUpdate["walletBalance"] = balance.balance.atomic
                     stateUpdate["walletAvailable"] = balance.available.atomic
+                    stateUpdate["walletImmature"] = balance.immatureValue
                 }
             }
 

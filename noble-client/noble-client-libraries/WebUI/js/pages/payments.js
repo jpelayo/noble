@@ -97,12 +97,23 @@ export function init(root, ctx) {
         }
 
         try {
-            const [balance, history] = await Promise.all([
-                Bridge.call('noble_api', 'getBalance', { address }),
-                Bridge.call('noble_api', 'getWalletTransactions'),
-            ]);
+            // Use atomic snapshot: balance + transactions under one chain_height.
+            // Eliminates race where parallel calls observe different chain tips.
+            let snapshot;
+            try {
+                snapshot = await Bridge.call('noble_api', 'getWalletSnapshot');
+            } catch {
+                // Fallback for nodes that don't support snapshot yet.
+                const [balance, history] = await Promise.all([
+                    Bridge.call('noble_api', 'getBalance', { address }),
+                    Bridge.call('noble_api', 'getWalletTransactions'),
+                ]);
+                snapshot = { ...balance, transactions: (history.transactions || []) };
+            }
             if (!alive) return;
             loadRetries = 0;
+            const balance = snapshot;
+            const history = { transactions: snapshot.transactions || [] };
             balanceData = balance;
             historyData = history;
             renderBalance(balanceContainer, balance);
@@ -156,7 +167,7 @@ export function init(root, ctx) {
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">Transactions</div>
-                    <div class="kpi-value">${balance.txCount}</div>
+                    <div class="kpi-value">${balance.txCount ?? (balance.transactions || []).length}</div>
                 </div>
             </div>
             <div class="chain-note">\u26A0\uFE0F Make sure you always work within the same chain your balance resides in. If you connect to a different chain, you cannot access your balance.</div>

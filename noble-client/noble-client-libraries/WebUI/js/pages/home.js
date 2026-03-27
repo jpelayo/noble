@@ -153,15 +153,24 @@ export function init(root, ctx) {
         }
 
         try {
-            const [balance, history] = await Promise.all([
-                Bridge.call('noble_api', 'getBalance', { address }),
-                Bridge.call('noble_api', 'getWalletTransactions')
-            ]);
+            // Use atomic snapshot when available — single chain_height for consistency.
+            let snapshot;
+            try {
+                snapshot = await Bridge.call('noble_api', 'getWalletSnapshot');
+            } catch {
+                const [balance, history] = await Promise.all([
+                    Bridge.call('noble_api', 'getBalance', { address }),
+                    Bridge.call('noble_api', 'getWalletTransactions')
+                ]);
+                snapshot = { ...balance, transactions: (history.transactions || []) };
+            }
             if (!alive) return;
 
+            const balance = snapshot;
+            const txs = snapshot.transactions || [];
             renderBalance(balanceContainer, balance, address);
-            renderRecentDocs(docsContainer, history.transactions);
-            renderRecentTxs(txsContainer, history.transactions);
+            renderRecentDocs(docsContainer, txs);
+            renderRecentTxs(txsContainer, txs);
         } catch (err) {
             if (!alive) return;
             const msg = err.message.toLowerCase();
