@@ -9,6 +9,12 @@ pub const MAX_TX_SIZE: usize = 4_096;
 /// Maximum serialized block size in bytes (4 MB).
 pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Maximum number of inputs per transaction (DoS prevention — limits UTXO lookup cost).
+pub const MAX_TX_INPUTS: usize = 128;
+
+/// Maximum number of outputs per transaction (UTXO set pollution prevention).
+pub const MAX_TX_OUTPUTS: usize = 128;
+
 /// Maximum number of metadata entries per transaction.
 pub const MAX_METADATA_ENTRIES: usize = 16;
 

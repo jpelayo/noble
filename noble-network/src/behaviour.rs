@@ -161,7 +161,10 @@ impl NobleBehaviour {
 
         // --- Kademlia DHT (GAP-H5) ---
         let local_peer_id = keypair.public().to_peer_id();
-        let store = kad::store::MemoryStore::new(local_peer_id);
+        let mut store_config = kad::store::MemoryStoreConfig::default();
+        store_config.max_records = 1_024;         // Cap peer records (M1 audit fix)
+        store_config.max_provided_keys = 1_024;   // Cap provided keys
+        let store = kad::store::MemoryStore::with_config(local_peer_id, store_config);
         let mut kad_config = kad::Config::new(
             StreamProtocol::try_from_owned(topics::KAD_PROTOCOL.to_string())
                 .expect("valid protocol string"),

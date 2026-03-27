@@ -84,6 +84,14 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         &self,
         tx_hex: String,
     ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
+        // Reject oversized hex before allocation (OOM prevention — C2 audit fix).
+        // MAX_TX_SIZE is 4KB; hex is 2 chars per byte, plus margin for whitespace.
+        if tx_hex.len() > noble_core::MAX_TX_SIZE * 2 + 64 {
+            return Err(ApiError::TxTooLarge(
+                format!("Transaction hex too large ({} chars, max {})", tx_hex.len(), noble_core::MAX_TX_SIZE * 2),
+            ).into());
+        }
+
         // Decode hex to bytes
         let tx_bytes = hex::decode(&tx_hex)
             .map_err(|_| ApiError::TxRejected("invalid hex encoding".into()))?;

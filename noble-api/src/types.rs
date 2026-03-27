@@ -31,7 +31,11 @@ pub fn parse_pubkey(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
         return noble_crypto::noble_addr::decode(trimmed)
             .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
     }
-    // Fall back to hex bytes
+    // Fall back to hex bytes — gate length to prevent OOM (C2 audit fix).
+    // Max Noble wire key is 35 bytes (scheme_id + 34 bytes) → 70 hex chars.
+    if trimmed.len() > 256 {
+        return Err(ApiError::InvalidAddress("input too long".into()).into());
+    }
     let bytes =
         hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
     // Try Noble wire format first (scheme_id prefix + key)
@@ -91,6 +95,10 @@ pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
     }
 
     // Try hex-encoded wire bytes (covers both NOBLE keys and Bitcoin address wire format)
+    // Gate length to prevent OOM (C2 audit fix).
+    if trimmed.len() > 256 {
+        return Err(ApiError::InvalidAddress("input too long".into()).into());
+    }
     let bytes = hex::decode(trimmed)
         .map_err(|_| ApiError::InvalidAddress("invalid hex string or unrecognized address format".into()))?;
     // Try Noble wire format first (scheme_id + key or Bitcoin address wire)
@@ -106,6 +114,10 @@ pub fn parse_address(input: &str) -> Result<NobleAddress, ErrorObjectOwned> {
 
 /// Parse a hex string into a `Hash256`, returning a JSON-RPC error on failure.
 pub fn parse_hash(hex_str: &str) -> Result<Hash256, ErrorObjectOwned> {
+    // Gate length — a Hash256 is 32 bytes = 64 hex chars (C2 audit fix).
+    if hex_str.len() > 128 {
+        return Err(ApiError::InvalidAddress("hash hex too long".into()).into());
+    }
     let bytes =
         hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
     if bytes.len() != 32 {

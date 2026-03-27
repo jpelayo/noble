@@ -649,7 +649,7 @@ impl StorageEngine for RocksDbStorage {
                 }
                 let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
                 if input_sum >= output_sum {
-                    total_fees += input_sum - output_sum;
+                    total_fees = total_fees.saturating_add(input_sum - output_sum);
                 }
             }
 

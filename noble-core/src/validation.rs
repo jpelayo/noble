@@ -302,6 +302,20 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
         }
     }
 
+    // U1b: Input count limit (DoS prevention — limits UTXO lookup cost per tx).
+    if tx.inputs.len() > crate::constants::MAX_TX_INPUTS {
+        return Err(ValidationError::Internal(format!(
+            "U1b: too many inputs ({}, max {})", tx.inputs.len(), crate::constants::MAX_TX_INPUTS
+        )));
+    }
+
+    // U1c: Output count limit (UTXO set pollution prevention).
+    if tx.outputs.len() > crate::constants::MAX_TX_OUTPUTS {
+        return Err(ValidationError::Internal(format!(
+            "U1c: too many outputs ({}, max {})", tx.outputs.len(), crate::constants::MAX_TX_OUTPUTS
+        )));
+    }
+
     // U2: No duplicate inputs within transaction
     {
         let mut seen = HashSet::new();
