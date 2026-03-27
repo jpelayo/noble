@@ -47,6 +47,10 @@ extension FaucetEntryDTO: Decodable {
     }
 }
 
+// MARK: - Snapshot params (file-scope to avoid @MainActor isolation)
+
+private struct SnapshotParams: Encodable, Sendable { let address: String }
+
 /// Routes bridge messages from the web UI to Swift services.
 @MainActor
 final class WebBridgeHandler {
@@ -139,7 +143,6 @@ final class WebBridgeHandler {
             guard let liveSvc = api as? LiveNobleAPIService else {
                 throw BridgeError.notConnected
             }
-            struct SnapshotParams: Encodable, Sendable { let address: String }
             let snap = try await liveSvc.client.call(
                 method: "noble_getWalletSnapshot",
                 params: SnapshotParams(address: addr),

@@ -163,10 +163,14 @@ export function renderMetadataWithSchema(metadataEntries) {
  * Fallback: render metadata as simple key/value table.
  */
 function renderRawMetadata(metadataEntries) {
+  // Show entries in the order the user wrote them (node may return reversed).
+  const ordered = [...metadataEntries].reverse();
   let html = '<table class="data-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>';
-  for (const entry of metadataEntries) {
+  for (const entry of ordered) {
     const valueStr = tryDecodeHexUtf8(entry.value);
-    html += `<tr><td><strong>${escapeHtml(entry.key)}</strong></td><td class="mono">${escapeHtml(valueStr)}</td></tr>`;
+    const isSchema = entry.key === 'schema';
+    const style = isSchema ? ' style="color:var(--text-muted);font-size:var(--font-size-xs)"' : '';
+    html += `<tr${style}><td>${isSchema ? '<em>' : '<strong>'}${escapeHtml(entry.key)}${isSchema ? '</em>' : '</strong>'}</td><td class="mono">${escapeHtml(valueStr)}</td></tr>`;
   }
   html += '</tbody></table>';
   return html;

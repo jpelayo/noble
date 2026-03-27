@@ -20,14 +20,14 @@ struct GetTransactionParams: Encodable, Sendable {
     let tx_id: String
 }
 
-struct TxInputDTO: Decodable, Sendable {
-    let txid: String
-    let vout: UInt32
+public struct TxInputDTO: Decodable, Sendable {
+    public let txid: String
+    public let vout: UInt32
 }
 
-struct TxOutputDTO: Decodable, Sendable {
-    let value: UInt64
-    let address: String
+public struct TxOutputDTO: Decodable, Sendable {
+    public let value: UInt64
+    public let address: String
 }
 
 struct TransactionDTO: Decodable, Sendable {
@@ -46,9 +46,9 @@ struct TransactionDTO: Decodable, Sendable {
     let attestation_count: Int?
 }
 
-struct MetadataDTO: Decodable, Sendable {
-    let key: String
-    let value: String
+public struct MetadataDTO: Decodable, Sendable {
+    public let key: String
+    public let value: String
 }
 
 // MARK: - noble_getTransactionStatus
