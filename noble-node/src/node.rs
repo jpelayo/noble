@@ -3082,6 +3082,56 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     "software_version": announce.software_version,
                     "connected": is_connected,
                 }));
+                // Bootstrap auto-badge: during first 60 days, auto-grant badges
+                // to peers that announce wants_to_vote=true.
+                if announce.wants_to_vote {
+                    let engine = self.consensus.read();
+                    let current_cycle = engine.current_cycle();
+                    let in_bootstrap = current_cycle < noble_core::BOOTSTRAP_MODE_CYCLES;
+                    if in_bootstrap && !engine.badge_store().has_badge(&identity_wire) {
+                        drop(engine); // release read lock before taking write lock
+                        let mut engine = self.consensus.write();
+                        // Double-check after acquiring write lock
+                        if !engine.badge_store().has_badge(&identity_wire) {
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let cycle = engine.current_cycle();
+                            let tip = engine.chain_tip().0;
+                            engine.badge_store_mut().set_badge(
+                                identity_wire.clone(),
+                                noble_consensus::badge::VoteBadge::new(tip, cycle, vec![], now_unix),
+                            );
+                            tracing::info!(
+                                task = "bootstrap_badge",
+                                "auto-badge granted to {} (bootstrap mode, cycle {})",
+                                announce.node_name, cycle
+                            );
+                        }
+                    }
+                }
+
+                // Badge candidate pool: track peers that want to vote but don't have badges.
+                // Post-bootstrap, these accumulate uptime until eligible for auto-proposal.
+                if announce.wants_to_vote {
+                    let engine = self.consensus.read();
+                    if !engine.badge_store().has_badge(&identity_wire) {
+                        let now_unix = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        drop(engine);
+                        let mut engine = self.consensus.write();
+                        engine.badge_candidate_pool.observe(
+                            identity_wire.clone(),
+                            &announce.node_name,
+                            true,
+                            now_unix,
+                        );
+                    }
+                }
+
                 // Announce equivocation detection — fully delegated to healing.
                 self.healing.handle_announce_equivocation(&announce, &identity_wire);
 

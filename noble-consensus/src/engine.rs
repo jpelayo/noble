@@ -110,6 +110,12 @@ pub struct CycleEngine {
     badge_store: BadgeStore,
     /// Active badge proposals (keyed by proposal hash hex).
     badge_proposals: std::collections::HashMap<String, badge::BadgeProposal>,
+    /// Auto-voting strategy for badge grant proposals.
+    pub badge_approval_strategy: crate::badge_strategy::BadgeApprovalStrategy,
+    /// Auto-voting strategy for badge revocation proposals.
+    pub badge_revocation_strategy: crate::badge_strategy::BadgeRevocationStrategy,
+    /// Candidate pool — tracks peers wanting badges, accumulates uptime.
+    pub badge_candidate_pool: crate::badge_candidates::BadgeCandidatePool,
     /// DAO governance polls.
     dao_store: crate::dao::DaoStore,
     /// Proposal cooldowns: proposer wire → last proposal cycle (rate limit).
@@ -190,6 +196,9 @@ impl CycleEngine {
             voting_enabled: true,   // default; call set_voting_enabled(false) for propose-only
             badge_store: BadgeStore::new(),
             badge_proposals: std::collections::HashMap::new(),
+            badge_approval_strategy: crate::badge_strategy::BadgeApprovalStrategy::default(),
+            badge_revocation_strategy: crate::badge_strategy::BadgeRevocationStrategy::default(),
+            badge_candidate_pool: crate::badge_candidates::BadgeCandidatePool::new(),
             dao_store: crate::dao::DaoStore::new(),
             proposal_cooldowns: std::collections::HashMap::new(),
             finality_tracker: FinalityTracker::new(confirmation_threshold),
@@ -1106,6 +1115,45 @@ impl CycleEngine {
                                 );
                             }
 
+                            // Genesis auto-badge: grant badges to block 1 proposer + all witnesses.
+                            // This bootstraps the badge system from genesis — these nodes
+                            // can then vote on badges for future validators.
+                            if new_height == 1 {
+                                let now_unix = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                // Grant badge to the block proposer
+                                let proposer_wire = block.header.validator_id.to_wire_bytes();
+                                if !self.badge_store.has_badge(&proposer_wire) {
+                                    self.badge_store.set_badge(
+                                        proposer_wire.clone(),
+                                        crate::badge::VoteBadge::new(1, completed_cycle, vec![], now_unix),
+                                    );
+                                    info!("genesis badge granted to block 1 proposer");
+                                }
+                                // Grant badge to all R1 voters for the winning candidate
+                                for voter_wire in self.vote_mgr.r1_voters_for(&candidate_hash) {
+                                    if !self.badge_store.has_badge(&voter_wire) {
+                                        self.badge_store.set_badge(
+                                            voter_wire,
+                                            crate::badge::VoteBadge::new(1, completed_cycle, proposer_wire.clone(), now_unix),
+                                        );
+                                    }
+                                }
+                                // Also R2 voters
+                                for voter_wire in self.vote_mgr.r2_voters_for(&candidate_hash) {
+                                    if !self.badge_store.has_badge(&voter_wire) {
+                                        self.badge_store.set_badge(
+                                            voter_wire,
+                                            crate::badge::VoteBadge::new(1, completed_cycle, proposer_wire.clone(), now_unix),
+                                        );
+                                    }
+                                }
+                                let badge_count = self.badge_store.count_active();
+                                info!("genesis auto-badge: {badge_count} badge(s) granted to block 1 participants");
+                            }
+
                             self.process_badge_transactions(&block, completed_cycle);
                             self.process_dao_transactions(&block, completed_cycle);
                             outputs.push(CycleIo::CommitBlock(block));
@@ -2019,12 +2067,21 @@ impl CycleEngine {
             );
         }
 
-        // Votes are accepted from any connected peer with a valid signature.
-        // The local validator_list only controls who THIS node votes for,
-        // not whose votes it accepts.  The only hard requirements are:
-        //   - valid cryptographic signature (GAP-C7, checked in record_vote)
-        //   - correct cycle number (AUD2-M4, checked in record_vote)
-        //   - not a duplicate (P0.2, checked in record_vote)
+        // Badge-gated voting (Sybil resistance):
+        // After bootstrap, only badge holders can cast consensus votes.
+        // During bootstrap, badges are auto-granted on NodeAnnounce, so
+        // this check still passes for legitimate validators.
+        let voter_wire = vote.voter_pubkey.to_wire_bytes();
+        let in_bootstrap = self.current_cycle() < noble_core::BOOTSTRAP_MODE_CYCLES;
+        if !in_bootstrap && !self.badge_store.is_active(&voter_wire) {
+            debug!("vote rejected: voter has no active badge (post-bootstrap)");
+            return outputs;
+        }
+
+        // Additional requirements (enforced in record_vote):
+        //   - valid cryptographic signature (GAP-C7)
+        //   - correct cycle number (AUD2-M4)
+        //   - not a duplicate (P0.2)
         //   - peer not banned (handled at the network layer)
 
         // If we receive a vote for a candidate we haven't seen yet, request
@@ -2263,6 +2320,20 @@ impl CycleEngine {
             return outputs;
         }
 
+        // Self-enforcement: don't cast votes without a badge (post-bootstrap).
+        // Prevents wasting bandwidth on votes that peers will drop.
+        let in_bootstrap = self.current_cycle() < noble_core::BOOTSTRAP_MODE_CYCLES;
+        if !in_bootstrap {
+            if let Some((_, ref pk)) = self.our_validator_key {
+                let self_wire = pk.to_wire_bytes();
+                if !self.badge_store.is_active(&self_wire) {
+                    debug!("{cl}: not casting R1 vote — this node has no active badge");
+                    self.r1_vote_cast = true;
+                    return outputs;
+                }
+            }
+        }
+
         let (ref priv_key, ref pub_key) = match &self.our_validator_key {
             Some(kp) => kp,
             None => {
@@ -2334,6 +2405,19 @@ impl CycleEngine {
         if !self.voting_enabled {
             self.r2_vote_cast = true;
             return outputs;
+        }
+
+        // Self-enforcement: don't cast votes without a badge (post-bootstrap).
+        let in_bootstrap = self.current_cycle() < noble_core::BOOTSTRAP_MODE_CYCLES;
+        if !in_bootstrap {
+            if let Some((_, ref pk)) = self.our_validator_key {
+                let self_wire = pk.to_wire_bytes();
+                if !self.badge_store.is_active(&self_wire) {
+                    debug!("{cl}: not casting R2 vote — this node has no active badge");
+                    self.r2_vote_cast = true;
+                    return outputs;
+                }
+            }
         }
 
         let (ref priv_key, ref pub_key) = match &self.our_validator_key {

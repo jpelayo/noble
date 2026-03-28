@@ -2210,7 +2210,7 @@ export function init(root, ctx) {
           <td>${i + 1}</td>
           ${strategyCell(keyHex, i)}
           <td>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${escapeHtml(v.name) || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
+            <div style="font-weight:600;font-size:var(--font-size-sm)">${v.has_badge ? '<span title="Voting badge" style="color:var(--success);margin-right:2px">&#9679;</span>' : '<span title="No badge" style="color:var(--text-muted);margin-right:2px;opacity:0.3">&#9675;</span>'}${escapeHtml(v.name) || (isSelf ? 'This Node' : 'Unknown')}${youBadge}</div>
             <div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">${truncateHash(keyHex, 6)} <button class="btn-copy" data-copy="${keyHex}" title="Copy public key">&#128203;</button></div>
           </td>
           <td class="mono" style="font-size:var(--font-size-xs)">${extractIpFromMultiaddr(v.host_address)}${v.host_address ? ` <button class="btn-copy" data-copy="${extractIpFromMultiaddr(v.host_address)}" title="Copy IP">&#128203;</button>` : ''}</td>

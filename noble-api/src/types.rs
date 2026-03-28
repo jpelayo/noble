@@ -588,6 +588,8 @@ pub struct ValidatorEntry {
     /// Whether this peer announced `wants_to_validate = true`.
     /// Defaults to `true` for validators with no announce data (benefit of doubt).
     pub wants_to_validate: bool,
+    /// Whether this validator holds an active voting badge.
+    pub has_badge: bool,
 }
 
 /// Response for `noble_getValidatorList`.

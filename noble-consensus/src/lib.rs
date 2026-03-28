@@ -5,6 +5,8 @@
 
 pub mod alignment;
 pub mod badge;
+pub mod badge_candidates;
+pub mod badge_strategy;
 pub mod candidate;
 pub mod checkpoint;
 pub mod dao;

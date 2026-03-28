@@ -53,6 +53,18 @@ pub trait BadgeApi {
         proposal_hash: String,
         vote: bool,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get current badge voting strategies.
+    #[method(name = "getBadgeStrategies")]
+    async fn get_badge_strategies(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Set badge approval strategy.
+    #[method(name = "setBadgeApprovalStrategy")]
+    async fn set_badge_approval_strategy(&self, strategy: serde_json::Value) -> Result<bool, ErrorObjectOwned>;
+
+    /// Set badge revocation strategy.
+    #[method(name = "setBadgeRevocationStrategy")]
+    async fn set_badge_revocation_strategy(&self, strategy: serde_json::Value) -> Result<bool, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -335,6 +347,32 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
             "ok": true,
             "tx_hash": tx,
         }))
+    }
+
+    async fn get_badge_strategies(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let engine = self.consensus.read();
+        Ok(serde_json::json!({
+            "approval": engine.badge_approval_strategy,
+            "revocation": engine.badge_revocation_strategy,
+        }))
+    }
+
+    async fn set_badge_approval_strategy(&self, strategy: serde_json::Value) -> Result<bool, ErrorObjectOwned> {
+        let parsed: noble_consensus::badge_strategy::BadgeApprovalStrategy =
+            serde_json::from_value(strategy)
+                .map_err(|e| ApiError::InvalidParam(format!("invalid strategy: {e}")))?;
+        let mut engine = self.consensus.write();
+        engine.badge_approval_strategy = parsed;
+        Ok(true)
+    }
+
+    async fn set_badge_revocation_strategy(&self, strategy: serde_json::Value) -> Result<bool, ErrorObjectOwned> {
+        let parsed: noble_consensus::badge_strategy::BadgeRevocationStrategy =
+            serde_json::from_value(strategy)
+                .map_err(|e| ApiError::InvalidParam(format!("invalid strategy: {e}")))?;
+        let mut engine = self.consensus.write();
+        engine.badge_revocation_strategy = parsed;
+        Ok(true)
     }
 }
 

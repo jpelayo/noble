@@ -446,6 +446,10 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                         }),
                     proposed_this_cycle: candidate_tracker.has_proposed(&wire),
                     wants_to_validate: wants_validate,
+                    has_badge: {
+                        let engine = self.consensus.read();
+                        engine.badge_store().is_active(&wire.to_vec())
+                    },
                 }
             })
             .collect();
