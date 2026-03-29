@@ -631,11 +631,32 @@ final class WebBridgeHandler {
             }
             let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
             let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
-            let metadata = (params["metadata"] as? [[String: Any]] ?? []).map {
-                ["key": $0["key"] as? String ?? "", "value": $0["value"] as? String ?? ""]
-            }
-            let metadataItems = metadata.map {
-                MetadataItem(key: $0["key"] ?? "", value: $0["value"] ?? "")
+            let rawMetadata = params["metadata"] as? [[String: Any]] ?? []
+            var metadataItems: [MetadataItem] = []
+            var metadata: [[String: String]] = []
+            for entry in rawMetadata {
+                let key = entry["key"] as? String ?? ""
+                var value = entry["value"] as? String ?? ""
+                let mode = entry["mode"] as? String ?? "plaintext"
+                let recipient = entry["recipient"] as? String ?? ""
+                // ECIES encrypt: mode == "encrypted" with a recipient pubkey
+                if mode == "encrypted" && !recipient.isEmpty {
+                    let plaintextHex = value.data(using: .utf8)?.map { String(format: "%02x", $0) }.joined() ?? ""
+                    let inputJson = "{\"plaintext_hex\":\"\(plaintextHex)\",\"recipient_pubkey_hex\":\"\(recipient)\"}"
+                    if let cStr = inputJson.cString(using: .utf8),
+                       let resultPtr = noble_ecies_encrypt(cStr) {
+                        let resultStr = String(cString: resultPtr)
+                        noble_free(resultPtr)
+                        if let data = resultStr.data(using: .utf8),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let payloadHex = json["payload_hex"] as? String {
+                            value = payloadHex
+                        }
+                    }
+                }
+                // Protected fields are already pre-encrypted in JS — pass through
+                metadataItems.append(MetadataItem(key: key, value: value))
+                metadata.append(["key": key, "value": value])
             }
 
             // Parse available UTXOs from JS, then run coin selection.
@@ -748,6 +769,67 @@ final class WebBridgeHandler {
                 throw BridgeError.operationFailed(error)
             }
             return resultDict
+
+        case "encryptField":
+            guard let value = params["value"] as? String,
+                  let mode = params["mode"] as? String else {
+                throw BridgeError.missingParam("value, mode")
+            }
+            guard mode == "encrypted" else {
+                // Protected fields are pre-encrypted in JS via Web Crypto
+                throw BridgeError.operationFailed("encryptField: only mode 'encrypted' (ECIES) supported in bridge; protected fields use client-side Web Crypto")
+            }
+            guard let recipientPubkey = params["recipient_pubkey"] as? String, !recipientPubkey.isEmpty else {
+                throw BridgeError.missingParam("recipient_pubkey")
+            }
+            let plaintextHex = value.data(using: .utf8)?.map { String(format: "%02x", $0) }.joined() ?? ""
+            let encInput = "{\"plaintext_hex\":\"\(plaintextHex)\",\"recipient_pubkey_hex\":\"\(recipientPubkey)\"}"
+            guard let cStr = encInput.cString(using: .utf8),
+                  let resultPtr = noble_ecies_encrypt(cStr) else {
+                throw BridgeError.operationFailed("ECIES encrypt failed")
+            }
+            let encResultStr = String(cString: resultPtr)
+            noble_free(resultPtr)
+            guard let encData = encResultStr.data(using: .utf8),
+                  let encJson = try? JSONSerialization.jsonObject(with: encData) as? [String: Any],
+                  let payloadHex = encJson["payload_hex"] as? String else {
+                throw BridgeError.operationFailed("ECIES encrypt: invalid result")
+            }
+            return ["encrypted_hex": payloadHex]
+
+        case "decryptField", "decryptEciesField":
+            let payloadHex: String
+            if let ph = params["payload_hex"] as? String {
+                payloadHex = ph
+            } else if let eh = params["encrypted_hex"] as? String {
+                payloadHex = eh
+            } else {
+                throw BridgeError.missingParam("payload_hex or encrypted_hex")
+            }
+            guard let privateKey = appState.loadPrivateKey() else {
+                throw BridgeError.noPrivateKey
+            }
+            let pkHex = privateKey.map { String(format: "%02x", $0) }.joined()
+            let decInput = "{\"payload_hex\":\"\(payloadHex)\",\"private_key_hex\":\"\(pkHex)\"}"
+            guard let decCStr = decInput.cString(using: .utf8),
+                  let decResultPtr = noble_ecies_decrypt(decCStr) else {
+                throw BridgeError.operationFailed("ECIES decrypt failed")
+            }
+            let decResultStr = String(cString: decResultPtr)
+            noble_free(decResultPtr)
+            guard let decData = decResultStr.data(using: .utf8),
+                  let decJson = try? JSONSerialization.jsonObject(with: decData) as? [String: Any],
+                  let plaintextHex = decJson["plaintext_hex"] as? String else {
+                return ["error": "Not a recipient of this encrypted field"]
+            }
+            var decBytes = [UInt8]()
+            var hIdx = plaintextHex.startIndex
+            while hIdx < plaintextHex.endIndex {
+                let next = plaintextHex.index(hIdx, offsetBy: 2)
+                if let byte = UInt8(plaintextHex[hIdx..<next], radix: 16) { decBytes.append(byte) }
+                hIdx = next
+            }
+            return ["plaintext": String(bytes: decBytes, encoding: .utf8) ?? plaintextHex, "value": String(bytes: decBytes, encoding: .utf8) ?? plaintextHex]
 
         case "signMetadataField":
             guard let keyIdStr = params["keyId"] as? String,

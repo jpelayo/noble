@@ -230,10 +230,8 @@ pub fn handle_crypto_action(
             let fee_rate = params.get("fee_rate").and_then(|v| v.as_u64()).unwrap_or(0);
 
             // Use noble-tx-core shared C library.
-            let metadata_arr: Vec<serde_json::Value> = parse_metadata(params)
-                .iter()
-                .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
-                .collect();
+            // Extract metadata with ECIES encryption for encrypted fields.
+            let metadata_arr: Vec<serde_json::Value> = parse_metadata_with_ecies(params, private_key)?;
             let mut input_json = serde_json::json!({
                 "checksum": hex::encode(&checksum),
                 "metadata": metadata_arr,
@@ -254,6 +252,36 @@ pub fn handle_crypto_action(
                 return Err(err.to_string());
             }
             Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
+        }
+
+        "encryptField" => {
+            let value = params.get("value").and_then(|v| v.as_str())
+                .ok_or("Missing parameter: value")?;
+            let mode = params.get("mode").and_then(|v| v.as_str())
+                .ok_or("Missing parameter: mode")?;
+            if mode == "encrypted" {
+                let recipient_pubkey = params.get("recipient_pubkey").and_then(|v| v.as_str())
+                    .ok_or("Missing parameter: recipient_pubkey")?;
+                let plaintext_hex = hex::encode(value.as_bytes());
+                let payload_hex = noble_tx_core::ecies_encrypt_field(&plaintext_hex, recipient_pubkey)
+                    .map_err(|e| format!("ECIES encrypt: {e}"))?;
+                Ok(serde_json::json!({ "encrypted_hex": payload_hex }))
+            } else {
+                Err("mode must be 'encrypted' (protected fields use client-side Web Crypto)".to_string())
+            }
+        }
+
+        "decryptField" | "decryptEciesField" => {
+            let payload_hex = params.get("payload_hex")
+                .or_else(|| params.get("encrypted_hex"))
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: payload_hex or encrypted_hex")?;
+            let private_key_hex = hex::encode(private_key);
+            let plaintext_hex = noble_tx_core::ecies_decrypt_field(payload_hex, &private_key_hex)
+                .map_err(|e| format!("ECIES decrypt: {e}"))?;
+            let plaintext_bytes = hex::decode(&plaintext_hex).unwrap_or_default();
+            let plaintext = String::from_utf8(plaintext_bytes).unwrap_or(plaintext_hex.clone());
+            Ok(serde_json::json!({ "plaintext": plaintext, "value": plaintext }))
         }
 
         "signTransfer" => {
@@ -320,6 +348,27 @@ pub fn sha256_hash(data: &[u8]) -> [u8; 32] {
 pub fn parse_chain_id(s: &str) -> u32 {
     let hex_str = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
     u32::from_str_radix(hex_str, 16).unwrap_or(0)
+}
+
+/// Extract metadata with ECIES encryption for encrypted fields.
+fn parse_metadata_with_ecies(params: &Value, _private_key: &[u8]) -> Result<Vec<serde_json::Value>, String> {
+    let entries = params.get("metadata").and_then(|v| v.as_array());
+    let Some(entries) = entries else { return Ok(vec![]); };
+    let mut result = Vec::new();
+    for entry in entries {
+        let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let mut value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mode = entry.get("mode").and_then(|v| v.as_str()).unwrap_or("plaintext");
+        let recipient = entry.get("recipient").and_then(|v| v.as_str()).unwrap_or("");
+        if mode == "encrypted" && !recipient.is_empty() {
+            let plaintext_hex = hex::encode(value.as_bytes());
+            let payload_hex = noble_tx_core::ecies_encrypt_field(&plaintext_hex, recipient)
+                .map_err(|e| format!("ECIES encrypt for field '{}': {}", key, e))?;
+            value = payload_hex;
+        }
+        result.push(serde_json::json!({"key": key, "value": value}));
+    }
+    Ok(result)
 }
 
 /// Extract metadata key-value pairs from bridge params.

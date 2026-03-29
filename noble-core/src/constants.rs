@@ -186,10 +186,10 @@ pub const MAX_SOFTWARE_VERSION_LEN: usize = 32;
 /// Maximum age of a NodeAnnounce before it is considered stale (seconds).
 pub const NODE_ANNOUNCE_MAX_AGE_SECS: u64 = 3_600;
 
-/// Validator liveness: considered alive if last seen within 3 cycles (1.5h).
+/// Validator liveness: considered alive if last seen within 3 cycles (48 min at 16-min cycles).
 pub const VALIDATOR_ALIVE_THRESHOLD_SECS: u64 = 5_400;
 
-/// Validator liveness: considered stale if last seen within 12 cycles (6h).
+/// Validator liveness: considered stale if last seen within 12 cycles (3.2h at 16-min cycles).
 /// Beyond this threshold, the validator is considered unreachable.
 pub const VALIDATOR_STALE_THRESHOLD_SECS: u64 = 21_600;
 

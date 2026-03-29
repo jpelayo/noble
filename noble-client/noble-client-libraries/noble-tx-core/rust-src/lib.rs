@@ -133,6 +133,37 @@ pub fn verify_tx(params_json: &str) -> Result<String, String> {
     call_ffi(noble_verify_tx, params_json)
 }
 
+// ── ECIES field encryption (pure Rust, no C FFI) ──
+
+// NOTE: noble_ecies_encrypt / noble_ecies_decrypt are now implemented in C (ecies.c).
+// The C implementations use the same compact binary format and HKDF info string.
+// These Rust-native helpers remain for WRY apps that link noble-crypto directly.
+
+/// Rust-native ECIES encrypt (for WRY apps that link noble-crypto directly).
+pub fn ecies_encrypt_field(plaintext_hex: &str, recipient_pubkey_hex: &str) -> Result<String, String> {
+    let plaintext = hex::decode(plaintext_hex).map_err(|e| format!("bad plaintext hex: {e}"))?;
+    let pubkey_bytes = hex::decode(recipient_pubkey_hex).map_err(|e| format!("bad pubkey hex: {e}"))?;
+    if pubkey_bytes.len() != 33 {
+        return Err(format!("pubkey must be 33 bytes, got {}", pubkey_bytes.len()));
+    }
+    let recipient = noble_crypto::keys::NoblePublicKey::Secp256k1(pubkey_bytes);
+    let payload = noble_crypto::ecies::encrypt_single(&plaintext, &recipient)
+        .map_err(|e| format!("ECIES encrypt: {e}"))?;
+    Ok(hex::encode(&payload))
+}
+
+/// Rust-native ECIES decrypt (for WRY apps that link noble-crypto directly).
+pub fn ecies_decrypt_field(payload_hex: &str, private_key_hex: &str) -> Result<String, String> {
+    let payload = hex::decode(payload_hex).map_err(|e| format!("bad payload hex: {e}"))?;
+    let sk_bytes = hex::decode(private_key_hex).map_err(|e| format!("bad privkey hex: {e}"))?;
+    if sk_bytes.len() != 32 {
+        return Err(format!("private key must be 32 bytes, got {}", sk_bytes.len()));
+    }
+    let private_key = noble_crypto::keys::NoblePrivateKey::Secp256k1(sk_bytes);
+    let plaintext = noble_crypto::ecies::decrypt_single(&payload, &private_key)
+        .map_err(|e| format!("ECIES decrypt: {e}"))?;
+    Ok(hex::encode(&plaintext))
+}
 
 #[cfg(test)]
 mod tests {

@@ -234,6 +234,81 @@ pub fn ecies_decrypt(
     aes_decrypt(&dek, &payload.ciphertext, &payload.nonce)
 }
 
+// ── Single-recipient compact binary API (for metadata field encryption) ──
+
+/// Encrypt plaintext for a single recipient, returning a compact binary payload.
+///
+/// Wire format: `nonce(12) || ciphertext(N+16) || ephemeral(33) || encrypted_key(48) || key_nonce(12)`
+///
+/// Total overhead: 121 bytes. With MAX_METADATA_VALUE_LEN=256, max plaintext is 134 bytes.
+/// This format is used for per-field ECIES encryption in metadata slots.
+#[tracing::instrument(skip(plaintext, recipient), fields(task = "ecies_encrypt_single"))]
+pub fn encrypt_single(
+    plaintext: &[u8],
+    recipient: &NoblePublicKey,
+) -> Result<Vec<u8>, CryptoError> {
+    let payload = ecies_encrypt(plaintext, &[recipient.clone()])?;
+    let env = &payload.recipients[0];
+
+    // Validate expected sizes
+    if env.ephemeral_pubkey.len() != 33 {
+        return Err(CryptoError::EciesEncrypt(format!(
+            "ephemeral pubkey must be 33 bytes, got {}",
+            env.ephemeral_pubkey.len()
+        )));
+    }
+    if env.encrypted_key.len() != 48 {
+        return Err(CryptoError::EciesEncrypt(format!(
+            "encrypted key must be 48 bytes (32+16 tag), got {}",
+            env.encrypted_key.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(12 + payload.ciphertext.len() + 33 + 48 + 12);
+    out.extend_from_slice(&payload.nonce);          // 12
+    out.extend_from_slice(&payload.ciphertext);     // N+16
+    out.extend_from_slice(&env.ephemeral_pubkey);   // 33
+    out.extend_from_slice(&env.encrypted_key);      // 48
+    out.extend_from_slice(&env.key_nonce);           // 12
+    Ok(out)
+}
+
+/// Decrypt a compact single-recipient ECIES payload.
+///
+/// Wire format: `nonce(12) || ciphertext(N+16) || ephemeral(33) || encrypted_key(48) || key_nonce(12)`
+///
+/// Minimum payload size: 121 bytes (empty plaintext → 16 bytes ciphertext from GCM tag).
+#[tracing::instrument(skip(payload, private_key), fields(task = "ecies_decrypt_single"))]
+pub fn decrypt_single(
+    payload: &[u8],
+    private_key: &NoblePrivateKey,
+) -> Result<Vec<u8>, CryptoError> {
+    // Minimum: nonce(12) + tag(16) + ephemeral(33) + enc_key(48) + key_nonce(12) = 121
+    if payload.len() < 121 {
+        return Err(CryptoError::EciesDecrypt(format!(
+            "payload too short ({} bytes, min 121)",
+            payload.len()
+        )));
+    }
+
+    let tail_len = 33 + 48 + 12; // ephemeral + encrypted_key + key_nonce = 93
+    let ciphertext_end = payload.len() - tail_len;
+
+    let nonce: [u8; 12] = payload[..12].try_into().expect("guaranteed by min size check");
+    let ciphertext = &payload[12..ciphertext_end];
+    let ephemeral_pubkey = &payload[ciphertext_end..ciphertext_end + 33];
+    let encrypted_key = &payload[ciphertext_end + 33..ciphertext_end + 33 + 48];
+    let key_nonce: [u8; 12] = payload[ciphertext_end + 33 + 48..].try_into().map_err(|_| {
+        CryptoError::EciesDecrypt("invalid key_nonce length".into())
+    })?;
+
+    // Decrypt DEK
+    let dek = decrypt_as_recipient(private_key, ephemeral_pubkey, encrypted_key, &key_nonce)?;
+
+    // Decrypt ciphertext
+    aes_decrypt(&dek, ciphertext, &nonce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +387,67 @@ mod tests {
         let payload = ecies_encrypt(b"", &[pub_key]).unwrap();
         let decrypted = ecies_decrypt(&payload, &priv_key).unwrap();
         assert!(decrypted.is_empty());
+    }
+
+    // ── Single-recipient compact binary tests ──
+
+    #[test]
+    fn single_roundtrip() {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
+
+        let plaintext = b"user@example.com";
+        let compact = encrypt_single(plaintext, &pub_key).unwrap();
+        // 121 overhead + 16 plaintext bytes
+        assert_eq!(compact.len(), 121 + plaintext.len());
+
+        let decrypted = decrypt_single(&compact, &priv_key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn single_max_plaintext_fits_256() {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
+
+        // 134 bytes plaintext → 121 + 134 = 255 bytes total (fits in 256 value limit)
+        let plaintext = vec![0x42u8; 134];
+        let compact = encrypt_single(&plaintext, &pub_key).unwrap();
+        assert_eq!(compact.len(), 255);
+
+        let decrypted = decrypt_single(&compact, &priv_key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn single_wrong_key_fails() {
+        let (_, pk1) = secp256k1::generate_keypair();
+        let (sk2, _) = secp256k1::generate_keypair();
+
+        let pub_key1 = NoblePublicKey::Secp256k1(pk1);
+        let priv_key2 = NoblePrivateKey::Secp256k1(sk2);
+
+        let compact = encrypt_single(b"secret", &pub_key1).unwrap();
+        assert!(decrypt_single(&compact, &priv_key2).is_err());
+    }
+
+    #[test]
+    fn single_empty_plaintext() {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk);
+        let pub_key = NoblePublicKey::Secp256k1(pk);
+
+        let compact = encrypt_single(b"", &pub_key).unwrap();
+        assert_eq!(compact.len(), 121); // overhead only, no plaintext bytes
+
+        let decrypted = decrypt_single(&compact, &priv_key).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn single_truncated_payload_rejected() {
+        assert!(decrypt_single(&[0u8; 120], &NoblePrivateKey::Secp256k1([0u8; 32])).is_err());
     }
 }

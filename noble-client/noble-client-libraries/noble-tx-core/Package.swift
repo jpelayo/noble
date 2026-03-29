@@ -40,6 +40,8 @@ let package = Package(
                 "src/coin_select.c",
                 "src/json.c",
                 "src/aes_gcm.c",
+                "src/hkdf.c",
+                "src/ecies.c",
                 "src/noble_tx.c",
             ],
             publicHeadersPath: "include",

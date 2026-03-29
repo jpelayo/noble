@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn protocol_constants() {
         let cfg = ConsensusConfig::default();
-        assert_eq!(cfg.max_block_size, 4 * 1024 * 1024);
+        assert_eq!(cfg.max_block_size, 8 * 1024 * 1024);
         assert_eq!(cfg.max_reorg_depth, 144);
         assert_eq!(cfg.plurality_floor_divisor, 3);
         assert_eq!(cfg.min_peers_for_consensus, 2);

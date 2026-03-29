@@ -105,7 +105,7 @@ export function init(root, ctx) {
           <input type="text" id="gov-poll-question" placeholder="Should we...?" class="input" />
         </div>
         <div class="form-group">
-          <label>Duration (cycles, 1 cycle = 20 min)</label>
+          <label>Duration (cycles, 1 cycle = 16 min)</label>
           <input type="number" id="gov-poll-duration" value="72" min="1" max="720" class="input" />
         </div>
         <button class="btn" id="gov-poll-submit">Create DAO Poll</button>

@@ -2100,7 +2100,22 @@ export function init(root, ctx) {
             // Merge batch metadata + per-file metadata for this file (additive).
             const batchMeta = metadata.filter(m => m.key && m.value);
             const fileMeta = (perFileMetadata[f.path] || []).filter(m => m.key && m.value);
-            const validMeta = [...batchMeta, ...fileMeta];
+            let validMeta = [...batchMeta, ...fileMeta];
+
+            // ── Step 0.5: Auto-duplicate multi-recipient encrypted fields ──
+            // Each encrypted field with N recipients becomes N separate entries,
+            // each with a single recipient. One slot per recipient on-chain.
+            const expanded = [];
+            for (const m of validMeta) {
+                if (m.mode === 'encrypted' && m.recipients && m.recipients.length > 1) {
+                    for (const r of m.recipients) {
+                        expanded.push({ ...m, recipients: [r] });
+                    }
+                } else {
+                    expanded.push(m);
+                }
+            }
+            validMeta = expanded;
 
             // ── Step 1: Sign fields BEFORE encryption (sign plaintext) ──
             // For each signed field, generate CMS detached signature over the plaintext value.
@@ -2136,7 +2151,8 @@ export function init(root, ctx) {
                 const m = validMeta[i];
                 const def = METADATA_FIELDS.find(f => f.key === m.fieldKey) || { code: 'T99' };
                 const vis = m.mode === 'encrypted' ? 'priv' : m.mode === 'protected' ? 'pwd' : 'pub';
-                schemaLines.push(`${slotIndex}:${def.code}:${vis}:${m.key}`);
+                const enc = m.mode === 'encrypted' ? 'ecies' : m.mode === 'protected' ? 'aesgcm' : 'utf8';
+                schemaLines.push(`${slotIndex}:${def.code}:${vis}:${enc}:${m.key}`);
                 metaWithSigs.push(m);
                 const fieldSlot = slotIndex;
                 slotIndex++;
@@ -2145,7 +2161,7 @@ export function init(root, ctx) {
                 const sigEntry = sigEntries.find(s => s.afterIndex === i);
                 if (sigEntry) {
                     const sigKey = `sig:${fieldSlot}`;
-                    schemaLines.push(`${slotIndex}:SIG:pub:${sigKey}`);
+                    schemaLines.push(`${slotIndex}:SIG:pub:cms:${sigKey}`);
                     metaWithSigs.push({ key: sigKey, value: sigEntry.sigHex, mode: 'plaintext' });
                     slotIndex++;
                 }
@@ -2194,7 +2210,12 @@ export function init(root, ctx) {
                 checksum: hash,
                 fee,
                 fee_rate: feeRate,
-                metadata: allMeta.map(m => ({ key: m.key, value: m.value, mode: m.mode || 'plaintext' })),
+                metadata: allMeta.map(m => ({
+                    key: m.key,
+                    value: m.value,
+                    mode: m.mode || 'plaintext',
+                    recipient: m.mode === 'encrypted' ? (m.recipients?.[0]?.publicKey || '') : ''
+                })),
                 utxos,
                 previousChecksum: previousChecksum || undefined
             });

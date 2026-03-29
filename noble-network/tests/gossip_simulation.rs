@@ -323,7 +323,7 @@ async fn gossip_block_announce_end_to_end() {
         test_chain_id(),
         &sk,
         &pk,
-        4 * 1024 * 1024,
+        8 * 1024 * 1024,
         &NoopLookup,
         None,
     )

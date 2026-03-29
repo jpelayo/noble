@@ -249,6 +249,31 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             description: "Estimate transaction wire size.",
             input_schema: obj(serde_json::json!({"tx_type": s()}), &["tx_type"]),
             annotations: ro.clone() },
+        ToolDef { name: "validateMetadata", handler: "noble_mcp", action: "validateMetadata",
+            description: "Validate metadata fields before building a transaction. Checks slot budget (max 16), field pairing (doc:bridge+doc:relation), forced encryption (contact:email/phone), mode requirements, key/value size limits, and version chain rules.",
+            input_schema: obj(serde_json::json!({
+                "metadata": arr(serde_json::json!({"type": "object", "properties": {
+                    "key": s(), "value": s(), "mode": s(),
+                    "recipient": s(), "fieldPassword": s(), "signed": b()
+                }})),
+                "tx_type": s(),
+                "batch": b()
+            }), &["metadata"]),
+            annotations: safe.clone() },
+        ToolDef { name: "encryptField", handler: "noble_crypto", action: "encryptField",
+            description: "Encrypt a metadata field value. For mode 'protected': AES-256-GCM with password. For mode 'encrypted': ECIES with recipient public key. Returns hex-encoded ciphertext to use as the field value in signNotarization.",
+            input_schema: obj(serde_json::json!({
+                "value": s(), "mode": s(),
+                "password": s(), "recipient_pubkey": s()
+            }), &["value", "mode"]),
+            annotations: safe.clone() },
+        ToolDef { name: "decryptField", handler: "noble_crypto", action: "decryptField",
+            description: "Decrypt a metadata field value. For mode 'protected': AES-256-GCM with password. For mode 'encrypted': ECIES with user's private key (loaded from keystore).",
+            input_schema: obj(serde_json::json!({
+                "encrypted_hex": s(), "mode": s(),
+                "password": s()
+            }), &["encrypted_hex", "mode"]),
+            annotations: safe.clone() },
         ToolDef { name: "signMetadataField", handler: "noble_crypto", action: "signMetadataField",
             description: "Create CMS detached signature for a metadata field.",
             input_schema: obj(serde_json::json!({"keyId": s(), "fieldValue": s()}), &["keyId", "fieldValue"]),
@@ -409,6 +434,14 @@ fn build_prompt_list() -> serde_json::Value {
                 ]
             },
             {
+                "name": "register-document-batch",
+                "description": "Register multiple documents as a linked batch on the Noble blockchain",
+                "arguments": [
+                    { "name": "filePaths", "description": "Comma-separated file paths to register", "required": true },
+                    { "name": "batchName", "description": "Human-readable batch name", "required": false },
+                ]
+            },
+            {
                 "name": "send-payment",
                 "description": "Guided Noble coin transfer",
                 "arguments": [
@@ -449,6 +482,131 @@ fn resolve_resource(uri: &str) -> Option<(&'static str, &'static str, serde_json
         "noble://node/sync" => Some(("noble_api", "getSyncStatus", serde_json::json!({}))),
         "noble://node/peers" => Some(("noble_api", "getPeers", serde_json::json!({}))),
         _ => None,
+    }
+}
+
+// ── Server-side tool implementations ──
+
+/// Validate metadata fields according to Noble protocol rules.
+/// Returns { valid: true } or { valid: false, errors: [...] }.
+fn validate_metadata_tool(
+    arguments: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, (i32, String)> {
+    let args = arguments.ok_or((-32602, "Missing arguments".to_string()))?;
+    let entries = args.get("metadata").and_then(|v| v.as_array())
+        .ok_or((-32602, "Missing metadata array".to_string()))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Count slots: 1 schema + fields + signatures (signed fields = 2 slots)
+    let mut slot_count = 1usize; // schema descriptor always occupies slot 0
+    for entry in entries {
+        slot_count += 1;
+        if entry.get("signed").and_then(|v| v.as_bool()).unwrap_or(false) {
+            slot_count += 1; // CMS signature consumes an additional slot
+        }
+    }
+    if slot_count > 16 {
+        errors.push(format!("Exceeds 16 slot limit ({slot_count} slots: 1 schema + {} fields/sigs)", slot_count - 1));
+    }
+
+    let mut has_bridge = false;
+    let mut has_relation = false;
+    let mut seen_keys: Vec<String> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let mode = entry.get("mode").and_then(|v| v.as_str()).unwrap_or("plaintext");
+
+        // Key/value size limits
+        if key.is_empty() || key.len() > 64 {
+            errors.push(format!("[{i}] Key must be 1-64 bytes, got {}", key.len()));
+        }
+        if value.is_empty() || value.len() > 256 {
+            errors.push(format!("[{i}] Value must be 1-256 bytes, got {}", value.len()));
+        }
+
+        // Duplicate key check (encrypted fields with same key are allowed — auto-duplicated)
+        if mode != "encrypted" && seen_keys.contains(&key.to_string()) {
+            errors.push(format!("[{i}] Duplicate key '{key}' (only encrypted fields may share keys)"));
+        }
+        seen_keys.push(key.to_string());
+
+        // Force-encrypt contact fields
+        if (key == "contact:email" || key == "contact:phone") && mode != "encrypted" {
+            errors.push(format!("[{i}] '{key}' must be mode 'encrypted' (forced encryption)"));
+        }
+
+        // doc:batch must be plaintext
+        if key == "doc:batch" && mode != "plaintext" {
+            errors.push(format!("[{i}] 'doc:batch' must be mode 'plaintext' (batch coordination)"));
+        }
+
+        // Protected requires password
+        if mode == "protected" {
+            let pw = entry.get("fieldPassword").and_then(|v| v.as_str()).unwrap_or("");
+            if pw.is_empty() {
+                errors.push(format!("[{i}] '{key}' mode 'protected' requires non-empty fieldPassword"));
+            }
+        }
+
+        // Encrypted requires recipient
+        if mode == "encrypted" {
+            let recipient = entry.get("recipient").and_then(|v| v.as_str()).unwrap_or("");
+            if recipient.is_empty() {
+                errors.push(format!("[{i}] '{key}' mode 'encrypted' requires non-empty recipient pubkey"));
+            } else if recipient.len() != 66 {
+                errors.push(format!("[{i}] '{key}' recipient must be 33-byte hex (66 chars), got {}", recipient.len()));
+            }
+            // Check plaintext fits after ECIES encryption (121 overhead + plaintext ≤ 256)
+            if value.len() > 134 {
+                errors.push(format!("[{i}] '{key}' value too long for ECIES ({} bytes, max 134)", value.len()));
+            }
+        }
+
+        // Track pairing
+        if key == "doc:bridge" { has_bridge = true; }
+        if key == "doc:relation" { has_relation = true; }
+
+        // Version chain rules
+        if key == "doc:version" {
+            if value.parse::<u32>().is_err() || value == "0" {
+                errors.push(format!("[{i}] 'doc:version' must be positive integer, got '{value}'"));
+            }
+        }
+        if key == "doc:prev_checksum" {
+            if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+                errors.push(format!("[{i}] 'doc:prev_checksum' must be 64 hex chars"));
+            }
+            // Check doc:version exists and > 1
+            let version_entry = entries.iter().find(|e| {
+                e.get("key").and_then(|v| v.as_str()) == Some("doc:version")
+            });
+            match version_entry {
+                None => errors.push(format!("[{i}] 'doc:prev_checksum' requires 'doc:version' field")),
+                Some(ve) => {
+                    let ver = ve.get("value").and_then(|v| v.as_str()).unwrap_or("0");
+                    if ver.parse::<u32>().unwrap_or(0) <= 1 {
+                        errors.push(format!("[{i}] 'doc:prev_checksum' requires doc:version > 1"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Pairing check
+    if has_bridge && !has_relation {
+        errors.push("'doc:bridge' requires 'doc:relation' (fields must be paired)".to_string());
+    }
+    if has_relation && !has_bridge {
+        errors.push("'doc:relation' requires 'doc:bridge' (fields must be paired)".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(serde_json::json!({ "valid": true }))
+    } else {
+        Ok(serde_json::json!({ "valid": false, "errors": errors }))
     }
 }
 
@@ -527,6 +685,15 @@ async fn handle_mcp_request(
                 .ok_or((-32602, "Missing tool name".to_string()))?;
             let arguments = params.get("arguments");
 
+            // Server-side tools (no bridge callback needed)
+            if name == "validateMetadata" {
+                let result = validate_metadata_tool(arguments)?;
+                return Ok(serde_json::json!({
+                    "content": [{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }],
+                    "isError": false,
+                }));
+            }
+
             let (handler, action) = resolve_tool(name)
                 .ok_or((-32601, format!("Unknown tool: {name}")))?;
 
@@ -566,10 +733,58 @@ async fn handle_mcp_request(
 
             match name {
                 "register-document" => Ok(serde_json::json!({
-                    "description": "Register a document on the Noble blockchain",
+                    "description": "Register a document on the Noble blockchain with metadata",
                     "messages": [{
                         "role": "user",
-                        "content": { "type": "text", "text": "I want to register a document on the Noble blockchain. Please help me: 1) Hash the file, 2) Estimate the fee, 3) Build and sign the transaction, 4) Submit it." }
+                        "content": { "type": "text", "text": concat!(
+                            "I want to register a document on the Noble blockchain.\n\n",
+                            "Steps:\n",
+                            "1. Hash the file with hashFile\n",
+                            "2. Choose metadata fields. Available types:\n",
+                            "   - doc:title (auto-populate from filename), doc:description, doc:url\n",
+                            "   - author, publisher, signer:pubkey\n",
+                            "   - contact:email (MUST be encrypted), contact:phone (MUST be encrypted)\n",
+                            "   - doc:bridge + doc:relation (always paired)\n",
+                            "   - custom fields (any key name)\n",
+                            "3. For each field, choose mode: plaintext, protected (password), or encrypted (ECIES recipient)\n",
+                            "4. Validate metadata with validateMetadata\n",
+                            "5. Encrypt protected/encrypted fields with encryptField\n",
+                            "6. Estimate fee with estimateTxSize\n",
+                            "7. Build and sign with signNotarization (pass pre-encrypted values with mode 'plaintext')\n",
+                            "8. Submit with submitTransaction\n\n",
+                            "Rules:\n",
+                            "- Max 16 metadata slots (1 schema + fields + signatures)\n",
+                            "- Signed fields consume 2 slots (field + CMS signature)\n",
+                            "- contact:email and contact:phone MUST be mode 'encrypted'\n",
+                            "- doc:bridge requires doc:relation (and vice versa)\n",
+                            "- Encrypted fields: max 134 bytes plaintext (ECIES overhead = 121 bytes)\n",
+                            "- Multi-recipient encryption: create one entry per recipient (same key, different ciphertext)"
+                        ) }
+                    }]
+                })),
+                "register-document-batch" => Ok(serde_json::json!({
+                    "description": "Register multiple documents as a linked batch",
+                    "messages": [{
+                        "role": "user",
+                        "content": { "type": "text", "text": concat!(
+                            "I want to register multiple documents as a linked batch.\n\n",
+                            "Steps:\n",
+                            "1. Generate a batch UUID (any unique identifier)\n",
+                            "2. Hash all files with hashFile\n",
+                            "3. Build shared batch metadata for ALL files:\n",
+                            "   - doc:batch = UUID (plaintext)\n",
+                            "   - doc:bridge = UUID (plaintext)\n",
+                            "   - doc:relation = 'same batch' (plaintext)\n",
+                            "4. Add per-file metadata (doc:title from filename, etc.)\n",
+                            "5. For each file: merge batch + per-file metadata\n",
+                            "6. Validate each file's metadata with validateMetadata\n",
+                            "7. Encrypt fields as needed with encryptField\n",
+                            "8. Estimate fees with estimateTxSize for each file\n",
+                            "9. Sign + submit each file with signNotarization + submitTransaction\n",
+                            "10. Report results (successes + failures)\n\n",
+                            "The batch UUID links all documents together. Each file becomes a separate\n",
+                            "transaction sharing the same doc:batch, doc:bridge, and doc:relation metadata."
+                        ) }
                     }]
                 })),
                 "send-payment" => Ok(serde_json::json!({

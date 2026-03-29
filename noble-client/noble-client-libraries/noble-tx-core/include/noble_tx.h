@@ -106,6 +106,17 @@ char *noble_verify_tx(const char *params_json);
 //         or:  { "error": "<message>" }
 char *noble_estimate_tx_size(const char *params_json);
 
+// ECIES single-recipient metadata field encryption (implemented in Rust, not C).
+// Input JSON: { "plaintext_hex": "...", "recipient_pubkey_hex": "..." }
+// Output JSON: { "payload_hex": "..." } or { "error": "..." }
+// Compact binary: nonce(12) || ciphertext(N+16) || ephemeral(33) || encrypted_key(48) || key_nonce(12)
+char *noble_ecies_encrypt(const char *params_json);
+
+// ECIES single-recipient metadata field decryption (implemented in Rust, not C).
+// Input JSON: { "payload_hex": "...", "private_key_hex": "..." }
+// Output JSON: { "plaintext_hex": "..." } or { "error": "..." }
+char *noble_ecies_decrypt(const char *params_json);
+
 // CMS stubs (temporary — replaced by noble-cms-core XCFramework).
 // Returns JSON error until noble-cms-core binary module is linked.
 char *noble_sign_cms_ffi(const char *params_json);

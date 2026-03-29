@@ -4,13 +4,22 @@
  * Parses the self-describing metadata schema convention where slot 0
  * contains a descriptor telling client software how to interpret remaining slots.
  *
- * Schema format (one line per slot):
- *   <slot>:<visibility>:<encoding>:<required>:<label>
+ * Schema format v2 (5-field, from client WebUI):
+ *   <slot>:<typeCode>:<visibility>:<encoding>:<fieldKey>
+ *   Example: 1:T07:pub:utf8:author
+ *            2:T10:priv:ecies:contact:email
+ *            3:SIG:pub:cms:sig:2
  *
- * Example:
- *   0:pub:utf8:opt:schema
- *   1:pub:b64:opt:description
- *   2:priv:ecies:opt:doc_url_enc
+ * Schema format v1 (5-field, legacy dashboard):
+ *   <slot>:<visibility>:<encoding>:<required>:<label>
+ *   Example: 0:pub:utf8:opt:schema
+ *
+ * Schema format v0 (4-field, pre-encoding):
+ *   <slot>:<typeCode>:<visibility>:<fieldKey>
+ *   Example: 1:T07:pub:author
+ *
+ * Detection: if parts[1] starts with 'T' or is 'SIG' → v2/v0 (type code present).
+ * Otherwise → v1 (visibility in parts[1]).
  */
 
 /**
@@ -37,16 +46,36 @@ export function parseMetadataSchema(metadataEntries) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const parts = trimmed.split(':');
-    if (parts.length < 5) continue;
-    const [slot, vis, encoding, required, ...labelParts] = parts;
-    const slotNum = parseInt(slot, 10);
+    if (parts.length < 4) continue;
+    const slotNum = parseInt(parts[0], 10);
     if (isNaN(slotNum)) continue;
 
+    // Detect format by parts[1]: type codes start with T or are SIG
+    const hasTypeCode = /^T\d+$/.test(parts[1]) || parts[1] === 'SIG';
+
+    let vis, encoding, label;
+    if (hasTypeCode && parts.length >= 5) {
+      // v2: slot:typeCode:vis:enc:key (key may contain colons)
+      vis = parts[2];
+      encoding = parts[3];
+      label = parts.slice(4).join(':');
+    } else if (hasTypeCode && parts.length === 4) {
+      // v0: slot:typeCode:vis:key (no encoding — infer from visibility)
+      vis = parts[2];
+      encoding = vis === 'priv' ? 'ecies' : vis === 'pwd' ? 'aesgcm' : 'utf8';
+      label = parts[3];
+    } else {
+      // v1 legacy: slot:vis:enc:req:label
+      vis = parts[1];
+      encoding = parts[2];
+      label = parts.length >= 5 ? parts.slice(4).join(':') : parts[3];
+    }
+
     slotMap.set(slotNum, {
-      visibility: vis,     // "pub" | "priv"
-      encoding: encoding,  // "utf8" | "b64" | "hex" | "der" | "ecies" | "raw"
-      required: required,  // "req" | "opt"
-      label: labelParts.join(':'),
+      visibility: vis,
+      encoding: encoding,
+      required: 'opt',
+      label: label,
     });
   }
 
@@ -91,6 +120,12 @@ export function renderSchemaValue(hexValue, slotInfo) {
 
     case 'ecies':
       return `<span class="badge-encrypted">ENCRYPTED</span> (${hexValue.length / 2} bytes)`;
+
+    case 'aesgcm':
+      return `<span class="badge-protected" style="background:color-mix(in srgb,var(--warning,#f59e0b) 15%,transparent);color:var(--warning,#f59e0b);padding:1px 6px;border-radius:4px;font-size:0.6rem;font-weight:600">PROTECTED</span> (${hexValue.length / 2} bytes)`;
+
+    case 'cms':
+      return `<span class="badge" style="background:var(--success);color:#fff;font-size:0.6rem;padding:1px 6px">SIGNATURE</span> (${hexValue.length / 2} bytes)`;
 
     case 'raw':
     default:

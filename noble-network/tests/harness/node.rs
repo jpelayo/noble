@@ -161,7 +161,7 @@ impl TestNode {
             test_chain_id(),
             &self.private_key,
             &self.public_key,
-            4 * 1024 * 1024,
+            8 * 1024 * 1024,
             &NoopLookup,
             None,
         )

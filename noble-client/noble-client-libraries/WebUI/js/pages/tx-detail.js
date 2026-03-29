@@ -175,21 +175,62 @@ export function init(root, ctx) {
 
         // ── User Metadata ──
         if (user.length > 0) {
+            // Parse schema descriptor to detect encoding per slot
+            const schemaSlots = parseSchemaDescriptor(metadata);
+
             const panel = document.createElement('div');
             panel.className = 'card';
             panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
             let mhtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Metadata (${user.length})</h3>`;
             for (const entry of user) {
-                const val = decodeMetadataValue(entry.value);
+                const entryIdx = metadata.indexOf(entry);
+                const slotInfo = schemaSlots?.get(entryIdx);
+                const isEcies = slotInfo?.encoding === 'ecies';
+                const isProtected = slotInfo?.encoding === 'aesgcm';
+
                 const sigMatch = signatures.find(s => s.slotIndex === metadata.indexOf(metadata.find(m => m.key === entry.key)));
                 const sigBadge = sigMatch ? ' <span class="badge" style="background:var(--success);color:#fff;font-size:0.5rem;padding:1px 4px">Signed</span>' : '';
+                const encBadge = isEcies ? ' <span class="badge" style="background:var(--accent);color:#fff;font-size:0.5rem;padding:1px 4px">Encrypted</span>'
+                    : isProtected ? ' <span class="badge" style="background:var(--warning);color:#fff;font-size:0.5rem;padding:1px 4px">Protected</span>' : '';
+
+                const val = isEcies ? `${(entry.value?.length || 0) / 2} bytes` : decodeMetadataValue(entry.value);
+                const decryptBtnId = isEcies ? `decrypt-${entryIdx}` : '';
+                const decryptBtn = isEcies ? ` <button class="btn btn-sm" id="${decryptBtnId}" style="margin-left:4px;font-size:0.6rem;padding:1px 6px">Decrypt</button>` : '';
+
                 mhtml += `<div style="margin-bottom:6px">
-                    <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(entry.key)}${sigBadge}</div>
-                    <div class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(val)}</div>
+                    <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(entry.key)}${sigBadge}${encBadge}${decryptBtn}</div>
+                    <div class="mono" id="meta-val-${entryIdx}" style="font-size:var(--font-size-xs);word-break:break-all">${esc(val)}</div>
                 </div>`;
             }
             panel.innerHTML = mhtml;
             root.appendChild(panel);
+
+            // Wire up Decrypt buttons
+            for (const entry of user) {
+                const entryIdx = metadata.indexOf(entry);
+                const slotInfo = schemaSlots?.get(entryIdx);
+                if (slotInfo?.encoding !== 'ecies') continue;
+                const btn = root.querySelector(`#decrypt-${entryIdx}`);
+                if (!btn) continue;
+                btn.addEventListener('click', async () => {
+                    btn.disabled = true;
+                    btn.textContent = 'Decrypting...';
+                    try {
+                        const result = await Bridge.call('noble_crypto', 'decryptEciesField', {
+                            payload_hex: entry.value
+                        });
+                        if (result?.plaintext) {
+                            const valEl = root.querySelector(`#meta-val-${entryIdx}`);
+                            if (valEl) valEl.textContent = result.plaintext;
+                            btn.textContent = 'Decrypted';
+                        } else if (result?.error) {
+                            btn.textContent = 'Failed';
+                        }
+                    } catch (e) {
+                        btn.textContent = 'Not for you';
+                    }
+                });
+            }
         }
 
         // ── Encrypted locator ──
@@ -227,6 +268,36 @@ function formatTime(ts) {
     if (!ts) return '—';
     const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
     return d.toLocaleString();
+}
+
+function parseSchemaDescriptor(metadataEntries) {
+    const schemaEntry = metadataEntries.find(e => e.key === 'schema');
+    if (!schemaEntry?.value) return null;
+    // Decode hex to UTF-8
+    let text;
+    try {
+        const bytes = new Uint8Array(schemaEntry.value.match(/.{2}/g).map(b => parseInt(b, 16)));
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch { return null; }
+    const slotMap = new Map();
+    for (const line of text.split('\n')) {
+        const parts = line.trim().split(':');
+        if (parts.length < 4) continue;
+        const slotNum = parseInt(parts[0], 10);
+        if (isNaN(slotNum)) continue;
+        const hasTypeCode = /^T\d+$/.test(parts[1]) || parts[1] === 'SIG';
+        let encoding;
+        if (hasTypeCode && parts.length >= 5) {
+            encoding = parts[3]; // v2: slot:code:vis:enc:key
+        } else if (hasTypeCode) {
+            const vis = parts[2];
+            encoding = vis === 'priv' ? 'ecies' : vis === 'pwd' ? 'aesgcm' : 'utf8'; // v0
+        } else {
+            encoding = parts[2]; // v1: slot:vis:enc:req:label
+        }
+        slotMap.set(slotNum, { encoding });
+    }
+    return slotMap.size > 0 ? slotMap : null;
 }
 
 function parseTypeFromLabel(label) {

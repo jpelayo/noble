@@ -2093,6 +2093,115 @@ char *noble_import_pkcs12_ffi(const char *params_json) {
     return strdup("{\"error\":\"PKCS#12 import requires noble-cms-core module (not yet linked)\"}");
 }
 
+// ── ECIES encrypt/decrypt (metadata field encryption) ──────────────────
+
+#include "ecies.h"
+
+char *noble_ecies_encrypt(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *plaintext_hex = json_get_string(params, "plaintext_hex");
+    const char *pubkey_hex = json_get_string(params, "recipient_pubkey_hex");
+    if (!plaintext_hex || !pubkey_hex) {
+        json_free(params);
+        return json_emit_error("missing plaintext_hex or recipient_pubkey_hex");
+    }
+
+    // Decode hex inputs
+    size_t pt_hex_len = strlen(plaintext_hex);
+    size_t pt_len = pt_hex_len / 2;
+    uint8_t *plaintext = (uint8_t *)malloc(pt_len > 0 ? pt_len : 1);
+    if (!plaintext) { json_free(params); return json_emit_error("malloc failed"); }
+    hex_decode(plaintext_hex, pt_hex_len, plaintext, pt_len);
+
+    uint8_t pubkey[33];
+    if (strlen(pubkey_hex) != 66 || hex_decode(pubkey_hex, 66, pubkey, 33) != 33) {
+        free(plaintext);
+        json_free(params);
+        return json_emit_error("recipient_pubkey_hex must be 66 hex chars (33 bytes compressed)");
+    }
+
+    // Encrypt
+    size_t payload_cap = pt_len + ECIES_OVERHEAD;
+    uint8_t *payload = (uint8_t *)malloc(payload_cap);
+    if (!payload) { free(plaintext); json_free(params); return json_emit_error("malloc failed"); }
+    int payload_len = noble_ecies_encrypt_impl(plaintext, pt_len, pubkey, payload, payload_cap);
+    free(plaintext);
+
+    if (payload_len < 0) {
+        free(payload);
+        json_free(params);
+        return json_emit_error("ECIES encryption failed");
+    }
+
+    // Hex-encode result
+    char *payload_hex_out = (char *)malloc(payload_len * 2 + 1);
+    if (!payload_hex_out) { free(payload); json_free(params); return json_emit_error("malloc failed"); }
+    hex_encode(payload, payload_len, payload_hex_out);
+
+    size_t bufsize = 32 + payload_len * 2;
+    char *result = (char *)malloc(bufsize);
+    if (!result) { free(payload_hex_out); free(payload); json_free(params); return json_emit_error("malloc failed"); }
+    snprintf(result, bufsize, "{\"payload_hex\":\"%s\"}", payload_hex_out);
+
+    free(payload_hex_out);
+    free(payload);
+    json_free(params);
+    return result;
+}
+
+char *noble_ecies_decrypt(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const char *payload_hex = json_get_string(params, "payload_hex");
+    const char *privkey_hex = json_get_string(params, "private_key_hex");
+    if (!payload_hex || !privkey_hex) {
+        json_free(params);
+        return json_emit_error("missing payload_hex or private_key_hex");
+    }
+
+    size_t pay_hex_len = strlen(payload_hex);
+    size_t pay_len = pay_hex_len / 2;
+    uint8_t *payload = (uint8_t *)malloc(pay_len > 0 ? pay_len : 1);
+    if (!payload) { json_free(params); return json_emit_error("malloc failed"); }
+    hex_decode(payload_hex, pay_hex_len, payload, pay_len);
+
+    uint8_t privkey[32];
+    if (strlen(privkey_hex) != 64 || hex_decode(privkey_hex, 64, privkey, 32) != 32) {
+        free(payload);
+        json_free(params);
+        return json_emit_error("private_key_hex must be 64 hex chars (32 bytes)");
+    }
+
+    size_t pt_cap = pay_len > 0 ? pay_len : 1;
+    uint8_t *plaintext = (uint8_t *)malloc(pt_cap);
+    if (!plaintext) { free(payload); json_free(params); return json_emit_error("malloc failed"); }
+    int pt_len = noble_ecies_decrypt_impl(payload, pay_len, privkey, plaintext, pt_cap);
+    free(payload);
+
+    if (pt_len < 0) {
+        free(plaintext);
+        json_free(params);
+        return json_emit_error("ECIES decryption failed (wrong key or corrupted payload)");
+    }
+
+    char *pt_hex = (char *)malloc(pt_len * 2 + 1);
+    if (!pt_hex) { free(plaintext); json_free(params); return json_emit_error("malloc failed"); }
+    hex_encode(plaintext, pt_len, pt_hex);
+    free(plaintext);
+
+    size_t bufsize = 32 + pt_len * 2;
+    char *result = (char *)malloc(bufsize);
+    if (!result) { free(pt_hex); json_free(params); return json_emit_error("malloc failed"); }
+    snprintf(result, bufsize, "{\"plaintext_hex\":\"%s\"}", pt_hex);
+
+    free(pt_hex);
+    json_free(params);
+    return result;
+}
+
 // ── noble_free ──────────────────────────────────────────────────────────
 
 void noble_free(char *ptr) {
