@@ -89,47 +89,33 @@ export function init(root, ctx) {
     }
 
     root.classList.add('page-content');
+    root.style.padding = 'var(--gap-xl)';
 
-    // Page header
-    const header = document.createElement('div');
-    header.className = 'page-header';
-    header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
-    header.innerHTML = '<div><h1>Home</h1><p>Dashboard overview</p></div><button id="home-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>';
-    root.appendChild(header);
-    root.querySelector('#home-refresh').addEventListener('click', () => loadDashboard());
-
-    // Node alignment status card (shown when node is not fully aligned)
+    // Node alignment status card
     const alignmentBanner = document.createElement('div');
     alignmentBanner.id = 'home-alignment-banner';
     alignmentBanner.style.marginBottom = 'var(--gap)';
     root.appendChild(alignmentBanner);
     renderAlignmentBanner(alignmentBanner, state);
 
-    // Balance card placeholder
+    // Hero balance card placeholder
     const balanceContainer = document.createElement('div');
-    balanceContainer.style.marginBottom = 'var(--gap)';
     balanceContainer.setAttribute('aria-live', 'polite');
     root.appendChild(balanceContainer);
 
-    // Quick actions
-    const actionsCard = buildQuickActions();
-    root.appendChild(actionsCard);
+    // Two-column grid: Recent Activity (left, wide) + Quick Actions (right, narrow)
+    const grid = document.createElement('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:1fr 320px;gap:var(--gap-lg);margin-top:var(--gap-lg)';
+    const activityContainer = document.createElement('div');
+    const actionsContainer = document.createElement('div');
+    grid.appendChild(activityContainer);
+    grid.appendChild(actionsContainer);
+    root.appendChild(grid);
 
-    // Split layout for recent docs + recent txs
-    const split = document.createElement('div');
-    split.className = 'split-layout';
-    split.style.marginTop = 'var(--gap)';
-
-    const docsContainer = document.createElement('div');
-    const txsContainer = document.createElement('div');
-    split.appendChild(docsContainer);
-    split.appendChild(txsContainer);
-    root.appendChild(split);
-
-    // Show skeleton while loading
-    balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
-    docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
-    txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+    // Skeletons
+    balanceContainer.innerHTML = '<div class="skeleton" style="height:200px;border-radius:var(--radius)"></div>';
+    activityContainer.innerHTML = '<div class="skeleton" style="height:300px;border-radius:var(--radius)"></div>';
+    actionsContainer.innerHTML = '<div class="skeleton" style="height:300px;border-radius:var(--radius)"></div>';
 
     let loadInFlight = false;
 
@@ -147,8 +133,8 @@ export function init(root, ctx) {
                 title: 'No Wallet',
                 subtitle: 'Set up a wallet to see your balance.'
             }));
-            docsContainer.innerHTML = '';
-            txsContainer.innerHTML = '';
+            activityContainer.innerHTML = '';
+            actionsContainer.innerHTML = '';
             return;
         }
 
@@ -168,9 +154,9 @@ export function init(root, ctx) {
 
             const balance = snapshot;
             const txs = snapshot.transactions || [];
-            renderBalance(balanceContainer, balance, address);
-            renderRecentDocs(docsContainer, txs);
-            renderRecentTxs(txsContainer, txs);
+            renderHeroBalance(balanceContainer, balance, address);
+            renderRecentActivity(activityContainer, txs);
+            renderQuickActions(actionsContainer);
         } catch (err) {
             if (!alive) return;
             const msg = err.message.toLowerCase();
@@ -192,173 +178,208 @@ export function init(root, ctx) {
                 : `<p>${err.message}</p><button type="button">Retry</button>`;
             errDiv.querySelector('button').addEventListener('click', () => {
                 loadRetries = 0;
-                balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
-                docsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
-                txsContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+                balanceContainer.innerHTML = '<div class="skeleton" style="height:200px;border-radius:var(--radius)"></div>';
+                activityContainer.innerHTML = '<div class="skeleton" style="height:300px;border-radius:var(--radius)"></div>';
+                actionsContainer.innerHTML = '';
                 loadDashboard();
             });
             balanceContainer.appendChild(errDiv);
-            docsContainer.innerHTML = '';
-            txsContainer.innerHTML = '';
+            activityContainer.innerHTML = '';
+            actionsContainer.innerHTML = '';
         } finally {
             loadInFlight = false;
         }
     }
 
-    function renderBalance(container, balance, address) {
+    // ── Stitch-inspired render functions ──
+
+    function renderHeroBalance(container, balance, address) {
         container.innerHTML = '';
         const chainId = state.chainId || '';
-        const html = `
-            <div class="kpi-grid">
-                <div class="kpi-card">
-                    <div class="kpi-label">Total Balance</div>
-                    <div class="kpi-value">\u25C6 ${formatAmount(balance.balance)}</div>
-                    ${chainId ? `<div class="kpi-sub mono">Chain: ${esc(chainId)}</div>` : ''}
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Available</div>
-                    <div class="kpi-value">${formatAmount(balance.available)}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Pending</div>
-                    <div class="kpi-value"${balance.pending > 0 ? ' style="color:var(--warning)"' : ''}>${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Address</div>
-                    <button class="kpi-value" id="home-address" style="background:none;border:none;cursor:pointer;font:inherit;color:inherit;padding:0;font-size:var(--font-size-sm);" title="${address}">${address.slice(0, 8)}\u2026${address.slice(-8)}</button>
-                </div>
-            </div>
-            <div class="chain-note">\u26A0\uFE0F Make sure you always work within the same chain your balance resides in. If you connect to a different chain, you cannot access your balance.</div>
-        `;
-        const card = nobleCard('Balance Summary', html);
-        container.appendChild(card);
+        const el = document.createElement('div');
+        el.style.cssText = 'display:grid;grid-template-columns:1fr 320px;gap:var(--gap-lg);margin-bottom:0';
 
-        // Copy address on click
-        const addrEl = container.querySelector('#home-address');
-        if (addrEl) {
-            addrEl.addEventListener('click', () => {
+        // Hero balance card
+        const heroHtml = `
+            <div class="panel" style="padding:var(--gap-xl) var(--gap-xl) var(--gap-lg);min-height:180px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden">
+                <div>
+                    <div style="display:inline-block;padding:4px 12px;background:var(--accent-subtle);color:var(--accent);font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;border-radius:999px;margin-bottom:var(--gap-sm)">Total Balance</div>
+                    <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px">
+                        <span style="color:var(--accent);font-size:var(--font-size-2xl);">\u25C6</span>
+                        <span class="mono" style="font-size:clamp(2rem, 4vw, 3rem);font-weight:800;letter-spacing:-0.02em">${formatAmount(balance.balance)}</span>
+                        <span style="font-size:var(--font-size-lg);color:var(--text-muted);font-weight:600">NOBLE</span>
+                    </div>
+                </div>
+                <div style="display:flex;gap:var(--gap-lg);margin-top:var(--gap)">
+                    <div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Available</div>
+                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">${formatAmount(balance.available)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Pending</div>
+                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600;${balance.pending > 0 ? 'color:var(--warning)' : ''}">${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
+                    </div>
+                    ${balance.immature_value > 0 ? `<div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Maturing</div>
+                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600;color:var(--warning)">${formatAmount(balance.immature_value)}</div>
+                    </div>` : ''}
+                </div>
+                ${chainId ? `<div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">Chain: ${esc(chainId)}</div>` : ''}
+            </div>`;
+
+        // Right column: Documents count + Address card
+        const txCount = balance.txCount ?? (balance.transactions || []).length;
+        const rightHtml = `
+            <div style="display:flex;flex-direction:column;gap:var(--gap-lg)">
+                <div class="panel" style="padding:var(--gap-lg);flex:1;display:flex;flex-direction:column;justify-content:center">
+                    <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);font-weight:700;margin-bottom:4px">Transactions</div>
+                    <div style="font-size:var(--font-size-2xl);font-weight:800;color:var(--accent)">${txCount}</div>
+                </div>
+                <div class="panel" style="padding:var(--gap-lg);flex:1;display:flex;flex-direction:column;justify-content:center;cursor:pointer" id="home-address-card" title="Click to copy address">
+                    <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);font-weight:700;margin-bottom:4px">Your Address</div>
+                    <div class="mono" style="font-size:var(--font-size-sm);word-break:break-all">${address.slice(0, 12)}\u2026${address.slice(-8)}</div>
+                </div>
+            </div>`;
+
+        el.innerHTML = heroHtml + rightHtml;
+        container.appendChild(el);
+
+        // Copy address
+        const addrCard = container.querySelector('#home-address-card');
+        if (addrCard) {
+            addrCard.addEventListener('click', () => {
                 Bridge.call('noble_app', 'copyToClipboard', { text: address });
-                const orig = addrEl.textContent;
-                showCopyFeedback(addrEl, orig);
+                const label = addrCard.querySelector('div:last-child');
+                if (label) showCopyFeedback(label, label.textContent);
             });
         }
     }
 
-    function renderRecentDocs(container, txs) {
+    function renderRecentActivity(container, txs) {
         container.innerHTML = '';
-        const docs = txs.filter(t => (t.tx_type === 0x00) || (t.type || '').toLowerCase() === 'notarization').slice(0, 5);
+        const recent = txs.slice(0, 6);
 
-        if (docs.length === 0) {
-            const card = nobleCard('Recent Documents', '');
-            card.querySelector('.panel-body').appendChild(emptyState({
-                icon: '\u{1F4C4}',
-                title: 'No Documents',
-                subtitle: 'Register your first document.'
-            }));
-            container.appendChild(card);
-            return;
-        }
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.style.padding = 'var(--gap-lg)';
 
-        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th>TX ID</th><th>Status</th><th>Time</th></tr></thead><tbody>';
-        for (const tx of docs) {
-            const ago = timeAgo(tx.timestamp);
-            const status = tx.confirmations >= 6 ? 'confirmed' : 'pending';
-            html += `<tr>
-                <td class="mono" style="font-size:var(--font-size-xs)">${tx.txId.slice(0, 8)}\u2026${tx.txId.slice(-8)}</td>
-                <td><span class="badge badge-${status}">${status}</span></td>
-                <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
-            </tr>`;
-        }
-        html += '</tbody></table></div>';
-
-        const card = nobleCard('Recent Documents', html);
-
-        // View all link
-        const viewAll = document.createElement('div');
-        viewAll.style.cssText = 'padding: var(--gap-sm) var(--gap); text-align: right;';
-        viewAll.innerHTML = '<a href="#" style="font-size:var(--font-size-sm); color:var(--accent); text-decoration:none;">View All \u2192</a>';
-        viewAll.querySelector('a').addEventListener('click', e => {
-            e.preventDefault();
-            Bridge.call('noble_app', 'navigateTo', { section: 'documents' });
-        });
-        card.appendChild(viewAll);
-        container.appendChild(card);
-    }
-
-    function renderRecentTxs(container, txs) {
-        container.innerHTML = '';
-        // Show ALL transaction types — no filtering.
-        const recent = txs.slice(0, 5);
+        // Header
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap-lg)">
+            <h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0">Recent Activity</h3>
+            <a href="#" id="home-view-all" style="font-size:var(--font-size-sm);font-weight:600;color:var(--accent);text-decoration:none">View all</a>
+        </div>`;
 
         if (recent.length === 0) {
-            const card = nobleCard('Recent Transactions', '');
-            card.querySelector('.panel-body').appendChild(emptyState({
-                icon: '\u{1F4B8}',
-                title: 'No Transactions',
-                subtitle: 'Send or receive NOBLE tokens.'
-            }));
-            container.appendChild(card);
-            return;
+            html += `<div style="text-align:center;padding:var(--gap-xl);color:var(--text-muted)">
+                <div style="font-size:2rem;margin-bottom:var(--gap-sm)">\u{1F4CB}</div>
+                <div>No activity yet</div>
+            </div>`;
+        } else {
+            html += '<div style="display:flex;flex-direction:column;gap:4px">';
+            for (const tx of recent) {
+                const disp = txDisplayAmount(tx);
+                const typeName = formatTxType(tx.tx_type ?? 0);
+                const signedAmt = formatSignedAmount(disp.amount, disp.direction);
+                const amtColor = disp.direction === 'outgoing' ? 'var(--warning)'
+                               : disp.direction === 'incoming' ? 'var(--success)' : 'var(--text-primary)';
+                const ago = timeAgo(tx.timestamp);
+                const badge = txStatusBadge(tx.confirmations, tx.status);
+
+                // Icon + background color per type
+                let iconBg, iconColor, iconName;
+                if (disp.direction === 'incoming') {
+                    iconBg = 'color-mix(in srgb, var(--success) 12%, transparent)';
+                    iconColor = 'var(--success)';
+                    iconName = '\u2193'; // ↓
+                } else if (tx.tx_type === 0x00 || tx.tx_type === 0x06 || tx.tx_type === 0x07) {
+                    iconBg = 'color-mix(in srgb, var(--accent) 12%, transparent)';
+                    iconColor = 'var(--accent)';
+                    iconName = '\u{1F4C4}'; // doc
+                } else {
+                    iconBg = 'color-mix(in srgb, var(--warning) 12%, transparent)';
+                    iconColor = 'var(--warning)';
+                    iconName = '\u2191'; // ↑
+                }
+
+                const counterparty = tx.counterparty ? esc(tx.counterparty).slice(0, 20) : '';
+
+                html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:var(--gap-sm) var(--gap);border-radius:var(--radius);cursor:pointer;transition:background 0.15s" class="activity-row" data-txid="${esc(tx.txId || '')}">
+                    <div style="display:flex;align-items:center;gap:var(--gap)">
+                        <div style="width:40px;height:40px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:${iconColor};flex-shrink:0">${iconName}</div>
+                        <div>
+                            <div style="font-weight:600;font-size:var(--font-size-sm)">${typeName}</div>
+                            <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${counterparty ? counterparty + ' \u00B7 ' : ''}${ago}</div>
+                        </div>
+                    </div>
+                    <div style="text-align:right">
+                        <div class="mono" style="font-weight:700;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + signedAmt : ''}</div>
+                        <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
+                    </div>
+                </div>`;
+            }
+            html += '</div>';
         }
 
-        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th>Type</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>';
-        for (const tx of recent) {
-            const typeName = formatTxType(tx.tx_type);
-            const disp = txDisplayAmount(tx);
-            const signedAmt = formatSignedAmount(disp.amount, disp.direction);
-            const amtColor = disp.direction === 'outgoing' ? 'color:var(--warning)'
-                           : disp.direction === 'incoming' ? 'color:var(--success)' : '';
-            const badge = txStatusBadge(tx.confirmations, tx.status);
-            const ago = timeAgo(tx.timestamp);
-            html += `<tr>
-                <td style="font-size:var(--font-size-xs);font-weight:600">${typeName}</td>
-                <td class="mono" style="${amtColor}">\u25C6 ${signedAmt}</td>
-                <td><span class="badge ${badge.cls}" style="font-size:0.7em">${badge.html}</span></td>
-                <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
-            </tr>`;
-        }
-        html += '</tbody></table></div>';
+        panel.innerHTML = html;
+        container.appendChild(panel);
 
-        const card = nobleCard('Recent Transactions', html);
-
-        const viewAll = document.createElement('div');
-        viewAll.style.cssText = 'padding: var(--gap-sm) var(--gap); text-align: right;';
-        viewAll.innerHTML = '<a href="#" style="font-size:var(--font-size-sm); color:var(--accent); text-decoration:none;">View All \u2192</a>';
-        viewAll.querySelector('a').addEventListener('click', e => {
+        // Wire view-all
+        const viewAll = panel.querySelector('#home-view-all');
+        if (viewAll) viewAll.addEventListener('click', e => {
             e.preventDefault();
-            Bridge.call('noble_app', 'navigateTo', { section: 'payments' });
+            if (window.App) window.App.navigateTo('payments');
         });
-        card.appendChild(viewAll);
-        container.appendChild(card);
+
+        // Wire activity rows → tx-detail
+        panel.querySelectorAll('.activity-row').forEach(row => {
+            row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-subtle)'; });
+            row.addEventListener('mouseleave', () => { row.style.background = ''; });
+            row.addEventListener('click', () => {
+                const txid = row.dataset.txid;
+                if (txid && window.App) window.App.navigateTo('tx-detail', { txid });
+            });
+        });
     }
 
-    function buildQuickActions() {
-        const card = nobleCard('Quick Actions', '');
-        const body = card.querySelector('.panel-body');
-        const wrap = document.createElement('div');
-        wrap.className = 'quick-actions';
+    function renderQuickActions(container) {
+        container.innerHTML = '';
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.style.padding = 'var(--gap-lg)';
 
         const actions = [
-            { label: 'Register', section: 'documents', icon: '\u{1F4DD}' },
-            { label: 'Verify', section: 'verify', icon: '\u2705' },
-            { label: 'Send', section: 'payments', icon: '\u{1F4E4}' },
-            { label: 'Receive', section: 'payments', icon: '\u{1F4E5}' },
+            { label: 'Send', icon: '\u{1F680}', page: 'payments', color: 'var(--accent)' },
+            { label: 'Register Document', icon: '\u{1F4DD}', page: 'documents', color: 'var(--text-primary)' },
+            { label: 'Receive Noble', icon: '\u{1F4E5}', page: 'payments', color: 'var(--info)' },
+            { label: 'Verify', icon: '\u2705', page: 'verify', color: 'var(--success)' },
         ];
 
+        let html = '<h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0 0 var(--gap-lg) 0">Quick Actions</h3>';
+        html += '<div style="display:flex;flex-direction:column;gap:var(--gap-sm)">';
         for (const a of actions) {
-            const btn = document.createElement('button');
-            btn.className = 'btn';
-            btn.textContent = `${a.icon} ${a.label}`;
-            btn.setAttribute('aria-label', a.label);
-            btn.addEventListener('click', () => {
-                Bridge.call('noble_app', 'navigateTo', { section: a.section });
-            });
-            wrap.appendChild(btn);
+            html += `<button class="quick-action-btn" data-page="${a.page}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:var(--gap) var(--gap);background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:var(--radius);cursor:pointer;transition:all 0.15s;text-align:left;font:inherit;color:inherit">
+                <div style="display:flex;align-items:center;gap:var(--gap)">
+                    <div style="width:36px;height:36px;border-radius:50%;background:color-mix(in srgb, ${a.color} 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:1rem">${a.icon}</div>
+                    <span style="font-weight:600;font-size:var(--font-size-sm)">${a.label}</span>
+                </div>
+                <span style="color:var(--text-muted);font-size:1.2rem">\u203A</span>
+            </button>`;
         }
+        html += '</div>';
 
-        body.appendChild(wrap);
-        return card;
+        panel.innerHTML = html;
+        container.appendChild(panel);
+
+        // Wire buttons
+        panel.querySelectorAll('.quick-action-btn').forEach(btn => {
+            btn.addEventListener('mouseenter', () => { btn.style.transform = 'translateX(2px)'; btn.style.borderColor = 'var(--accent)'; });
+            btn.addEventListener('mouseleave', () => { btn.style.transform = ''; btn.style.borderColor = 'var(--glass-border)'; });
+            btn.addEventListener('click', () => {
+                if (window.App) window.App.navigateTo(btn.dataset.page);
+            });
+        });
     }
+
 
     // Auto-refresh every 30s
     const autoRefreshId = setInterval(() => { if (alive) loadDashboard(); }, 30_000);

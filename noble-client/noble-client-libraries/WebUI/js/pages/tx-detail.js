@@ -57,8 +57,8 @@ export function init(root, ctx) {
 
         // ── Hero Section ──
         const heroEl = document.createElement('div');
-        heroEl.className = 'card';
-        heroEl.style.cssText = 'text-align:center;padding:var(--gap);margin-bottom:var(--gap)';
+        heroEl.className = 'panel';
+        heroEl.style.cssText = 'text-align:center;padding:var(--gap-xl);margin-bottom:var(--gap-lg)';
 
         if ((txType === TX_TYPES.NOTARIZATION || txType === TX_TYPES.UNLOCKING) && !isZeroChecksum(tx.checksum)) {
             heroEl.innerHTML = `
@@ -75,12 +75,12 @@ export function init(root, ctx) {
             const heroColor = disp.direction === 'outgoing' ? 'color:var(--warning)' : disp.direction === 'incoming' ? 'color:var(--success)' : '';
             heroEl.innerHTML = `
                 <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${disp.label}</div>
-                <div style="font-size:1.5rem;font-weight:700;${heroColor}" class="mono">&diams; ${formatSignedAmount(disp.amount, disp.direction)}</div>
+                <div style="font-size:clamp(1.8rem, 3vw, 2.5rem);font-weight:800;${heroColor};letter-spacing:-0.02em" class="mono">&diams; ${formatSignedAmount(disp.amount, disp.direction)}</div>
             `;
         } else if (txType === TX_TYPES.COINBASE) {
             heroEl.innerHTML = `
                 <div style="font-size:var(--font-size-xs);color:var(--text-muted)"><span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Coinbase</span> Block Reward</div>
-                <div style="font-size:1.5rem;font-weight:700;color:var(--success)" class="mono">&diams; ${formatSignedAmount(disp.amount, 'incoming')}</div>
+                <div style="font-size:clamp(1.8rem, 3vw, 2.5rem);font-weight:800;color:var(--success);letter-spacing:-0.02em" class="mono">&diams; ${formatSignedAmount(disp.amount, 'incoming')}</div>
             `;
         } else if (txType === TX_TYPES.KEY_ROTATION) {
             heroEl.innerHTML = '<div style="font-size:1.2rem">&#x1F504; Key Rotation</div>';
@@ -106,8 +106,8 @@ export function init(root, ctx) {
 
         // ── Detail Grid ──
         const grid = document.createElement('div');
-        grid.className = 'card';
-        grid.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+        grid.className = 'panel';
+        grid.style.cssText = 'padding:var(--gap-lg);margin-bottom:var(--gap-lg)';
         let html = '<dl style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0">';
         html += row('TX ID', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.txId || txid)}</span>`);
         html += row('Type', formatTxType(txType));

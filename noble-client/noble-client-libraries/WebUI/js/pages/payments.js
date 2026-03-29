@@ -38,37 +38,33 @@ export function init(root, ctx) {
             return;
         }
 
-        // Page header
-        const header = document.createElement('div');
-        header.className = 'page-header';
-        header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
-        header.innerHTML = '<div><h1>Payments</h1><p>Send, receive, and track NOBLE transfers</p></div><button id="payments-refresh" title="Refresh" style="background:none;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-muted);font-size:1.1rem;line-height:1">&#x21BB;</button>';
-        root.appendChild(header);
-        root.querySelector('#payments-refresh').addEventListener('click', () => loadData(balanceContainer, historyContainer));
+        root.style.padding = 'var(--gap-xl)';
 
         // Balance card placeholder with skeleton
         balanceContainer = document.createElement('div');
-        balanceContainer.style.marginBottom = 'var(--gap)';
         balanceContainer.setAttribute('aria-live', 'polite');
-        balanceContainer.innerHTML = '<div class="skeleton skeleton-card"></div>';
+        balanceContainer.innerHTML = '<div class="skeleton" style="height:140px;border-radius:var(--radius)"></div>';
         root.appendChild(balanceContainer);
 
-        // Action buttons
+        // Action buttons — card-style
         const actions = document.createElement('div');
-        actions.className = 'quick-actions';
-        actions.style.marginBottom = 'var(--gap)';
+        actions.style.cssText = 'display:flex;gap:var(--gap);margin:var(--gap-lg) 0';
 
         const sendBtn = document.createElement('button');
-        sendBtn.className = 'btn btn-primary';
-        sendBtn.textContent = '\u{1F4E4} Send';
-        sendBtn.setAttribute('aria-label', 'Send payment');
+        sendBtn.className = 'panel';
+        sendBtn.style.cssText = 'flex:1;padding:var(--gap-lg);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        sendBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--accent)">\u{1F680}</div><div><div style="font-weight:700">Send</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer NOBLE</div></div>';
         sendBtn.addEventListener('click', openSendWizard);
+        sendBtn.addEventListener('mouseenter', () => { sendBtn.style.borderColor = 'var(--accent)'; sendBtn.style.transform = 'translateY(-1px)'; });
+        sendBtn.addEventListener('mouseleave', () => { sendBtn.style.borderColor = 'var(--glass-border)'; sendBtn.style.transform = ''; });
 
         const recvBtn = document.createElement('button');
-        recvBtn.className = 'btn';
-        recvBtn.textContent = '\u{1F4E5} Receive';
-        recvBtn.setAttribute('aria-label', 'Receive payment');
+        recvBtn.className = 'panel';
+        recvBtn.style.cssText = 'flex:1;padding:var(--gap-lg);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        recvBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:color-mix(in srgb, var(--success) 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--success)">\u{1F4E5}</div><div><div style="font-weight:700">Receive</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Your address & QR</div></div>';
         recvBtn.addEventListener('click', openReceiveModal);
+        recvBtn.addEventListener('mouseenter', () => { recvBtn.style.borderColor = 'var(--success)'; recvBtn.style.transform = 'translateY(-1px)'; });
+        recvBtn.addEventListener('mouseleave', () => { recvBtn.style.borderColor = 'var(--glass-border)'; recvBtn.style.transform = ''; });
 
         actions.appendChild(sendBtn);
         actions.appendChild(recvBtn);
@@ -149,30 +145,34 @@ export function init(root, ctx) {
     function renderBalance(container, balance) {
         container.innerHTML = '';
         const chainId = state.chainId || '';
-        const html = `
-            <div class="kpi-grid">
-                <div class="kpi-card">
-                    <div class="kpi-label">Total Balance</div>
-                    <div class="kpi-value">\u25C6 ${formatAmount(balance.balance)}</div>
-                    ${chainId ? `<div class="kpi-sub mono">Chain: ${esc(chainId)}</div>` : ''}
+        const el = document.createElement('div');
+        el.className = 'panel';
+        el.style.cssText = 'padding:var(--gap-xl);margin-bottom:var(--gap-lg)';
+        el.innerHTML = `
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:var(--gap-lg)">
+                <div>
+                    <div style="display:inline-block;padding:4px 12px;background:var(--accent-subtle);color:var(--accent);font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;border-radius:999px;margin-bottom:var(--gap-sm)">Total Balance</div>
+                    <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px">
+                        <span style="color:var(--accent);font-size:var(--font-size-2xl)">\u25C6</span>
+                        <span class="mono" style="font-size:clamp(1.8rem, 3vw, 2.5rem);font-weight:800;letter-spacing:-0.02em">${formatAmount(balance.balance)}</span>
+                        <span style="font-size:var(--font-size-base);color:var(--text-muted);font-weight:600">NOBLE</span>
+                    </div>
+                    ${chainId ? `<div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Chain: ${esc(chainId)}</div>` : ''}
                 </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Available</div>
-                    <div class="kpi-value">${formatAmount(balance.available)}</div>
-                    ${balance.immature_value > 0 ? `<div class="kpi-sub" style="color:var(--warning)">\u25C6 ${formatAmount(balance.immature_value)} maturing</div>` : ''}
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Pending</div>
-                    <div class="kpi-value"${balance.pending > 0 ? ' style="color:var(--warning)"' : ''}>${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Transactions</div>
-                    <div class="kpi-value">${balance.txCount ?? (balance.transactions || []).length}</div>
+                <div style="display:flex;gap:var(--gap-xl)">
+                    <div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Available</div>
+                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">${formatAmount(balance.available)}</div>
+                        ${balance.immature_value > 0 ? `<div style="font-size:var(--font-size-xs);color:var(--warning);margin-top:2px">\u25C6 ${formatAmount(balance.immature_value)} maturing</div>` : ''}
+                    </div>
+                    <div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Pending</div>
+                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600;${balance.pending > 0 ? 'color:var(--warning)' : ''}">${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
+                    </div>
                 </div>
             </div>
-            <div class="chain-note">\u26A0\uFE0F Make sure you always work within the same chain your balance resides in. If you connect to a different chain, you cannot access your balance.</div>
         `;
-        container.appendChild(nobleCard('Balance Summary', html));
+        container.appendChild(el);
     }
 
     // ── Transaction History ──
@@ -181,67 +181,81 @@ export function init(root, ctx) {
         container.innerHTML = '';
         const txs = data.transactions || [];
 
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.style.padding = 'var(--gap-lg)';
+
         if (txs.length === 0) {
-            const card = nobleCard('Transaction History', '');
-            card.querySelector('.panel-body').appendChild(emptyState({
-                icon: '\u{1F4B8}',
-                title: 'No Transactions',
-                subtitle: 'Your transaction history will appear here.'
-            }));
-            container.appendChild(card);
+            panel.innerHTML = `<h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0 0 var(--gap-lg)">Transaction History</h3>
+                <div style="text-align:center;padding:var(--gap-xl);color:var(--text-muted)">
+                    <div style="font-size:2rem;margin-bottom:var(--gap-sm)">\u{1F4B8}</div>
+                    <div>No transactions yet</div>
+                </div>`;
+            container.appendChild(panel);
             return;
         }
 
-        let html = '<div class="table-scroll-wrapper"><table class="data-table"><thead><tr><th></th><th>Type</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>';
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap-lg)">
+            <h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0">Transaction History</h3>
+            <span style="font-size:var(--font-size-xs);color:var(--text-muted)">${txs.length} transaction${txs.length !== 1 ? 's' : ''}</span>
+        </div>`;
+        html += '<div style="display:flex;flex-direction:column;gap:4px">';
+
         for (const tx of txs) {
-            const dir = txDirection(tx);
             const typeName = formatTxType(tx.tx_type ?? parseTypeLabel(tx.type));
             const counterparty = tx.counterparty ? truncate(tx.counterparty, 12) : '';
             const disp = txDisplayAmount(tx);
             const amount = formatSignedAmount(disp.amount, disp.direction);
-            const amtColor = disp.direction === 'outgoing' ? 'color:var(--warning)'
-                           : disp.direction === 'incoming' ? 'color:var(--success)' : '';
+            const amtColor = disp.direction === 'outgoing' ? 'var(--warning)'
+                           : disp.direction === 'incoming' ? 'var(--success)' : 'var(--text-primary)';
             const badge = txStatusBadge(tx.confirmations, tx.status);
             const ago = timeAgo(tx.timestamp);
-            html += `<tr class="tx-row" data-txid="${esc(tx.txId)}" style="cursor:pointer">
-                <td><span class="tx-direction ${dir.cls}">${dir.icon}</span></td>
-                <td>
-                    <div style="font-size:var(--font-size-xs);font-weight:600">${typeName}</div>
-                    ${counterparty ? `<div class="mono" style="font-size:0.65rem;color:var(--text-muted)">${counterparty}</div>` : ''}
-                </td>
-                <td class="mono" style="${amtColor}">\u25C6 ${amount}</td>
-                <td><span class="badge ${badge.cls}">${badge.html}</span></td>
-                <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${ago}</td>
-            </tr>`;
+
+            let iconBg, iconColor, iconChar;
+            if (disp.direction === 'incoming') {
+                iconBg = 'color-mix(in srgb, var(--success) 12%, transparent)';
+                iconColor = 'var(--success)';
+                iconChar = '\u2193';
+            } else if (tx.tx_type === 0x00 || tx.tx_type === 0x06 || tx.tx_type === 0x07) {
+                iconBg = 'color-mix(in srgb, var(--accent) 12%, transparent)';
+                iconColor = 'var(--accent)';
+                iconChar = '\u{1F4C4}';
+            } else {
+                iconBg = 'color-mix(in srgb, var(--warning) 12%, transparent)';
+                iconColor = 'var(--warning)';
+                iconChar = '\u2191';
+            }
+
+            html += `<div class="tx-row" data-txid="${esc(tx.txId || '')}" style="display:flex;align-items:center;justify-content:space-between;padding:var(--gap-sm) var(--gap);border-radius:var(--radius);cursor:pointer;transition:background 0.15s" tabindex="0" role="button">
+                <div style="display:flex;align-items:center;gap:var(--gap)">
+                    <div style="width:40px;height:40px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:${iconColor};flex-shrink:0">${iconChar}</div>
+                    <div>
+                        <div style="font-weight:600;font-size:var(--font-size-sm)">${typeName}</div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${counterparty ? counterparty + ' \u00B7 ' : ''}${ago}</div>
+                    </div>
+                </div>
+                <div style="text-align:right">
+                    <div class="mono" style="font-weight:700;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + amount : ''}</div>
+                    <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
+                </div>
+            </div>`;
         }
-        html += '</tbody></table></div>';
+        html += '</div>';
+        panel.innerHTML = html;
+        container.appendChild(panel);
 
-        const card = nobleCard('Transaction History', html);
-
-        // Click handler → navigate to tx-detail page
-        card.addEventListener('click', e => {
-            const row = e.target.closest('.tx-row');
-            if (!row) return;
-            const txId = row.dataset.txid;
-            if (txId && window.App) App.navigateTo('tx-detail', { txid: txId });
-        });
-
-        // Keyboard accessibility for tx rows
-        card.querySelectorAll('.tx-row').forEach(row => {
-            row.setAttribute('tabindex', '0');
-            row.setAttribute('role', 'button');
+        // Wire click + hover + keyboard
+        panel.querySelectorAll('.tx-row').forEach(row => {
+            row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-subtle)'; });
+            row.addEventListener('mouseleave', () => { row.style.background = ''; });
+            row.addEventListener('click', () => {
+                const txId = row.dataset.txid;
+                if (txId && window.App) App.navigateTo('tx-detail', { txid: txId });
+            });
             row.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
             });
         });
-
-        // Transaction count footer
-        const footer = document.createElement('div');
-        footer.style.cssText = 'padding:var(--gap-sm) var(--gap); font-size:var(--font-size-xs); color:var(--text-muted); text-align:center';
-        footer.textContent = `${txs.length} transaction${txs.length !== 1 ? 's' : ''}`;
-        card.appendChild(footer);
-
-        container.appendChild(card);
     }
 
     function txDirection(tx) {
