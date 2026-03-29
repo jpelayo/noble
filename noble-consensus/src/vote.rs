@@ -224,7 +224,7 @@ impl VoteManager {
 
     /// Enable or disable ±1 cycle tolerance for bootstrap.
     ///
-    /// During pre-genesis, nodes starting in adjacent 1200s wall-clock windows
+    /// During pre-genesis, nodes starting in adjacent 960s wall-clock windows
     /// may disagree on cycle number by 1. This tolerance accepts votes from
     /// those peers. Disabled after block 1 commit.
     pub fn set_bootstrap_tolerance(&mut self, enabled: bool) {
@@ -241,7 +241,7 @@ impl VoteManager {
     pub fn record_vote(&mut self, _peer_id: &[u8], vote: &PorVote) -> Result<bool, VoteError> {
         // AUD2-M4: Validate vote cycle matches current cycle
         if vote.cycle != self.current_cycle {
-            // During bootstrap, nodes in adjacent 1200s wall-clock windows may
+            // During bootstrap, nodes in adjacent 960s wall-clock windows may
             // compute cycle numbers that differ by 1. Accept ±1 tolerance.
             if self.bootstrap_tolerance
                 && (vote.cycle == self.current_cycle.wrapping_add(1)

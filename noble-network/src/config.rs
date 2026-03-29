@@ -157,7 +157,7 @@ impl Default for NetworkConfig {
             kad_walk_interval_secs: 300,
             tx_relay_rate_per_sec: 100,
             tx_relay_burst: 100,
-            peer_exchange_interval_secs: 1200,
+            peer_exchange_interval_secs: 960,
             max_addrs_per_exchange: 1000,
             max_outbound_per_subnet: 2,
             peer_rotation_interval_secs: 600,
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(cfg.kad_walk_interval_secs, 300);
         assert_eq!(cfg.tx_relay_rate_per_sec, 100);
         assert_eq!(cfg.tx_relay_burst, 100);
-        assert_eq!(cfg.peer_exchange_interval_secs, 1200);
+        assert_eq!(cfg.peer_exchange_interval_secs, 960);
         assert_eq!(cfg.max_addrs_per_exchange, 1000);
         assert_eq!(cfg.max_outbound_per_subnet, 2);
         assert_eq!(cfg.peer_rotation_interval_secs, 600);

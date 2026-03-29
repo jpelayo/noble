@@ -60,7 +60,7 @@ pub struct PruningConfig {
     /// Pruning mode.
     pub mode: PruningMode,
     /// Number of recent blocks to keep full data for (moderate/aggressive).
-    /// Default: 10,000 blocks (~208 days at 30-min cycles).
+    /// Default: 10,000 blocks (~111 days at 16-min cycles).
     pub keep_blocks: u64,
     /// Maximum number of blocks to prune per invocation (to limit I/O).
     /// Default: 500.

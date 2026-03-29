@@ -14,7 +14,7 @@
 // ── Constants ──
 // Mock chain ID — real value is derived from the genesis block hash at runtime.
 const MOCK_CHAIN_ID = 0x4E4F424C;
-const CYCLE_DURATION_SECS = 1200;
+const CYCLE_DURATION_SECS = 960;
 const MIN_TX_FEE = 1000;
 const PROTOCOL_VERSION = 1;
 const GENESIS_TIMESTAMP = 1700000000;
@@ -1178,8 +1178,8 @@ export class MockRpcClient {
         const walletKey = this.#validators[0].public_key; // bech32m string (nbl1p...)
         const address = walletKey; // real API returns bech32 address
         const blocksValidated = this.#validators[0].blocks_produced;
-        // Subsidy: 100 NOBLE (100_000_000 atomic) per block
-        const subsidyPerBlock = 100_000_000;
+        // Subsidy: 80 NOBLE (8_000_000_000 groats) per block
+        const subsidyPerBlock = 8_000_000_000;
         // Average fee per block ~15,000 atomic
         const avgFeePerBlock = 15_000;
         const totalSubsidy = blocksValidated * subsidyPerBlock;
@@ -1217,7 +1217,7 @@ export class MockRpcClient {
         const txs = [];
         const now = Math.floor(Date.now() / 1000);
         const chainHeight = this.chainHeight;
-        const subsidyPerBlock = 100_000_000;
+        const subsidyPerBlock = 8_000_000_000;
         let runningBalance = 0;
 
         // Generate transaction history from validated blocks

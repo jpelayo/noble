@@ -85,7 +85,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         tx_hex: String,
     ) -> Result<SubmitTxResponse, ErrorObjectOwned> {
         // Reject oversized hex before allocation (OOM prevention — C2 audit fix).
-        // MAX_TX_SIZE is 4KB; hex is 2 chars per byte, plus margin for whitespace.
+        // MAX_TX_SIZE is 8KB; hex is 2 chars per byte, plus margin for whitespace.
         if tx_hex.len() > noble_core::MAX_TX_SIZE * 2 + 64 {
             return Err(ApiError::TxTooLarge(
                 format!("Transaction hex too large ({} chars, max {})", tx_hex.len(), noble_core::MAX_TX_SIZE * 2),

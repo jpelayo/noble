@@ -3,17 +3,17 @@
 
 //! Protocol constants — single source of truth (GAP-L5).
 
-/// Maximum serialized transaction size in bytes.
-pub const MAX_TX_SIZE: usize = 4_096;
+/// Maximum serialized transaction size in bytes (8 KB).
+pub const MAX_TX_SIZE: usize = 8_192;
 
-/// Maximum serialized block size in bytes (4 MB).
-pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum serialized block size in bytes (8 MB).
+pub const MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Maximum number of inputs per transaction (DoS prevention — limits UTXO lookup cost).
-pub const MAX_TX_INPUTS: usize = 128;
+pub const MAX_TX_INPUTS: usize = 64;
 
 /// Maximum number of outputs per transaction (UTXO set pollution prevention).
-pub const MAX_TX_OUTPUTS: usize = 128;
+pub const MAX_TX_OUTPUTS: usize = 64;
 
 /// Maximum number of metadata entries per transaction.
 pub const MAX_METADATA_ENTRIES: usize = 16;
@@ -25,7 +25,7 @@ pub const MAX_METADATA_KEY_LEN: usize = 64;
 pub const MAX_METADATA_VALUE_LEN: usize = 256;
 
 /// Maximum number of additional signatures per transaction.
-pub const MAX_ADDITIONAL_SIGS: usize = 32;
+pub const MAX_ADDITIONAL_SIGS: usize = 16;
 
 // Chain identifiers are derived from their genesis block hashes.
 // See `derive_chain_id()` in the `genesis` module.
@@ -61,8 +61,8 @@ pub const CLOCK_DRIFT_CRITICAL_SECS: u64 = 120;
 /// Maximum allowed block timestamp skew into the past (seconds).
 pub const MAX_BLOCK_PAST_SKEW: u64 = 3_600;
 
-/// Duration of a consensus cycle in seconds (20 minutes).
-pub const CYCLE_DURATION_SECS: u64 = 1_200;
+/// Duration of a consensus cycle in seconds (16 minutes).
+pub const CYCLE_DURATION_SECS: u64 = 960;
 
 /// Transaction type: document notarization.
 pub const TX_TYPE_NOTARIZATION: u8 = 0x00;
@@ -121,14 +121,14 @@ pub const BADGE_MIN_PRESENCE_SECS: u64 = 604_800;
 /// Short-chain minimum presence (2 days).
 pub const BADGE_MIN_PRESENCE_SHORT_SECS: u64 = 172_800;
 
-/// Bootstrap mode duration in cycles (60 days at 20-min cycles = 4,320 cycles).
+/// Bootstrap mode duration in cycles (60 days at 16-min cycles = 5,400 cycles).
 /// During bootstrap, the voting badge requirement is waived for governance.
-pub const BOOTSTRAP_MODE_CYCLES: u64 = 4_320;
+pub const BOOTSTRAP_MODE_CYCLES: u64 = 5_400;
 
-/// Proposal cooldown in cycles (30 days at 20-min cycles = 2,160 cycles).
+/// Proposal cooldown in cycles (30 days at 16-min cycles = 2,700 cycles).
 /// Each proposer can submit at most 1 governance proposal per cooldown period.
 /// Exception: provable-ban revocations (DuplicateProposal, ProtocolAbuse) bypass this.
-pub const PROPOSAL_COOLDOWN_CYCLES: u64 = 2_160;
+pub const PROPOSAL_COOLDOWN_CYCLES: u64 = 2_700;
 
 /// Suspension threshold: offline for this many seconds triggers local suspension.
 /// 15 days = 1,296,000 seconds.
@@ -142,24 +142,24 @@ pub const BADGE_RECOVERY_THRESHOLD_SECS: u64 = 172_800;
 pub const BADGE_VOTE_WINDOW_CYCLES: u64 = 48;
 
 /// Grace period (in cycles) during which both old and new keys are valid.
-/// 48 cycles = 24 hours at 30-min cycles.
+/// 48 cycles = 12.8 hours at 16-min cycles.
 pub const KEY_ROTATION_GRACE_CYCLES: u64 = 48;
 
 /// Groats per NOBLE. 1 NOBLE = 100,000,000 groats (8 decimal places, same as Bitcoin satoshis).
 /// The groat is the smallest indivisible unit of the NOBLE token.
 pub const GROATS_PER_NOBLE: u64 = 100_000_000;
 
-/// Initial block subsidy in groats (100 NOBLE = 10,000,000,000 groats).
-pub const INITIAL_SUBSIDY: u64 = 10_000_000_000;
+/// Initial block subsidy in groats (80 NOBLE = 8,000,000,000 groats).
+pub const INITIAL_SUBSIDY: u64 = 8_000_000_000;
 
-/// Number of blocks between halving events (~3.8 years at 20-min cycles).
-pub const HALVING_INTERVAL: u64 = 100_000;
+/// Number of blocks between halving events (~3.95 years at 16-min cycles).
+pub const HALVING_INTERVAL: u64 = 130_000;
 
-/// Maximum total supply in groats (~20 million NOBLE = 2,000,000,000,000,000 groats).
-/// Actual emission: 1,999,989,880,000,000 groats after 27 halvings.
-pub const MAX_SUPPLY: u64 = 2_000_000_000_000_000;
+/// Maximum total supply in groats (~20.8 million NOBLE = 2,080,000,000,000,000 groats).
+/// Actual emission: 2,079,991,998,310,000 groats after 33 halvings.
+pub const MAX_SUPPLY: u64 = 2_080_000_000_000_000;
 
-/// Maximum reorg depth allowed (144 blocks ≈ 3 days at 30-min cycles).
+/// Maximum reorg depth allowed (144 blocks ≈ 1.6 days at 16-min cycles).
 pub const MAX_REORG_DEPTH: u64 = 144;
 
 /// Merkle leaf hash domain-separation prefix.
@@ -301,8 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn block_size_is_4mb() {
-        assert_eq!(MAX_BLOCK_SIZE, 4_194_304);
+    fn block_size_is_8mb() {
+        assert_eq!(MAX_BLOCK_SIZE, 8_388_608);
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
             };
             total += subsidy as u128 * blocks as u128;
         }
-        assert_eq!(total, 1_999_989_880_000_000u128);
+        assert_eq!(total, 2_079_991_998_310_000u128);
         assert!(total < MAX_SUPPLY as u128);
     }
 

@@ -189,9 +189,14 @@ char *noble_sign_transfer(const char *params_json) {
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     // Emit result.
@@ -331,9 +336,14 @@ char *noble_sign_notarization(const char *params_json) {
     // Sign and encode.
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -540,6 +550,13 @@ char *noble_tx_encode(const char *tx_json) {
     noble_buf_init(&cbor, 512);
     tx_encode_full(&cbor, &tx);
 
+    // Reject if serialized tx exceeds protocol limit.
+    if (cbor.len > MAX_TX_SIZE) {
+        noble_buf_free(&cbor);
+        json_free(params);
+        return json_emit_error("transaction exceeds MAX_TX_SIZE (8192 bytes)");
+    }
+
     // Emit result
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
     hex_encode(cbor.data, cbor.len, tx_hex);
@@ -678,9 +695,14 @@ static char *sign_metadata_tx(
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -837,9 +859,14 @@ char *noble_build_coinbase(const char *params_json) {
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -910,9 +937,14 @@ char *noble_build_fee_distribution(const char *params_json) {
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -1156,9 +1188,14 @@ char *noble_sign_locked(const char *params_json) {
     // Sign and encode
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -1292,9 +1329,14 @@ char *noble_sign_unlocking(const char *params_json) {
 
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("signing failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
     }
 
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
@@ -2012,9 +2054,14 @@ char *noble_estimate_tx_size(const char *params_json) {
     // Sign and encode (probe pass) to measure exact CBOR size
     noble_buf_t cbor;
     uint8_t tx_id[HASH256_LEN];
-    if (sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id) != 0) {
-        json_free(params);
-        return json_emit_error("size estimation failed");
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "size estimation failed");
+        }
     }
 
     size_t size = cbor.len;

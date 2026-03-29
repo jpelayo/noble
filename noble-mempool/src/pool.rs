@@ -886,7 +886,7 @@ mod tests {
 
     // --- Step 1: Size check ---
 
-    // Note: Generating a tx that exceeds MAX_TX_SIZE (4096) with valid sigs
+    // Note: Generating a tx that exceeds MAX_TX_SIZE (8192) with valid sigs
     // is tricky. We test this path via an oversized metadata entry.
 
     // --- Step 2: Duplicate check ---

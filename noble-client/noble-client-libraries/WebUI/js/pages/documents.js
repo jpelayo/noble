@@ -767,6 +767,7 @@ export function init(root, ctx) {
                 if (wantsMetadata && isBatch && metadata.length === 0) {
                     batchUUID = batchUUID || crypto.randomUUID();
                     metadata = [
+                        { fieldKey: 'doc:batch', key: 'doc:batch', value: batchUUID, mode: 'plaintext' },
                         { fieldKey: 'doc:relation', key: 'doc:relation', value: 'same batch', mode: 'plaintext' },
                         { fieldKey: 'doc:bridge', key: 'doc:bridge', value: batchUUID, mode: 'plaintext' },
                     ];
@@ -976,8 +977,8 @@ export function init(root, ctx) {
             valRow.appendChild(pickBtn);
         }
 
-        // UUID generator button for Linked Document (doc:bridge) fields
-        if (m.fieldKey === 'doc:bridge') {
+        // UUID generator button for Linked Document and Batch Name fields
+        if (m.fieldKey === 'doc:bridge' || m.fieldKey === 'doc:batch') {
             const uuidBtn = document.createElement('button');
             uuidBtn.className = 'btn btn-secondary btn-sm';
             uuidBtn.textContent = 'UUID';

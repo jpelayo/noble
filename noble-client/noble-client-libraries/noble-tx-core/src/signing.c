@@ -144,6 +144,12 @@ int sign_and_encode_tx(
     noble_buf_init(tx_cbor_out, 512);
     tx_encode_full(tx_cbor_out, tx);
 
+    // 6b. Reject if serialized tx exceeds protocol limit.
+    if (tx_cbor_out->len > MAX_TX_SIZE) {
+        noble_buf_free(tx_cbor_out);
+        return -2; // size limit exceeded (distinct from -1 = signing failure)
+    }
+
     // 7. Compute tx_id.
     compute_tx_id(tx, chain_id, tx_id_out);
 

@@ -48,8 +48,9 @@ void compute_tx_id(
 // 2. Sign with private key
 // 3. Fill issuer_sig
 // 4. Encode full transaction
-// 5. Compute tx_id
-// Returns 0 on success, -1 on failure.
+// 5. Reject if serialized size > MAX_TX_SIZE
+// 6. Compute tx_id
+// Returns 0 on success, -1 on signing failure, -2 if tx exceeds MAX_TX_SIZE.
 int sign_and_encode_tx(
     noble_tx_t *tx,
     const uint8_t private_key[32],

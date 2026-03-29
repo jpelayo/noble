@@ -193,7 +193,7 @@ proptest! {
             Some(0),
         );
         engine.set_validator_snapshot(snap);
-        engine.step(CycleEvent::Tick { now: cycle * 1200 });
+        engine.step(CycleEvent::Tick { now: cycle * 960 });
 
         // Force Voting phase for vote acceptance
         engine.step(CycleEvent::PhaseTransition {

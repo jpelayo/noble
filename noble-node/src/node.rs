@@ -794,7 +794,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             // phase_timing() returns (phase_index, phase_remaining_secs, cycle_remaining_secs)
             let (phase_idx, _phase_remaining, cycle_remaining) = engine.phase_timing();
             m.cycle_phase.set(phase_idx as f64);
-            // Cycle duration is 1200s (20 min); elapsed = total - remaining
+            // Cycle duration is 960s (16 min); elapsed = total - remaining
             m.cycle_elapsed_secs
                 .set((noble_core::CYCLE_DURATION_SECS.saturating_sub(cycle_remaining)) as f64);
         }
@@ -2170,8 +2170,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tokio::time::interval(std::time::Duration::from_secs(60));
         rate_limit_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // --- NodeAnnounce periodic broadcast (every 20 min) ---
-        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(1200));
+        // --- NodeAnnounce periodic broadcast (every 16 min) ---
+        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(960));
         announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut initial_announce_sent = false;
 
@@ -2362,7 +2362,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     // ── Faucet probe (every N cycles, piggyback on tick) ──
                     if self.faucet_config.discovery_enabled {
                         self.faucet_probe_counter += 1;
-                        // 120 ticks per cycle (10s tick, 1200s cycle). Probe every N cycles.
+                        // 96 ticks per cycle (10s tick, 960s cycle). Probe every N cycles.
                         let ticks_per_probe = self.faucet_config.probe_interval_cycles * 120;
                         if self.faucet_probe_counter >= ticks_per_probe {
                             self.faucet_probe_counter = 0;
@@ -2454,7 +2454,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 }
 
-                // Periodic NodeAnnounce re-broadcast (every 20 min)
+                // Periodic NodeAnnounce re-broadcast (every 16 min)
                 _ = announce_interval.tick() => {
                     if initial_announce_sent {
                         self.publish_node_announce(&shared_identity, &network_cmd, &cycle_phase_tx);
@@ -3296,7 +3296,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // S60: Bootstrap proposal retry — when the first peer status
                 // arrives during Proposal phase at tip=0, re-trigger the
                 // proposal that was suppressed by the "waiting for peer status"
-                // gate.  Without this, the node waits a full 20-min cycle.
+                // gate.  Without this, the node waits a full 16-min cycle.
                 if our_height == 0 {
                     let engine = self.consensus.read();
                     let in_proposal = engine.current_tracked_phase() == noble_consensus::CyclePhase::Proposal;
@@ -5756,7 +5756,7 @@ mod tests {
         // Simulate: advance through a full cycle.
         // First tick initializes epoch AND requests mempool txs if in Proposal phase.
         let epoch = 1_773_600_000u64;
-        let cycle_dur = 1200u64;
+        let cycle_dur = 960u64;
         let actions = engine.step(CycleEvent::Tick { now: epoch + 1 });
         let has_mempool_req = actions.iter().any(|a| matches!(a, CycleIo::RequestMempoolTransactions { .. }));
         assert!(has_mempool_req, "engine should request mempool txs on first tick in Proposal phase");

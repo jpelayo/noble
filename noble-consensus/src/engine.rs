@@ -3050,20 +3050,20 @@ mod tests {
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
         assert_eq!(engine.current_cycle(), 0);
 
-        // Tick at g+300: should transition to Voting
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 300 });
+        // Tick at g+240: should transition to Voting
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 240 });
         assert_eq!(engine.current_phase(), CyclePhase::Voting);
 
-        // Tick at g+600: should transition to Reflection
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 600 });
+        // Tick at g+480: should transition to Reflection
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 480 });
         assert_eq!(engine.current_phase(), CyclePhase::Reflection);
 
-        // Tick at g+900: should transition to Propagation
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 900 });
+        // Tick at g+720: should transition to Propagation
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 720 });
         assert_eq!(engine.current_phase(), CyclePhase::Propagation);
 
-        // Tick at g+1200: should transition to new cycle
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 1200 });
+        // Tick at g+960: should transition to new cycle
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 960 });
         assert_eq!(engine.current_cycle(), 1);
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
     }
@@ -3243,7 +3243,7 @@ mod tests {
     #[test]
     fn bootstrap_epoch_initializes_cycle_machinery() {
         // Engine with genesis_timestamp=None → first tick sets a wall-clock-aligned epoch.
-        // `aligned = floor(now / 1200) * 1200`, so `current_cycle(now)` is 0 or 1.
+        // `aligned = floor(now / 960) * 960`, so `current_cycle(now)` is 0 or 1.
         let (vp, vpub) = make_validator();
         let mut engine = CycleEngine::new(
             ConsensusConfig::default(),
@@ -3270,11 +3270,11 @@ mod tests {
             engine.tracked_cycle,
         );
         // Verify the genesis timestamp is wall-clock aligned
-        let expected_epoch = (now / 1200) * 1200;
+        let expected_epoch = (now / 960) * 960;
         assert_eq!(
             engine.cycle_mgr.genesis_ts(),
             expected_epoch,
-            "bootstrap epoch should be floor(now/1200)*1200"
+            "bootstrap epoch should be floor(now/960)*960"
         );
     }
 
@@ -3299,7 +3299,7 @@ mod tests {
             engine.tracked_cycle, 0,
             "wall-clock-aligned epoch must produce cycle 0 at the alignment point"
         );
-        let expected_epoch = (far_future / 1200) * 1200;
+        let expected_epoch = (far_future / 960) * 960;
         assert_eq!(engine.cycle_mgr.genesis_ts(), expected_epoch);
     }
 
@@ -3382,7 +3382,7 @@ mod tests {
             new_phase: CyclePhase::Proposal,
         });
         // Tick at 31s into cycle 1's Proposal phase.
-        let now = noble_core::GENESIS_TIMESTAMP + 1200 + 31;
+        let now = noble_core::GENESIS_TIMESTAMP + 960 + 31;
         let outputs = engine.step(CycleEvent::Tick { now });
         assert!(
             outputs
@@ -3452,7 +3452,7 @@ mod tests {
         engine.tracked_cycle = 0;
         engine.tracked_phase = CyclePhase::Voting;
         engine.r1_vote_cast = false;
-        let outputs = engine.step(CycleEvent::Tick { now: g + 300 + 30 }); // Voting + 30s delay
+        let outputs = engine.step(CycleEvent::Tick { now: g + 240 + 30 }); // Voting + 30s delay
 
         let vote_broadcast = outputs
             .iter()
@@ -3479,8 +3479,8 @@ mod tests {
         assert_eq!(engine.current_phase(), CyclePhase::Proposal);
 
         // Tick into Voting phase past VOTE_CAST_DELAY (30s)
-        // Voting starts at g+300, delay fires at g+330
-        let _outputs = engine.step(CycleEvent::Tick { now: g + 330 });
+        // Voting starts at g+240, delay fires at g+270
+        let _outputs = engine.step(CycleEvent::Tick { now: g + 270 });
 
         // With no candidates available, r1_vote_cast stays false so the
         // engine can retry when a candidate arrives via gossip.
@@ -3503,8 +3503,8 @@ mod tests {
         engine.r2_vote_cast = false;
 
         // Tick at 30s into Reflection phase of cycle 1
-        // Reflection starts at 600s in cycle, so offset 630s from cycle start
-        let now = g + 1200 + 600 + 30; // cycle 1 start + Reflection + 30s delay
+        // Reflection starts at 480s in cycle, so offset 510s from cycle start
+        let now = g + 960 + 480 + 30; // cycle 1 start + Reflection + 30s delay
         let _outputs = engine.step(CycleEvent::Tick { now });
 
         // With no candidates available, r2_vote_cast stays false so the

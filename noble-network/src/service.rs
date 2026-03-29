@@ -779,7 +779,7 @@ async fn handle_swarm_event(
 
                     // Immediate PeerExchange: share our known peer addresses with
                     // the newcomer so it can discover additional peers without
-                    // waiting for the next 20-minute periodic exchange.
+                    // waiting for the next 16-minute periodic exchange.
                     {
                         let mut addrs = peer_manager.connected_addrs();
                         addrs.truncate(config.max_addrs_per_exchange);
