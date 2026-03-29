@@ -60,6 +60,7 @@ export function init(root, ctx) {
         });
         root.appendChild(header);
 
+        renderAppearanceSection();
         renderNodeSection();
         renderWalletSection();
         renderIdentitySection();
@@ -68,6 +69,41 @@ export function init(root, ctx) {
         renderBackupSection();
         if (state.platform !== 'ios') renderDeveloperApiSection();
         renderAboutSection();
+    }
+
+    // ── Appearance ──
+
+    function renderAppearanceSection() {
+        const currentTheme = localStorage.getItem('noble.theme') || 'system';
+        const card = document.createElement('div');
+        card.className = 'panel';
+        card.innerHTML = `
+            <div class="panel-header">Appearance</div>
+            <div class="panel-body">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:var(--font-size-sm);font-weight:500">Theme</div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Choose light, dark, or follow system appearance</div>
+                    </div>
+                    <div class="segmented-control segmented-control-sm" id="theme-toggle">
+                        <button data-theme="system" class="${currentTheme === 'system' ? 'active' : ''}">System</button>
+                        <button data-theme="light" class="${currentTheme === 'light' ? 'active' : ''}">Light</button>
+                        <button data-theme="dark" class="${currentTheme === 'dark' ? 'active' : ''}">Dark</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        root.appendChild(card);
+
+        card.querySelectorAll('#theme-toggle button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const theme = btn.dataset.theme;
+                localStorage.setItem('noble.theme', theme);
+                window.applyTheme(theme);
+                card.querySelectorAll('#theme-toggle button').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            });
+        });
     }
 
     // ── Node Connection ──

@@ -1,24 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 /* NOBLE Document Client — Theme & Components
-   CSS custom properties from noble-gui themes.css
-   Dark mode via prefers-color-scheme (WKWebView respects macOS appearance) */
+   Liquid Glass design system — approved via Stitch (March 2026).
+   Dark mode via prefers-color-scheme (WKWebView respects macOS appearance). */
 
 /* ── Light theme (default) ── */
 :root {
   /* Backgrounds */
-  --bg-primary: #f8fafc;
+  --bg-primary: #f7f9fb;
   --bg-secondary: #f1f5f9;
   --bg-tertiary: #e2e8f0;
   --bg-surface: #ffffff;
 
+  /* Glass surfaces */
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.4);
+  --glass-blur: 40px;
+
   /* Text */
-  --text-primary: #0f172a;
+  --text-primary: #191c1e;
   --text-secondary: #475569;
-  --text-muted: #94a3b8;
+  --text-muted: #6b7280;
 
   /* Accent & status */
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --accent-subtle: rgba(59, 130, 246, 0.12);
+  --accent: #4643e9;
+  --accent-hover: #3532d4;
+  --accent-subtle: rgba(70, 67, 233, 0.12);
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
@@ -27,12 +34,13 @@
   /* Borders & shadows */
   --border: #e2e8f0;
   --border-strong: #cbd5e1;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 8px 32px rgba(0, 0, 0, 0.08);
 
   /* Layout */
-  --radius: 8px;
-  --radius-sm: 4px;
+  --radius: 12px;
+  --radius-sm: 8px;
 
   /* Spacing */
   --gap-xs: 4px;
@@ -42,7 +50,8 @@
   --gap-xl: 32px;
 
   /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-headline: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
   --font-size-xs: clamp(0.7rem, 0.66rem + 0.15vw, 0.78rem);
   --font-size-sm: clamp(0.8rem, 0.76rem + 0.18vw, 0.9rem);
@@ -52,26 +61,72 @@
   --font-size-2xl: clamp(1.6rem, 1.2rem + 1.5vw, 2.2rem);
 }
 
-/* ── Dark theme (macOS system) ── */
+/* ── Dark theme tokens ── */
+/* Applied via system preference OR manual data-theme="dark" attribute. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg-primary: #0f172a;
+  :root:not([data-theme="light"]) {
+    --bg-primary: #020617;
     --bg-secondary: #1e293b;
     --bg-tertiary: #334155;
-    --bg-surface: #232d3f;
-
+    --bg-surface: #1e1e28;
+    --glass-bg: rgba(30, 30, 40, 0.7);
+    --glass-border: rgba(255, 255, 255, 0.1);
     --text-primary: #e2e8f0;
     --text-secondary: #94a3b8;
     --text-muted: #64748b;
+    --accent: #818cf8;
+    --accent-hover: #a5b4fc;
+    --accent-subtle: rgba(129, 140, 248, 0.15);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
+    --shadow-float: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+}
 
-    --accent: #3b82f6;
-    --accent-hover: #60a5fa;
-    --accent-subtle: rgba(59, 130, 246, 0.15);
+/* Manual dark mode override (data-theme="dark" on <html>) */
+:root[data-theme="dark"] {
+  --bg-primary: #020617;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --bg-surface: #1e1e28;
+  --glass-bg: rgba(30, 30, 40, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #818cf8;
+  --accent-hover: #a5b4fc;
+  --accent-subtle: rgba(129, 140, 248, 0.15);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --shadow-float: 0 8px 32px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
 
-    --border: #334155;
-    --border-strong: #475569;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+/* ── Glass & Floating utilities ── */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+}
+
+.float-card {
+  box-shadow: var(--shadow-float);
+  transition: box-shadow 0.2s ease;
+}
+
+.float-card:hover {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  .float-card:hover {
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   }
 }
 
@@ -229,11 +284,14 @@ input, textarea, select, button {
 
 /* ── Panel ── */
 .panel {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   overflow: hidden;
   margin-bottom: var(--gap);
+  box-shadow: var(--shadow-float);
 }
 .panel:last-child {
   margin-bottom: 0;
@@ -265,10 +323,19 @@ input, textarea, select, button {
 }
 
 .kpi-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  padding: var(--gap);
+  padding: var(--gap-lg);
+  box-shadow: var(--shadow-md);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.kpi-card:hover {
+  box-shadow: var(--shadow-float);
+  transform: translateY(-1px);
 }
 
 .kpi-card .kpi-label {
@@ -583,13 +650,13 @@ input, textarea, select, button {
 
 /* ── Drop Zone ── */
 .drop-zone {
-  border: 2px dashed var(--border);
+  border: 2px dashed var(--border-strong);
   border-radius: var(--radius);
   padding: var(--gap-xl);
   text-align: center;
   cursor: pointer;
   transition: all 0.2s ease;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .drop-zone:hover,

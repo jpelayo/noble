@@ -11,6 +11,26 @@ import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
 import { init as initTxDetail } from './pages/tx-detail.js';
 
+// ── Theme management ──
+// Applies data-theme attribute on <html> for manual light/dark override.
+// "system" = follow prefers-color-scheme, "light" = force light, "dark" = force dark.
+window.applyTheme = function(theme) {
+    const root = document.documentElement;
+    if (theme === 'light') {
+        root.setAttribute('data-theme', 'light');
+        root.style.colorScheme = 'light';
+    } else if (theme === 'dark') {
+        root.setAttribute('data-theme', 'dark');
+        root.style.colorScheme = 'dark';
+    } else {
+        root.removeAttribute('data-theme');
+        root.style.colorScheme = 'light dark';
+    }
+};
+// Apply saved theme immediately (before first render)
+const savedTheme = localStorage.getItem('noble.theme') || 'system';
+window.applyTheme(savedTheme);
+
 const pages = {
     home:       initHome,
     documents:  initDocuments,
