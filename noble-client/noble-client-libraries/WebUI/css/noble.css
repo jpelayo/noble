@@ -1151,6 +1151,15 @@ textarea.caret-hidden {
   color: var(--warning);
   margin-bottom: var(--gap);
 }
+.success-box {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  padding: var(--gap-sm) var(--gap);
+  font-size: var(--font-size-sm);
+  color: var(--success);
+  margin-bottom: var(--gap);
+}
 
 /* ── Summary ── */
 .summary-section {

@@ -1892,10 +1892,23 @@ export function init(root, ctx) {
         // Refresh signing keys to detect any added/removed since metadata step
         if (metadata.some(m => m.signed)) loadMyCardKeys();
 
+        // Check if any sensitive metadata field is plaintext (unencrypted).
+        // Structural fields (batch coordination, document linking, public keys) are
+        // non-sensitive by design and always plaintext — don't count those.
+        const NON_SENSITIVE_KEYS = new Set(['doc:batch', 'doc:bridge', 'doc:relation', 'signer:pubkey']);
+        const allMeta = [...metadata.filter(m => m.key && m.value), ...(Object.values(perFileMetadata).flat().filter(m => m.key && m.value))];
+        const sensitiveFields = allMeta.filter(m => !NON_SENSITIVE_KEYS.has(m.fieldKey || m.key));
+        const hasSensitivePlaintext = sensitiveFields.some(m => m.mode === 'plaintext' || !m.mode);
+
         const warning = document.createElement('div');
-        warning.className = 'warning-box';
         warning.setAttribute('role', 'alert');
-        warning.textContent = '\u26A0\uFE0F Permanent \u2014 all public information (checksums, metadata, timestamps) cannot be removed from the blockchain once registered.';
+        if (sensitiveFields.length > 0 && !hasSensitivePlaintext) {
+            warning.className = 'success-box';
+            warning.textContent = '\u2705 There is no sensitive unencrypted information in this transaction. All metadata fields are encrypted or password-protected.';
+        } else {
+            warning.className = 'warning-box';
+            warning.textContent = '\u26A0\uFE0F Permanent \u2014 all public information (checksums, metadata, timestamps) cannot be removed from the blockchain once registered.';
+        }
         container.appendChild(warning);
 
         // Files summary
