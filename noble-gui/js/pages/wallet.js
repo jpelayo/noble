@@ -643,20 +643,21 @@ function txIcon(txType) {
 }
 
 function txStatusHtml(status, confirmations) {
+  const maturity = 3; // COINBASE_MATURITY
   switch (status) {
     case 'complete':
       return `<span style="color:var(--success)">Complete</span>`;
     case 'maturing':
-      return `<span style="color:var(--warning)">Maturing (${confirmations || 0}/6)</span>`;
+      return `<span style="color:var(--warning)">Maturing (${confirmations || 0}/${maturity})</span>`;
     case 'admitted':
       return `<span style="color:var(--info, #60a5fa)">Admitted</span>`;
     case 'pending':
       return `<span style="color:var(--text-muted)">Pending</span>`;
     default:
-      return confirmations >= 6
+      return confirmations > maturity
         ? `<span style="color:var(--success)">${formatNumber(confirmations)}</span>`
         : confirmations > 0
-          ? `<span style="color:var(--warning)">${confirmations} / 6</span>`
+          ? `<span style="color:var(--warning)">${confirmations} / ${maturity}</span>`
           : `<span style="color:var(--text-muted)">pending</span>`;
   }
 }

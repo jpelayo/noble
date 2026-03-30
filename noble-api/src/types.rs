@@ -162,13 +162,22 @@ pub fn block_to_response(block: &Block, block_hash: &Hash256, chain_id: u32) -> 
     }
 }
 
-/// Compute confirmation status from confirmation count.
-/// Returns ("pending"|"admitted"|"maturing"|"complete", icon).
+/// Compute confirmation status from confirmation count (1-based, Bitcoin-compatible).
+///
+/// Status lifecycle:
+/// - **pending**: in mempool, no confirmations (`None`)
+/// - **admitted**: in a proposed block, not yet committed (`Some(0)`)
+/// - **maturing**: in committed chain, 1 to COINBASE_MATURITY confirmations (`Some(1..=3)`)
+/// - **complete**: in committed chain, > COINBASE_MATURITY confirmations (`Some(4+)`)
+///
+/// With 1-based counting, a tx in the latest committed block has 1 confirmation.
+/// UTXO is spendable when `creation_height + COINBASE_MATURITY <= current_height`,
+/// which corresponds to > COINBASE_MATURITY confirmations (1-based).
 pub fn confirmation_status_label(confirmations: Option<u64>) -> String {
     match confirmations {
         None => "pending".to_string(),
         Some(0) => "admitted".to_string(),
-        Some(c) if c < noble_core::COINBASE_MATURITY => "maturing".to_string(),
+        Some(c) if c <= noble_core::COINBASE_MATURITY => "maturing".to_string(),
         Some(_) => "complete".to_string(),
     }
 }

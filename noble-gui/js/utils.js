@@ -10,18 +10,18 @@
  */
 export function txStatusBadge(confirmations, maturity = 3) {
   if (confirmations == null || confirmations < 0) {
-    // Pending — in mempool, not yet in a block
+    // Pending — in mempool, not in any block
     return '<span title="Pending (in mempool)" style="color:var(--warning)">◔ Pending</span>';
   }
   if (confirmations === 0) {
-    // Admitted — in a block, 0 confirmations
-    return '<span title="Admitted (in block, 0 confirmations)" style="color:var(--accent)">◑ Admitted</span>';
+    // Admitted — in a proposed block, not yet committed to chain
+    return '<span title="Admitted (in proposed block)" style="color:var(--accent)">◑ Admitted</span>';
   }
-  if (confirmations < maturity) {
-    // Maturing — 1 to maturity-1 confirmations
+  if (confirmations <= maturity) {
+    // Maturing — 1 to maturity confirmations (1-based: being in a block = 1 confirmation)
     return `<span title="Maturing (${confirmations}/${maturity} confirmations)" style="color:var(--accent)">◕ Maturing</span>`;
   }
-  // Complete — maturity+ confirmations
+  // Complete — more than maturity confirmations, UTXO is spendable
   return `<span title="Complete (${confirmations} confirmations)" style="color:var(--success)">● Complete</span>`;
 }
 

@@ -637,7 +637,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             };
 
             let tx_id_hex = hex::encode(tx_id.as_bytes());
-            let confirmations = tip_height.saturating_sub(*height);
+            let confirmations = tip_height.saturating_sub(*height) + 1;
             let status = confirmation_status_label(Some(confirmations));
 
             // Build the base TransactionResponse (reuse the shared function).
@@ -967,7 +967,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             };
 
             let tx_id_hex = hex::encode(tx_id.as_bytes());
-            let confirmations = chain_height.saturating_sub(*height);
+            let confirmations = chain_height.saturating_sub(*height) + 1;
             let status = confirmation_status_label(Some(confirmations));
 
             let mut resp = tx_to_response(&tx, &tx_id_hex);

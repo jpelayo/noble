@@ -221,7 +221,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         // Compute confirmation status from tx location
         if let Ok((tx_height, _)) = storage.get_transaction_location(&tx_id_hash) {
             let tip = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
-            let confs = tip.saturating_sub(tx_height);
+            let confs = tip.saturating_sub(tx_height) + 1;
             resp.confirmations = Some(confs);
             resp.confirmation_status = Some(confirmation_status_label(Some(confs)));
         }
@@ -299,7 +299,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             .map_err(ApiError::from)?;
         let tip = storage.get_chain_tip().map_err(ApiError::from)?;
 
-        let confirmations = tip.map(|t| t.height.saturating_sub(height));
+        let confirmations = tip.map(|t| t.height.saturating_sub(height) + 1);
 
         let mut tx_resp = tx_to_response(&tx, &tx_id);
         tx_resp.confirmations = confirmations;

@@ -197,7 +197,7 @@ export function txStatusBadge(confirmations, status, maturity = 3) {
     if (confirmations === 0) {
         return { html: '\u25D1 Admitted', cls: 'badge-admitted' };
     }
-    if (confirmations < maturity) {
+    if (confirmations <= maturity) {
         return { html: `\u25D5 Maturing (${confirmations}/${maturity})`, cls: 'badge-maturing' };
     }
     return { html: `\u25CF Complete`, cls: 'badge-confirmed' };
