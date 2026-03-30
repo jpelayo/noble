@@ -503,7 +503,7 @@ async fn run_event_loop(
                 seen_votes.evict_expired();
                 // Cleanup stale rate limiter buckets.
                 tx_rate_limiter.cleanup(Duration::from_secs(300));
-                // Evict pending proposals older than one cycle (30 min).
+                // Evict pending proposals older than one cycle (16 min).
                 {
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
