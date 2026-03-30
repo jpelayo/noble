@@ -1067,7 +1067,8 @@ export function init(root, ctx) {
   }
 
   const PHASES = ['Block Proposal', 'Voting', 'Reflection', 'Propagation'];
-  const PHASE_DURATION = 300; // 5:00 per phase
+  // Derived from first getCycleStatus response. Fallback: 240s (960s cycle / 4 phases).
+  let PHASE_DURATION = 240;
 
   // ══════════════════════════════════════════════
   // SUPERPOSITION TIMELINE
@@ -1973,6 +1974,16 @@ export function init(root, ctx) {
   async function loadCycle() {
     try {
       const status = await rpc.call('noble_getCycleStatus');
+      // Derive phase duration from live cycle status (no hardcoding)
+      if (status && status.cycle_remaining_secs != null && status.phase_remaining_secs != null) {
+        const cycleDur = status.cycle_remaining_secs + (status.phase_index || 0) * (status.phase_remaining_secs + 1);
+        // More reliable: cycle_remaining = phase_remaining + (3 - phase_index) * phase_dur
+        // → phase_dur = (cycle_remaining - phase_remaining) / (3 - phase_index) when phase_index < 3
+        if (status.phase_index < 3) {
+          const phaseDur = Math.round((status.cycle_remaining_secs - status.phase_remaining_secs) / (3 - status.phase_index));
+          if (phaseDur > 0) PHASE_DURATION = phaseDur;
+        }
+      }
       updateCycleDisplay(status);
       return true;
     } catch (e) {
