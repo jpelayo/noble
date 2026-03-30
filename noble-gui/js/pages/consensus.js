@@ -425,6 +425,7 @@ export function init(root, ctx) {
 
   const ACTIVITY_MAX_ENTRIES = 100;
   const activityEntries = []; // circular buffer (oldest at 0)
+  const deferredPeerEvents = new Map(); // peer_id → { data, timer }
 
   // ── Rate-limiting: coalesce rapid repeated events ──
   // Key = event type + peer/node identifier → last entry index + timestamp.
@@ -1376,7 +1377,7 @@ export function init(root, ctx) {
       // Synced nodes and genesis blocks may lack local vote tallies,
       // but noble_getBlockVotes always has the committed witness data.
       for (const cycle of cycles) {
-        if (!cycle._blockVotes) continue;
+        if (!cycle._blockVotes || !cycle.phases) continue;
         const votingPhase = cycle.phases[1];
         if (votingPhase.votes && votingPhase.votes.length > 0) continue;
 
