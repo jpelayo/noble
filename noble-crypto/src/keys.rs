@@ -110,6 +110,12 @@ impl NoblePublicKey {
             return Err(CryptoError::InvalidKey("empty wire bytes".to_string()));
         }
 
+        // 33 bytes starting with 0x02 or 0x03: raw SEC1 compressed secp256k1 key
+        // (not wire format — wire format is 0x02 scheme + 33-byte SEC1 = 34 bytes).
+        if bytes.len() == secp256k1::PUBLIC_KEY_LEN && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+            return Ok(Self::Secp256k1(bytes.to_vec()));
+        }
+
         let scheme_id = bytes[0];
         let key_bytes = &bytes[1..];
 
