@@ -57,12 +57,21 @@ export function init(root, ctx) {
         return;
       }
 
+      // Tier 1: Try receipt (confirmed txs — has block_height, block_hash)
       try {
-        const txResult = await rpc.call('noble_getTransaction', { tx_id: hex });
-        renderTxResult(txResult);
+        const receipt = await rpc.call('noble_getTransactionReceipt', { tx_id: hex });
+        renderTxResult(receipt);
         return;
-      } catch { /* not found as tx_id, try as checksum */ }
+      } catch (e) { console.warn('[tx-explorer] receipt lookup failed:', e.message); }
 
+      // Tier 2: Try getTransaction (works for confirmed AND pending/mempool txs)
+      try {
+        const tx = await rpc.call('noble_getTransaction', { tx_id: hex });
+        renderTxResult(tx);
+        return;
+      } catch (e) { console.warn('[tx-explorer] tx lookup failed:', e.message); }
+
+      // Tier 3: Try as document checksum
       const lookup = await rpc.call('noble_lookupChecksum', { checksum: hex });
       if (lookup.found && lookup.records.length > 0) {
         renderChecksumResults(hex, lookup.records);
@@ -149,7 +158,15 @@ export function init(root, ctx) {
 
   // formatTxType removed — use formatTxType from ../tx-display.js instead
 
-  function renderTxResult(txResult) {
+  function renderTxResult(result) {
+    // Handle both shapes: receipt ({transaction, block_height, status, ...}) and flat tx ({tx_id, tx_type, ...})
+    const tx = result.transaction || result;
+    const txId = result.tx_id || tx.tx_id;
+    const blockHeight = result.block_height ?? '—';
+    const status = result.status || tx.confirmation_status || '—';
+    const confirmations = result.confirmations ?? tx.confirmations ?? 0;
+    const disp = txDisplayAmount(tx);
+    const statusClass = status === 'pending' ? 'pending' : 'confirmed';
     results.innerHTML = `
       <div class="panel">
         <div class="panel-header">Transaction Found</div>
@@ -158,11 +175,11 @@ export function init(root, ctx) {
             <thead><tr><th>Tx ID</th><th>Block</th><th>Amount</th><th>Status</th><th>Confirmations</th></tr></thead>
             <tbody>
               <tr class="clickable" id="tx-result-row">
-                <td class="mono">${truncateHash(txResult.tx_id)}</td>
-                <td>${txResult.block_height}</td>
-                <td>${formatFee(txDisplayAmount(txResult.tx).amount)}</td>
-                <td><span class="badge confirmed">${txResult.status}</span></td>
-                <td>${txResult.confirmations}</td>
+                <td class="mono">${truncateHash(txId)}</td>
+                <td>${blockHeight}</td>
+                <td>${formatFee(disp.amount)}</td>
+                <td><span class="badge ${statusClass}">${status.toUpperCase()}</span></td>
+                <td>${confirmations}</td>
               </tr>
             </tbody>
           </table>
@@ -170,7 +187,7 @@ export function init(root, ctx) {
       </div>
     `;
     results.querySelector('#tx-result-row')?.addEventListener('click', () => {
-      location.hash = `#/tx/${txResult.tx_id}`;
+      location.hash = `#/tx/${txId}`;
     });
   }
 
