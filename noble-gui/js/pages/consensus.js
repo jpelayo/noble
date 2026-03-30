@@ -1093,7 +1093,7 @@ export function init(root, ctx) {
     }
 
     // Sort proposals by validator key for deterministic display across nodes
-    const sortedProposals = [...(entry.proposals || [])].sort((a, b) => a.validator.localeCompare(b.validator));
+    const sortedProposals = [...(entry.proposals || [])].sort((a, b) => (a.validator || '').localeCompare(b.validator || ''));
 
     return {
       cycle_number: entry.cycle_number,
@@ -1185,10 +1185,10 @@ export function init(root, ctx) {
       // backbone and overlay local cycle history for enrichment (proposals,
       // votes, disambiguation).
       const [blockCount, cycleStatus, tallies, history] = await Promise.all([
-        rpc.call('noble_getBlockCount').catch(() => ({ height: 0 })),
-        rpc.call('noble_getCycleStatus').catch(() => null),
-        rpc.call('noble_getVoteTallies').catch(() => null),
-        rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]).catch(() => ({ entries: [] })),
+        rpc.call('noble_getBlockCount').catch(e => { console.warn('[consensus] getBlockCount failed:', e.message); return { height: 0 }; }),
+        rpc.call('noble_getCycleStatus').catch(e => { console.warn('[consensus] getCycleStatus failed:', e.message); return null; }),
+        rpc.call('noble_getVoteTallies').catch(e => { console.warn('[consensus] getVoteTallies failed:', e.message); return null; }),
+        rpc.call('noble_getCycleHistory', [TIMELINE_LIMIT * 5]).catch(e => { console.warn('[consensus] getCycleHistory failed:', e.message); return { entries: [] }; }),
       ]);
 
       const tipHeight = blockCount.height || 0;
@@ -1206,7 +1206,8 @@ export function init(root, ctx) {
       let recentBlocks = [];
       if (fetchCount > 0) {
         const startH = Math.max(1, tipHeight - fetchCount + 1);
-        recentBlocks = await rpc.call('noble_getBlockRange', [startH, tipHeight - startH + 1]);
+        recentBlocks = await rpc.call('noble_getBlockRange', [startH, tipHeight - startH + 1])
+          .catch(e => { console.warn('[consensus] getBlockRange failed:', e.message); return []; });
       }
 
       // Build cycle→block mapping from committed blocks (newest first).
