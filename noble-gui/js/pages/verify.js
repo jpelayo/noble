@@ -84,10 +84,10 @@ export function init(root, ctx) {
         <div class="panel-header">Search Documents by Issuer</div>
         <div class="panel-body">
           <p style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)">
-            Enter an issuer's public key (hex) to find all documents they have registered on the NOBLE blockchain.
+            Enter an issuer's public key (nbl1... or hex) to find all documents they have registered on the NOBLE blockchain.
           </p>
           <div class="search-bar">
-            <input type="text" id="issuer-input" placeholder="Issuer public key (hex)..." value="${esc(prefillIssuer)}" />
+            <input type="text" id="issuer-input" placeholder="nbl1... or hex public key" value="${esc(prefillIssuer)}" />
             <button id="issuer-btn">Search</button>
           </div>
           <div id="issuer-result"></div>
@@ -364,8 +364,10 @@ export function init(root, ctx) {
     const pubkey = issuerInput.value.trim();
     if (!pubkey) return;
 
-    if (!/^[0-9a-fA-F]{64,68}$/.test(pubkey)) {
-      issuerResult.innerHTML = '<div class="empty-state">Please enter a valid hex public key (64-68 characters)</div>';
+    const isHex = /^[0-9a-fA-F]{64,68}$/.test(pubkey);
+    const isBech32 = /^nbl1[a-z0-9]{38,}$/.test(pubkey);
+    if (!isHex && !isBech32) {
+      issuerResult.innerHTML = '<div class="empty-state">Please enter a valid public key (nbl1... bech32 or 64-68 hex characters)</div>';
       return;
     }
 

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 
-use noble_crypto::NoblePublicKey;
+
 use noble_storage::StorageEngine;
 
 use crate::error::ApiError;
@@ -220,29 +220,10 @@ fn build_version_chain<S: StorageEngine>(
 /// - 34 bytes (secp256k1 wire: 0x02 + 33B compressed key)
 /// - 33 bytes (legacy wire format — validated via `from_wire_bytes`)
 /// - 32 bytes (raw key bytes → prepend 0x02 secp256k1 scheme byte)
-fn parse_issuer_wire(hex_str: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
-    let bytes =
-        hex::decode(hex_str).map_err(|_| ApiError::InvalidAddress("invalid hex string".into()))?;
-    match bytes.len() {
-        33 | 34 => {
-            // Already wire format — validate
-            NoblePublicKey::from_wire_bytes(&bytes)
-                .map_err(|e| ApiError::InvalidAddress(e.to_string()))?;
-            Ok(bytes)
-        }
-        32 => {
-            // Raw key bytes — prepend secp256k1 scheme byte 0x02
-            let mut wire = Vec::with_capacity(33);
-            wire.push(noble_crypto::SCHEME_SECP256K1);
-            wire.extend_from_slice(&bytes);
-            Ok(wire)
-        }
-        _ => Err(ApiError::InvalidAddress(format!(
-            "issuer key must be 32, 33, or 34 bytes, got {}",
-            bytes.len()
-        ))
-        .into()),
-    }
+// Unified pubkey parser: accepts bech32 (nbl1…), hex wire format, and raw SEC1 keys.
+fn parse_issuer_wire(input: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
+    let pk = crate::types::parse_pubkey(input)?;
+    Ok(pk.to_wire_bytes())
 }
 
 #[jsonrpsee::core::async_trait]

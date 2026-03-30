@@ -14,26 +14,8 @@ use noble_crypto::NoblePublicKey;
 use noble_storage::StorageEngine;
 
 /// Parse a public key that may be hex wire bytes, a raw compressed key, or a `nbl1…` bech32 address.
-fn parse_pubkey_input(input: &str) -> Result<NoblePublicKey, ErrorObjectOwned> {
-    let trimmed = input.trim();
-    // Try nbl1… bech32 address first
-    if noble_crypto::noble_addr::is_noble_address(trimmed) {
-        return noble_crypto::noble_addr::decode(trimmed)
-            .map_err(|e| ApiError::InvalidAddress(e.to_string()).into());
-    }
-    // Fall back to hex bytes
-    let wire_bytes =
-        hex::decode(trimmed).map_err(|_| ApiError::InvalidAddress("invalid hex".into()))?;
-    // Try Noble wire format first (scheme_id prefix + key)
-    if let Ok(pk) = NoblePublicKey::from_wire_bytes(&wire_bytes) {
-        return Ok(pk);
-    }
-    // Fallback: raw 33-byte compressed secp256k1 key (0x02 or 0x03 SEC1 prefix)
-    if wire_bytes.len() == 33 && (wire_bytes[0] == 0x02 || wire_bytes[0] == 0x03) {
-        return Ok(NoblePublicKey::Secp256k1(wire_bytes));
-    }
-    Err(ApiError::InvalidAddress("not a valid public key (expected nbl1… bech32, Noble wire hex, or 33-byte compressed key)".into()).into())
-}
+// Unified pubkey parser: use crate::types::parse_pubkey (accepts bech32, hex, wire format).
+use crate::types::parse_pubkey as parse_pubkey_input;
 
 /// Convert a `VotingStrategy` to a (name, params) pair for RPC responses.
 fn strategy_to_response(strategy: &VotingStrategy) -> (String, serde_json::Value) {
