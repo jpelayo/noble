@@ -207,6 +207,20 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         _ => tx.total_output_value(),
     };
 
+    // Recipient: the intended destination address for transfers.
+    // Non-signer output = recipient. Self-transfer fallback: signer address.
+    let recipient = if tx.tx_type == noble_core::TX_TYPE_TRANSFER {
+        let dest = match &signer_wire {
+            Some(sw) => tx.outputs.iter()
+                .find(|o| o.address.to_wire_bytes() != *sw)
+                .or_else(|| tx.outputs.first()),
+            _ => tx.outputs.first(),
+        };
+        dest.map(|o| o.address.to_display_address())
+    } else {
+        None
+    };
+
     // Privacy: strip input hashes for transfers — exposes UTXO history unnecessarily.
     // Non-transfer types (coinbase, notarization) have 1-2 inputs and are non-sensitive.
     let is_transfer = tx.tx_type == noble_core::TX_TYPE_TRANSFER;
@@ -235,7 +249,8 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         }).collect(),
         signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.issuer_sig.public_key)
             .unwrap_or_else(|| hex::encode(&tx.issuer_sig.public_key)),
-        signer_name: None, // Populated by caller via resolve_friendly_name
+        signer_name: None,   // Populated by caller via resolve_friendly_name
+        recipient,
         metadata: tx
             .metadata
             .iter()
@@ -251,6 +266,12 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         attestation_count: tx.external_attestations.len(),
         confirmation_status: None, // Set by caller based on context
         confirmations: None,       // Set by caller based on chain tip
+        // Wallet-enriched fields (set by wallet RPCs, None otherwise)
+        direction: None,
+        amount: None,
+        type_label: None,
+        block_height: None,
+        status: None,
         attestations: tx
             .external_attestations
             .iter()
@@ -333,6 +354,9 @@ pub struct TransactionResponse {
     pub signer: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer_name: Option<String>,
+    /// Intended destination address (transfers only; None for other tx types).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
     pub metadata: Vec<MetadataResponse>,
     pub has_encrypted_locator: bool,
     pub locator_recipient_count: usize,
@@ -345,6 +369,22 @@ pub struct TransactionResponse {
     /// Number of confirmations (None = pending/mempool).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmations: Option<u64>,
+    // ── Wallet-enriched fields (set by wallet RPCs, None otherwise) ──
+    /// Transaction direction from wallet perspective: "incoming" / "outgoing" / "self".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// Wallet-perspective display amount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Human-readable type name (e.g., "Transfer", "Notarization").
+    #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
+    pub type_label: Option<String>,
+    /// Block height containing this transaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_height: Option<u64>,
+    /// Status string: "pending", "maturing", "complete".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Transaction input response.
@@ -1651,7 +1691,7 @@ pub struct DiscoveredBlockchainInfo {
 /// Response for `noble_getWalletTransactions`.
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletTransactionsResponse {
-    pub transactions: Vec<WalletTransactionEntry>,
+    pub transactions: Vec<TransactionResponse>,
 }
 
 /// Atomic wallet snapshot: balance + transactions computed under a single
@@ -1665,43 +1705,7 @@ pub struct WalletSnapshotResponse {
     pub pending: u64,
     pub immature_count: usize,
     pub immature_value: u64,
-    pub transactions: Vec<WalletTransactionEntry>,
-}
-
-/// A single wallet transaction entry — fully enriched with all fields
-/// the client needs for display (absorbs TransactionResponse + receipt context).
-#[derive(Debug, Clone, Serialize)]
-pub struct WalletTransactionEntry {
-    // Identity
-    pub tx_id: String,
-    pub tx_type: u8,
-    #[serde(rename = "type")]
-    pub type_label: String,
-
-    // Wallet-enriched fields (computed by server)
-    pub direction: String,
-    pub amount: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counterparty: Option<String>,
-    pub status: String,
-
-    // From TransactionResponse (full tx data)
-    pub total_output: u64,
-    pub transfer_value: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fee: Option<u64>,
-    pub checksum: String,
-    pub timestamp: u64,
-    pub signer: String,
-    pub inputs: Vec<TxInputResponse>,
-    pub outputs: Vec<TxOutputResponse>,
-    pub metadata: Vec<MetadataResponse>,
-    pub has_encrypted_locator: bool,
-
-    // From TransactionReceiptResponse (block context)
-    pub confirmations: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block_height: Option<u64>,
+    pub transactions: Vec<TransactionResponse>,
 }
 
 /// Response for `noble_getFinalityStatus`.
@@ -1877,5 +1881,241 @@ mod tests {
         assert_eq!(v["tx_count"], 3);
         assert_eq!(v["timestamp"], 1700000000u64);
         assert!(v["transactions"].as_array().unwrap().is_empty());
+    }
+
+    // --- tx_to_response: transfer_value computation ---
+
+    /// Helper: build a minimal Transaction for testing tx_to_response.
+    fn make_tx_for_response(
+        tx_type: u8,
+        signer_pk: &[u8],
+        outputs: Vec<noble_core::TxOut>,
+        inputs: Vec<noble_core::TxIn>,
+    ) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type,
+            inputs,
+            outputs,
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            issuer_sig: noble_crypto::SignatureEnvelope {
+                scheme_id: noble_crypto::SCHEME_SECP256K1,
+                public_key: signer_pk.to_vec(),
+                signature: vec![0u8; 64],
+            },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            contract_data: None,
+            expires_at: None,
+        }
+    }
+
+    fn make_outpoint(fill: u8) -> noble_core::OutPoint {
+        noble_core::OutPoint { txid: Hash256::from_bytes([fill; 32]), vout: 0 }
+    }
+
+    fn make_addr(pk_bytes: &[u8]) -> NobleAddress {
+        NobleAddress::Noble(NoblePublicKey::Secp256k1(pk_bytes.to_vec()))
+    }
+
+    #[test]
+    fn transfer_value_normal() {
+        // Outputs to a different address → transfer_value = sum of non-signer outputs
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let (_, other_pk) = noble_crypto::secp256k1::generate_keypair();
+        let signer_addr = make_addr(&signer_pk);
+        let other_addr = make_addr(&other_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![
+                noble_core::TxOut { value: 2000, address: other_addr },
+                noble_core::TxOut { value: 500, address: signer_addr },
+            ],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0x11) }],
+        );
+
+        let resp = tx_to_response(&tx, "deadbeef");
+        assert_eq!(resp.transfer_value, 2000);
+    }
+
+    #[test]
+    fn transfer_value_self_transfer() {
+        // All outputs go to the signer → self-transfer fallback to total_output
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let signer_addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![
+                noble_core::TxOut { value: 3000, address: signer_addr.clone() },
+                noble_core::TxOut { value: 1000, address: signer_addr },
+            ],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0x22) }],
+        );
+
+        let resp = tx_to_response(&tx, "deadbeef");
+        assert_eq!(resp.transfer_value, 4000);
+    }
+
+    #[test]
+    fn transfer_value_coinbase() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_COINBASE,
+            &signer_pk,
+            vec![noble_core::TxOut { value: 8_000_000_000, address: addr }],
+            vec![noble_core::TxIn { prev_output: noble_core::OutPoint::COINBASE_PREVOUT }],
+        );
+
+        let resp = tx_to_response(&tx, "coinbase_tx_id");
+        assert_eq!(resp.transfer_value, 8_000_000_000);
+    }
+
+    #[test]
+    fn transfer_value_mixed_address_types() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let signer_addr = make_addr(&signer_pk);
+        let (_, other_pk) = noble_crypto::secp256k1::generate_keypair();
+        let other_addr = make_addr(&other_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![
+                noble_core::TxOut { value: 5000, address: other_addr },
+                noble_core::TxOut { value: 1000, address: signer_addr },
+            ],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0x33) }],
+        );
+
+        let resp = tx_to_response(&tx, "mixed_tx");
+        assert_eq!(resp.transfer_value, 5000);
+    }
+
+    // --- tx_to_response: input stripping ---
+
+    #[test]
+    fn inputs_stripped_for_transfer() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let (_, other_pk) = noble_crypto::secp256k1::generate_keypair();
+        let other_addr = make_addr(&other_pk);
+
+        let inputs: Vec<noble_core::TxIn> = (0..5).map(|i| noble_core::TxIn {
+            prev_output: noble_core::OutPoint { txid: Hash256::from_bytes([i; 32]), vout: 0 },
+        }).collect();
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![noble_core::TxOut { value: 1000, address: other_addr }],
+            inputs,
+        );
+
+        let resp = tx_to_response(&tx, "transfer_tx");
+        assert!(resp.inputs.is_empty(), "transfer inputs should be stripped");
+        assert_eq!(resp.input_count, 5, "input_count should reflect original count");
+    }
+
+    #[test]
+    fn inputs_kept_for_notarization() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_NOTARIZATION,
+            &signer_pk,
+            vec![noble_core::TxOut { value: 99_000, address: addr }],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0x44) }],
+        );
+
+        let resp = tx_to_response(&tx, "notarize_tx");
+        assert_eq!(resp.inputs.len(), 1, "notarization inputs should be kept");
+        assert_eq!(resp.input_count, 1);
+    }
+
+    #[test]
+    fn inputs_kept_for_coinbase() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_COINBASE,
+            &signer_pk,
+            vec![noble_core::TxOut { value: 8_000_000_000, address: addr }],
+            vec![noble_core::TxIn { prev_output: noble_core::OutPoint::COINBASE_PREVOUT }],
+        );
+
+        let resp = tx_to_response(&tx, "coinbase_tx");
+        assert_eq!(resp.inputs.len(), 1, "coinbase null input should be kept");
+        assert_eq!(resp.input_count, 1);
+    }
+
+    // --- tx_to_response: recipient field ---
+
+    #[test]
+    fn recipient_set_for_transfer() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let (_, other_pk) = noble_crypto::secp256k1::generate_keypair();
+        let signer_addr = make_addr(&signer_pk);
+        let other_addr = make_addr(&other_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![
+                noble_core::TxOut { value: 2000, address: other_addr.clone() },
+                noble_core::TxOut { value: 500, address: signer_addr },
+            ],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0xA1) }],
+        );
+
+        let resp = tx_to_response(&tx, "recipient_test");
+        assert!(resp.recipient.is_some(), "transfer must have recipient");
+        assert_eq!(resp.recipient.unwrap(), other_addr.to_display_address());
+    }
+
+    #[test]
+    fn recipient_none_for_notarization() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_NOTARIZATION,
+            &signer_pk,
+            vec![noble_core::TxOut { value: 99_000, address: addr }],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0xA2) }],
+        );
+
+        let resp = tx_to_response(&tx, "notarize_no_recipient");
+        assert!(resp.recipient.is_none(), "notarization must not have recipient");
+    }
+
+    #[test]
+    fn recipient_self_transfer_shows_signer() {
+        let (_, signer_pk) = noble_crypto::secp256k1::generate_keypair();
+        let signer_addr = make_addr(&signer_pk);
+
+        let tx = make_tx_for_response(
+            noble_core::TX_TYPE_TRANSFER,
+            &signer_pk,
+            vec![
+                noble_core::TxOut { value: 3000, address: signer_addr.clone() },
+                noble_core::TxOut { value: 1000, address: signer_addr.clone() },
+            ],
+            vec![noble_core::TxIn { prev_output: make_outpoint(0xA3) }],
+        );
+
+        let resp = tx_to_response(&tx, "self_transfer");
+        assert!(resp.recipient.is_some(), "self-transfer must have recipient");
+        assert_eq!(resp.recipient.unwrap(), signer_addr.to_display_address());
     }
 }

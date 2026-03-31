@@ -178,6 +178,7 @@ fn make_signed_announce(
         0,
         String::new(),
         None, // chain_vote_weight
+        None, // min_fee_rate
         now,
         sk,
         None,
@@ -469,8 +470,8 @@ async fn start_gossip_node_with_tx_provider(
 /// TxAnnounce → TxRequest → TxResponse pipeline.
 #[tokio::test]
 async fn gossip_tx_relay_end_to_end() {
-    use noble_core::{OutPoint, SignatureEnvelope, TxIn, TxOut, NobleAddress, PROTOCOL_VERSION};
-    use noble_crypto::NobleSigner;
+    use noble_core::{OutPoint, TxIn, TxOut, NobleAddress, PROTOCOL_VERSION};
+    use noble_crypto::{NobleSigner, SignatureEnvelope};
 
     // Node A: has a MemoryTxProvider so it can serve the tx when B requests it.
     let tx_provider_a = Arc::new(MemoryTxProvider::new());

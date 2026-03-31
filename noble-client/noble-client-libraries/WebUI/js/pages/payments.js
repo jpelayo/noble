@@ -204,7 +204,7 @@ export function init(root, ctx) {
 
         for (const tx of txs) {
             const typeName = formatTxType(tx.tx_type ?? parseTypeLabel(tx.type));
-            const counterparty = tx.counterparty ? truncate(tx.counterparty, 12) : '';
+            const counterparty = tx.recipient ? truncate(tx.recipient, 12) : '';
             const disp = txDisplayAmount(tx);
             const amount = formatSignedAmount(disp.amount, disp.direction);
             const amtColor = disp.direction === 'outgoing' ? 'var(--warning)'

@@ -462,7 +462,7 @@ pub enum MisbehaviorEvidence {
 mod tests {
     use super::*;
     use noble_crypto::{
-        Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
+        secp256k1, Hash256, NoblePrivateKey, NobleSigner, SignatureEnvelope, SCHEME_SECP256K1,
     };
 
     fn make_validator() -> (NoblePrivateKey, NoblePublicKey) {

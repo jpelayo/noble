@@ -243,7 +243,7 @@ pub async fn handle_api_action(
                                 "fee": fee,
                                 "status": "pending",
                                 "confirmations": 0,
-                                "counterparty": if is_transfer { "Transfer" } else { "Self (Document)" },
+                                "recipient": if is_transfer { "Transfer" } else { "Self (Document)" },
                                 "total_output": change + sent,
                                 "transfer_value": sent,
                                 "timestamp": now,
@@ -530,7 +530,7 @@ pub async fn handle_api_action(
     }
 }
 
-/// Enrich a raw transaction record with direction/counterparty/confirmations
+/// Enrich a raw transaction record with direction/recipient/confirmations
 /// for WebUI display, matching Swift's `txToDict()`.
 fn enrich_transaction(tx: &Value, wallet_address: &str, tip_height: u64) -> Value {
     let mut dict = tx.clone();
@@ -567,7 +567,7 @@ fn enrich_transaction(tx: &Value, wallet_address: &str, tip_height: u64) -> Valu
         if tx_type == "transfer" {
             if signer == wallet_address {
                 obj.insert("direction".to_string(), json!("outgoing"));
-                let counterparty = outputs
+                let recipient = outputs
                     .iter()
                     .find(|o| {
                         o.get("address").and_then(|v| v.as_str()) != Some(wallet_address)
@@ -575,10 +575,10 @@ fn enrich_transaction(tx: &Value, wallet_address: &str, tip_height: u64) -> Valu
                     .and_then(|o| o.get("address"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(first_output_addr);
-                obj.insert("counterparty".to_string(), json!(counterparty));
+                obj.insert("recipient".to_string(), json!(recipient));
             } else {
                 obj.insert("direction".to_string(), json!("incoming"));
-                obj.insert("counterparty".to_string(), json!(signer));
+                obj.insert("recipient".to_string(), json!(signer));
             }
         }
 

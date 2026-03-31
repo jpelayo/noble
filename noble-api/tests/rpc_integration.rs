@@ -148,9 +148,9 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         gui_port: 8785,
         tls_plaintext_mode: false,
         peer_id: "12D3KooWTestPeerIdPlaceholder".to_string(),
-        validator_pubkey: None,
-        validator_scheme: None,
-        validator_key_path: None,
+        validator_pubkey: parking_lot::RwLock::new(None),
+        validator_scheme: parking_lot::RwLock::new(None),
+        validator_key_path: parking_lot::RwLock::new(None),
         data_dir: None,
         pruning_mode: "archive".to_string(),
         keep_blocks: 0,
@@ -178,6 +178,13 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         sync_target_height: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         sync_progress_current: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         sync_progress_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        alignment: std::sync::Arc::new(parking_lot::RwLock::new(noble_consensus::AlignmentSnapshot::default())),
+        engine_reward_address: std::sync::Arc::new(parking_lot::RwLock::new(None)),
+        faucet_cache: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+        faucet_address: parking_lot::RwLock::new(String::new()),
+        faucet_listen: parking_lot::RwLock::new(String::new()),
+        faucet_enabled: std::sync::atomic::AtomicBool::new(false),
+        min_fee_rate: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
     });
 
     (state, dir)
@@ -701,6 +708,7 @@ fn commit_block_with_tx(state: &ApiState<MemoryStorage>) -> (String, String) {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
     let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx.issuer_sig = priv_key.sign(&msg).unwrap();

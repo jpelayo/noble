@@ -253,7 +253,7 @@ public struct LiveNobleAPIService: NobleAPIService {
                 confirmations: e.confirmations,
                 direction: e.direction,
                 displayAmount: e.amount,
-                counterparty: e.counterparty,
+                recipient: e.recipient,
                 typeLabel: e.type_label
             )
         }
@@ -292,7 +292,7 @@ public struct LiveNobleAPIService: NobleAPIService {
                 hasEncryptedLocator: e.has_encrypted_locator ?? false,
                 confirmations: e.confirmations,
                 direction: e.direction, displayAmount: e.amount,
-                counterparty: e.counterparty, typeLabel: e.type_label
+                recipient: e.recipient, typeLabel: e.type_label
             )
         }
     }

@@ -848,6 +848,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
 
         let msg = tx
@@ -1197,6 +1198,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1260,6 +1262,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1303,6 +1306,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1341,6 +1345,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1383,6 +1388,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1422,6 +1428,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1457,6 +1464,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1585,6 +1593,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1634,6 +1643,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1682,6 +1692,7 @@ mod tests {
             external_attestations: vec![attestation],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1727,6 +1738,7 @@ mod tests {
             external_attestations: vec![attestation],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1877,6 +1889,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1920,6 +1933,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -1980,6 +1994,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: Some(gw_wire),
+        contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2014,6 +2030,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: Some(vec![0xFF, 0x01, 0x02]), // invalid wire bytes
+        contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2066,6 +2084,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         (tx, tx_id)
@@ -2119,6 +2138,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
@@ -2159,6 +2179,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2198,6 +2219,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2242,6 +2264,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let msg = tx
             .compute_signing_message_for_chain(test_chain_id())
@@ -2373,6 +2396,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -2426,6 +2450,7 @@ mod tests {
             external_attestations: vec![],
             gateway_address: None,
         contract_data: None,
+        expires_at: None,
         };
         let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();

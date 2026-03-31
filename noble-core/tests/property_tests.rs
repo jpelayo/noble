@@ -78,7 +78,8 @@ fn arb_transaction() -> impl Strategy<Value = Transaction> {
                 encrypted_locator: None,
                 external_attestations: vec![],
                 gateway_address: None,
-        contract_data: None,
+                contract_data: None,
+                expires_at: None,
             },
         )
 }
@@ -103,9 +104,9 @@ proptest! {
 
     #[test]
     fn hash256_canonical_idempotent(hash in arb_hash256()) {
-        let canonical1 = hash.canonical_bytes().unwrap();
+        let canonical1 = hash.to_cbor().unwrap();
         let decoded = Hash256::from_cbor(&canonical1).unwrap();
-        let canonical2 = decoded.canonical_bytes().unwrap();
+        let canonical2 = decoded.to_cbor().unwrap();
         prop_assert_eq!(canonical1, canonical2);
     }
 }
@@ -130,9 +131,9 @@ proptest! {
 
     #[test]
     fn metadata_entry_canonical_idempotent(entry in arb_metadata_entry()) {
-        let canonical1 = entry.canonical_bytes().unwrap();
+        let canonical1 = entry.to_cbor().unwrap();
         let decoded = MetadataEntry::from_cbor(&canonical1).unwrap();
-        let canonical2 = decoded.canonical_bytes().unwrap();
+        let canonical2 = decoded.to_cbor().unwrap();
         prop_assert_eq!(canonical1, canonical2);
     }
 }
@@ -170,9 +171,9 @@ proptest! {
 
     #[test]
     fn transaction_canonical_idempotent(tx in arb_transaction()) {
-        let canonical1 = tx.canonical_bytes().unwrap();
+        let canonical1 = tx.to_cbor().unwrap();
         let decoded = Transaction::from_cbor(&canonical1).unwrap();
-        let canonical2 = decoded.canonical_bytes().unwrap();
+        let canonical2 = decoded.to_cbor().unwrap();
         prop_assert_eq!(canonical1, canonical2);
     }
 }
@@ -243,7 +244,8 @@ fn arb_transfer_transaction() -> impl Strategy<Value = Transaction> {
                     encrypted_locator: None,
                     external_attestations: vec![],
                     gateway_address: None,
-        contract_data: None,
+                    contract_data: None,
+                    expires_at: None,
                 }
             },
         )
@@ -304,7 +306,8 @@ fn signed_transaction_roundtrip_100() {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -316,7 +319,7 @@ fn signed_transaction_roundtrip_100() {
         assert_eq!(tx, decoded);
 
         // Canonical roundtrip
-        let canonical = tx.canonical_bytes().unwrap();
+        let canonical = tx.to_cbor().unwrap();
         let decoded2 = Transaction::from_cbor(&canonical).unwrap();
         assert_eq!(tx, decoded2);
 
@@ -358,6 +361,7 @@ fn signing_message_includes_tx_type() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
     let msg0 = tx0.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx0.issuer_sig = priv_key.sign(&msg0).unwrap();
@@ -384,6 +388,7 @@ fn signing_message_includes_tx_type() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
     tx1.issuer_sig = priv_key.sign(&msg1).unwrap();
@@ -424,6 +429,7 @@ fn signing_message_includes_recipient() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
 
     let tx2 = Transaction {
@@ -447,6 +453,7 @@ fn signing_message_includes_recipient() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();
@@ -490,6 +497,7 @@ fn signing_message_includes_amount() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
 
     let tx2 = Transaction {
@@ -513,6 +521,7 @@ fn signing_message_includes_amount() {
         external_attestations: vec![],
         gateway_address: None,
         contract_data: None,
+        expires_at: None,
     };
 
     let msg1 = tx1.compute_signing_message_for_chain(test_chain_id()).unwrap();

@@ -209,7 +209,7 @@ export function init(root, ctx) {
                         <span style="font-size:var(--font-size-lg);color:var(--text-muted);font-weight:600">NOBLE</span>
                     </div>
                 </div>
-                <div style="display:flex;gap:var(--gap-lg);margin-top:var(--gap)">
+                <div class="balance-breakdown">
                     <div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Available</div>
                         <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">${formatAmount(balance.available)}</div>
@@ -300,7 +300,7 @@ export function init(root, ctx) {
                     iconName = '\u2191'; // ↑
                 }
 
-                const counterparty = tx.counterparty ? esc(tx.counterparty).slice(0, 20) : '';
+                const counterparty = tx.recipient ? esc(tx.recipient).slice(0, 20) : '';
 
                 html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:var(--gap-sm) var(--gap);border-radius:var(--radius);cursor:pointer;transition:background 0.15s" class="activity-row" data-txid="${esc(tx.txId || '')}">
                     <div style="display:flex;align-items:center;gap:var(--gap)">

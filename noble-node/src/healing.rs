@@ -2907,8 +2907,10 @@ mod tests {
                 chain_id: Some(0xDEADBEEF), // different chain
                 identity_key: None,
                 proposed_height: None,
+                node_name: None,
                 latency_ms: None,
                 last_ban_reason: None,
+                min_fee_rate: None,
             },
         );
         let groups = compute_fork_groups(

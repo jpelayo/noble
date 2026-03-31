@@ -143,7 +143,7 @@ final class WebBridgeHandler {
                 if let f = e.fee { dict["fee"] = f }
                 if let to = e.total_output { dict["total_output"] = to }
                 if let bh = e.block_height { dict["blockHeight"] = bh }
-                if let cp = e.counterparty { dict["counterparty"] = cp }
+                if let cp = e.recipient { dict["recipient"] = cp }
                 if let s = e.signer { dict["signer"] = s }
                 if let cs = e.checksum { dict["checksum"] = cs }
                 if let hel = e.has_encrypted_locator { dict["has_encrypted_locator"] = hel }
@@ -185,7 +185,7 @@ final class WebBridgeHandler {
                         "fee": p.fee,
                         "status": "pending",
                         "confirmations": 0,
-                        "counterparty": isTransfer ? "Transfer" : "Self (Document)",
+                        "recipient": isTransfer ? "Transfer" : "Self (Document)",
                         "total_output": p.change + p.sent,
                         "transfer_value": p.sent,
                         "timestamp": Date().timeIntervalSince1970,
@@ -530,14 +530,14 @@ final class WebBridgeHandler {
             dict["metadata"] = meta.map { ["key": $0.key, "value": $0.value] as [String: Any] }
         }
 
-        // Use server-computed direction/counterparty/amount when available.
+        // Use server-computed direction/recipient/amount when available.
         // The server has full wire-byte matching across all 3 address variants —
         // more reliable than client-side bech32 string comparison.
         if let dir = tx.direction {
             dict["direction"] = dir
         }
-        if let cp = tx.counterparty {
-            dict["counterparty"] = cp
+        if let cp = tx.recipient {
+            dict["recipient"] = cp
         }
         if let amt = tx.displayAmount {
             dict["amount"] = amt
@@ -553,31 +553,31 @@ final class WebBridgeHandler {
             case .transfer:
                 if tx.signer.nobleBech32 == walletAddr {
                     dict["direction"] = "outgoing"
-                    dict["counterparty"] = dict["counterparty"] ?? tx.outputs.first(where: { $0.address != walletAddr })?.address
+                    dict["recipient"] = dict["recipient"] ?? tx.outputs.first(where: { $0.address != walletAddr })?.address
                 } else {
                     dict["direction"] = "incoming"
-                    dict["counterparty"] = dict["counterparty"] ?? tx.signer.nobleBech32
+                    dict["recipient"] = dict["recipient"] ?? tx.signer.nobleBech32
                 }
             case .coinbase:
                 dict["direction"] = "incoming"
-                dict["counterparty"] = dict["counterparty"] ?? "Block Reward"
+                dict["recipient"] = dict["recipient"] ?? "Block Reward"
             case .notarization, .locked, .unlocking:
                 if tx.signer.nobleBech32 == walletAddr {
                     dict["direction"] = "outgoing"
-                    dict["counterparty"] = dict["counterparty"] ?? "Self (Document)"
+                    dict["recipient"] = dict["recipient"] ?? "Self (Document)"
                 } else {
                     dict["direction"] = "incoming"
-                    dict["counterparty"] = dict["counterparty"] ?? tx.signer.nobleBech32
+                    dict["recipient"] = dict["recipient"] ?? tx.signer.nobleBech32
                 }
             case .keyRotation:
                 dict["direction"] = "self"
-                dict["counterparty"] = dict["counterparty"] ?? "Key Rotation"
+                dict["recipient"] = dict["recipient"] ?? "Key Rotation"
             case .badgeProposal, .badgeVote, .badgeRevocation:
                 dict["direction"] = "self"
-                dict["counterparty"] = dict["counterparty"] ?? "Governance"
+                dict["recipient"] = dict["recipient"] ?? "Governance"
             case .feeDistribution:
                 dict["direction"] = "incoming"
-                dict["counterparty"] = dict["counterparty"] ?? "Fee Distribution"
+                dict["recipient"] = dict["recipient"] ?? "Fee Distribution"
             }
         }
 

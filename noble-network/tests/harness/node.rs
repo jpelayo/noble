@@ -145,7 +145,7 @@ impl TestNode {
         let (tip_height, tip_hash) = self.engine.chain_tip();
         let txs: Vec<Transaction> = self
             .mempool
-            .iter_by_fee_desc()
+            .iter_by_fee_rate_desc()
             .take(100)
             .map(|e| e.tx.clone())
             .collect();

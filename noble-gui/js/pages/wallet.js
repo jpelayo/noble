@@ -374,7 +374,7 @@ export function init(root, ctx) {
       const icon = txIcon(tx.tx_type);
       const label = TX_TYPE_NAMES[tx.tx_type] || tx.type || 'Unknown';
       const statusHtml = txStatusHtml(tx.status, tx.confirmations);
-      const counterparty = tx.counterparty || '';
+      const counterparty = tx.recipient || '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `

@@ -56,7 +56,7 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
     /// Display amount from server (groats).
     public let displayAmount: UInt64?
     /// Counterparty address from server (bech32m or display string).
-    public let counterparty: String?
+    public let recipient: String?
     /// Type label from server (e.g. "Pending Notarization", "Transfer").
     public let typeLabel: String?
 
@@ -78,7 +78,7 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         confirmations: UInt64? = nil,
         direction: String? = nil,
         displayAmount: UInt64? = nil,
-        counterparty: String? = nil,
+        recipient: String? = nil,
         typeLabel: String? = nil
     ) {
         self.txId = txId
@@ -98,7 +98,7 @@ public struct TransactionRecord: Codable, Equatable, Sendable, Identifiable {
         self.confirmations = confirmations
         self.direction = direction
         self.displayAmount = displayAmount
-        self.counterparty = counterparty
+        self.recipient = recipient
         self.typeLabel = typeLabel
     }
 }

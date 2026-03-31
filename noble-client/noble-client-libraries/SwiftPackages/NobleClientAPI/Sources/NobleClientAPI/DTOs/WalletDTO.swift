@@ -132,7 +132,7 @@ public struct WalletTxEntryDTO: Decodable, Sendable {
     public let confirmations: UInt64
     public let block_height: UInt64?
     public let timestamp: UInt64?
-    public let counterparty: String?
+    public let recipient: String?
     public let signer: String?
     public let status: String?
     public let checksum: String?

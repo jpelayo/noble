@@ -492,6 +492,57 @@ mod tests {
         assert!(envelope.validate_lengths().is_err());
     }
 
+    // --- from_wire_bytes: 33-byte SEC1 vs 34-byte wire format ---
+
+    #[test]
+    fn from_wire_33bytes_sec1_02() {
+        // 33 bytes starting with 0x02 = raw SEC1 compressed-even key
+        let mut key = vec![0x02];
+        key.extend_from_slice(&[0xAB; 32]);
+        let pk = NoblePublicKey::from_wire_bytes(&key).unwrap();
+        assert_eq!(pk.key_bytes(), key.as_slice());
+        assert_eq!(pk.scheme_id(), SCHEME_SECP256K1);
+    }
+
+    #[test]
+    fn from_wire_33bytes_sec1_03() {
+        // 33 bytes starting with 0x03 = raw SEC1 compressed-odd key
+        let mut key = vec![0x03];
+        key.extend_from_slice(&[0xCD; 32]);
+        let pk = NoblePublicKey::from_wire_bytes(&key).unwrap();
+        assert_eq!(pk.key_bytes(), key.as_slice());
+    }
+
+    #[test]
+    fn from_wire_34bytes_scheme_02() {
+        // 34 bytes = 0x02 (scheme) + 33-byte SEC1 key
+        let (_, pk_bytes) = secp256k1::generate_keypair();
+        let mut wire = vec![SCHEME_SECP256K1];
+        wire.extend_from_slice(&pk_bytes);
+        assert_eq!(wire.len(), 34);
+        let pk = NoblePublicKey::from_wire_bytes(&wire).unwrap();
+        assert_eq!(pk.key_bytes(), pk_bytes.as_slice());
+    }
+
+    #[test]
+    fn from_wire_33bytes_and_34bytes_same_key() {
+        // Given a real keypair, both 33-byte (raw SEC1) and 34-byte (wire) produce same key
+        let (_, pk_bytes) = secp256k1::generate_keypair();
+        let pk_from_33 = NoblePublicKey::from_wire_bytes(&pk_bytes).unwrap();
+        let mut wire = vec![SCHEME_SECP256K1];
+        wire.extend_from_slice(&pk_bytes);
+        let pk_from_34 = NoblePublicKey::from_wire_bytes(&wire).unwrap();
+        assert_eq!(pk_from_33, pk_from_34);
+    }
+
+    #[test]
+    fn from_wire_33bytes_non_sec1_rejected() {
+        // 33 bytes starting with 0x80 (Bitcoin Hash160 prefix) — not a valid SEC1 key
+        let mut data = vec![0x80];
+        data.extend_from_slice(&[0x00; 32]);
+        assert!(NoblePublicKey::from_wire_bytes(&data).is_err());
+    }
+
     #[test]
     fn noble_public_key_hash_consistent() {
         use std::collections::hash_map::DefaultHasher;

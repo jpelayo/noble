@@ -47,13 +47,17 @@ export function txDisplayAmount(tx) {
     const dir = tx.direction;
 
     switch (txType) {
-        case TX_TYPES.TRANSFER:
+        case TX_TYPES.TRANSFER: {
+            let amt = tx.transfer_value ?? tx.total_output ?? 0;
+            // Self-transfer or address match: transfer_value=0 but total_output>0
+            if (amt === 0 && (tx.total_output ?? 0) > 0) amt = tx.total_output;
             return {
                 label: dir === 'incoming' ? 'Amount Received' : 'Amount Sent',
-                amount: tx.transfer_value ?? tx.total_output ?? 0,
+                amount: amt,
                 showFee: true,
                 direction: dir || 'outgoing',
             };
+        }
         case TX_TYPES.COINBASE:
             return {
                 label: 'Block Reward',

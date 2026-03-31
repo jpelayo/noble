@@ -205,6 +205,82 @@ mod tests {
         assert!(entry.is_mature(100));
     }
 
+    // --- is_mature boundary tests ---
+
+    #[test]
+    fn mature_at_exact_boundary() {
+        // height=100, COINBASE_MATURITY=3 → mature at 100+3=103
+        let entry = UtxoEntry {
+            value: 1000,
+            address: NobleAddress::Noble({
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
+            }),
+            height: 100,
+            is_coinbase: false,
+        };
+        assert!(entry.is_mature(103)); // exactly at boundary
+    }
+
+    #[test]
+    fn immature_one_before_boundary() {
+        let entry = UtxoEntry {
+            value: 1000,
+            address: NobleAddress::Noble({
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
+            }),
+            height: 100,
+            is_coinbase: false,
+        };
+        assert!(!entry.is_mature(102)); // one before boundary
+    }
+
+    #[test]
+    fn mature_one_after_boundary() {
+        let entry = UtxoEntry {
+            value: 1000,
+            address: NobleAddress::Noble({
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
+            }),
+            height: 100,
+            is_coinbase: false,
+        };
+        assert!(entry.is_mature(104)); // one after boundary
+    }
+
+    #[test]
+    fn mature_height_zero() {
+        // Genesis UTXO: height=0, mature at 0+3=3
+        let entry = UtxoEntry {
+            value: 1000,
+            address: NobleAddress::Noble({
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
+            }),
+            height: 0,
+            is_coinbase: true,
+        };
+        assert!(!entry.is_mature(2));
+        assert!(entry.is_mature(3));
+    }
+
+    #[test]
+    fn immature_same_height() {
+        // UTXO at height 100, current height 100 → NOT mature (0 confirmations)
+        let entry = UtxoEntry {
+            value: 1000,
+            address: NobleAddress::Noble({
+                let (_, pk) = noble_crypto::secp256k1::generate_keypair();
+                noble_crypto::NoblePublicKey::Secp256k1(pk)
+            }),
+            height: 100,
+            is_coinbase: false,
+        };
+        assert!(!entry.is_mature(100));
+    }
+
     #[test]
     fn outpoint_hash_set_dedup() {
         use std::collections::HashSet;

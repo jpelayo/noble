@@ -658,7 +658,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                                 all_resolved = false;
                             }
                         }
-                        Err(_) => { all_resolved = false; }
+                        Err(_) => { all_resolved = false; } // pruned UTXO — fee will be None
                     }
                 }
                 if all_resolved && input_total > 0 {
@@ -674,7 +674,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 })
                 .unwrap_or(false);
 
-            // Type-aware direction, amount, counterparty.
+            // Type-aware direction and amount.
             let tx_type_names = [
                 (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
                 (0x03, "Badge Proposal"), (0x04, "Badge Vote"), (0x05, "Badge Revocation"),
@@ -686,20 +686,19 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 .map(|(_, name)| name.to_string())
                 .unwrap_or_else(|| format!("Type 0x{:02x}", tx.tx_type));
 
-            let (direction, amount, counterparty) = if tx.tx_type == 0x11 {
+            let (direction, amount) = if tx.tx_type == 0x11 {
                 // Fee Distribution: fees collected from block transactions.
                 let fee_income: u64 = tx.outputs.iter()
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value)
                     .sum();
-                ("incoming".to_string(), fee_income, Some("Fee Income".to_string()))
+                ("incoming".to_string(), fee_income)
             } else if tx.is_coinbase() {
-                // Block Reward: subsidy only (new format) or subsidy+fees (legacy).
                 let reward: u64 = tx.outputs.iter()
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value)
                     .sum();
-                ("incoming".to_string(), reward, Some("Block Reward".to_string()))
+                ("incoming".to_string(), reward)
             } else if tx.tx_type == 0x01 {
                 // Transfer
                 if is_sender {
@@ -707,58 +706,34 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                         .filter(|o| !is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value)
                         .sum();
-                    let cp = tx.outputs.iter()
-                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
-                        .map(|o| o.address.to_display_address());
-                    ("outgoing".to_string(), sent, cp)
+                    ("outgoing".to_string(), sent)
                 } else {
                     let received: u64 = tx.outputs.iter()
                         .filter(|o| is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value)
                         .sum();
-                    let cp = tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming".to_string(), received, cp)
+                    ("incoming".to_string(), received)
                 }
             } else if tx.tx_type == 0x00 || tx.tx_type == 0x06 || tx.tx_type == 0x07 {
                 // Notarization, Locked, Unlocking
                 let fee_amount = resp.fee.unwrap_or(0);
                 if is_sender {
-                    ("outgoing".to_string(), fee_amount, Some("Self (Document)".to_string()))
+                    ("outgoing".to_string(), fee_amount)
                 } else {
-                    let cp = tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming".to_string(), fee_amount, cp)
+                    ("incoming".to_string(), fee_amount)
                 }
             } else if tx.tx_type == 0x02 {
-                // Key Rotation
-                ("self".to_string(), 0, Some("Key Rotation".to_string()))
+                ("self".to_string(), 0)
             } else {
-                // Badge types (0x03-0x05)
-                ("self".to_string(), 0, Some("Governance".to_string()))
+                ("self".to_string(), 0)
             };
 
-            entries.push(WalletTransactionEntry {
-                tx_id: tx_id_hex,
-                tx_type: tx.tx_type,
-                type_label,
-                direction,
-                amount,
-                counterparty,
-                status,
-                total_output: resp.total_output,
-                transfer_value: resp.transfer_value,
-                fee: resp.fee,
-                checksum: resp.checksum.clone(),
-                timestamp: tx.timestamp,
-                signer: resp.signer.clone(),
-                inputs: resp.inputs.clone(),
-                outputs: resp.outputs.clone(),
-                metadata: resp.metadata.clone(),
-                has_encrypted_locator: resp.has_encrypted_locator,
-                confirmations,
-                block_height: Some(*height),
-            });
+            resp.direction = Some(direction);
+            resp.amount = Some(amount);
+            resp.type_label = Some(type_label);
+            resp.block_height = Some(*height);
+            resp.status = Some(status);
+            entries.push(resp);
         }
 
         // Prepend mempool pending txs — both sent BY and sent TO the wallet.
@@ -803,26 +778,15 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     continue; // Not our tx — skip
                 }
 
-                let (direction, amount, counterparty) = if sender_is_ours {
-                    // Outgoing: we sent it
+                let (direction, amount) = if sender_is_ours {
                     let sent: u64 = entry.tx.outputs.iter()
                         .filter(|o| !is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value)
                         .sum();
-                    let cp = entry.tx.outputs.iter()
-                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
-                        .map(|o| o.address.to_display_address());
-                    ("outgoing", sent, cp)
+                    ("outgoing", sent)
                 } else {
-                    // Incoming: someone sent to us
-                    let cp = entry.tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming", value_to_us, cp)
+                    ("incoming", value_to_us)
                 };
-
-                let signer_display = entry.tx.issuer_sig.to_noble_public_key().ok()
-                    .map(|pk| noble_crypto::noble_addr::encode(&pk))
-                    .unwrap_or_default();
 
                 let tx_type_names = [
                     (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
@@ -835,37 +799,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     .map(|(_, name)| format!("Pending {name}"))
                     .unwrap_or_else(|| "Pending".to_string());
 
-                pending_entries.push(WalletTransactionEntry {
-                    tx_id: hex::encode(entry.tx_id.as_bytes()),
-                    tx_type: entry.tx.tx_type,
-                    type_label,
-                    direction: direction.to_string(),
-                    amount,
-                    counterparty,
-                    status: "pending".to_string(),
-                    total_output: entry.tx.total_output_value(),
-                    transfer_value: amount,
-                    fee: Some(entry.fee),
-                    checksum: hex::encode(entry.tx.checksum.as_bytes()),
-                    timestamp: entry.tx.timestamp,
-                    signer: signer_display,
-                    inputs: entry.tx.inputs.iter().map(|i| TxInputResponse {
-                        txid: hex::encode(i.prev_output.txid.as_bytes()),
-                        vout: i.prev_output.vout,
-                    }).collect(),
-                    outputs: entry.tx.outputs.iter().map(|o| TxOutputResponse {
-                        value: o.value,
-                        address: o.address.to_display_address(),
-                    }).collect(),
-                    metadata: entry.tx.metadata.iter().map(|m| MetadataResponse {
-                        key: m.key.clone(),
-                        value: String::from_utf8(m.value.clone())
-                            .unwrap_or_else(|_| hex::encode(&m.value)),
-                    }).collect(),
-                    has_encrypted_locator: entry.tx.encrypted_locator.is_some(),
-                    confirmations: 0,
-                    block_height: None,
-                });
+                let tx_id_hex = hex::encode(entry.tx_id.as_bytes());
+                let mut resp = tx_to_response(&entry.tx, &tx_id_hex);
+                resp.fee = Some(entry.fee);
+                resp.confirmation_status = Some("pending".to_string());
+                resp.confirmations = Some(0);
+                resp.direction = Some(direction.to_string());
+                resp.amount = Some(amount);
+                resp.type_label = Some(type_label);
+                resp.block_height = None;
+                resp.status = Some("pending".to_string());
+                pending_entries.push(resp);
             }
         }
 
@@ -947,13 +891,19 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         for a in &all_addrs {
             let ids = match storage.get_address_history(a, 0, 1000) {
                 Ok(ids) => ids,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(task = "wallet_snapshot", "address history lookup failed for {}: {e}", a.to_display_address());
+                    continue;
+                }
             };
             for id in ids {
                 if !seen.insert(id) { continue; }
                 match storage.get_transaction_location(&id) {
                     Ok((h, _)) => all_tx_ids.push((id, h)),
-                    Err(_) => continue,
+                    Err(e) => {
+                        tracing::warn!(task = "wallet_snapshot", "tx location lookup failed for {}: {e}", hex::encode(id.as_bytes()));
+                        continue;
+                    }
                 }
             }
         }
@@ -963,7 +913,10 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         for (tx_id, height) in &all_tx_ids {
             let tx = match storage.get_transaction(tx_id) {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(task = "wallet_snapshot", "failed to read tx {}: {e}", hex::encode(tx_id.as_bytes()));
+                    continue;
+                }
             };
 
             let tx_id_hex = hex::encode(tx_id.as_bytes());
@@ -984,7 +937,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                                 input_total += out.value;
                             } else { all_resolved = false; }
                         }
-                        Err(_) => { all_resolved = false; }
+                        Err(_) => { all_resolved = false; } // pruned UTXO — fee will be None
                     }
                 }
                 if all_resolved && input_total > 0 {
@@ -1007,69 +960,47 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 .map(|(_, name)| name.to_string())
                 .unwrap_or_else(|| format!("Type 0x{:02x}", tx.tx_type));
 
-            let (direction, amount, counterparty) = if tx.tx_type == 0x11 {
+            let (direction, amount) = if tx.tx_type == 0x11 {
                 let fee_income: u64 = tx.outputs.iter()
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value).sum();
-                ("incoming".to_string(), fee_income, Some("Fee Income".to_string()))
+                ("incoming".to_string(), fee_income)
             } else if tx.is_coinbase() {
                 let reward: u64 = tx.outputs.iter()
                     .filter(|o| is_ours(&o.address.to_wire_bytes()))
                     .map(|o| o.value).sum();
-                ("incoming".to_string(), reward, Some("Block Reward".to_string()))
+                ("incoming".to_string(), reward)
             } else if tx.tx_type == 0x01 {
                 if is_sender {
                     let sent: u64 = tx.outputs.iter()
                         .filter(|o| !is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value).sum();
-                    let cp = tx.outputs.iter()
-                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
-                        .map(|o| o.address.to_display_address());
-                    ("outgoing".to_string(), sent, cp)
+                    ("outgoing".to_string(), sent)
                 } else {
                     let received: u64 = tx.outputs.iter()
                         .filter(|o| is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value).sum();
-                    let cp = tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming".to_string(), received, cp)
+                    ("incoming".to_string(), received)
                 }
             } else if tx.tx_type == 0x00 || tx.tx_type == 0x06 || tx.tx_type == 0x07 {
                 let fee_amount = resp.fee.unwrap_or(0);
                 if is_sender {
-                    ("outgoing".to_string(), fee_amount, Some("Self (Document)".to_string()))
+                    ("outgoing".to_string(), fee_amount)
                 } else {
-                    let cp = tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming".to_string(), fee_amount, cp)
+                    ("incoming".to_string(), fee_amount)
                 }
             } else if tx.tx_type == 0x02 {
-                ("self".to_string(), 0, Some("Key Rotation".to_string()))
+                ("self".to_string(), 0)
             } else {
-                ("self".to_string(), 0, Some("Governance".to_string()))
+                ("self".to_string(), 0)
             };
 
-            entries.push(WalletTransactionEntry {
-                tx_id: tx_id_hex,
-                tx_type: tx.tx_type,
-                type_label,
-                direction,
-                amount,
-                counterparty,
-                status,
-                total_output: resp.total_output,
-                transfer_value: resp.transfer_value,
-                fee: resp.fee,
-                checksum: resp.checksum.clone(),
-                timestamp: tx.timestamp,
-                signer: resp.signer.clone(),
-                inputs: resp.inputs.clone(),
-                outputs: resp.outputs.clone(),
-                metadata: resp.metadata.clone(),
-                has_encrypted_locator: resp.has_encrypted_locator,
-                confirmations,
-                block_height: Some(*height),
-            });
+            resp.direction = Some(direction);
+            resp.amount = Some(amount);
+            resp.type_label = Some(type_label);
+            resp.block_height = Some(*height);
+            resp.status = Some(status);
+            entries.push(resp);
         }
 
         // Prepend pending mempool txs.
@@ -1086,23 +1017,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     .map(|o| o.value).sum();
                 if !sender_is_ours && value_to_us == 0 { continue; }
 
-                let (dir, amt, cp) = if sender_is_ours {
+                let (dir, amt) = if sender_is_ours {
                     let sent: u64 = entry.tx.outputs.iter()
                         .filter(|o| !is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value).sum();
-                    let cp = entry.tx.outputs.iter()
-                        .find(|o| !is_ours(&o.address.to_wire_bytes()))
-                        .map(|o| o.address.to_display_address());
-                    ("outgoing", sent, cp)
+                    ("outgoing", sent)
                 } else {
-                    let cp = entry.tx.issuer_sig.to_noble_public_key().ok()
-                        .map(|pk| noble_crypto::noble_addr::encode(&pk));
-                    ("incoming", value_to_us, cp)
+                    ("incoming", value_to_us)
                 };
-
-                let signer_display = entry.tx.issuer_sig.to_noble_public_key().ok()
-                    .map(|pk| noble_crypto::noble_addr::encode(&pk))
-                    .unwrap_or_default();
 
                 let type_label = [
                     (0x00, "Notarization"), (0x01, "Transfer"), (0x02, "Key Rotation"),
@@ -1114,37 +1036,17 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                     .map(|(_, name)| format!("Pending {name}"))
                     .unwrap_or_else(|| "Pending".to_string());
 
-                pending_entries.push(WalletTransactionEntry {
-                    tx_id: hex::encode(entry.tx_id.as_bytes()),
-                    tx_type: entry.tx.tx_type,
-                    type_label,
-                    direction: dir.to_string(),
-                    amount: amt,
-                    counterparty: cp,
-                    status: "pending".to_string(),
-                    total_output: entry.tx.total_output_value(),
-                    transfer_value: amt,
-                    fee: Some(entry.fee),
-                    checksum: hex::encode(entry.tx.checksum.as_bytes()),
-                    timestamp: entry.tx.timestamp,
-                    signer: signer_display,
-                    inputs: entry.tx.inputs.iter().map(|i| TxInputResponse {
-                        txid: hex::encode(i.prev_output.txid.as_bytes()),
-                        vout: i.prev_output.vout,
-                    }).collect(),
-                    outputs: entry.tx.outputs.iter().map(|o| TxOutputResponse {
-                        value: o.value,
-                        address: o.address.to_display_address(),
-                    }).collect(),
-                    metadata: entry.tx.metadata.iter().map(|m| MetadataResponse {
-                        key: m.key.clone(),
-                        value: String::from_utf8(m.value.clone())
-                            .unwrap_or_else(|_| hex::encode(&m.value)),
-                    }).collect(),
-                    has_encrypted_locator: entry.tx.encrypted_locator.is_some(),
-                    confirmations: 0,
-                    block_height: None,
-                });
+                let tx_id_hex = hex::encode(entry.tx_id.as_bytes());
+                let mut resp = tx_to_response(&entry.tx, &tx_id_hex);
+                resp.fee = Some(entry.fee);
+                resp.confirmation_status = Some("pending".to_string());
+                resp.confirmations = Some(0);
+                resp.direction = Some(dir.to_string());
+                resp.amount = Some(amt);
+                resp.type_label = Some(type_label);
+                resp.block_height = None;
+                resp.status = Some("pending".to_string());
+                pending_entries.push(resp);
             }
         }
 

@@ -1,0 +1,99 @@
+# Default NOBLE node configuration.
+#
+# This file is the reference config shipped with the repository.
+# It uses all default values — any missing key falls back to the same
+# defaults at runtime, so the file can safely be trimmed.
+
+[node]
+role = "observer"
+
+[network]
+listen_addr = "/ip4/0.0.0.0/tcp/8780"
+seeds = ["/dns4/node.infinitecontext.com/tcp/8780"]
+max_peers = 50
+ban_threshold = 100
+
+[storage]
+data_dir = "data"
+cache_size_mb = 256
+compression = true
+pruning_mode = "archive"
+keep_blocks = 0
+max_db_size_gb = 0
+
+[consensus]
+validator_key_path = ""
+validator_list_path = "validators.txt"
+voting_strategy = "weighted_probability"
+confirmation_strategy = "follow_majority"
+voting_preferred_validator = ""
+voting_subset = []
+fork_resolution_strategy = "longest_most_legitimate"
+fork_resolution_delay_cycles = 3
+min_fee_rate = 1
+
+[api]
+rpc_addr = "127.0.0.1:8783"
+ws_addr = "127.0.0.1:8784"
+max_connections = 100
+rate_limit = 30
+totp_enabled = false
+totp_scope = "all"
+totp_secret_file = ""
+gui_addr = "127.0.0.1:8785"
+gui_dir = ""
+allowed_ips = []
+tls_enabled = true
+tls_san = []
+tls_allow_plaintext_fallback = false
+remote_setup = false
+
+[wallet]
+keystore_path = "keystore.noble"
+
+[logging]
+level = "info"
+file = ""
+rotation = "daily"
+
+[metrics]
+prometheus_addr = "127.0.0.1:8787"
+enabled = false
+
+[identity]
+node_name = ""
+org_type = "Individual"
+org_name = ""
+node_role = "FullNode"
+contact_email = ""
+website = ""
+host_address = ""
+country_code = ""
+wants_to_validate = false
+wants_to_vote = false
+pkcs12_path = ""
+pkcs12_password = ""
+ca_store_path = ""
+
+[trace]
+buffer_capacity = 50000
+initial_filter = "info"
+stderr_enabled = true
+
+[gateway]
+key_path = ""
+enabled = true
+
+[rewards]
+reward_address = ""
+
+[security]
+encryption_mode = "automatic"
+
+[faucet]
+discovery_enabled = true
+probe_interval_cycles = 36
+probe_port = 8786
+server_enabled = true
+server_port = 8786
+address = ""

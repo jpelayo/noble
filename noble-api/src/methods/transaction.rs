@@ -224,6 +224,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             let confs = tip.saturating_sub(tx_height) + 1;
             resp.confirmations = Some(confs);
             resp.confirmation_status = Some(confirmation_status_label(Some(confs)));
+            resp.block_height = Some(tx_height);
         }
         Ok(resp)
     }
@@ -304,6 +305,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         let mut tx_resp = tx_to_response(&tx, &tx_id);
         tx_resp.confirmations = confirmations;
         tx_resp.confirmation_status = Some(confirmation_status_label(confirmations));
+        tx_resp.block_height = Some(height);
 
         Ok(TransactionReceiptResponse {
             tx_id: tx_id.clone(),

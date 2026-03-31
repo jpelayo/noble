@@ -135,6 +135,7 @@ export function init(root, ctx) {
         if (tx.blockHeight != null) html += row('Block Height', String(tx.blockHeight));
         if (tx.confirmations != null) html += row('Confirmations', String(tx.confirmations));
         if (tx.signer) html += row('Signer', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.signer)}</span>`);
+        if (tx.recipient) html += row('Recipient', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.recipient)}</span>`);
 
         html += '</dl>';
         grid.innerHTML = html;

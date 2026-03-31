@@ -1095,7 +1095,7 @@ impl StorageEngine for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY, TX_TYPE_COINBASE, TX_TYPE_TRANSFER};
+    use noble_core::constants::{HALVING_INTERVAL, INITIAL_SUBSIDY, TX_TYPE_COINBASE, TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER};
     use noble_core::{Block, BlockHeader, OutPoint, Transaction, TxIn, TxOut, PROTOCOL_VERSION};
     use noble_test_utils::fixtures::test_chain_id;
     use noble_crypto::{
@@ -1156,7 +1156,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         let msg = tx.compute_signing_message_for_chain(chain_id).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
@@ -1185,7 +1186,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
@@ -1219,7 +1221,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
@@ -2066,7 +2069,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();

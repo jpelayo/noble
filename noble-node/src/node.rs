@@ -5613,7 +5613,8 @@ mod tests {
             encrypted_locator: None,
             external_attestations: vec![],
             gateway_address: None,
-        contract_data: None,
+            contract_data: None,
+            expires_at: None,
         };
         let cb_msg = coinbase.compute_signing_message_for_chain(chain_id).unwrap();
         coinbase.issuer_sig = priv_key.sign(&cb_msg).unwrap();
@@ -5664,7 +5665,7 @@ mod tests {
 
         // Attempt sync import directly — this should NOT commit block 1
         // because sync import bypasses the dual-witness check.
-        let result = node.healing.try_sync_import(&block1);
+        let result = node.healing.try_sync_import(&block1, None);
         // The sync import may accept or reject on structural grounds,
         // but even if it accepts, the node-level routing code should
         // never call try_sync_import for block 1 at tip_height=0.

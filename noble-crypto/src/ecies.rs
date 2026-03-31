@@ -448,6 +448,6 @@ mod tests {
 
     #[test]
     fn single_truncated_payload_rejected() {
-        assert!(decrypt_single(&[0u8; 120], &NoblePrivateKey::Secp256k1([0u8; 32])).is_err());
+        assert!(decrypt_single(&[0u8; 120], &NoblePrivateKey::Secp256k1([0u8; 32].to_vec())).is_err());
     }
 }

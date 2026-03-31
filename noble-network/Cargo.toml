@@ -30,3 +30,4 @@ noble-consensus.workspace = true
 noble-mempool.workspace = true
 noble-storage.workspace = true
 noble-codec.workspace = true
+parking_lot.workspace = true

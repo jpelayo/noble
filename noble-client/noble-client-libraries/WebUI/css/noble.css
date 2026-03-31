@@ -1616,6 +1616,7 @@ body {
 .home-hero-grid { display: grid; grid-template-columns: 1fr 320px; gap: var(--gap-lg); margin-bottom: 0; }
 .action-buttons { display: flex; gap: var(--gap); }
 .skeleton-balance { height: 200px; border-radius: var(--radius); }
+.balance-breakdown { display: flex; gap: var(--gap-lg); margin-top: var(--gap); }
 .skeleton-section { height: 300px; border-radius: var(--radius); }
 .tx-detail-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
 
@@ -1632,6 +1633,9 @@ body {
   .action-buttons > * { width: 100%; }
   .tx-detail-dl { grid-template-columns: 1fr; }
   .tx-detail-dl dt { font-weight: 600; margin-top: var(--gap-sm); }
+  /* Balance breakdown: smaller gap + font on mobile */
+  .balance-breakdown { gap: var(--gap-sm); flex-wrap: wrap; }
+  .balance-breakdown .mono { font-size: var(--font-size-sm) !important; }
   /* Prevent address/hash overflow on narrow screens */
   .card .mono, .panel .mono { word-break: break-all; overflow-wrap: anywhere; }
 

@@ -248,6 +248,7 @@ export function init(root, ctx) {
     if (tx.signer) {
       sigPanel.innerHTML = `<div class="panel-header">Issuer Signature</div><div class="panel-body"><dl class="detail-grid">
         <dt>Signer</dt><dd>${tx.signer_name ? `<strong>${tx.signer_name}</strong> ` : ''}<span class="mono"><a href="#/verify?tab=issuer&issuer=${tx.signer}" title="View all documents by this issuer">${tx.signer}</a></span></dd>
+        ${tx.recipient ? `<dt>Recipient</dt><dd><span class="mono">${tx.recipient}</span></dd>` : ''}
       </dl></div>`;
     } else if (tx.issuer_sig) {
       sigPanel.innerHTML = `<div class="panel-header">Issuer Signature</div><div class="panel-body"><dl class="detail-grid">
