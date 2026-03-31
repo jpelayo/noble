@@ -665,7 +665,7 @@ export function init(root, ctx) {
                         </div>
                         <div style="display:flex;align-items:center;gap:var(--gap-sm)">
                             <label style="font-size:var(--font-size-xs)">Port</label>
-                            <input type="number" class="form-input" id="settings-rpc-port" value="${rpcPort}" min="1024" max="65535" style="width:80px;font-size:var(--font-size-xs);padding:2px 6px">
+                            <input type="number" class="form-input" id="settings-rpc-port" value="${rpcPort}" min="1024" max="65535" style="width:100%;max-width:120px;font-size:var(--font-size-xs);padding:2px 6px">
                         </div>
                         <div style="margin-top:var(--gap-xs)">
                             <code style="font-size:var(--font-size-xs);color:var(--text-muted)">curl -X POST http://127.0.0.1:${rpcPort} -d '{"method":"noble.getBalance",...}'</code>
@@ -686,7 +686,7 @@ export function init(root, ctx) {
                         </div>
                         <div style="display:flex;align-items:center;gap:var(--gap-sm)">
                             <label style="font-size:var(--font-size-xs)">Port</label>
-                            <input type="number" class="form-input" id="settings-mcp-port" value="${mcpPort}" min="1024" max="65535" style="width:80px;font-size:var(--font-size-xs);padding:2px 6px">
+                            <input type="number" class="form-input" id="settings-mcp-port" value="${mcpPort}" min="1024" max="65535" style="width:100%;max-width:120px;font-size:var(--font-size-xs);padding:2px 6px">
                         </div>
                     </div>
                 </div>

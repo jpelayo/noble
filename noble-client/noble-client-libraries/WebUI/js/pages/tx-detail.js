@@ -108,7 +108,7 @@ export function init(root, ctx) {
         const grid = document.createElement('div');
         grid.className = 'panel';
         grid.style.cssText = 'padding:var(--gap-lg);margin-bottom:var(--gap-lg)';
-        let html = '<dl style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0">';
+        let html = '<dl class="tx-detail-dl">';
         html += row('TX ID', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.txId || txid)}</span>`);
         html += row('Type', formatTxType(txType));
         if (tx.timestamp) html += row('Time', formatTime(tx.timestamp));

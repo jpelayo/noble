@@ -19,7 +19,7 @@ export function init(root, ctx) {
         root.classList.add('page-content');
         const defaultSeed = 'https://node.infinitecontext.com:8783';
         const welcome = document.createElement('div');
-        welcome.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:var(--gap)';
+        welcome.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh;text-align:center;padding:var(--gap)';
         welcome.innerHTML = `
             <div style="font-size:64px;margin-bottom:var(--gap)">&#x2B22;</div>
             <h1 style="margin:0 0 8px">Welcome to Noble</h1>
@@ -89,7 +89,6 @@ export function init(root, ctx) {
     }
 
     root.classList.add('page-content');
-    root.style.padding = 'var(--gap-xl)';
 
     // Node alignment status card
     const alignmentBanner = document.createElement('div');
@@ -105,7 +104,7 @@ export function init(root, ctx) {
 
     // Two-column grid: Recent Activity (left, wide) + Quick Actions (right, narrow)
     const grid = document.createElement('div');
-    grid.style.cssText = 'display:grid;grid-template-columns:1fr 320px;gap:var(--gap-lg);margin-top:var(--gap-lg)';
+    grid.className = 'home-grid';
     const activityContainer = document.createElement('div');
     const actionsContainer = document.createElement('div');
     grid.appendChild(activityContainer);
@@ -113,9 +112,9 @@ export function init(root, ctx) {
     root.appendChild(grid);
 
     // Skeletons
-    balanceContainer.innerHTML = '<div class="skeleton" style="height:200px;border-radius:var(--radius)"></div>';
-    activityContainer.innerHTML = '<div class="skeleton" style="height:300px;border-radius:var(--radius)"></div>';
-    actionsContainer.innerHTML = '<div class="skeleton" style="height:300px;border-radius:var(--radius)"></div>';
+    balanceContainer.innerHTML = '<div class="skeleton skeleton-balance"></div>';
+    activityContainer.innerHTML = '<div class="skeleton skeleton-section"></div>';
+    actionsContainer.innerHTML = '<div class="skeleton skeleton-section"></div>';
 
     let loadInFlight = false;
 
@@ -197,7 +196,7 @@ export function init(root, ctx) {
         container.innerHTML = '';
         const chainId = state.chainId || '';
         const el = document.createElement('div');
-        el.style.cssText = 'display:grid;grid-template-columns:1fr 320px;gap:var(--gap-lg);margin-bottom:0';
+        el.className = 'home-hero-grid';
 
         // Hero balance card
         const heroHtml = `

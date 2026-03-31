@@ -48,11 +48,12 @@ export function init(root, ctx) {
 
         // Action buttons — card-style
         const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex;gap:var(--gap);margin:var(--gap-lg) 0';
+        actions.className = 'action-buttons';
+        actions.style.margin = 'var(--gap-lg) 0';
 
         const sendBtn = document.createElement('button');
         sendBtn.className = 'panel';
-        sendBtn.style.cssText = 'flex:1;padding:var(--gap-lg);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        sendBtn.style.cssText = 'flex:1;padding:var(--gap);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
         sendBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--accent)">\u{1F680}</div><div><div style="font-weight:700">Send</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer NOBLE</div></div>';
         sendBtn.addEventListener('click', openSendWizard);
         sendBtn.addEventListener('mouseenter', () => { sendBtn.style.borderColor = 'var(--accent)'; sendBtn.style.transform = 'translateY(-1px)'; });
@@ -60,7 +61,7 @@ export function init(root, ctx) {
 
         const recvBtn = document.createElement('button');
         recvBtn.className = 'panel';
-        recvBtn.style.cssText = 'flex:1;padding:var(--gap-lg);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        recvBtn.style.cssText = 'flex:1;padding:var(--gap);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
         recvBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:color-mix(in srgb, var(--success) 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--success)">\u{1F4E5}</div><div><div style="font-weight:700">Receive</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Your address & QR</div></div>';
         recvBtn.addEventListener('click', openReceiveModal);
         recvBtn.addEventListener('mouseenter', () => { recvBtn.style.borderColor = 'var(--success)'; recvBtn.style.transform = 'translateY(-1px)'; });

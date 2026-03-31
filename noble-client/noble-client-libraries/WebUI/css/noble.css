@@ -1611,8 +1611,28 @@ body {
   }
 }
 
+/* ── Responsive layout classes ── */
+.home-grid { display: grid; grid-template-columns: 1fr 320px; gap: var(--gap-lg); margin-top: var(--gap-lg); }
+.home-hero-grid { display: grid; grid-template-columns: 1fr 320px; gap: var(--gap-lg); margin-bottom: 0; }
+.action-buttons { display: flex; gap: var(--gap); }
+.skeleton-balance { height: 200px; border-radius: var(--radius); }
+.skeleton-section { height: 300px; border-radius: var(--radius); }
+.tx-detail-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+
+@media (max-width: 768px) {
+  .home-grid, .home-hero-grid { grid-template-columns: 1fr; }
+}
+
 /* ── Mobile (max-width: 480px) ── */
 @media (max-width: 480px) {
+  .home-grid, .home-hero-grid { grid-template-columns: 1fr; }
+  .skeleton-balance { height: 120px; }
+  .skeleton-section { height: 140px; }
+  .action-buttons { flex-direction: column; }
+  .action-buttons > * { width: 100%; }
+  .tx-detail-dl { grid-template-columns: 1fr; }
+  .tx-detail-dl dt { font-weight: 600; margin-top: var(--gap-sm); }
+
   #app-content {
     padding: var(--gap) var(--gap-sm);
   }
