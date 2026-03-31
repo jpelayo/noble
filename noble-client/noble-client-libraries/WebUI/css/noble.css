@@ -1632,6 +1632,8 @@ body {
   .action-buttons > * { width: 100%; }
   .tx-detail-dl { grid-template-columns: 1fr; }
   .tx-detail-dl dt { font-weight: 600; margin-top: var(--gap-sm); }
+  /* Prevent address/hash overflow on narrow screens */
+  .card .mono, .panel .mono { word-break: break-all; overflow-wrap: anywhere; }
 
   #app-content {
     padding: var(--gap) var(--gap-sm);

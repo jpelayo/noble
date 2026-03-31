@@ -33,6 +33,7 @@ struct NodeConnectionStepView: View {
                 TextField(defaultNodeHostname, text: $nodeIP)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
+                    .autocorrectionDisabled()
                     .onChange(of: nodeIP) { _, newValue in
                         if newValue.count > Self.maxInputLength {
                             nodeIP = String(newValue.prefix(Self.maxInputLength))

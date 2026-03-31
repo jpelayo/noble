@@ -50,6 +50,12 @@ export function init(root, ctx) {
 
         root.querySelector('#tx-loading')?.remove();
 
+        // Clear previous content on refresh (prevents duplication)
+        const prev = root.querySelector('#tx-content');
+        if (prev) prev.remove();
+        const content = document.createElement('div');
+        content.id = 'tx-content';
+
         const txType = tx.tx_type ?? parseTypeFromLabel(tx.type);
         const metadata = tx.metadata || [];
         const { system, user, signatures } = classifyMetadata(metadata, txType);
@@ -93,7 +99,7 @@ export function init(root, ctx) {
         } else {
             heroEl.style.display = 'none';
         }
-        root.appendChild(heroEl);
+        content.appendChild(heroEl);
 
         // Copy button
         root.querySelector('#copy-checksum')?.addEventListener('click', () => {
@@ -132,18 +138,22 @@ export function init(root, ctx) {
 
         html += '</dl>';
         grid.innerHTML = html;
-        root.appendChild(grid);
+        content.appendChild(grid);
 
         // ── Inputs ──
         const inputs = tx.inputs || [];
-        if (inputs.length > 0) {
+        const inputCount = tx.input_count ?? inputs.length;
+        if (inputCount > 0) {
             const panel = document.createElement('div');
             panel.className = 'card';
             panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
-            const isCoinbase = inputs.length === 1 && /^0+$/.test(inputs[0].txid);
-            let ihtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Inputs (${inputs.length})</h3>`;
+            const isCoinbase = inputs.length === 1 && /^0+$/.test(inputs[0]?.txid);
+            let ihtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Inputs (${inputCount})</h3>`;
             if (isCoinbase) {
                 ihtml += '<div style="color:var(--text-muted);font-size:var(--font-size-xs)">Coinbase (new coins minted by the network)</div>';
+            } else if (inputs.length === 0 && inputCount > 0) {
+                // Transfer: inputs stripped for privacy — show count only
+                ihtml += `<div style="color:var(--text-muted);font-size:var(--font-size-xs)">${inputCount} UTXO${inputCount > 1 ? 's' : ''} consolidated</div>`;
             } else {
                 for (let i = 0; i < inputs.length; i++) {
                     ihtml += `<div style="margin-bottom:4px;font-size:var(--font-size-xs)">
@@ -153,7 +163,7 @@ export function init(root, ctx) {
                 }
             }
             panel.innerHTML = ihtml;
-            root.appendChild(panel);
+            content.appendChild(panel);
         }
 
         // ── Outputs ──
@@ -170,7 +180,7 @@ export function init(root, ctx) {
                 </div>`;
             }
             panel.innerHTML = ohtml;
-            root.appendChild(panel);
+            content.appendChild(panel);
         }
 
         // ── User Metadata ──
@@ -203,7 +213,7 @@ export function init(root, ctx) {
                 </div>`;
             }
             panel.innerHTML = mhtml;
-            root.appendChild(panel);
+            content.appendChild(panel);
 
             // Wire up Decrypt buttons
             for (const entry of user) {
@@ -239,8 +249,9 @@ export function init(root, ctx) {
             locEl.className = 'card';
             locEl.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap);border-left:3px solid var(--accent)';
             locEl.innerHTML = '<span class="badge" style="background:var(--accent);color:#fff;font-size:0.6rem;padding:1px 6px">Encrypted Locator</span> Available';
-            root.appendChild(locEl);
+            content.appendChild(locEl);
         }
+        root.appendChild(content);
         loadInFlight = false;
     }
 

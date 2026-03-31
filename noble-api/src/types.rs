@@ -197,13 +197,20 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
     let transfer_value = match &signer_wire {
         Some(sw) if !tx.is_coinbase() => {
-            tx.outputs.iter()
+            let non_signer: u64 = tx.outputs.iter()
                 .filter(|o| o.address.to_wire_bytes() != *sw)
                 .map(|o| o.value)
-                .sum()
+                .sum();
+            // Self-transfer: all outputs go to signer → use total_output
+            if non_signer == 0 { tx.total_output_value() } else { non_signer }
         }
         _ => tx.total_output_value(),
     };
+
+    // Privacy: strip input hashes for transfers — exposes UTXO history unnecessarily.
+    // Non-transfer types (coinbase, notarization) have 1-2 inputs and are non-sensitive.
+    let is_transfer = tx.tx_type == noble_core::TX_TYPE_TRANSFER;
+    let input_count = tx.inputs.len() as u32;
 
     TransactionResponse {
         tx_id: tx_id.to_string(),
@@ -213,10 +220,15 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         total_output: tx.total_output_value(),
         transfer_value,
         fee: None, // Set by caller when UTXO data is available
-        inputs: tx.inputs.iter().map(|i| TxInputResponse {
-            txid: hash_to_hex(&i.prev_output.txid),
-            vout: i.prev_output.vout,
-        }).collect(),
+        input_count,
+        inputs: if is_transfer {
+            vec![]
+        } else {
+            tx.inputs.iter().map(|i| TxInputResponse {
+                txid: hash_to_hex(&i.prev_output.txid),
+                vout: i.prev_output.vout,
+            }).collect()
+        },
         outputs: tx.outputs.iter().map(|o| TxOutputResponse {
             value: o.value,
             address: o.address.to_display_address(),
@@ -311,7 +323,10 @@ pub struct TransactionResponse {
     /// `None` for coinbase transactions or if input UTXOs are unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee: Option<u64>,
+    /// Number of inputs (always present; inputs[] may be empty for transfers — privacy).
+    pub input_count: u32,
     /// Inputs: references to spent UTXOs.
+    /// Empty for transfer transactions (privacy: hides UTXO history). Use input_count instead.
     pub inputs: Vec<TxInputResponse>,
     /// Outputs: new UTXOs created.
     pub outputs: Vec<TxOutputResponse>,
