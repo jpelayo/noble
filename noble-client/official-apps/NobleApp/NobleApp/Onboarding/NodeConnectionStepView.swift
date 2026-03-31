@@ -87,6 +87,9 @@ struct NodeConnectionStepView: View {
         }
         .padding()
         .onAppear {
+            // Cancel any stale reconnect timer from a previous session
+            appState.cancelReconnect()
+            appState.connectionError = nil
             // Extract IP from saved URL if present
             if let url = URL(string: appState.nodeURL), let host = url.host {
                 nodeIP = host

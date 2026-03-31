@@ -40,7 +40,7 @@ struct NobleAppApp: App {
                 case .active:
                     if appState.isConnected {
                         appState.startPolling()
-                    } else if !appState.nodeURL.isEmpty {
+                    } else if appState.hasCompletedOnboarding && !appState.nodeURL.isEmpty {
                         Task { await appState.connectToNode() }
                     }
                 case .background, .inactive:

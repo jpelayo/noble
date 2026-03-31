@@ -372,6 +372,12 @@ final class AppState {
         }
     }
 
+    /// Cancel any pending reconnect timer (e.g. when entering onboarding).
+    func cancelReconnect() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+    }
+
     /// Schedule repeating reconnect attempts (10s interval).
     /// Self-cancels when connectToNode succeeds.
     private func scheduleReconnect() {
