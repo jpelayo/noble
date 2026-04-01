@@ -91,6 +91,7 @@ export function init(root, ctx) {
     root.classList.add('page-content');
 
     // Node alignment status card
+    let lastBannerState = '';
     const alignmentBanner = document.createElement('div');
     alignmentBanner.id = 'home-alignment-banner';
     alignmentBanner.style.marginBottom = 'var(--gap)';
@@ -307,7 +308,7 @@ export function init(root, ctx) {
                     </div>
                     <div style="text-align:right;flex-shrink:0;white-space:nowrap">
                         <div class="mono" style="font-weight:700;font-size:0.8rem;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + signedAmt : ''}</div>
-                        <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
+                        <div data-role="status" style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
                     </div>
                 </div>`;
             }
@@ -377,11 +378,12 @@ export function init(root, ctx) {
 
     return {
         destroy() { alive = false; },
-        refresh(newState) {
+        async refresh(newState) {
             Object.assign(state, newState);
-            renderAlignmentBanner(alignmentBanner, state);
-            // In-place balance update — no DOM rebuild, no scroll reset.
-            // Full loadDashboard() only runs on first mount and manual refresh.
+            // Banner: only re-render if nodeState changed (avoids innerHTML wipe)
+            const ns = state.nodeState || '';
+            if (ns !== lastBannerState) { lastBannerState = ns; renderAlignmentBanner(alignmentBanner, state); }
+            // Balance leaf-node updates — zero DOM mutation
             const fmt = formatAmount;
             const total = root.querySelector('#bal-total');
             if (total && newState.walletBalance != null) total.textContent = fmt(newState.walletBalance);
@@ -394,6 +396,21 @@ export function init(root, ctx) {
             }
             const mat = root.querySelector('#bal-maturing');
             if (mat && newState.walletImmature != null) mat.textContent = fmt(newState.walletImmature);
+            // Status badge updates — zero DOM mutation (leaf textContent only)
+            try {
+                const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
+                if (!alive) return;
+                const txMap = new Map((snap.transactions || []).map(t => [t.txId || t.tx_id, t]));
+                root.querySelectorAll('.activity-row').forEach(row => {
+                    const tx = txMap.get(row.dataset.txid);
+                    if (!tx) return;
+                    const el = row.querySelector('[data-role="status"]');
+                    if (el) {
+                        const b = txStatusBadge(tx.confirmations, tx.status);
+                        el.textContent = b.html.replace(/<[^>]+>/g, '');
+                    }
+                });
+            } catch { /* silent — balance already updated */ }
         }
     };
 }

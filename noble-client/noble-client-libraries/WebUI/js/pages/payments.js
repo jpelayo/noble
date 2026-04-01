@@ -238,7 +238,7 @@ export function init(root, ctx) {
                 </div>
                 <div style="text-align:right;flex-shrink:0;white-space:nowrap">
                     <div class="mono" style="font-weight:700;font-size:0.8rem;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + amount : ''}</div>
-                    <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
+                    <div data-role="status" style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
                 </div>
             </div>`;
         }
@@ -766,9 +766,24 @@ export function init(root, ctx) {
 
     return {
         destroy() { alive = false; closeModal(); },
-        refresh(newState) {
+        async refresh(newState) {
             Object.assign(state, newState);
             if (newState.walletBalance !== undefined) lastKnownBalance = newState.walletBalance;
+            // Zero-DOM-mutation: update status badges in-place
+            try {
+                const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
+                if (!alive) return;
+                const txMap = new Map((snap.transactions || []).map(t => [t.txId || t.tx_id, t]));
+                root.querySelectorAll('.tx-row').forEach(row => {
+                    const tx = txMap.get(row.dataset.txid);
+                    if (!tx) return;
+                    const el = row.querySelector('[data-role="status"]');
+                    if (el) {
+                        const b = txStatusBadge(tx.confirmations, tx.status);
+                        el.textContent = b.html.replace(/<[^>]+>/g, '');
+                    }
+                });
+            } catch {}
         },
         openSendWizard(recipientAddress) { openSendWizard(recipientAddress); }
     };

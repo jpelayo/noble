@@ -78,13 +78,14 @@ export function init(root, ctx) {
     }
 
     function getWizardState() {
-        // Strip fieldPassword from metadata before persisting (security — same as locking password).
-        const stripPwd = arr => arr.map(m => { const { fieldPassword, ...rest } = m; return rest; });
-        const safePerFile = {};
-        for (const [k, v] of Object.entries(perFileMetadata)) { safePerFile[k] = stripPwd(v); }
+        // Passwords for protected fields are kept in drafts — drafts are local-only
+        // (UserDefaults on device, never transmitted). Losing passwords forces re-entry
+        // and blocks submission (B3 fix).
+        const perFileCopy = {};
+        for (const [k, v] of Object.entries(perFileMetadata)) { perFileCopy[k] = v; }
         return {
             files, hashes, previousChecksum, isNewVersion, versionMode,
-            wantsMetadata, metadata: stripPwd(metadata), perFileMetadata: safePerFile,
+            wantsMetadata, metadata, perFileMetadata: perFileCopy,
             metadataTab, batchUUID, selectedSigningKeyId, wantsLocking, feeLevel, step
         };
     }
@@ -306,6 +307,7 @@ export function init(root, ctx) {
             // Right: Next button with next step name
             const nextBtn = document.createElement('button');
             nextBtn.className = 'btn btn-primary';
+            nextBtn.setAttribute('data-nav', 'next');
             nextBtn.textContent = step === 5 ? 'Sign & Submit' : `${STEP_NAMES[step + 1]} \u2192`;
             nextBtn.disabled = !canAdvance();
             nextBtn.addEventListener('click', () => { step++; render(); });
@@ -330,6 +332,9 @@ export function init(root, ctx) {
         }
         if (step === 4) return feeData !== null;
         if (step === 5) {
+            // Block if any protected field has value but no password
+            const allMeta = [...metadata, ...Object.values(perFileMetadata).flat()];
+            if (allMeta.some(m => m.mode === 'protected' && m.value && !m.fieldPassword)) return false;
             // Block submit if balance is known and insufficient
             if (balanceData) {
                 const total = getSelectedFee() * files.length;
@@ -1130,7 +1135,11 @@ export function init(root, ctx) {
             pwdInput.style.cssText = 'flex:1;padding-right:36px;font-size:var(--font-size-sm)';
             pwdInput.placeholder = 'Encryption password';
             pwdInput.value = m.fieldPassword || '';
-            pwdInput.addEventListener('input', () => { m.fieldPassword = pwdInput.value; });
+            pwdInput.addEventListener('input', () => {
+                m.fieldPassword = pwdInput.value;
+                const nb = root.querySelector('[data-nav="next"]');
+                if (nb) nb.disabled = !canAdvance();
+            });
             pwdWrap.appendChild(pwdInput);
             const eye = document.createElement('button');
             eye.type = 'button';
@@ -1997,12 +2006,11 @@ export function init(root, ctx) {
         }
     }
 
-    // ── Step 6: Submit ──
+    // ── Step 6: Submit (two-phase: sign all, then submit all) ──
 
     function renderStepSubmit(container) {
         const desc = document.createElement('p');
         desc.style.cssText = 'font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--gap)';
-        desc.textContent = 'Signing and submitting transactions...';
         container.appendChild(desc);
 
         const progress = document.createElement('div');
@@ -2010,247 +2018,228 @@ export function init(root, ctx) {
         progress.style.marginBottom = 'var(--gap)';
         const fill = document.createElement('div');
         fill.className = 'progress-fill';
-        fill.style.width = `${(results.length / files.length) * 100}%`;
         progress.appendChild(fill);
         container.appendChild(progress);
 
         const resultsContainer = document.createElement('div');
         container.appendChild(resultsContainer);
 
-        // Render existing results
-        for (const r of results) {
-            resultsContainer.appendChild(buildReceipt(r));
-        }
-
-        if (results.length < files.length) {
-            submitNext(resultsContainer, fill);
-        } else {
-            // Done — show summary
-            const successes = results.filter(r => r.success).length;
-            const failures = results.length - successes;
-            const summary = document.createElement('div');
-            summary.style.cssText = 'margin-top:var(--gap);text-align:center;';
-
-            if (failures === 0) {
-                // Auto-delete the draft if this was a resumed draft — it's now submitted.
-                if (editingDraftId) {
-                    Bridge.call('noble_app', 'deleteDraft', { id: editingDraftId }).catch(() => {});
-                    editingDraftId = null;
-                }
-                summary.innerHTML = `
-                    <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--success)">
-                        ${successes === 1 ? 'Document Submitted' : `All ${successes} Documents Submitted`}
-                    </div>
-                `;
-            } else if (successes === 0) {
-                summary.innerHTML = `
-                    <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--error)">
-                        Submission Failed
-                    </div>
-                    <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
-                        ${failures === 1 ? 'The transaction was rejected.' : `All ${failures} transactions were rejected.`}
-                        Check your balance and try again.
-                    </div>
-                `;
-            } else {
-                summary.innerHTML = `
-                    <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--warning)">
-                        Partially Submitted
-                    </div>
-                    <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
-                        ${successes} succeeded, ${failures} failed.
-                    </div>
-                `;
-            }
-            container.appendChild(summary);
-
-            // Offer to save failed documents as draft
-            if (failures > 0) {
-                const draftBtn = document.createElement('button');
-                draftBtn.className = 'btn btn-secondary';
-                draftBtn.textContent = 'Save Failed as Draft';
-                draftBtn.style.cssText = 'margin-top:var(--gap-sm);';
-                draftBtn.addEventListener('click', () => {
-                    // Keep only the failed files in state
-                    const failedHashes = new Set(results.filter(r => !r.success).map(r => r.hash));
-                    files = files.filter(f => failedHashes.has(hashes[f.path]));
-                    const newHashes = {};
-                    for (const f of files) { newHashes[f.path] = hashes[f.path]; }
-                    hashes = newHashes;
-                    step = 0;
-                    results = [];
-                    saveDraft('Submission failed');
-                });
-                summary.appendChild(draftBtn);
-            }
-
-            const doneBtn = document.createElement('button');
-            doneBtn.className = 'btn btn-primary btn-lg';
-            doneBtn.textContent = 'Done';
-            doneBtn.style.marginTop = 'var(--gap)';
-            doneBtn.addEventListener('click', () => {
-                resetWizard();
-                render();
-            });
-            summary.appendChild(doneBtn);
-        }
+        // Phase 1: Sign all files. If any fails, stop — don't submit anything.
+        // Phase 2: Submit all signed txs.
+        signAllThenSubmitAll(desc, fill, resultsContainer, container);
     }
 
-    async function submitNext(resultsContainer, fill) {
-        const idx = results.length;
-        if (idx >= files.length || !alive) return;
+    async function signAllThenSubmitAll(desc, fill, resultsContainer, container) {
+        // ── Phase 1: Sign every file ──
+        desc.textContent = 'Signing transactions...';
+        const signed = []; // { file, hash, txHex } or { file, hash, error }
+        for (let i = 0; i < files.length; i++) {
+            if (!alive) return;
+            fill.style.width = `${((i + 1) / files.length) * 50}%`; // 0-50% for signing
 
-        const f = files[idx];
-        const hash = hashes[f.path];
-        if (!hash || hash.startsWith('ERROR')) {
-            results.push({ file: f.name, hash, success: false, error: 'Hash computation failed' });
-            if (alive) render();
+            const f = files[i];
+            const hash = hashes[f.path];
+            if (!hash || hash.startsWith('ERROR')) {
+                signed.push({ file: f.name, hash, error: 'Hash computation failed' });
+                continue;
+            }
+            try {
+                const txHex = await buildSignedTx(f, hash);
+                signed.push({ file: f.name, hash, txHex });
+            } catch (err) {
+                signed.push({ file: f.name, hash, error: err.message });
+            }
+        }
+
+        // Check: did ALL sign successfully?
+        const signErrors = signed.filter(s => s.error);
+        if (signErrors.length > 0) {
+            // Show signing failures — nothing was submitted
+            desc.textContent = 'Signing failed — no transactions were submitted.';
+            fill.style.width = '100%';
+            fill.style.background = 'var(--error)';
+            for (const s of signed) {
+                resultsContainer.appendChild(buildReceipt({
+                    file: s.file, hash: s.hash,
+                    success: !s.error, error: s.error || null
+                }));
+            }
+            const summary = document.createElement('div');
+            summary.style.cssText = 'margin-top:var(--gap);text-align:center;';
+            summary.innerHTML = `
+                <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--error)">
+                    Signing Failed
+                </div>
+                <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
+                    ${signErrors.length} of ${files.length} document${files.length > 1 ? 's' : ''} failed to sign. Fix the errors and try again.
+                </div>
+            `;
+            const draftBtn = document.createElement('button');
+            draftBtn.className = 'btn btn-secondary';
+            draftBtn.textContent = 'Save as Draft';
+            draftBtn.style.marginTop = 'var(--gap-sm)';
+            draftBtn.addEventListener('click', () => { step = 0; results = []; saveDraft('Signing failed'); });
+            summary.appendChild(draftBtn);
+            const backBtn = document.createElement('button');
+            backBtn.className = 'btn btn-primary';
+            backBtn.textContent = 'Back to Review';
+            backBtn.style.marginTop = 'var(--gap-sm)';
+            backBtn.style.marginLeft = 'var(--gap-sm)';
+            backBtn.addEventListener('click', () => { step = 5; results = []; render(); });
+            summary.appendChild(backBtn);
+            container.appendChild(summary);
             return;
         }
 
-        try {
-            const fee = getSelectedFee();
-            // Merge batch metadata + per-file metadata for this file (additive).
-            const batchMeta = metadata.filter(m => m.key && m.value);
-            const fileMeta = (perFileMetadata[f.path] || []).filter(m => m.key && m.value);
-            let validMeta = [...batchMeta, ...fileMeta];
-
-            // ── Step 0.5: Auto-duplicate multi-recipient encrypted fields ──
-            // Each encrypted field with N recipients becomes N separate entries,
-            // each with a single recipient. One slot per recipient on-chain.
-            const expanded = [];
-            for (const m of validMeta) {
-                if (m.mode === 'encrypted' && m.recipients && m.recipients.length > 1) {
-                    for (const r of m.recipients) {
-                        expanded.push({ ...m, recipients: [r] });
-                    }
-                } else {
-                    expanded.push(m);
-                }
-            }
-            validMeta = expanded;
-
-            // ── Step 1: Sign fields BEFORE encryption (sign plaintext) ──
-            // For each signed field, generate CMS detached signature over the plaintext value.
-            const sigEntries = []; // { afterIndex, key, value }
-            for (let i = 0; i < validMeta.length; i++) {
-                const m = validMeta[i];
-                if (!m.signed || !m.signingKeyId) continue;
-                try {
-                    const sigResult = await Bridge.call('noble_crypto', 'signMetadataField', {
-                        keyId: m.signingKeyId,
-                        fieldValue: m.value
-                    });
-                    if (!alive) return;
-                    if (sigResult && sigResult.signatureHex) {
-                        sigEntries.push({ afterIndex: i, sigHex: sigResult.signatureHex });
-                    }
-                } catch (sigErr) {
-                    // CMS signing failed — abort submission for this file
-                    results.push({
-                        file: f.name, hash, success: false,
-                        error: `CMS signing failed for field "${m.key}": ${sigErr.message}`
-                    });
-                    if (alive) render();
-                    return;
-                }
-            }
-
-            // ── Step 2: Build schema descriptor with SIG entries interleaved ──
-            const schemaLines = [];
-            let slotIndex = 1;
-            const metaWithSigs = []; // final metadata array (fields + sig slots)
-            for (let i = 0; i < validMeta.length; i++) {
-                const m = validMeta[i];
-                const def = METADATA_FIELDS.find(f => f.key === m.fieldKey) || { code: 'T99' };
-                const vis = m.mode === 'encrypted' ? 'priv' : m.mode === 'protected' ? 'pwd' : 'pub';
-                const enc = m.mode === 'encrypted' ? 'ecies' : m.mode === 'protected' ? 'aesgcm' : 'utf8';
-                schemaLines.push(`${slotIndex}:${def.code}:${vis}:${enc}:${m.key}`);
-                metaWithSigs.push(m);
-                const fieldSlot = slotIndex;
-                slotIndex++;
-
-                // Insert signature slot immediately after the signed field
-                const sigEntry = sigEntries.find(s => s.afterIndex === i);
-                if (sigEntry) {
-                    const sigKey = `sig:${fieldSlot}`;
-                    schemaLines.push(`${slotIndex}:SIG:pub:cms:${sigKey}`);
-                    metaWithSigs.push({ key: sigKey, value: sigEntry.sigHex, mode: 'plaintext' });
-                    slotIndex++;
-                }
-            }
-            const schemaEntry = schemaLines.length > 0
-                ? [{ key: 'schema', value: schemaLines.join('\n'), mode: 'plaintext' }]
-                : [];
-
-            // ── Step 2.5: Encrypt password-protected fields ──
-            // Protected fields use AES-256-GCM with SHA-256(password || salt) key derivation.
-            // Encryption happens here in JS; the native handler sees the ciphertext as plaintext hex.
-            for (const m of metaWithSigs) {
-                if (m.mode === 'protected' && m.fieldPassword && m.value) {
-                    m.value = await encryptFieldWithPassword(m.value, m.fieldPassword);
-                    m.mode = 'plaintext'; // native handler sees pre-encrypted hex
-                }
-            }
-
-            // ── Step 3: Submit ──
-            // NOTE: Metadata encryption (ECIES for mode:'encrypted' fields) is handled
-            // by the native signNotarization handler. CMS sig slots use mode:'plaintext'
-            // and are never encrypted.
-            const allMeta = [...schemaEntry, ...metaWithSigs];
-
-            // Fetch wallet UTXOs for coin selection — only use available UTXOs.
-            const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
-            const allUtxos = utxoResp.utxos || [];
-            const utxos = allUtxos
-                .filter(u => !u.status || u.status === 'available')
-                .map(u => ({
-                    txid: u.txid,
-                    vout: u.vout,
-                    value: u.value,
-                }));
-
-            if (utxos.length === 0 && allUtxos.length > 0) {
-                const pending = allUtxos.filter(u => u.status === 'pending_spend').length;
-                const immature = allUtxos.filter(u => u.status === 'immature').length;
-                throw new Error(
-                    `No spendable UTXOs available. ${pending ? pending + ' locked by pending transactions. ' : ''}${immature ? immature + ' immature outputs.' : ''}Wait for pending transactions to confirm.`
-                );
-            }
-
-            const feeRate = getSelectedFeeRate();
-            const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
-                checksum: hash,
-                fee,
-                fee_rate: feeRate,
-                metadata: allMeta.map(m => ({
-                    key: m.key,
-                    value: m.value,
-                    mode: m.mode || 'plaintext',
-                    recipient: m.mode === 'encrypted' ? (m.recipients?.[0]?.publicKey || '') : ''
-                })),
-                utxos,
-                previousChecksum: previousChecksum || undefined
-            });
+        // ── Phase 2: Submit all signed transactions ──
+        desc.textContent = 'Submitting transactions...';
+        for (let i = 0; i < signed.length; i++) {
             if (!alive) return;
-
-            const submitResult = await Bridge.call('noble_api', 'submitTransaction', {
-                txHex: signResult.txHex
-            });
-            if (!alive) return;
-
-            results.push({
-                file: f.name,
-                hash,
-                success: submitResult.accepted,
-                txId: submitResult.txId,
-                error: submitResult.accepted ? null : 'Transaction rejected'
-            });
-        } catch (err) {
-            results.push({ file: f.name, hash, success: false, error: err.message });
+            fill.style.width = `${50 + ((i + 1) / signed.length) * 50}%`; // 50-100%
+            const s = signed[i];
+            try {
+                const submitResult = await Bridge.call('noble_api', 'submitTransaction', {
+                    txHex: s.txHex
+                });
+                results.push({
+                    file: s.file, hash: s.hash,
+                    success: submitResult.accepted,
+                    txId: submitResult.txId,
+                    error: submitResult.accepted ? null : 'Transaction rejected'
+                });
+            } catch (err) {
+                results.push({ file: s.file, hash: s.hash, success: false, error: err.message });
+            }
+            resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
         }
 
-        if (alive) render();
+        // ── Summary ──
+        const successes = results.filter(r => r.success).length;
+        const failures = results.length - successes;
+        const summary = document.createElement('div');
+        summary.style.cssText = 'margin-top:var(--gap);text-align:center;';
+
+        if (failures === 0) {
+            if (editingDraftId) {
+                Bridge.call('noble_app', 'deleteDraft', { id: editingDraftId }).catch(() => {});
+                editingDraftId = null;
+            }
+            summary.innerHTML = `
+                <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--success)">
+                    ${successes === 1 ? 'Document Submitted' : `All ${successes} Documents Submitted`}
+                </div>
+            `;
+        } else {
+            summary.innerHTML = `
+                <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--error)">
+                    Submission Failed
+                </div>
+                <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
+                    ${failures} of ${results.length} transaction${results.length > 1 ? 's' : ''} rejected.
+                </div>
+            `;
+        }
+
+        const doneBtn = document.createElement('button');
+        doneBtn.className = 'btn btn-primary btn-lg';
+        doneBtn.textContent = 'Done';
+        doneBtn.style.marginTop = 'var(--gap)';
+        doneBtn.addEventListener('click', () => { resetWizard(); render(); });
+        summary.appendChild(doneBtn);
+        container.appendChild(summary);
+    }
+
+    /** Sign a single file — returns txHex string. Throws on error. */
+    async function buildSignedTx(f, hash) {
+        const fee = getSelectedFee();
+        const batchMeta = metadata.filter(m => m.key && m.value);
+        const fileMeta = (perFileMetadata[f.path] || []).filter(m => m.key && m.value);
+        let validMeta = [...batchMeta, ...fileMeta];
+
+        // Auto-duplicate multi-recipient encrypted fields
+        const expanded = [];
+        for (const m of validMeta) {
+            if (m.mode === 'encrypted' && m.recipients && m.recipients.length > 1) {
+                for (const r of m.recipients) { expanded.push({ ...m, recipients: [r] }); }
+            } else { expanded.push(m); }
+        }
+        validMeta = expanded;
+
+        // CMS field signing (sign plaintext before encryption)
+        const sigEntries = [];
+        for (let i = 0; i < validMeta.length; i++) {
+            const m = validMeta[i];
+            if (!m.signed || !m.signingKeyId) continue;
+            const sigResult = await Bridge.call('noble_crypto', 'signMetadataField', {
+                keyId: m.signingKeyId, fieldValue: m.value
+            });
+            if (sigResult && sigResult.signatureHex) {
+                sigEntries.push({ afterIndex: i, sigHex: sigResult.signatureHex });
+            }
+        }
+
+        // Build schema descriptor with SIG entries interleaved
+        const schemaLines = [];
+        let slotIndex = 1;
+        const metaWithSigs = [];
+        for (let i = 0; i < validMeta.length; i++) {
+            const m = validMeta[i];
+            const def = METADATA_FIELDS.find(fd => fd.key === m.fieldKey) || { code: 'T99' };
+            const vis = m.mode === 'encrypted' ? 'priv' : m.mode === 'protected' ? 'pwd' : 'pub';
+            const enc = m.mode === 'encrypted' ? 'ecies' : m.mode === 'protected' ? 'aesgcm' : 'utf8';
+            schemaLines.push(`${slotIndex}:${def.code}:${vis}:${enc}:${m.key}`);
+            metaWithSigs.push(m);
+            const fieldSlot = slotIndex;
+            slotIndex++;
+            const sigEntry = sigEntries.find(s => s.afterIndex === i);
+            if (sigEntry) {
+                const sigKey = `sig:${fieldSlot}`;
+                schemaLines.push(`${slotIndex}:SIG:pub:cms:${sigKey}`);
+                metaWithSigs.push({ key: sigKey, value: sigEntry.sigHex, mode: 'plaintext' });
+                slotIndex++;
+            }
+        }
+        const schemaEntry = schemaLines.length > 0
+            ? [{ key: 'schema', value: schemaLines.join('\n'), mode: 'plaintext' }]
+            : [];
+
+        // Encrypt password-protected fields
+        for (const m of metaWithSigs) {
+            if (m.mode === 'protected' && m.fieldPassword && m.value) {
+                m.value = await encryptFieldWithPassword(m.value, m.fieldPassword);
+                m.mode = 'plaintext';
+            }
+        }
+
+        const allMeta = [...schemaEntry, ...metaWithSigs];
+
+        // Fetch UTXOs
+        const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
+        const allUtxos = utxoResp.utxos || [];
+        const utxos = allUtxos
+            .filter(u => !u.status || u.status === 'available')
+            .map(u => ({ txid: u.txid, vout: u.vout, value: u.value }));
+
+        if (utxos.length === 0 && allUtxos.length > 0) {
+            const pending = allUtxos.filter(u => u.status === 'pending_spend').length;
+            const immature = allUtxos.filter(u => u.status === 'immature').length;
+            throw new Error(
+                `No spendable UTXOs. ${pending ? pending + ' locked. ' : ''}${immature ? immature + ' immature.' : ''}`
+            );
+        }
+
+        const feeRate = getSelectedFeeRate();
+        const signResult = await Bridge.call('noble_crypto', 'signNotarization', {
+            checksum: hash, fee, fee_rate: feeRate,
+            metadata: allMeta.map(m => ({
+                key: m.key, value: m.value,
+                mode: m.mode || 'plaintext',
+                recipient: m.mode === 'encrypted' ? (m.recipients?.[0]?.publicKey || '') : ''
+            })),
+            utxos,
+            previousChecksum: previousChecksum || undefined
+        });
+        return signResult.txHex;
     }
 
     function buildReceipt(r) {
