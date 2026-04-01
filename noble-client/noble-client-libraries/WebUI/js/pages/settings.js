@@ -768,7 +768,6 @@ export function init(root, ctx) {
 
     function refresh(newState) {
         Object.assign(state, newState);
-        loadSettings();
     }
 
     return {

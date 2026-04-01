@@ -13,8 +13,8 @@ import { TX_TYPES, txDisplayAmount, formatTxType, txStatusBadge } from '../tx-di
 export function init(root, ctx) {
     let alive = true;
     const state = ctx.state;
-    let historyPage = 0;
-    const historyLimit = 20;
+    const TX_BATCH = 30;
+    let displayCount = TX_BATCH;
     let historyData = null;
     let balanceData = null;
     let balanceContainer = null;
@@ -38,7 +38,7 @@ export function init(root, ctx) {
             return;
         }
 
-        root.style.padding = 'var(--gap-xl)';
+        root.style.padding = '8px';
 
         // Balance card placeholder with skeleton
         balanceContainer = document.createElement('div');
@@ -49,20 +49,20 @@ export function init(root, ctx) {
         // Action buttons — card-style
         const actions = document.createElement('div');
         actions.className = 'action-buttons';
-        actions.style.margin = 'var(--gap-lg) 0';
+        actions.style.margin = '8px 0';
 
         const sendBtn = document.createElement('button');
         sendBtn.className = 'panel';
-        sendBtn.style.cssText = 'flex:1;padding:var(--gap);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
-        sendBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--accent)">\u{1F680}</div><div><div style="font-weight:700">Send</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer NOBLE</div></div>';
+        sendBtn.style.cssText = 'flex:1;padding:8px;display:flex;align-items:center;gap:8px;cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        sendBtn.innerHTML = '<div style="width:28px;height:28px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:0.85rem;color:var(--accent)">\u{1F680}</div><div><div style="font-weight:700">Send</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Transfer NOBLE</div></div>';
         sendBtn.addEventListener('click', openSendWizard);
         sendBtn.addEventListener('mouseenter', () => { sendBtn.style.borderColor = 'var(--accent)'; sendBtn.style.transform = 'translateY(-1px)'; });
         sendBtn.addEventListener('mouseleave', () => { sendBtn.style.borderColor = 'var(--glass-border)'; sendBtn.style.transform = ''; });
 
         const recvBtn = document.createElement('button');
         recvBtn.className = 'panel';
-        recvBtn.style.cssText = 'flex:1;padding:var(--gap);display:flex;align-items:center;gap:var(--gap);cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
-        recvBtn.innerHTML = '<div style="width:40px;height:40px;border-radius:50%;background:color-mix(in srgb, var(--success) 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:var(--success)">\u{1F4E5}</div><div><div style="font-weight:700">Receive</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Your address & QR</div></div>';
+        recvBtn.style.cssText = 'flex:1;padding:8px;display:flex;align-items:center;gap:8px;cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        recvBtn.innerHTML = '<div style="width:28px;height:28px;border-radius:50%;background:color-mix(in srgb, var(--success) 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:0.85rem;color:var(--success)">\u{1F4E5}</div><div><div style="font-weight:700">Receive</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Your address & QR</div></div>';
         recvBtn.addEventListener('click', openReceiveModal);
         recvBtn.addEventListener('mouseenter', () => { recvBtn.style.borderColor = 'var(--success)'; recvBtn.style.transform = 'translateY(-1px)'; });
         recvBtn.addEventListener('mouseleave', () => { recvBtn.style.borderColor = 'var(--glass-border)'; recvBtn.style.transform = ''; });
@@ -148,7 +148,7 @@ export function init(root, ctx) {
         const chainId = state.chainId || '';
         const el = document.createElement('div');
         el.className = 'panel';
-        el.style.cssText = 'padding:var(--gap-xl);margin-bottom:var(--gap-lg)';
+        el.style.cssText = 'padding:12px;margin-bottom:8px';
         el.innerHTML = `
             <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:var(--gap-lg)">
                 <div>
@@ -180,7 +180,8 @@ export function init(root, ctx) {
 
     function renderHistory(container, data) {
         container.innerHTML = '';
-        const txs = data.transactions || [];
+        const allTxs = data.transactions || [];
+        const txs = allTxs.slice(0, displayCount);
 
         const panel = document.createElement('div');
         panel.className = 'panel';
@@ -196,8 +197,8 @@ export function init(root, ctx) {
             return;
         }
 
-        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap-lg)">
-            <h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0">Transaction History</h3>
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <h3 style="font-size:0.9rem;font-weight:700;margin:0">Transaction History</h3>
             <span style="font-size:var(--font-size-xs);color:var(--text-muted)">${txs.length} transaction${txs.length !== 1 ? 's' : ''}</span>
         </div>`;
         html += '<div style="display:flex;flex-direction:column;gap:4px">';
@@ -227,23 +228,39 @@ export function init(root, ctx) {
                 iconChar = '\u2191';
             }
 
-            html += `<div class="tx-row" data-txid="${esc(tx.txId || '')}" style="display:flex;align-items:center;justify-content:space-between;padding:var(--gap-sm) var(--gap);border-radius:var(--radius);cursor:pointer;transition:background 0.15s" tabindex="0" role="button">
-                <div style="display:flex;align-items:center;gap:var(--gap)">
-                    <div style="width:40px;height:40px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:${iconColor};flex-shrink:0">${iconChar}</div>
+            html += `<div class="tx-row" data-txid="${esc(tx.txId || '')}" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:var(--radius);cursor:pointer;transition:background 0.15s" tabindex="0" role="button">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <div style="width:28px;height:28px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:0.85rem;color:${iconColor};flex-shrink:0">${iconChar}</div>
                     <div>
                         <div style="font-weight:600;font-size:var(--font-size-sm)">${typeName}</div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${counterparty ? counterparty + ' \u00B7 ' : ''}${ago}</div>
                     </div>
                 </div>
-                <div style="text-align:right">
-                    <div class="mono" style="font-weight:700;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + amount : ''}</div>
+                <div style="text-align:right;flex-shrink:0;white-space:nowrap">
+                    <div class="mono" style="font-weight:700;font-size:0.8rem;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + amount : ''}</div>
                     <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
                 </div>
             </div>`;
         }
         html += '</div>';
+
+        // "Load more" button if there are more transactions
+        if (displayCount < allTxs.length) {
+            const remaining = allTxs.length - displayCount;
+            html += `<button id="load-more-txs" style="width:100%;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--glass-bg);color:var(--accent);font-weight:600;font-size:var(--font-size-sm);cursor:pointer">Show more (${remaining} remaining)</button>`;
+        }
+
         panel.innerHTML = html;
         container.appendChild(panel);
+
+        // Wire "Load more"
+        const loadMoreBtn = panel.querySelector('#load-more-txs');
+        if (loadMoreBtn) {
+            loadMoreBtn.addEventListener('click', () => {
+                displayCount += TX_BATCH;
+                renderHistory(container, data);
+            });
+        }
 
         // Wire click + hover + keyboard
         panel.querySelectorAll('.tx-row').forEach(row => {
@@ -747,17 +764,11 @@ export function init(root, ctx) {
     // Track last known balance to detect changes that warrant a tx list refresh.
     let lastKnownBalance = state.walletBalance;
 
-    // Auto-refresh every 30s
-    const autoRefreshId = setInterval(() => {
-        if (alive) loadData(balanceContainer, historyContainer);
-    }, 30_000);
-
     return {
-        destroy() { alive = false; clearInterval(autoRefreshId); closeModal(); },
+        destroy() { alive = false; closeModal(); },
         refresh(newState) {
             Object.assign(state, newState);
             if (newState.walletBalance !== undefined) lastKnownBalance = newState.walletBalance;
-            loadData(balanceContainer, historyContainer);
         },
         openSendWizard(recipientAddress) { openSendWizard(recipientAddress); }
     };

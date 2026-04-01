@@ -1616,7 +1616,7 @@ body {
 .home-hero-grid { display: grid; grid-template-columns: 1fr 320px; gap: var(--gap-lg); margin-bottom: 0; }
 .action-buttons { display: flex; gap: var(--gap); }
 .skeleton-balance { height: 200px; border-radius: var(--radius); }
-.balance-breakdown { display: flex; gap: var(--gap-lg); margin-top: var(--gap); }
+.balance-breakdown { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: var(--gap-sm); margin-top: var(--gap); }
 .skeleton-section { height: 300px; border-radius: var(--radius); }
 .tx-detail-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
 
@@ -1633,15 +1633,17 @@ body {
   .action-buttons > * { width: 100%; }
   .tx-detail-dl { grid-template-columns: 1fr; }
   .tx-detail-dl dt { font-weight: 600; margin-top: var(--gap-sm); }
+  .tx-detail-dl dd .mono { font-size: 0.7rem !important; }
+  /* TX detail panels: tighter padding on mobile */
+  #tx-content .panel, #tx-content .card { padding: var(--gap-sm) !important; }
   /* Balance breakdown: smaller gap + font on mobile */
-  .balance-breakdown { gap: var(--gap-sm); flex-wrap: wrap; }
-  .balance-breakdown .mono { font-size: var(--font-size-sm) !important; }
+  .balance-breakdown { gap: 4px; }
+  .balance-breakdown .mono { font-size: clamp(0.75rem, 2.5vw, 0.875rem) !important; }
   /* Prevent address/hash overflow on narrow screens */
   .card .mono, .panel .mono { word-break: break-all; overflow-wrap: anywhere; }
 
-  #app-content {
-    padding: var(--gap) var(--gap-sm);
-  }
+  #app-content { padding: 6px 4px; }
+  .panel { margin-bottom: 6px !important; }
 
   /* ── KPI grid: 2 columns on phone ── */
   .kpi-grid {

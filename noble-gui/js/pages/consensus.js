@@ -1277,7 +1277,7 @@ export function init(root, ctx) {
       let collected = 0;
       const lowestBlockCycle = blockCycles.length > 0 ? blockCycles[blockCycles.length - 1] : highestCycle;
       const startCycle = allEntries.length > 0 ? allEntries[0].cycle_number - 1 : highestCycle;
-      const MAX_SCAN_GAP = TIMELINE_LIMIT * 10;
+      const MAX_SCAN_GAP = TIMELINE_LIMIT * 100;
       const scanFloor = Math.max(lowestBlockCycle, startCycle - MAX_SCAN_GAP);
 
       for (let c = startCycle; c >= scanFloor && collected < TIMELINE_LIMIT; c--) {

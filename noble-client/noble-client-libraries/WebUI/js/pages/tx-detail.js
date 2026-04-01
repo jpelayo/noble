@@ -64,7 +64,7 @@ export function init(root, ctx) {
         // ── Hero Section ──
         const heroEl = document.createElement('div');
         heroEl.className = 'panel';
-        heroEl.style.cssText = 'text-align:center;padding:var(--gap-xl);margin-bottom:var(--gap-lg)';
+        heroEl.style.cssText = 'text-align:center;padding:var(--gap);margin-bottom:var(--gap)';
 
         if ((txType === TX_TYPES.NOTARIZATION || txType === TX_TYPES.UNLOCKING) && !isZeroChecksum(tx.checksum)) {
             heroEl.innerHTML = `
@@ -113,7 +113,7 @@ export function init(root, ctx) {
         // ── Detail Grid ──
         const grid = document.createElement('div');
         grid.className = 'panel';
-        grid.style.cssText = 'padding:var(--gap-lg);margin-bottom:var(--gap-lg)';
+        grid.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
         let html = '<dl class="tx-detail-dl">';
         html += row('TX ID', `<span class="mono" style="word-break:break-all;font-size:var(--font-size-xs)">${esc(tx.txId || txid)}</span>`);
         html += row('Type', formatTxType(txType));
@@ -141,46 +141,59 @@ export function init(root, ctx) {
         grid.innerHTML = html;
         content.appendChild(grid);
 
-        // ── Inputs ──
+        // ── Inputs (collapsible) ──
         const inputs = tx.inputs || [];
         const inputCount = tx.input_count ?? inputs.length;
         if (inputCount > 0) {
             const panel = document.createElement('div');
             panel.className = 'card';
-            panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
+            panel.style.cssText = 'padding:var(--gap-sm);margin-bottom:var(--gap-sm)';
             const isCoinbase = inputs.length === 1 && /^0+$/.test(inputs[0]?.txid);
-            let ihtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Inputs (${inputCount})</h3>`;
             if (isCoinbase) {
-                ihtml += '<div style="color:var(--text-muted);font-size:var(--font-size-xs)">Coinbase (new coins minted by the network)</div>';
+                panel.innerHTML = `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">Coinbase (new coins minted by the network)</div>`;
             } else if (inputs.length === 0 && inputCount > 0) {
-                // Transfer: inputs stripped for privacy — show count only
-                ihtml += `<div style="color:var(--text-muted);font-size:var(--font-size-xs)">${inputCount} UTXO${inputCount > 1 ? 's' : ''} consolidated</div>`;
+                panel.innerHTML = `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${inputCount} UTXO${inputCount > 1 ? 's' : ''} consolidated</div>`;
             } else {
+                const details = document.createElement('details');
+                const summary = document.createElement('summary');
+                summary.style.cssText = 'cursor:pointer;font-weight:600;font-size:var(--font-size-xs);color:var(--text-muted)';
+                summary.textContent = `Inputs (${inputCount})`;
+                details.appendChild(summary);
+                const inner = document.createElement('div');
+                inner.style.cssText = 'margin-top:6px';
                 for (let i = 0; i < inputs.length; i++) {
-                    ihtml += `<div style="margin-bottom:4px;font-size:var(--font-size-xs)">
+                    inner.innerHTML += `<div style="margin-bottom:4px;font-size:0.65rem">
                         <span style="color:var(--text-muted)">#${i}</span>
                         <span class="mono" style="word-break:break-all">${esc(inputs[i].txid)}</span>:<strong>${inputs[i].vout}</strong>
                     </div>`;
                 }
+                details.appendChild(inner);
+                panel.appendChild(details);
             }
-            panel.innerHTML = ihtml;
             content.appendChild(panel);
         }
 
-        // ── Outputs ──
+        // ── Outputs (collapsible) ──
         const outputs = tx.outputs || [];
         if (outputs.length > 0) {
             const panel = document.createElement('div');
             panel.className = 'card';
-            panel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap)';
-            let ohtml = `<h3 style="margin:0 0 8px;font-size:var(--font-size-sm)">Outputs (${outputs.length})</h3>`;
+            panel.style.cssText = 'padding:var(--gap-sm);margin-bottom:var(--gap-sm)';
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.style.cssText = 'cursor:pointer;font-weight:600;font-size:var(--font-size-xs);color:var(--text-muted)';
+            summary.textContent = `Outputs (${outputs.length})`;
+            details.appendChild(summary);
+            const inner = document.createElement('div');
+            inner.style.cssText = 'margin-top:6px';
             for (let i = 0; i < outputs.length; i++) {
-                ohtml += `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;font-size:var(--font-size-xs)">
-                    <span class="mono" style="word-break:break-all;flex:1;margin-right:8px">#${i} &rarr; ${esc(outputs[i].address)}</span>
+                inner.innerHTML += `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;font-size:0.65rem">
+                    <span class="mono" style="word-break:break-all;flex:1;margin-right:4px">#${i} &rarr; ${esc(outputs[i].address)}</span>
                     <span class="mono" style="white-space:nowrap">&diams; ${formatAmount(outputs[i].value)}</span>
                 </div>`;
             }
-            panel.innerHTML = ohtml;
+            details.appendChild(inner);
+            panel.appendChild(details);
             content.appendChild(panel);
         }
 
@@ -257,10 +270,7 @@ export function init(root, ctx) {
     }
 
     load();
-    // Auto-refresh every 15s (track confirmation progress)
-    let alive = true;
-    const autoRefreshId = setInterval(() => { if (alive) load(); }, 15_000);
-    return { destroy() { alive = false; clearInterval(autoRefreshId); } };
+    return { destroy() {} };
 }
 
 // ── Helpers ──

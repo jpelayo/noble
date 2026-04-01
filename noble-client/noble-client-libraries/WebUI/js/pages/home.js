@@ -200,40 +200,35 @@ export function init(root, ctx) {
 
         // Hero balance card
         const heroHtml = `
-            <div class="panel" style="padding:var(--gap-xl) var(--gap-xl) var(--gap-lg);min-height:180px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden">
+            <div class="panel" style="padding:12px;min-height:0;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden">
                 <div>
                     <div style="display:inline-block;padding:4px 12px;background:var(--accent-subtle);color:var(--accent);font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;border-radius:999px;margin-bottom:var(--gap-sm)">Total Balance</div>
                     <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px">
                         <span style="color:var(--accent);font-size:var(--font-size-2xl);">\u25C6</span>
-                        <span class="mono" style="font-size:clamp(2rem, 4vw, 3rem);font-weight:800;letter-spacing:-0.02em">${formatAmount(balance.balance)}</span>
+                        <span id="bal-total" class="mono" style="font-size:clamp(2rem, 4vw, 3rem);font-weight:800;letter-spacing:-0.02em">${formatAmount(balance.balance)}</span>
                         <span style="font-size:var(--font-size-lg);color:var(--text-muted);font-weight:600">NOBLE</span>
                     </div>
                 </div>
                 <div class="balance-breakdown">
                     <div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Available</div>
-                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">${formatAmount(balance.available)}</div>
+                        <div id="bal-available" class="mono" style="font-size:clamp(0.8rem, 3vw, 1.1rem);font-weight:600">${formatAmount(balance.available)}</div>
                     </div>
                     <div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Pending</div>
-                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600;${balance.pending > 0 ? 'color:var(--warning)' : ''}">${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
+                        <div id="bal-pending" class="mono" style="font-size:clamp(0.8rem, 3vw, 1.1rem);font-weight:600;${balance.pending > 0 ? 'color:var(--warning)' : ''}">${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
                     </div>
                     ${balance.immature_value > 0 ? `<div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Maturing</div>
-                        <div class="mono" style="font-size:var(--font-size-lg);font-weight:600;color:var(--warning)">${formatAmount(balance.immature_value)}</div>
+                        <div id="bal-maturing" class="mono" style="font-size:clamp(0.8rem, 3vw, 1.1rem);font-weight:600;color:var(--warning)">${formatAmount(balance.immature_value)}</div>
                     </div>` : ''}
                 </div>
                 ${chainId ? `<div class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)">Chain: ${esc(chainId)}</div>` : ''}
             </div>`;
 
-        // Right column: Documents count + Address card
-        const txCount = balance.txCount ?? (balance.transactions || []).length;
+        // Right column: Address card
         const rightHtml = `
             <div style="display:flex;flex-direction:column;gap:var(--gap-lg)">
-                <div class="panel" style="padding:var(--gap-lg);flex:1;display:flex;flex-direction:column;justify-content:center">
-                    <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);font-weight:700;margin-bottom:4px">Transactions</div>
-                    <div style="font-size:var(--font-size-2xl);font-weight:800;color:var(--accent)">${txCount}</div>
-                </div>
                 <div class="panel" style="padding:var(--gap-lg);flex:1;display:flex;flex-direction:column;justify-content:center;cursor:pointer" id="home-address-card" title="Click to copy address">
                     <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);font-weight:700;margin-bottom:4px">Your Address</div>
                     <div class="mono" style="font-size:var(--font-size-sm);word-break:break-all">${address.slice(0, 12)}\u2026${address.slice(-8)}</div>
@@ -260,10 +255,10 @@ export function init(root, ctx) {
 
         const panel = document.createElement('div');
         panel.className = 'panel';
-        panel.style.padding = 'var(--gap-lg)';
+        panel.style.padding = '10px';
 
         // Header
-        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--gap-lg)">
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
             <h3 style="font-size:var(--font-size-lg);font-weight:700;margin:0">Recent Activity</h3>
             <a href="#" id="home-view-all" style="font-size:var(--font-size-sm);font-weight:600;color:var(--accent);text-decoration:none">View all</a>
         </div>`;
@@ -302,16 +297,16 @@ export function init(root, ctx) {
 
                 const counterparty = tx.recipient ? esc(tx.recipient).slice(0, 20) : '';
 
-                html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:var(--gap-sm) var(--gap);border-radius:var(--radius);cursor:pointer;transition:background 0.15s" class="activity-row" data-txid="${esc(tx.txId || '')}">
-                    <div style="display:flex;align-items:center;gap:var(--gap)">
-                        <div style="width:40px;height:40px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:${iconColor};flex-shrink:0">${iconName}</div>
+                html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:var(--radius);cursor:pointer;transition:background 0.15s" class="activity-row" data-txid="${esc(tx.txId || '')}">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <div style="width:28px;height:28px;border-radius:var(--radius-sm);background:${iconBg};display:flex;align-items:center;justify-content:center;font-size:0.85rem;color:${iconColor};flex-shrink:0">${iconName}</div>
                         <div>
                             <div style="font-weight:600;font-size:var(--font-size-sm)">${typeName}</div>
                             <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${counterparty ? counterparty + ' \u00B7 ' : ''}${ago}</div>
                         </div>
                     </div>
-                    <div style="text-align:right">
-                        <div class="mono" style="font-weight:700;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + signedAmt : ''}</div>
+                    <div style="text-align:right;flex-shrink:0;white-space:nowrap">
+                        <div class="mono" style="font-weight:700;font-size:0.8rem;color:${amtColor}">${disp.amount > 0 ? '\u25C6 ' + signedAmt : ''}</div>
                         <div style="font-size:0.6rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.03em">${badge.html.replace(/<[^>]+>/g, '')}</div>
                     </div>
                 </div>`;
@@ -344,7 +339,7 @@ export function init(root, ctx) {
         container.innerHTML = '';
         const panel = document.createElement('div');
         panel.className = 'panel';
-        panel.style.padding = 'var(--gap-lg)';
+        panel.style.padding = '10px';
 
         const actions = [
             { label: 'Send', icon: '\u{1F680}', page: 'payments', color: 'var(--accent)' },
@@ -380,15 +375,25 @@ export function init(root, ctx) {
     }
 
 
-    // Auto-refresh every 30s
-    const autoRefreshId = setInterval(() => { if (alive) loadDashboard(); }, 30_000);
-
     return {
-        destroy() { alive = false; clearInterval(autoRefreshId); },
+        destroy() { alive = false; },
         refresh(newState) {
             Object.assign(state, newState);
             renderAlignmentBanner(alignmentBanner, state);
-            loadDashboard();
+            // In-place balance update — no DOM rebuild, no scroll reset.
+            // Full loadDashboard() only runs on first mount and manual refresh.
+            const fmt = formatAmount;
+            const total = root.querySelector('#bal-total');
+            if (total && newState.walletBalance != null) total.textContent = fmt(newState.walletBalance);
+            const avail = root.querySelector('#bal-available');
+            if (avail && newState.walletAvailable != null) avail.textContent = fmt(newState.walletAvailable);
+            const pend = root.querySelector('#bal-pending');
+            if (pend && newState.walletPending != null) {
+                const v = newState.walletPending;
+                pend.textContent = (v > 0 ? '\u2212' : '') + fmt(v);
+            }
+            const mat = root.querySelector('#bal-maturing');
+            if (mat && newState.walletImmature != null) mat.textContent = fmt(newState.walletImmature);
         }
     };
 }
