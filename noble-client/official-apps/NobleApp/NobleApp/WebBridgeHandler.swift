@@ -208,6 +208,20 @@ final class WebBridgeHandler {
                         "transfer_value": p.sent,
                         "timestamp": Date().timeIntervalSince1970,
                     ] as [String: Any], at: 0)
+                    // If outputs return to self, add incoming entry
+                    if p.change > 0 {
+                        allDicts.insert([
+                            "txId": p.txId,
+                            "tx_type": 1,
+                            "type": "Pending Transfer",
+                            "direction": "incoming",
+                            "amount": p.change,
+                            "fee": 0,
+                            "status": "pending",
+                            "confirmations": 0,
+                            "timestamp": Date().timeIntervalSince1970,
+                        ] as [String: Any], at: 1)
+                    }
                 }
             }
 
@@ -738,6 +752,83 @@ final class WebBridgeHandler {
                 chainId: chainId
             )
             return ["txHex": txHex]
+
+        case "signSplitTransfer":
+            guard let outputsArr = params["outputs"] as? [[String: Any]] else {
+                throw BridgeError.missingParam("outputs")
+            }
+            guard let privateKey = appState.loadPrivateKey() else {
+                throw BridgeError.noPrivateKey
+            }
+            let allUtxos = try parseUtxoParams(params)
+            let changeAddress = try walletChangeAddress()
+            let chainId = appState.resolvedChainId
+            let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
+            let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
+
+            // Build outputs JSON array
+            let walletHex = changeAddress.map { String(format: "%02x", $0) }.joined()
+            var outputsJson: [[String: Any]] = []
+            for (i, o) in outputsArr.enumerated() {
+                guard let amt = (o["amount"] as? NSNumber)?.uint64Value else {
+                    print("[Bridge] Skipping malformed split output at index \(i): \(o)")
+                    continue
+                }
+                outputsJson.append(["address": walletHex, "amount": amt])
+            }
+            guard !outputsJson.isEmpty else {
+                throw BridgeError.operationFailed("signSplitTransfer: all outputs invalid")
+            }
+            // Map UTXOs to JSON
+            let utxoJson: [[String: Any]] = allUtxos.map { u in
+                ["txid": u.txid.map { String(format: "%02x", $0) }.joined(), "vout": u.vout, "value": u.value]
+            }
+            let cParams: [String: Any] = [
+                "outputs": outputsJson,
+                "fee": feeAtomic,
+                "fee_rate": feeRate,
+                "change_address": changeAddress.map { String(format: "%02x", $0) }.joined(),
+                "private_key": privateKey.map { String(format: "%02x", $0) }.joined(),
+                "chain_id": chainId,
+                "utxos": utxoJson,
+                "timestamp": UInt64(Date().timeIntervalSince1970)
+            ]
+            guard JSONSerialization.isValidJSONObject(cParams) else {
+                throw BridgeError.operationFailed("signSplitTransfer: invalid JSON params")
+            }
+            let jsonData = try JSONSerialization.data(withJSONObject: cParams)
+            guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
+                throw BridgeError.operationFailed("signSplitTransfer: UTF-8 encoding failed")
+            }
+            guard let resultPtr = noble_sign_split_transfer(jsonStr) else {
+                throw BridgeError.operationFailed("split transfer signing returned null")
+            }
+            let resultStr = String(cString: resultPtr)
+            noble_free(resultPtr)
+            guard let rData = resultStr.data(using: .utf8) else {
+                throw BridgeError.operationFailed("signSplitTransfer: result not valid UTF-8")
+            }
+            let rJson: [String: Any]
+            do {
+                guard let parsed = try JSONSerialization.jsonObject(with: rData) as? [String: Any] else {
+                    throw BridgeError.operationFailed("signSplitTransfer: result is not a JSON object")
+                }
+                rJson = parsed
+            } catch let error as BridgeError {
+                throw error
+            } catch {
+                throw BridgeError.operationFailed("signSplitTransfer: \(error.localizedDescription)")
+            }
+            if let err = rJson["error"] as? String {
+                throw BridgeError.operationFailed(err)
+            }
+            guard let txHex = rJson["tx_hex"] as? String else {
+                throw BridgeError.operationFailed("missing tx_hex in split transfer result")
+            }
+            guard let txId = rJson["tx_id"] as? String else {
+                throw BridgeError.operationFailed("signSplitTransfer: missing tx_id in result")
+            }
+            return ["txHex": txHex, "txId": txId]
 
         case "estimateTxSize":
             guard let privateKey = appState.loadPrivateKey() else {

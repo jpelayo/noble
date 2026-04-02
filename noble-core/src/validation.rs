@@ -412,9 +412,9 @@ pub fn validate_transaction(
     validate_tx_protocol_fields(tx, ctx)?;
     validate_tx_signatures(tx, ctx)?;
 
-    // T8 + T9: Metadata validation
+    // T8: Metadata bounds validation (T9 duplicate-key check removed by decree)
     validate_metadata(&tx.metadata)?;
-    tracing::trace!("T8/T9: metadata validation passed");
+    tracing::trace!("T8: metadata validation passed");
 
     // T29/T30: Version metadata validation (only for types with version chains)
     if crate::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.validates_version_chain()) {

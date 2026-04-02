@@ -706,6 +706,20 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                         .filter(|o| !is_ours(&o.address.to_wire_bytes()))
                         .map(|o| o.value)
                         .sum();
+                    // If sender AND recipient, add a second incoming entry for the received portion
+                    let received: u64 = tx.outputs.iter()
+                        .filter(|o| is_ours(&o.address.to_wire_bytes()))
+                        .map(|o| o.value)
+                        .sum();
+                    if received > 0 {
+                        let mut incoming_resp = resp.clone();
+                        incoming_resp.direction = Some("incoming".to_string());
+                        incoming_resp.amount = Some(received);
+                        incoming_resp.type_label = Some(type_label.clone());
+                        incoming_resp.block_height = Some(*height);
+                        incoming_resp.status = Some(status.clone());
+                        entries.push(incoming_resp);
+                    }
                     ("outgoing".to_string(), sent)
                 } else {
                     let received: u64 = tx.outputs.iter()
@@ -806,10 +820,19 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 resp.confirmations = Some(0);
                 resp.direction = Some(direction.to_string());
                 resp.amount = Some(amount);
-                resp.type_label = Some(type_label);
+                resp.type_label = Some(type_label.clone());
                 resp.block_height = None;
                 resp.status = Some("pending".to_string());
-                pending_entries.push(resp);
+                pending_entries.push(resp.clone());
+
+                // If sender AND recipient, add a second incoming entry
+                if sender_is_ours && value_to_us > 0 {
+                    let mut incoming_resp = resp;
+                    incoming_resp.direction = Some("incoming".to_string());
+                    incoming_resp.amount = Some(value_to_us);
+                    incoming_resp.type_label = Some(type_label);
+                    pending_entries.push(incoming_resp);
+                }
             }
         }
 

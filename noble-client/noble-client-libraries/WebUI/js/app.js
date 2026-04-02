@@ -10,6 +10,7 @@ import { init as initContacts } from './pages/contacts.js';
 import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
 import { init as initTxDetail } from './pages/tx-detail.js';
+import { init as initUtxoMaintenance } from './pages/utxo-maintenance.js';
 
 // ── Theme management ──
 // Applies data-theme attribute on <html> for manual light/dark override.
@@ -41,6 +42,7 @@ const pages = {
     settings:   initSettings,
     faucet:     initFaucet,
     'tx-detail': initTxDetail,
+    'utxo-maintenance': initUtxoMaintenance,
 };
 
 let currentPage = null;

@@ -40,6 +40,17 @@ export function init(root, ctx) {
 
         root.style.padding = '8px';
 
+        // Header with Refresh
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:4px';
+        const refreshBtn = document.createElement('button');
+        refreshBtn.className = 'btn btn-sm';
+        refreshBtn.textContent = 'Refresh';
+        refreshBtn.style.fontSize = '0.75rem';
+        refreshBtn.addEventListener('click', render);
+        header.appendChild(refreshBtn);
+        root.appendChild(header);
+
         // Balance card placeholder with skeleton
         balanceContainer = document.createElement('div');
         balanceContainer.setAttribute('aria-live', 'polite');
@@ -573,7 +584,7 @@ export function init(root, ctx) {
                 const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
                 const allUtxos = utxoResp.utxos || [];
                 const utxos = allUtxos
-                    .filter(u => !u.status || u.status === 'available')
+                    .filter(u => !u.status || u.status === 'available' || u.status === 'unconfirmed')
                     .map(u => ({
                         txid: u.txid,
                         vout: u.vout,

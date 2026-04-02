@@ -3,7 +3,6 @@
 
 //! Metadata entries for NOBLE transactions.
 
-use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -53,20 +52,12 @@ impl MetadataEntry {
     }
 }
 
-/// Validate a list of metadata entries: individual bounds (T8) and uniqueness (T9).
+/// Validate a list of metadata entries: individual bounds (T8).
+/// Duplicate keys are allowed (T9 removed by decree 2026-04-01).
 pub fn validate_metadata(entries: &[MetadataEntry]) -> Result<(), ValidationError> {
     for entry in entries {
         entry.validate()?;
     }
-
-    // T9: check for duplicate keys (O(n) via HashSet)
-    let mut seen = HashSet::with_capacity(entries.len());
-    for entry in entries {
-        if !seen.insert(&entry.key) {
-            return Err(ValidationError::DuplicateMetadataKey(entry.key.clone()));
-        }
-    }
-
     Ok(())
 }
 
@@ -200,21 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_keys_rejected() {
+    fn duplicate_keys_accepted() {
+        // T9 removed by decree (2026-04-01): duplicate metadata keys are allowed.
         let entries = vec![
             MetadataEntry {
-                key: "doc_type".into(),
-                value: b"report".to_vec(),
+                key: "doc:url".into(),
+                value: b"https://example.com/a.pdf".to_vec(),
             },
             MetadataEntry {
-                key: "doc_type".into(),
-                value: b"certificate".to_vec(),
+                key: "doc:url".into(),
+                value: b"https://mirror.example.com/a.pdf".to_vec(),
             },
         ];
-        assert!(matches!(
-            validate_metadata(&entries),
-            Err(ValidationError::DuplicateMetadataKey(_))
-        ));
+        assert!(validate_metadata(&entries).is_ok());
     }
 
     #[test]

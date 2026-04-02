@@ -12,6 +12,7 @@ use std::os::raw::c_char;
 
 extern "C" {
     fn noble_sign_transfer(params_json: *const c_char) -> *mut c_char;
+    fn noble_sign_split_transfer(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_notarization(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_key_rotation(params_json: *const c_char) -> *mut c_char;
     fn noble_sign_badge_proposal(params_json: *const c_char) -> *mut c_char;
@@ -51,6 +52,11 @@ fn call_ffi(
 /// Build, sign, and CBOR-encode a transfer transaction.
 pub fn sign_transfer(params_json: &str) -> Result<String, String> {
     call_ffi(noble_sign_transfer, params_json)
+}
+
+/// Build, sign, and CBOR-encode a multi-output transfer (UTXO split/join).
+pub fn sign_split_transfer(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_sign_split_transfer, params_json)
 }
 
 /// Build, sign, and CBOR-encode a notarization transaction.
@@ -649,5 +655,76 @@ mod tests {
             d2["issuer_sig"]["public_key"].as_str().unwrap(),
             "same private key must derive same public key"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Split transfer tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn split_transfer_3_outputs() {
+        let (sk, addr) = test_keypair();
+        let utxo = fake_utxo(200_000_000, 0xE0);
+        let params = format!(
+            r#"{{"outputs":[{{"address":"{}","amount":50000000}},{{"address":"{}","amount":50000000}},{{"address":"{}","amount":50000000}}],"fee":1000,"change_address":"{}","private_key":"{}","chain_id":1315202980,"timestamp":1700000000,"utxos":[{}]}}"#,
+            addr, addr, addr, addr, sk, utxo
+        );
+        let result = sign_split_transfer(&params).unwrap();
+        let v = parse_result(&result);
+        assert!(v["tx_hex"].is_string(), "expected tx_hex: {result}");
+        // Decode and verify 4 outputs (3 recipients + 1 change)
+        let decoded = parse_result(&tx_decode(&format!(r#"{{"tx_hex":"{}"}}"#, v["tx_hex"].as_str().unwrap())).unwrap());
+        let outputs = decoded["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 4, "expected 3 splits + 1 change");
+        assert_eq!(outputs[0]["value"].as_u64().unwrap(), 50_000_000);
+        assert_eq!(outputs[1]["value"].as_u64().unwrap(), 50_000_000);
+        assert_eq!(outputs[2]["value"].as_u64().unwrap(), 50_000_000);
+        // Change = 200M - 150M - 1000 = 49_999_000
+        assert_eq!(outputs[3]["value"].as_u64().unwrap(), 49_999_000);
+    }
+
+    #[test]
+    fn split_transfer_exact_no_change() {
+        let (sk, addr) = test_keypair();
+        let utxo = fake_utxo(100_001_000, 0xE1);
+        let params = format!(
+            r#"{{"outputs":[{{"address":"{}","amount":50000000}},{{"address":"{}","amount":50000000}}],"fee":1000,"change_address":"{}","private_key":"{}","chain_id":1315202980,"timestamp":1700000000,"utxos":[{}]}}"#,
+            addr, addr, addr, sk, utxo
+        );
+        let result = sign_split_transfer(&params).unwrap();
+        let v = parse_result(&result);
+        let decoded = parse_result(&tx_decode(&format!(r#"{{"tx_hex":"{}"}}"#, v["tx_hex"].as_str().unwrap())).unwrap());
+        let outputs = decoded["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2, "exact amount = no change output");
+    }
+
+    #[test]
+    fn split_transfer_insufficient_funds() {
+        let (sk, addr) = test_keypair();
+        let utxo = fake_utxo(1000, 0xE2);
+        let params = format!(
+            r#"{{"outputs":[{{"address":"{}","amount":50000000}},{{"address":"{}","amount":50000000}}],"fee":1000,"change_address":"{}","private_key":"{}","chain_id":1315202980,"timestamp":1700000000,"utxos":[{}]}}"#,
+            addr, addr, addr, sk, utxo
+        );
+        let result = sign_split_transfer(&params).unwrap();
+        let v = parse_result(&result);
+        assert!(v["error"].is_string(), "expected error for insufficient funds: {result}");
+    }
+
+    #[test]
+    fn split_transfer_with_fee_rate() {
+        let (sk, addr) = test_keypair();
+        let utxo = fake_utxo(200_000_000, 0xE3);
+        let params = format!(
+            r#"{{"outputs":[{{"address":"{}","amount":50000000}},{{"address":"{}","amount":50000000}}],"fee_rate":2,"change_address":"{}","private_key":"{}","chain_id":1315202980,"timestamp":1700000000,"utxos":[{}]}}"#,
+            addr, addr, addr, sk, utxo
+        );
+        let result = sign_split_transfer(&params).unwrap();
+        let v = parse_result(&result);
+        assert!(v["fee"].is_number(), "fee_rate response must include fee");
+        assert!(v["size"].is_number(), "fee_rate response must include size");
+        let fee = v["fee"].as_u64().unwrap();
+        let size = v["size"].as_u64().unwrap();
+        assert_eq!(fee, size * 2, "fee = size × fee_rate");
     }
 }

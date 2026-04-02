@@ -90,6 +90,17 @@ export function init(root, ctx) {
 
     root.classList.add('page-content');
 
+    // Header with Refresh button
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:4px';
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'btn btn-sm';
+    refreshBtn.textContent = 'Refresh';
+    refreshBtn.style.fontSize = '0.75rem';
+    refreshBtn.addEventListener('click', () => loadDashboard());
+    header.appendChild(refreshBtn);
+    root.appendChild(header);
+
     // Node alignment status card
     let lastBannerState = '';
     const alignmentBanner = document.createElement('div');
@@ -401,7 +412,8 @@ export function init(root, ctx) {
                 const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
                 if (!alive) return;
                 const txMap = new Map((snap.transactions || []).map(t => [t.txId || t.tx_id, t]));
-                root.querySelectorAll('.activity-row').forEach(row => {
+                const rows = root.querySelectorAll('.activity-row');
+                rows.forEach(row => {
                     const tx = txMap.get(row.dataset.txid);
                     if (!tx) return;
                     const el = row.querySelector('[data-role="status"]');
@@ -410,6 +422,13 @@ export function init(root, ctx) {
                         el.textContent = b.html.replace(/<[^>]+>/g, '');
                     }
                 });
+                // Re-render activity only when tx list actually changed
+                const freshTxs = snap.transactions || [];
+                const topFresh = freshTxs[0]?.txId || freshTxs[0]?.tx_id || '';
+                const topShown = rows[0]?.dataset.txid || '';
+                if (freshTxs.length !== rows.length || topFresh !== topShown) {
+                    renderRecentActivity(activityContainer, freshTxs);
+                }
             } catch { /* silent — balance already updated */ }
         }
     };

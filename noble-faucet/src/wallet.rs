@@ -150,26 +150,62 @@ impl FaucetWallet {
             .cloned()
             .unwrap_or(all_utxo_json);
 
-        // Build params JSON — same structure the Swift/WRY clients pass to noble_sign_transfer
+        // Split faucet amount into multiple UTXOs so the recipient can do batch operations.
+        // Each UTXO is sized at 4× typical notarization fee. Capped at 64 outputs.
+        let typical_notarization_fee = fee_rate.saturating_mul(200); // ~200 bytes typical
+        let min_utxo_value = typical_notarization_fee.saturating_mul(4);
+        let split_count = if min_utxo_value > 0 {
+            (amount / min_utxo_value).min(63).max(1) as usize  // 63 max (leave 1 slot for change)
+        } else {
+            1
+        };
+        let per_output = amount / split_count as u64;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let params = serde_json::json!({
-            "recipient": recipient_hex,
-            "amount": amount,
-            "fee": 0,
-            "fee_rate": fee_rate,
-            "utxos": utxo_json,
-            "change_address": change_hex,
-            "private_key": private_key_hex,
-            "chain_id": self.chain_id,
-            "timestamp": now,
-        });
 
-        // Call the same C library function all clients use
-        let result_json = noble_tx_core::sign_transfer(&params.to_string())
-            .map_err(|e| format!("sign_transfer: {e}"))?;
+        let result_json = if split_count > 1 {
+            // Multi-output: N outputs to recipient, each of per_output value
+            let outputs: Vec<serde_json::Value> = (0..split_count).map(|i| {
+                let val = if i == split_count - 1 {
+                    // Last output gets remainder to avoid rounding loss
+                    amount - per_output * (split_count as u64 - 1)
+                } else {
+                    per_output
+                };
+                serde_json::json!({ "address": recipient_hex, "amount": val })
+            }).collect();
+            let params = serde_json::json!({
+                "outputs": outputs,
+                "fee": 0,
+                "fee_rate": fee_rate,
+                "utxos": utxo_json,
+                "change_address": change_hex,
+                "private_key": private_key_hex,
+                "chain_id": self.chain_id,
+                "timestamp": now,
+            });
+            tracing::info!(task = "faucet", "splitting faucet send into {} UTXOs of ~{} groats each", split_count, per_output);
+            noble_tx_core::sign_split_transfer(&params.to_string())
+                .map_err(|e| format!("sign_split_transfer: {e}"))?
+        } else {
+            // Single output: standard transfer
+            let params = serde_json::json!({
+                "recipient": recipient_hex,
+                "amount": amount,
+                "fee": 0,
+                "fee_rate": fee_rate,
+                "utxos": utxo_json,
+                "change_address": change_hex,
+                "private_key": private_key_hex,
+                "chain_id": self.chain_id,
+                "timestamp": now,
+            });
+            noble_tx_core::sign_transfer(&params.to_string())
+                .map_err(|e| format!("sign_transfer: {e}"))?
+        };
 
         // Parse result — the C library returns {"tx_hex": "..."} or {"error": "..."}
         let result: serde_json::Value = serde_json::from_str(&result_json)

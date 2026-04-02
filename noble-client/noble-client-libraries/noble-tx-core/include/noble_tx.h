@@ -21,6 +21,13 @@ extern "C" {
 //         or:  { "error": "<message>" }
 char *noble_sign_transfer(const char *params_json);
 
+// Build, sign, and CBOR-encode a multi-output transfer (UTXO split/join).
+// Input JSON: { "outputs": [{"address": "<wire_hex>", "amount": <u64>}, ...],
+//               "fee_rate": <u64>, "utxos": [...], "change_address": "<wire_hex>",
+//               "private_key": "<hex32>", "chain_id": <u32> }
+// Output JSON: { "tx_hex": "<cbor_hex>", "tx_id": "<hash_hex>" }
+char *noble_sign_split_transfer(const char *params_json);
+
 // Build, sign, and CBOR-encode a notarization transaction.
 // Input JSON: { "checksum": "<hex32>", "metadata": [{"key":"...","value":"..."},...],
 //               "fee": <u64>, "utxos": [...], "change_address": "<wire_hex>",

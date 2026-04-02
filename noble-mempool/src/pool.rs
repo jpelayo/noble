@@ -159,6 +159,13 @@ pub struct Mempool {
     by_sender: HashMap<Vec<u8>, HashSet<Hash256>>,
     /// UTXO double-spend prevention: outpoints consumed by in-mempool transactions.
     spent_by_mempool: HashSet<OutPoint>,
+    /// Outputs created by mempool transactions — spendable as inputs by other mempool txs.
+    /// Mirrors Bitcoin's unconfirmed transaction chaining (CPFP).
+    mempool_outputs: HashMap<OutPoint, (u64, Vec<u8>)>, // (value, address_wire)
+    /// Which mempool tx created each mempool output (for cascade eviction).
+    output_creator: HashMap<OutPoint, Hash256>,
+    /// Dependency graph: child_tx_id → set of parent tx_ids it spends from.
+    depends_on: HashMap<Hash256, HashSet<Hash256>>,
     /// Signature verification cache.
     sig_cache: SigCache,
     /// Current total serialized size of all transactions.
@@ -177,6 +184,9 @@ impl Mempool {
             by_timestamp: BTreeMap::new(),
             by_sender: HashMap::new(),
             spent_by_mempool: HashSet::new(),
+            mempool_outputs: HashMap::new(),
+            output_creator: HashMap::new(),
+            depends_on: HashMap::new(),
             sig_cache,
             total_size_bytes: 0,
         }
@@ -240,6 +250,15 @@ impl Mempool {
     pub fn pending_debit(&self, pubkey: &noble_crypto::NoblePublicKey) -> u64 {
         let wire = pubkey.to_wire_bytes();
         self.pending_debits_for_sender(&wire)
+    }
+
+    /// Return all unspent mempool outputs for a given address (wire bytes).
+    /// These are change outputs from pending transactions — spendable by subsequent txs.
+    pub fn outputs_for_address(&self, addr_wire: &[u8]) -> Vec<(OutPoint, u64)> {
+        self.mempool_outputs.iter()
+            .filter(|(op, (_, wire))| wire == addr_wire && !self.spent_by_mempool.contains(op))
+            .map(|(op, (value, _))| (op.clone(), *value))
+            .collect()
     }
 
     /// Whether an outpoint is already consumed by an in-mempool transaction.
@@ -327,6 +346,42 @@ impl Mempool {
             .iter()
             .rev()
             .flat_map(move |(_, ids)| ids.iter().filter_map(move |id| self.by_id.get(id)))
+    }
+
+    /// Iterate transactions in dependency-safe order for block proposal.
+    /// Parents always appear before their children. Within independent groups,
+    /// higher fee-rate transactions come first.
+    pub fn iter_for_block_proposal(&self) -> Vec<&MempoolEntry> {
+        let mut result: Vec<&MempoolEntry> = Vec::with_capacity(self.by_id.len());
+        let mut emitted: HashSet<Hash256> = HashSet::new();
+
+        // Collect all entries sorted by fee rate desc (default priority)
+        let all_by_fee: Vec<&MempoolEntry> = self.iter_by_fee_rate_desc().collect();
+
+        // Repeatedly scan: emit entries whose parents are all emitted (or have no parents)
+        let mut remaining: Vec<&MempoolEntry> = all_by_fee;
+        loop {
+            let before = result.len();
+            let mut still_blocked = Vec::new();
+            for entry in remaining {
+                let parents = self.depends_on.get(&entry.tx_id);
+                let ready = match parents {
+                    None => true,
+                    Some(deps) => deps.iter().all(|p| emitted.contains(p)),
+                };
+                if ready {
+                    emitted.insert(entry.tx_id);
+                    result.push(entry);
+                } else {
+                    still_blocked.push(entry);
+                }
+            }
+            remaining = still_blocked;
+            if remaining.is_empty() || result.len() == before {
+                break; // all emitted or stuck (circular — shouldn't happen)
+            }
+        }
+        result
     }
 
     // --- 8-Step Admission Pipeline ---
@@ -462,6 +517,7 @@ impl Mempool {
         // Step 6.5: UTXO existence + double-spend check
         tracing::trace!("mempool step 6.5: UTXO validation");
         let mut input_value_sum: u64 = 0;
+        let mut parent_deps: HashSet<Hash256> = HashSet::new();
         for input in &tx.inputs {
             let outpoint = &input.prev_output;
 
@@ -480,7 +536,7 @@ impl Mempool {
                 ));
             }
 
-            // Verify UTXO exists on-chain and is mature
+            // Verify UTXO exists: check on-chain first, then mempool outputs
             match utxos.get_utxo(outpoint) {
                 Some((value, _is_coinbase, creation_height)) => {
                     // Maturity check — ALL UTXOs need COINBASE_MATURITY confirmations.
@@ -502,10 +558,19 @@ impl Mempool {
                     input_value_sum = input_value_sum.saturating_add(value);
                 }
                 None => {
-                    return Err(MempoolError::StructuralValidation(
-                        "Input references a coin that does not exist or has already been spent. \
-                        This usually means the funds were used in another transaction.".into(),
-                    ));
+                    // Not on-chain — check mempool outputs (unconfirmed tx chaining)
+                    if let Some((value, _addr_wire)) = self.mempool_outputs.get(outpoint) {
+                        input_value_sum = input_value_sum.saturating_add(*value);
+                        // Record dependency on the tx that created this output
+                        if let Some(parent_id) = self.output_creator.get(outpoint) {
+                            parent_deps.insert(*parent_id);
+                        }
+                    } else {
+                        return Err(MempoolError::StructuralValidation(
+                            "Input references a coin that does not exist or has already been spent. \
+                            This usually means the funds were used in another transaction.".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -555,7 +620,7 @@ impl Mempool {
             received_at: current_time,
         };
 
-        self.insert_entry(entry);
+        self.insert_entry(entry, parent_deps);
         tracing::debug!(
             task = "mempool",
             "transaction admitted to mempool, pool size: {}",
@@ -606,6 +671,26 @@ impl Mempool {
         // Unmark spent outpoints
         for input in &entry.tx.inputs {
             self.spent_by_mempool.remove(&input.prev_output);
+        }
+
+        // Remove mempool outputs created by this tx
+        for (vout, _) in entry.tx.outputs.iter().enumerate() {
+            let outpoint = OutPoint { txid: *tx_id, vout: vout as u32 };
+            self.mempool_outputs.remove(&outpoint);
+            self.output_creator.remove(&outpoint);
+        }
+
+        // Remove dependency record
+        self.depends_on.remove(tx_id);
+
+        // Cascade-evict any tx that depends on this one
+        let dependents: Vec<Hash256> = self.depends_on.iter()
+            .filter(|(_, parents)| parents.contains(tx_id))
+            .map(|(child, _)| *child)
+            .collect();
+        for child_id in dependents {
+            tracing::debug!(task = "mempool", "cascade-evicting dependent tx {:?}", child_id);
+            self.remove(&child_id);
         }
 
         self.total_size_bytes -= entry.size_bytes;
@@ -698,7 +783,7 @@ impl Mempool {
         pct.min(100) as u8
     }
 
-    fn insert_entry(&mut self, entry: MempoolEntry) {
+    fn insert_entry(&mut self, entry: MempoolEntry, parent_deps: HashSet<Hash256>) {
         let tx_id = entry.tx_id;
         let fee_rate = entry.fee_rate;
         let checksum = entry.tx.checksum;
@@ -714,6 +799,19 @@ impl Mempool {
         // Mark input outpoints as spent by mempool
         for input in &entry.tx.inputs {
             self.spent_by_mempool.insert(input.prev_output.clone());
+        }
+
+        // Register this tx's outputs as spendable mempool outputs
+        for (vout, output) in entry.tx.outputs.iter().enumerate() {
+            let outpoint = OutPoint { txid: tx_id, vout: vout as u32 };
+            let addr_wire = output.address.to_wire_bytes();
+            self.mempool_outputs.insert(outpoint.clone(), (output.value, addr_wire));
+            self.output_creator.insert(outpoint, tx_id);
+        }
+
+        // Record dependency graph (for cascade eviction + topo ordering)
+        if !parent_deps.is_empty() {
+            self.depends_on.insert(tx_id, parent_deps);
         }
 
         self.by_id.insert(tx_id, entry);

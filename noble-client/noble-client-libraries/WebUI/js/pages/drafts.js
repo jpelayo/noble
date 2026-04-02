@@ -128,9 +128,9 @@ export function init(root, ctx) {
         editBtn.title = 'Resume editing this draft';
         editBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            // Store draft ID so documents page picks it up on init
-            if (window.App) window.App._pendingDraftId = d.id;
-            Bridge.call('noble_app', 'navigateTo', { section: 'documents' });
+            // Parameterized navigation forces the router to destroy the cached
+            // documents page and call init() fresh with the draft ID.
+            if (window.App) App.navigateTo('documents', { draftId: d.id });
         });
         actions.appendChild(editBtn);
 

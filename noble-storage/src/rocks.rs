@@ -617,18 +617,18 @@ impl StorageEngine for RocksDbStorage {
                     }
 
                     // Try in-block created outputs first, then DB
-                    let entry = if let Some(e) = created_in_block.remove(&op_key) {
-                        e
+                    let (entry, from_same_block) = if let Some(e) = created_in_block.remove(&op_key) {
+                        (e, true)
                     } else {
-                        self.read_utxo(&input.prev_output)?
+                        (self.read_utxo(&input.prev_output)?
                             .ok_or_else(|| StorageError::UtxoNotFound {
                                 txid: input.prev_output.txid.to_string(),
                                 vout: input.prev_output.vout,
-                            })?
+                            })?, false)
                     };
 
-                    // Check UTXO maturity (ALL outputs need COINBASE_MATURITY confirmations)
-                    if !entry.is_mature(height) {
+                    // Check UTXO maturity — skip for in-block outputs (UTXO chaining)
+                    if !from_same_block && !entry.is_mature(height) {
                         return Err(StorageError::ImmatureUtxo {
                             created_height: entry.height,
                             current_height: height,

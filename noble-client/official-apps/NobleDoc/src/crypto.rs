@@ -309,6 +309,33 @@ pub fn handle_crypto_action(
             Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
         }
 
+        "signSplitTransfer" => {
+            let outputs = params.get("outputs").filter(|v| v.is_array()).cloned()
+                .ok_or_else(|| "signSplitTransfer: missing 'outputs'".to_string())?;
+            let utxos = params.get("utxos").filter(|v| v.is_array()).cloned()
+                .ok_or_else(|| "signSplitTransfer: missing 'utxos'".to_string())?;
+            let fee_rate = params.get("fee_rate").and_then(|v| v.as_u64()).unwrap_or(0);
+            let input_json = serde_json::json!({
+                "outputs": outputs,
+                "fee": params.get("fee").and_then(|v| v.as_u64()).unwrap_or(0),
+                "fee_rate": fee_rate,
+                "utxos": utxos,
+                "change_address": wallet_address,
+                "private_key": hex::encode(private_key),
+                "chain_id": chain_id,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            });
+            let result_json = noble_tx_core::sign_split_transfer(&input_json.to_string())
+                .map_err(|e| format!("sign_split_transfer: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
+        }
+
         "estimateTxSize" => {
             let estimate_json = serde_json::json!({
                 "tx_type": params.get("tx_type").and_then(|v| v.as_str()).unwrap_or("notarization"),

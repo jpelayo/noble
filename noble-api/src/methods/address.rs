@@ -222,6 +222,20 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
             })
             .collect();
 
+        // Include unconfirmed mempool outputs (change from pending txs) for this address.
+        let addr_wire = addr.to_wire_bytes();
+        let mut entries = entries;
+        for (outpoint, value) in mempool.outputs_for_address(&addr_wire) {
+            entries.push(UtxoResponse {
+                txid: hash_to_hex(&outpoint.txid),
+                vout: outpoint.vout,
+                value,
+                height: 0,
+                is_coinbase: false,
+                status: "unconfirmed".to_string(),
+            });
+        }
+
         drop(mempool);
 
         Ok(AddressUtxosResponse {

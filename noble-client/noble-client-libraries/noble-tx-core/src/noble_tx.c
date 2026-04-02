@@ -216,6 +216,153 @@ char *noble_sign_transfer(const char *params_json) {
     return result;
 }
 
+// ── noble_sign_split_transfer ───────────────────────────────────────────
+// Multi-output transfer: split 1 UTXO into N outputs + change.
+// Used for UTXO maintenance (split/join) and faucet pre-splitting.
+// Input: { "outputs": [{"address":"<hex>","amount":<u64>}, ...],
+//          "fee_rate": <u64>, "change_address": "<hex>",
+//          "private_key": "<hex32>", "chain_id": <u32>, "utxos": [...] }
+
+char *noble_sign_split_transfer(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    const json_value_t *outputs_arr = json_get(params, "outputs");
+    uint64_t fee              = json_get_uint(params, "fee");
+    const char *change_hex    = json_get_string(params, "change_address");
+    const char *privkey_hex   = json_get_string(params, "private_key");
+    uint32_t chain_id         = json_get_uint32(params, "chain_id");
+    const json_value_t *utxos = json_get(params, "utxos");
+
+    if (!outputs_arr || outputs_arr->type != JSON_ARRAY || !change_hex || !privkey_hex || !utxos) {
+        json_free(params);
+        return json_emit_error("missing required field");
+    }
+    if (outputs_arr->array.count == 0) {
+        json_free(params);
+        return json_emit_error("outputs array is empty");
+    }
+    if (outputs_arr->array.count > MAX_OUTPUTS - 1) {
+        json_free(params);
+        return json_emit_error("too many outputs (max 63 + change)");
+    }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.tx_type = TX_TYPE_TRANSFER;
+
+    // Parse inputs from UTXOs.
+    if (parse_utxos_into_inputs(utxos, &tx, NULL, NULL) != 0) {
+        json_free(params);
+        return json_emit_error("invalid utxos");
+    }
+
+    // Parse recipient outputs.
+    uint64_t output_total = 0;
+    for (size_t i = 0; i < outputs_arr->array.count; i++) {
+        const json_value_t *o = &outputs_arr->array.items[i];
+        const char *addr_hex = json_get_string(o, "address");
+        uint64_t amount = json_get_uint(o, "amount");
+        if (!addr_hex || amount == 0) {
+            json_free(params);
+            return json_emit_error("invalid output entry");
+        }
+        if (parse_address_wire(addr_hex, &tx.outputs[i].address) != 0) {
+            json_free(params);
+            return json_emit_error("invalid output address");
+        }
+        tx.outputs[i].value = amount;
+        output_total += amount;
+    }
+    tx.output_count = (uint8_t)outputs_arr->array.count;
+
+    // Change address.
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
+    }
+
+    // Compute total input value.
+    uint64_t input_total = 0;
+    for (uint8_t i = 0; i < tx.input_count; i++) {
+        const json_value_t *u = &utxos->array.items[i];
+        input_total += json_get_uint(u, "value");
+    }
+
+    tx.timestamp = json_get_uint(params, "timestamp");
+    memset(tx.checksum, 0, HASH256_LEN);
+
+    // Two-pass fee computation.
+    uint64_t fee_rate = json_get_uint(params, "fee_rate");
+    uint64_t actual_fee = fee;
+
+    if (fee_rate > 0) {
+        uint64_t change0 = input_total > output_total ? input_total - output_total : 0;
+        if (change0 > 0) {
+            tx.outputs[tx.output_count].address = change_addr;
+            tx.outputs[tx.output_count].value = change0;
+            tx.output_count++;
+        }
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+        // Reset output_count to before change was added
+        tx.output_count = (uint8_t)outputs_arr->array.count;
+    }
+
+    if (actual_fee + output_total > input_total) {
+        json_free(params);
+        return json_emit_error("insufficient funds for outputs + fee");
+    }
+    uint64_t change = input_total - output_total - actual_fee;
+    if (change > 0) {
+        tx.outputs[tx.output_count].address = change_addr;
+        tx.outputs[tx.output_count].value = change;
+        tx.output_count++;
+    }
+
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    {
+        int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+        if (rc != 0) {
+            json_free(params);
+            return json_emit_error(rc == -2
+                ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+                : "signing failed");
+        }
+    }
+
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    if (!tx_hex) { noble_buf_free(&cbor); json_free(params); return json_emit_error("out of memory"); }
+    hex_encode(cbor.data, cbor.len, tx_hex);
+
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    char *result = fee_rate > 0
+        ? json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len)
+        : json_emit_result(tx_hex, tx_id_hex);
+
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(params);
+    return result;
+}
+
 // ── noble_sign_notarization ─────────────────────────────────────────────
 
 char *noble_sign_notarization(const char *params_json) {

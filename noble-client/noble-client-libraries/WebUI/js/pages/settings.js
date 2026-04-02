@@ -252,9 +252,19 @@ export function init(root, ctx) {
 
         card.innerHTML = `
             <div class="panel-header">Wallet</div>
-            <div class="panel-body">${body}</div>
+            <div class="panel-body">
+                ${body}
+                ${hasWallet ? `<div class="settings-row" style="margin-top:var(--gap-sm)">
+                    <button id="settings-utxo-manage" class="btn btn-sm" style="width:100%">UTXO Management</button>
+                </div>` : ''}
+            </div>
         `;
         root.appendChild(card);
+
+        // UTXO Management link
+        card.querySelector('#settings-utxo-manage')?.addEventListener('click', () => {
+            if (window.App) App.navigateTo('utxo-maintenance');
+        });
 
         if (hasWallet && addr) {
             // Noble address — full, no trimming

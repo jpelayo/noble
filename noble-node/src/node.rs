@@ -3912,7 +3912,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let txs: Vec<noble_core::Transaction> = {
                         let mempool = self.mempool.lock();
                         mempool
-                            .iter_by_fee_rate_desc()
+                            .iter_for_block_proposal()
+                            .into_iter()
                             .filter(|entry| entry.fee_rate >= node_min_fee_rate)
                             .take(max_count)
                             .map(|entry| entry.tx.clone())

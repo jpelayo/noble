@@ -58,9 +58,14 @@ export function init(root, ctx) {
     let editingDraftId = null;  // ID of draft being resumed
     let balanceData = null;     // cached balance { available }
 
-    // Check if we're resuming a draft (set by drafts page)
-    if (window.App && window.App._pendingDraftId) {
-        resumePendingDraft(window.App._pendingDraftId);
+    // Check if we're resuming a draft — from params (new path) or global (legacy)
+    const { params } = ctx;
+    const resumeDraftId = params?.draftId || window.App?._pendingDraftId;
+    let _draftResuming = false;
+    if (resumeDraftId) {
+        _draftResuming = true;
+        if (window.App) window.App._pendingDraftId = null;
+        resumePendingDraft(resumeDraftId);
     }
 
     async function resumePendingDraft(draftId) {
@@ -72,22 +77,20 @@ export function init(root, ctx) {
             if (draft && draft.state) {
                 editingDraftId = draft.id;
                 restoreWizardState(draft.state);
-                render();
             }
-        } catch { /* draft not found, stay on landing */ }
+        } catch { /* draft not found — fall through to render() */ }
+        if (alive) render(); // always render — either restored draft or fresh wizard
     }
 
     function getWizardState() {
-        // Passwords for protected fields are kept in drafts — drafts are local-only
-        // (UserDefaults on device, never transmitted). Losing passwords forces re-entry
-        // and blocks submission (B3 fix).
-        const perFileCopy = {};
-        for (const [k, v] of Object.entries(perFileMetadata)) { perFileCopy[k] = v; }
-        return {
-            files, hashes, previousChecksum, isNewVersion, versionMode,
-            wantsMetadata, metadata, perFileMetadata: perFileCopy,
-            metadataTab, batchUUID, selectedSigningKeyId, wantsLocking, feeLevel, step
-        };
+        // Deep clone via JSON roundtrip — strips functions/undefined, clones all nested objects.
+        // Passwords kept (local-only storage). versionFile + selectedFilePath now included.
+        return JSON.parse(JSON.stringify({
+            files, hashes, previousChecksum, isNewVersion, versionMode, versionFile,
+            wantsMetadata, metadata, perFileMetadata,
+            metadataTab, selectedFilePath, batchUUID, selectedSigningKeyId,
+            wantsLocking, feeLevel, step
+        }));
     }
 
     function restoreWizardState(d) {
@@ -96,26 +99,27 @@ export function init(root, ctx) {
         previousChecksum = d.previousChecksum || '';
         isNewVersion = d.isNewVersion || false;
         versionMode = d.versionMode || 'checksum';
+        versionFile = d.versionFile || null;
         wantsMetadata = d.wantsMetadata || false;
         metadata = d.metadata || [];
         perFileMetadata = d.perFileMetadata || {};
         metadataTab = d.metadataTab || 'batch';
+        selectedFilePath = d.selectedFilePath || null;
         batchUUID = d.batchUUID || null;
-        selectedFilePath = null;
         selectedSigningKeyId = d.selectedSigningKeyId || null;
         wantsLocking = d.wantsLocking || false;
         lockingPassword = '';
         lockingPasswordConfirm = '';
         feeLevel = d.feeLevel || 'recommended';
-        step = d.step || 0;
-        versionFile = null;
-        feeData = null;
+        step = d.step ?? 0; // ?? not || — step 0 is a valid saved value
+        feeData = null;     // re-fetched on Fee step render
         results = [];
     }
 
     async function saveDraft(reason) {
+        const id = editingDraftId || crypto.randomUUID();
         const draft = {
-            id: editingDraftId || crypto.randomUUID(),
+            id,
             name: files.length > 0 ? files[0].name : 'Untitled',
             fileCount: files.length,
             reason: reason || null,
@@ -124,13 +128,26 @@ export function init(root, ctx) {
         };
         try {
             await Bridge.call('noble_app', 'saveDraft', { draft });
-            editingDraftId = null;
-            resetWizard();
-            render();
+            editingDraftId = id; // keep ID so subsequent saves update same draft
         } catch {
-            // Save failed — keep wizard state so user doesn't lose work
             alert('Could not save draft. Please try again.');
         }
+    }
+
+    /** Silent auto-save — no UI reset, no navigation. Called on step transitions. */
+    async function autoSaveDraft() {
+        if (files.length === 0) return;
+        const id = editingDraftId || crypto.randomUUID();
+        editingDraftId = id;
+        const draft = {
+            id,
+            name: files[0]?.name || 'Untitled',
+            fileCount: files.length,
+            reason: 'auto-save',
+            createdAt: Date.now() / 1000,
+            state: getWizardState()
+        };
+        try { await Bridge.call('noble_app', 'saveDraft', { draft }); } catch {}
     }
 
     function resetWizard() {
@@ -159,7 +176,12 @@ export function init(root, ctx) {
         balanceData = null;
     }
 
-    render();
+    // Skip initial render if draft resume is in progress — avoids flash of step 0
+    if (_draftResuming) {
+        root.innerHTML = '<div style="text-align:center;padding:var(--gap-xl);color:var(--text-muted)">Loading draft\u2026</div>';
+    } else {
+        render();
+    }
 
     function render() {
         if (!alive) return;
@@ -310,7 +332,7 @@ export function init(root, ctx) {
             nextBtn.setAttribute('data-nav', 'next');
             nextBtn.textContent = step === 5 ? 'Sign & Submit' : `${STEP_NAMES[step + 1]} \u2192`;
             nextBtn.disabled = !canAdvance();
-            nextBtn.addEventListener('click', () => { step++; render(); });
+            nextBtn.addEventListener('click', () => { step++; autoSaveDraft(); render(); });
             nav.appendChild(nextBtn);
 
             root.appendChild(nav);
@@ -774,7 +796,7 @@ export function init(root, ctx) {
                     metadata = [
                         { fieldKey: 'doc:batch', key: 'doc:batch', value: batchUUID, mode: 'plaintext' },
                         { fieldKey: 'doc:relation', key: 'doc:relation', value: 'same batch', mode: 'plaintext' },
-                        { fieldKey: 'doc:bridge', key: 'doc:bridge', value: batchUUID, mode: 'plaintext' },
+                        { fieldKey: 'doc:bridge', key: 'doc:bridge', value: crypto.randomUUID(), mode: 'plaintext' },
                     ];
                 }
                 render();
@@ -2029,86 +2051,103 @@ export function init(root, ctx) {
         signAllThenSubmitAll(desc, fill, resultsContainer, container);
     }
 
+    function preflightCheck() {
+        const errors = [];
+        if (files.length === 0) errors.push('No files selected');
+        for (const f of files) {
+            if (!hashes[f.path] || hashes[f.path].startsWith('ERROR'))
+                errors.push(`Hash missing for ${f.name}`);
+        }
+        const allMeta = [...metadata, ...Object.values(perFileMetadata).flat()];
+        for (const m of allMeta) {
+            if (m.mode === 'protected' && m.value && !m.fieldPassword)
+                errors.push(`Password missing for field "${m.key}"`);
+            if (m.mode === 'encrypted' && (!m.recipients || m.recipients.length === 0))
+                errors.push(`No recipients for encrypted field "${m.key}"`);
+        }
+        if (wantsLocking && (lockingPassword.length < 8 || lockingPassword !== lockingPasswordConfirm))
+            errors.push('Locking password missing or mismatched');
+        if (!feeData) errors.push('Fee estimate not loaded');
+        return errors;
+    }
+
     async function signAllThenSubmitAll(desc, fill, resultsContainer, container) {
-        // ── Phase 1: Sign every file ──
-        desc.textContent = 'Signing transactions...';
-        const signed = []; // { file, hash, txHex } or { file, hash, error }
+        // ── Auto-reload stale data (old drafts may lack fee/balance) ──
+        if (!feeData) {
+            desc.textContent = 'Loading fee estimates...';
+            try { await loadFees(); } catch {}
+        }
+        if (!balanceData) {
+            desc.textContent = 'Loading balance...';
+            try {
+                const addr = state.walletAddress;
+                if (addr) {
+                    const bal = await Bridge.call('noble_api', 'getBalance', { address: addr });
+                    balanceData = bal;
+                }
+            } catch {}
+        }
+        // ── Pre-flight integrity check ──
+        const preflight = preflightCheck();
+        if (preflight.length > 0) {
+            desc.textContent = 'Cannot submit — missing data:';
+            const errList = document.createElement('ul');
+            errList.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);text-align:left;margin:var(--gap) 0';
+            for (const e of preflight) {
+                const li = document.createElement('li');
+                li.textContent = e;
+                errList.appendChild(li);
+            }
+            container.appendChild(errList);
+            const backBtn = document.createElement('button');
+            backBtn.className = 'btn btn-primary';
+            backBtn.textContent = 'Back to Review';
+            backBtn.addEventListener('click', () => { step = 5; results = []; render(); });
+            container.appendChild(backBtn);
+            return;
+        }
+        // ── Sequential sign+submit (each tx sees mempool state from prior submissions) ──
+        desc.textContent = 'Processing documents...';
         for (let i = 0; i < files.length; i++) {
             if (!alive) return;
-            fill.style.width = `${((i + 1) / files.length) * 50}%`; // 0-50% for signing
+            fill.style.width = `${((i + 1) / files.length) * 100}%`;
+            desc.textContent = `Signing document ${i + 1} of ${files.length}...`;
 
             const f = files[i];
             const hash = hashes[f.path];
             if (!hash || hash.startsWith('ERROR')) {
-                signed.push({ file: f.name, hash, error: 'Hash computation failed' });
-                continue;
+                results.push({ file: f.name, hash, success: false, error: 'Hash computation failed' });
+                resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
+                break; // stop batch on first error
             }
             try {
+                // Sign (buildSignedTx fetches fresh UTXOs — sees mempool outputs from prior txs)
                 const txHex = await buildSignedTx(f, hash);
-                signed.push({ file: f.name, hash, txHex });
+                // Submit with retry
+                desc.textContent = `Submitting document ${i + 1} of ${files.length}...`;
+                let submitted = false;
+                let lastErr = null;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        const submitResult = await Bridge.call('noble_api', 'submitTransaction', { txHex });
+                        if (submitResult.accepted) {
+                            results.push({ file: f.name, hash, success: true, txId: submitResult.txId });
+                            submitted = true;
+                            break;
+                        }
+                        lastErr = 'Transaction rejected';
+                    } catch (e) { lastErr = e.message; }
+                    if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+                }
+                if (!submitted) {
+                    results.push({ file: f.name, hash, success: false, error: lastErr });
+                    resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
+                    break; // stop batch on first error
+                }
             } catch (err) {
-                signed.push({ file: f.name, hash, error: err.message });
-            }
-        }
-
-        // Check: did ALL sign successfully?
-        const signErrors = signed.filter(s => s.error);
-        if (signErrors.length > 0) {
-            // Show signing failures — nothing was submitted
-            desc.textContent = 'Signing failed — no transactions were submitted.';
-            fill.style.width = '100%';
-            fill.style.background = 'var(--error)';
-            for (const s of signed) {
-                resultsContainer.appendChild(buildReceipt({
-                    file: s.file, hash: s.hash,
-                    success: !s.error, error: s.error || null
-                }));
-            }
-            const summary = document.createElement('div');
-            summary.style.cssText = 'margin-top:var(--gap);text-align:center;';
-            summary.innerHTML = `
-                <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--error)">
-                    Signing Failed
-                </div>
-                <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
-                    ${signErrors.length} of ${files.length} document${files.length > 1 ? 's' : ''} failed to sign. Fix the errors and try again.
-                </div>
-            `;
-            const draftBtn = document.createElement('button');
-            draftBtn.className = 'btn btn-secondary';
-            draftBtn.textContent = 'Save as Draft';
-            draftBtn.style.marginTop = 'var(--gap-sm)';
-            draftBtn.addEventListener('click', () => { step = 0; results = []; saveDraft('Signing failed'); });
-            summary.appendChild(draftBtn);
-            const backBtn = document.createElement('button');
-            backBtn.className = 'btn btn-primary';
-            backBtn.textContent = 'Back to Review';
-            backBtn.style.marginTop = 'var(--gap-sm)';
-            backBtn.style.marginLeft = 'var(--gap-sm)';
-            backBtn.addEventListener('click', () => { step = 5; results = []; render(); });
-            summary.appendChild(backBtn);
-            container.appendChild(summary);
-            return;
-        }
-
-        // ── Phase 2: Submit all signed transactions ──
-        desc.textContent = 'Submitting transactions...';
-        for (let i = 0; i < signed.length; i++) {
-            if (!alive) return;
-            fill.style.width = `${50 + ((i + 1) / signed.length) * 50}%`; // 50-100%
-            const s = signed[i];
-            try {
-                const submitResult = await Bridge.call('noble_api', 'submitTransaction', {
-                    txHex: s.txHex
-                });
-                results.push({
-                    file: s.file, hash: s.hash,
-                    success: submitResult.accepted,
-                    txId: submitResult.txId,
-                    error: submitResult.accepted ? null : 'Transaction rejected'
-                });
-            } catch (err) {
-                results.push({ file: s.file, hash: s.hash, success: false, error: err.message });
+                results.push({ file: f.name, hash, success: false, error: err.message });
+                resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
+                break; // stop batch on first error
             }
             resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
         }
@@ -2121,7 +2160,8 @@ export function init(root, ctx) {
 
         if (failures === 0) {
             if (editingDraftId) {
-                Bridge.call('noble_app', 'deleteDraft', { id: editingDraftId }).catch(() => {});
+                try { await Bridge.call('noble_app', 'deleteDraft', { id: editingDraftId }); }
+                catch (e) { console.warn('[documents] draft deletion failed:', e); }
                 editingDraftId = null;
             }
             summary.innerHTML = `
@@ -2217,7 +2257,7 @@ export function init(root, ctx) {
         const utxoResp = await Bridge.call('noble_api', 'getAddressUtxos', { address: state.walletAddress });
         const allUtxos = utxoResp.utxos || [];
         const utxos = allUtxos
-            .filter(u => !u.status || u.status === 'available')
+            .filter(u => !u.status || u.status === 'available' || u.status === 'unconfirmed')
             .map(u => ({ txid: u.txid, vout: u.vout, value: u.value }));
 
         if (utxos.length === 0 && allUtxos.length > 0) {

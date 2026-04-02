@@ -84,6 +84,9 @@ struct MainView: View {
                     Button { navigateTo(.drafts) } label: {
                         Label("Drafts", systemImage: "tray")
                     }
+                    Button { navigateTo(.wallet) } label: {
+                        Label("Wallet", systemImage: "wallet.bifold.fill")
+                    }
                     Button { navigateTo(.faucet) } label: {
                         Label("Faucet", systemImage: "drop")
                     }
