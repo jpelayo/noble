@@ -226,7 +226,7 @@ export function init(root, ctx) {
         if (step === 0) {
             backBtn.textContent = '\u2190 Cancel';
         } else {
-            backBtn.textContent = `\u2190 ${STEP_NAMES[step - 1]}`;
+            backBtn.textContent = `\u2190 Previous: ${STEP_NAMES[step - 1]}`;
         }
         backBtn.addEventListener('click', () => {
             if (step === 0) { resetWizard(); } else { step--; }
@@ -259,7 +259,7 @@ export function init(root, ctx) {
         const nextHint = document.createElement('span');
         nextHint.className = 'wizard-top-btn wizard-top-next';
         if (step < 6) {
-            nextHint.textContent = `${STEP_NAMES[Math.min(step + 1, STEP_NAMES.length - 1)]} \u2192`;
+            nextHint.textContent = `Next: ${STEP_NAMES[Math.min(step + 1, STEP_NAMES.length - 1)]} \u2192`;
         }
         // Invisible placeholder to keep dots centered when no next hint
         if (step >= 6) nextHint.style.visibility = 'hidden';
@@ -318,7 +318,7 @@ export function init(root, ctx) {
             if (step === 0) {
                 navBackBtn.textContent = '\u2190 Cancel';
             } else {
-                navBackBtn.textContent = `\u2190 ${STEP_NAMES[step - 1]}`;
+                navBackBtn.textContent = `\u2190 Previous: ${STEP_NAMES[step - 1]}`;
             }
             navBackBtn.addEventListener('click', () => {
                 if (step === 0) { resetWizard(); } else { step--; }
@@ -330,7 +330,7 @@ export function init(root, ctx) {
             const nextBtn = document.createElement('button');
             nextBtn.className = 'btn btn-primary';
             nextBtn.setAttribute('data-nav', 'next');
-            nextBtn.textContent = step === 5 ? 'Sign & Submit' : `${STEP_NAMES[step + 1]} \u2192`;
+            nextBtn.textContent = step === 5 ? 'Sign & Submit' : `Next: ${STEP_NAMES[step + 1]} \u2192`;
             nextBtn.disabled = !canAdvance();
             nextBtn.addEventListener('click', () => { step++; autoSaveDraft(); render(); });
             nav.appendChild(nextBtn);
