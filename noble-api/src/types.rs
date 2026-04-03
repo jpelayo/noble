@@ -183,6 +183,26 @@ pub fn confirmation_status_label(confirmations: Option<u64>) -> String {
 }
 
 /// Convert a `Transaction` to a `TransactionResponse`.
+/// Compute the net transfer value for a transaction: sum of outputs NOT going
+/// back to the signer. For self-transfers (all outputs to signer) and coinbase,
+/// returns total_output_value. Single source of truth — used by tx_to_response
+/// and mempool RPC.
+pub fn compute_transfer_value(tx: &Transaction) -> u64 {
+    let signer_wire: Option<Vec<u8>> = tx.issuer_sig.to_noble_public_key()
+        .ok()
+        .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+    match &signer_wire {
+        Some(sw) if !tx.is_coinbase() => {
+            let non_signer: u64 = tx.outputs.iter()
+                .filter(|o| o.address.to_wire_bytes() != *sw)
+                .map(|o| o.value)
+                .sum();
+            if non_signer == 0 { tx.total_output_value() } else { non_signer }
+        }
+        _ => tx.total_output_value(),
+    }
+}
+
 pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
     let has_locator = tx.encrypted_locator.is_some();
     let locator_recipients = tx
@@ -190,22 +210,10 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
         .as_ref()
         .map_or(0, |l| l.recipients.len());
 
-    // Compute transfer_value: outputs NOT going to the signer.
-    // For coinbase (no signer match possible), use total_output.
     let signer_wire: Option<Vec<u8>> = tx.issuer_sig.to_noble_public_key()
         .ok()
         .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
-    let transfer_value = match &signer_wire {
-        Some(sw) if !tx.is_coinbase() => {
-            let non_signer: u64 = tx.outputs.iter()
-                .filter(|o| o.address.to_wire_bytes() != *sw)
-                .map(|o| o.value)
-                .sum();
-            // Self-transfer: all outputs go to signer → use total_output
-            if non_signer == 0 { tx.total_output_value() } else { non_signer }
-        }
-        _ => tx.total_output_value(),
-    };
+    let transfer_value = compute_transfer_value(tx);
 
     // Recipient: the intended destination address for transfers.
     // Non-signer output = recipient. Self-transfer fallback: signer address.

@@ -111,7 +111,7 @@ export function init(root, ctx) {
         lockingPassword = '';
         lockingPasswordConfirm = '';
         feeLevel = d.feeLevel || 'recommended';
-        step = d.step ?? 0; // ?? not || — step 0 is a valid saved value
+        step = Math.min(d.step ?? 0, 4); // cap to Fee step — fees must be re-evaluated on resume
         feeData = null;     // re-fetched on Fee step render
         results = [];
     }
@@ -2107,6 +2107,7 @@ export function init(root, ctx) {
             return;
         }
         // ── Sequential sign+submit (each tx sees mempool state from prior submissions) ──
+        const submittedPaths = []; // track successfully submitted files for draft cleanup
         desc.textContent = 'Processing documents...';
         for (let i = 0; i < files.length; i++) {
             if (!alive) return;
@@ -2118,12 +2119,10 @@ export function init(root, ctx) {
             if (!hash || hash.startsWith('ERROR')) {
                 results.push({ file: f.name, hash, success: false, error: 'Hash computation failed' });
                 resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
-                break; // stop batch on first error
+                break;
             }
             try {
-                // Sign (buildSignedTx fetches fresh UTXOs — sees mempool outputs from prior txs)
                 const txHex = await buildSignedTx(f, hash);
-                // Submit with retry
                 desc.textContent = `Submitting document ${i + 1} of ${files.length}...`;
                 let submitted = false;
                 let lastErr = null;
@@ -2135,21 +2134,41 @@ export function init(root, ctx) {
                             submitted = true;
                             break;
                         }
-                        lastErr = 'Transaction rejected';
-                    } catch (e) { lastErr = e.message; }
+                        lastErr = submitResult.error || 'Transaction rejected';
+                    } catch (e) {
+                        // Treat "already exists" (NE-611) as success — tx is in the mempool
+                        if (e.message && e.message.includes('already exists')) {
+                            results.push({ file: f.name, hash, success: true, txId: '(already submitted)' });
+                            submitted = true;
+                            break;
+                        }
+                        lastErr = e.message;
+                    }
                     if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
                 }
-                if (!submitted) {
+                if (submitted) {
+                    submittedPaths.push(f.path);
+                } else {
                     results.push({ file: f.name, hash, success: false, error: lastErr });
                     resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
-                    break; // stop batch on first error
+                    break;
                 }
             } catch (err) {
                 results.push({ file: f.name, hash, success: false, error: err.message });
                 resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
-                break; // stop batch on first error
+                break;
             }
             resultsContainer.appendChild(buildReceipt(results[results.length - 1]));
+        }
+
+        // ── Drop successfully submitted files from draft ──
+        if (submittedPaths.length > 0 && submittedPaths.length < files.length) {
+            // Partial success: update draft with remaining files only
+            files = files.filter(f => !submittedPaths.includes(f.path));
+            for (const p of submittedPaths) delete hashes[p];
+            if (editingDraftId) {
+                try { await saveDraft('partial'); } catch {}
+            }
         }
 
         // ── Summary ──
@@ -2169,23 +2188,30 @@ export function init(root, ctx) {
                     ${successes === 1 ? 'Document Submitted' : `All ${successes} Documents Submitted`}
                 </div>
             `;
+            const doneBtn = document.createElement('button');
+            doneBtn.className = 'btn btn-primary btn-lg';
+            doneBtn.textContent = 'Done';
+            doneBtn.style.marginTop = 'var(--gap)';
+            doneBtn.addEventListener('click', () => { resetWizard(); render(); });
+            summary.appendChild(doneBtn);
         } else {
             summary.innerHTML = `
                 <div style="font-size:var(--font-size-lg);font-weight:600;color:var(--error)">
-                    Submission Failed
+                    ${successes > 0 ? 'Partial Submission' : 'Submission Failed'}
                 </div>
                 <div style="font-size:var(--font-size-sm);color:var(--text-secondary);margin-top:var(--gap-xs)">
-                    ${failures} of ${results.length} transaction${results.length > 1 ? 's' : ''} rejected.
+                    ${successes} of ${results.length} submitted. ${failures} failed.
+                    ${submittedPaths.length > 0 ? ' Successful documents removed from draft.' : ''}
                 </div>
             `;
+            const backBtn = document.createElement('button');
+            backBtn.className = 'btn btn-primary btn-lg';
+            backBtn.textContent = 'Back to Fee Selection';
+            backBtn.style.marginTop = 'var(--gap)';
+            backBtn.addEventListener('click', () => { step = 4; results = []; render(); });
+            summary.appendChild(backBtn);
         }
 
-        const doneBtn = document.createElement('button');
-        doneBtn.className = 'btn btn-primary btn-lg';
-        doneBtn.textContent = 'Done';
-        doneBtn.style.marginTop = 'var(--gap)';
-        doneBtn.addEventListener('click', () => { resetWizard(); render(); });
-        summary.appendChild(doneBtn);
         container.appendChild(summary);
     }
 

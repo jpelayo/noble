@@ -37,6 +37,7 @@ const pages = {
     documents:  initDocuments,
     drafts:     initDrafts,
     verify:     initVerify,
+    wallet:     initPayments,
     payments:   initPayments,
     contacts:   initContacts,
     settings:   initSettings,

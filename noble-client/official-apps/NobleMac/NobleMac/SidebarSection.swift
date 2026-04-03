@@ -10,20 +10,14 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case drafts
     case verify
     case faucet
-    case payments
-    case contacts
     case wallet
+    case contacts
     case settings
 
     var id: String { rawValue }
 
     /// Route name for web UI navigation.
-    var webRoute: String {
-        switch self {
-        case .wallet: "utxo-maintenance"
-        default: rawValue
-        }
-    }
+    var webRoute: String { rawValue }
 
     var label: String {
         switch self {
@@ -32,9 +26,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .drafts: "Drafts"
         case .verify: "Verify"
         case .faucet: "Faucet"
-        case .payments: "Payments"
-        case .contacts: "Contacts"
         case .wallet: "Wallet"
+        case .contacts: "Contacts"
         case .settings: "Settings"
         }
     }
@@ -46,9 +39,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .drafts: "tray.fill"
         case .verify: "checkmark.seal.fill"
         case .faucet: "drop.fill"
-        case .payments: "creditcard.fill"
-        case .contacts: "person.2.fill"
         case .wallet: "wallet.bifold.fill"
+        case .contacts: "person.2.fill"
         case .settings: "gearshape.fill"
         }
     }

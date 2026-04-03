@@ -78,8 +78,17 @@ export function init(root, ctx) {
         recvBtn.addEventListener('mouseenter', () => { recvBtn.style.borderColor = 'var(--success)'; recvBtn.style.transform = 'translateY(-1px)'; });
         recvBtn.addEventListener('mouseleave', () => { recvBtn.style.borderColor = 'var(--glass-border)'; recvBtn.style.transform = ''; });
 
+        const utxoBtn = document.createElement('button');
+        utxoBtn.className = 'panel';
+        utxoBtn.style.cssText = 'flex:1;padding:8px;display:flex;align-items:center;gap:8px;cursor:pointer;border:1px solid var(--glass-border);transition:all 0.15s;text-align:left;font:inherit;color:inherit;margin:0';
+        utxoBtn.innerHTML = '<div style="width:28px;height:28px;border-radius:50%;background:color-mix(in srgb, var(--warning) 12%, transparent);display:flex;align-items:center;justify-content:center;font-size:0.85rem;color:var(--warning)">\u2696</div><div><div style="font-weight:700">UTXOs</div><div style="font-size:var(--font-size-xs);color:var(--text-muted)">Split & manage</div></div>';
+        utxoBtn.addEventListener('click', () => { if (window.App) window.App.navigateTo('utxo-maintenance'); });
+        utxoBtn.addEventListener('mouseenter', () => { utxoBtn.style.borderColor = 'var(--warning)'; utxoBtn.style.transform = 'translateY(-1px)'; });
+        utxoBtn.addEventListener('mouseleave', () => { utxoBtn.style.borderColor = 'var(--glass-border)'; utxoBtn.style.transform = ''; });
+
         actions.appendChild(sendBtn);
         actions.appendChild(recvBtn);
+        actions.appendChild(utxoBtn);
         root.appendChild(actions);
 
         // Transaction history placeholder with skeleton

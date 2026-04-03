@@ -5,7 +5,7 @@
 
 import { Bridge } from '../bridge.js';
 import { formatAmount } from '../components/amount-text.js';
-import { openModal, openWizardModal, closeModal } from '../components/modal.js';
+import { openModal, openWizardModal, closeModal, createSlideConfirm } from '../components/modal.js';
 import { esc } from '../utils.js';
 
 export function init(root, ctx) {
@@ -66,12 +66,17 @@ export function init(root, ctx) {
         const minVal = minUtxoValue();
 
         // ── Header ──
-        const header = el('div', 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px');
-        const title = el('h2', 'margin:0;font-size:var(--font-size-lg)', 'UTXO Management');
+        const header = el('div', 'display:flex;align-items:center;gap:8px;margin-bottom:8px');
+        const backBtn = el('button', 'font-size:0.8rem;padding:4px 8px');
+        backBtn.className = 'btn btn-sm';
+        backBtn.textContent = '\u2190 Wallet';
+        backBtn.addEventListener('click', () => { if (window.App) window.App.navigateTo('wallet'); });
+        const title = el('h2', 'margin:0;font-size:var(--font-size-lg);flex:1', 'UTXO Management');
         const refreshBtn = el('button', 'font-size:0.75rem');
         refreshBtn.className = 'btn btn-sm';
         refreshBtn.textContent = 'Refresh';
         refreshBtn.addEventListener('click', loadData);
+        header.appendChild(backBtn);
         header.appendChild(title);
         header.appendChild(refreshBtn);
         root.appendChild(header);
@@ -196,12 +201,10 @@ export function init(root, ctx) {
         openSplitWizard(u, maxN);
     }
 
-    // ── Split wizard modal ──
+    // ── Split modal (single screen: summary + fee + slider → inline result) ──
     function openSplitWizard(sourceUtxo, splitCount) {
         let feeLevel = 'recommended';
         let feeData = null;
-        let submitResult = null;
-        let submitError = null;
         const n = splitCount;
         const perOutput = minUtxoValue();
         const totalOut = n * perOutput;
@@ -219,56 +222,42 @@ export function init(root, ctx) {
             return feeData.recommendedFeeRate;
         }
 
-        const wizard = openWizardModal({
-            title: 'Split UTXO',
-            steps: [
-                { label: 'Summary', render: renderSummary, canAdvance: () => true },
-                { label: 'Fee', render: renderFee, canAdvance: () => feeData !== null },
-                { label: 'Confirm', render: renderReview, canAdvance: () => true,
-                  submitLabel: 'Slide to Split', slideConfirm: true, onNext: submitSplit },
-                { label: 'Result', render: renderResult, canAdvance: () => true,
-                  submitLabel: 'Close', hideBack: true },
-            ],
-            onComplete: () => { closeModal(); loadData(); },
-        });
+        const body = document.createElement('div');
 
-        function renderSummary(container) {
-            container.innerHTML = '<div class="detail-grid">'
-                + '<dt>Source UTXO</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(sourceUtxo.txid) + ':' + sourceUtxo.vout + '</dd>'
-                + '<dt>Source Value</dt><dd class="mono">\u25c6 ' + formatAmount(sourceUtxo.value) + '</dd>'
-                + '<dt>Output Count</dt><dd>' + n + ' UTXOs</dd>'
-                + '<dt>Per-Output Amount</dt><dd class="mono">\u25c6 ' + formatAmount(perOutput) + '</dd>'
-                + '<dt>Total Outputs</dt><dd class="mono">\u25c6 ' + formatAmount(totalOut) + '</dd>'
-                + '<dt>Estimated Change</dt><dd class="mono">\u25c6 ' + formatAmount(sourceUtxo.value - totalOut) + '</dd>'
-                + '</div>'
-                + '<div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap)">Change will be adjusted by the selected fee.</div>';
+        // ── Summary ──
+        const summaryDiv = document.createElement('div');
+        summaryDiv.innerHTML = '<div class="detail-grid" style="margin-bottom:var(--gap)">'
+            + '<dt>Source</dt><dd class="mono" style="font-size:var(--font-size-xs)">\u25c6 ' + formatAmount(sourceUtxo.value) + '</dd>'
+            + '<dt>Outputs</dt><dd>' + n + ' \u00d7 \u25c6 ' + formatAmount(perOutput) + '</dd>'
+            + '</div>';
+        body.appendChild(summaryDiv);
+
+        // ── Fee options (loading placeholder) ──
+        const feeContainer = document.createElement('div');
+        feeContainer.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">Loading fees\u2026</p>';
+        body.appendChild(feeContainer);
+
+        // ── Output preview ──
+        const outputDiv = el('div', 'text-align:center;margin:var(--gap) 0');
+        body.appendChild(outputDiv);
+
+        // ── Action area (slider → replaced by result) ──
+        const actionDiv = document.createElement('div');
+        actionDiv.style.cssText = 'margin-top:var(--gap)';
+        const sliderPlaceholder = el('div', 'text-align:center;color:var(--text-muted);font-size:var(--font-size-sm)', 'Loading\u2026');
+        actionDiv.appendChild(sliderPlaceholder);
+        body.appendChild(actionDiv);
+
+        function updateOutput() {
+            const fee = getSelectedFee();
+            const change = sourceUtxo.value - totalOut - fee;
+            outputDiv.innerHTML = '<div style="font-size:var(--font-size-sm);color:var(--text-muted)">Change After Split</div>'
+                + '<div class="mono" style="font-size:var(--font-size-lg);font-weight:600">\u25c6 ' + formatAmount(Math.max(0, change)) + '</div>'
+                + '<div style="font-size:var(--font-size-xs);color:var(--text-muted)">Fee: \u25c6 ' + formatAmount(fee) + '</div>';
         }
 
-        function renderFee(container) {
-            if (!feeData) {
-                container.innerHTML = '<p style="color:var(--text-muted)">Loading fee estimates\u2026</p>';
-                Bridge.call('noble_api', 'estimateFee').then(f => {
-                    const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
-                    const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
-                    const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
-                    const localLow = f.lowFeeRate || f.low_fee_rate || 1;
-                    const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
-                    const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-                    const minRate = Math.max(localLow, netMin, localMin);
-                    const recRate = Math.max(localRec, netMedian, netMin, localMin);
-                    const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
-                    const txSize = 150 + (n * 40) + 60;
-                    const eff = txSize + Math.ceil(txSize * 0.02);
-                    feeData = {
-                        minFee: minRate * eff, recommendedFee: recRate * eff, highPriorityFee: highRate * eff,
-                        minFeeRate: minRate, recommendedFeeRate: recRate, highPriorityFeeRate: highRate,
-                    };
-                    wizard.renderStep();
-                }).catch(err => {
-                    container.innerHTML = '<div style="color:var(--error)">Could not estimate fees: ' + esc(err?.message || 'node unreachable') + '</div>';
-                });
-                return;
-            }
+        function renderFeeOptions() {
+            feeContainer.innerHTML = '';
             const options = document.createElement('div');
             options.className = 'fee-options';
             for (const l of [
@@ -279,81 +268,211 @@ export function init(root, ctx) {
                 const opt = document.createElement('div');
                 opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
                 opt.innerHTML = '<div class="fee-label">' + l.label + '</div><div class="fee-amount">\u25c6 ' + formatAmount(l.value) + '</div>';
-                opt.addEventListener('click', () => { feeLevel = l.key; wizard.renderStep(); });
+                opt.addEventListener('click', () => { feeLevel = l.key; renderFeeOptions(); updateOutput(); });
                 options.appendChild(opt);
             }
-            container.appendChild(options);
-            const fee = getSelectedFee();
-            const netChange = sourceUtxo.value - totalOut - fee;
-            const info = el('div', 'margin-top:var(--gap);text-align:center');
-            info.innerHTML = '<div style="font-size:var(--font-size-sm);color:var(--text-muted)">Change After Split</div>'
-                + '<div class="mono" style="font-size:var(--font-size-lg);font-weight:600">\u25c6 ' + formatAmount(Math.max(0, netChange)) + '</div>';
-            if (netChange < 0) info.innerHTML += '<div style="color:var(--error);font-size:var(--font-size-xs);margin-top:4px">Fee exceeds available change.</div>';
-            container.appendChild(info);
+            feeContainer.appendChild(options);
+            updateOutput();
+            if (!actionDiv.querySelector('.slide-confirm')) {
+                actionDiv.innerHTML = '';
+                actionDiv.appendChild(createSlideConfirm('Slide to Split', doSplit));
+            }
         }
 
-        function renderReview(container) {
-            const fee = getSelectedFee();
-            const netChange = sourceUtxo.value - totalOut - fee;
-            container.innerHTML = '<div class="detail-grid">'
-                + '<dt>Source</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(sourceUtxo.txid) + ':' + sourceUtxo.vout + '</dd>'
-                + '<dt>Source Value</dt><dd class="mono">\u25c6 ' + formatAmount(sourceUtxo.value) + '</dd>'
-                + '<dt>Outputs</dt><dd>' + n + ' \u00d7 \u25c6 ' + formatAmount(perOutput) + '</dd>'
-                + '<dt>Fee</dt><dd class="mono">\u25c6 ' + formatAmount(fee) + '</dd>'
-                + '<dt>Change</dt><dd class="mono" style="font-weight:600">\u25c6 ' + formatAmount(Math.max(0, netChange)) + '</dd>'
-                + '</div>';
-        }
+        // Fetch fees
+        Bridge.call('noble_api', 'estimateFee').then(f => {
+            const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
+            const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
+            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
+            const localLow = f.lowFeeRate || f.low_fee_rate || 1;
+            const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
+            const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+            const minRate = Math.max(localLow, netMin, localMin);
+            const recRate = Math.max(localRec, netMedian, netMin, localMin);
+            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
+            const txSize = 150 + (n * 40) + 60;
+            const eff = txSize + Math.ceil(txSize * 0.02);
+            feeData = {
+                minFee: minRate * eff, recommendedFee: recRate * eff, highPriorityFee: highRate * eff,
+                minFeeRate: minRate, recommendedFeeRate: recRate, highPriorityFeeRate: highRate,
+            };
+            renderFeeOptions();
+        }).catch(err => {
+            feeContainer.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">Fee error: ' + esc(err?.message || 'unknown') + '</div>';
+        });
 
-        async function submitSplit() {
+        // Submit handler (called by slider)
+        async function doSplit() {
+            const label = actionDiv.querySelector('.slide-confirm-label');
+            if (label) label.textContent = 'Submitting\u2026';
             try {
-                const wireHex = await Bridge.call('noble_api', 'getAddressWireHex', { address: state.walletAddress }).catch(() => null);
-                const addrHex = wireHex?.wireHex || state.walletAddress;
-                const outputs = Array.from({ length: n }, () => ({ address: addrHex, amount: perOutput }));
-                const result = await Bridge.call('noble_crypto', 'signSplitTransfer', {
-                    outputs, fee_rate: getSelectedFeeRate(),
-                    utxos: [{ txid: sourceUtxo.txid, vout: sourceUtxo.vout, value: sourceUtxo.value }]
+                const result = await Bridge.call('noble_crypto', 'buildTransaction', {
+                    mode: 'split', split_count: n, fee_rate: getSelectedFeeRate(),
+                    selected_utxos: [{ txid: sourceUtxo.txid, vout: sourceUtxo.vout, value: sourceUtxo.value }],
+                    utxos: [{ txid: sourceUtxo.txid, vout: sourceUtxo.vout, value: sourceUtxo.value, status: 'available' }]
                 });
                 if (!result.txHex) throw new Error('No txHex returned');
                 const sub = await Bridge.call('noble_api', 'submitTransaction', { txHex: result.txHex });
-                submitResult = sub;
-                submitError = sub.accepted ? null : ('Rejected: ' + (sub.error || 'unknown'));
+                if (sub.accepted) {
+                    actionDiv.innerHTML = '<div class="receipt-card receipt-success" style="margin:0">'
+                        + '<div class="receipt-title">\u2713 Split Submitted</div>'
+                        + '<div style="font-size:var(--font-size-xs)">' + n + ' UTXOs of \u25c6 ' + formatAmount(perOutput) + '</div></div>';
+                    setTimeout(loadData, 1500);
+                } else {
+                    actionDiv.innerHTML = '<div class="receipt-card receipt-error" style="margin:0">'
+                        + '<div class="receipt-title">\u2717 Rejected</div>'
+                        + '<div style="font-size:var(--font-size-sm);color:var(--error)">' + esc(sub.error || 'unknown') + '</div></div>';
+                }
             } catch (err) {
-                submitResult = null;
-                submitError = err.message || String(err);
+                actionDiv.innerHTML = '<div class="receipt-card receipt-error" style="margin:0">'
+                    + '<div class="receipt-title">\u2717 Failed</div>'
+                    + '<div style="font-size:var(--font-size-sm);color:var(--error)">' + esc(err.message || String(err)) + '</div></div>';
             }
         }
 
-        function renderResult(container) {
-            if (submitError) {
-                container.innerHTML = '<div class="receipt-card receipt-error">'
-                    + '<div class="receipt-title">\u2717 Split Failed</div>'
-                    + '<div style="font-size:var(--font-size-sm);color:var(--error)">' + esc(submitError) + '</div></div>';
-                return;
-            }
-            container.innerHTML = '<div class="receipt-card receipt-success">'
-                + '<div class="receipt-title">\u2713 Split Submitted</div>'
-                + '<div style="font-size:var(--font-size-sm);margin-bottom:4px">' + n + ' UTXOs of \u25c6 ' + formatAmount(perOutput) + ' created.</div>'
-                + '<div class="receipt-hash mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(submitResult?.txId || '') + '</div></div>';
-        }
+        openModal({ title: 'Split into ' + n + ' UTXOs', body });
     }
 
     // ── Join selected UTXOs ──
-    async function joinSelected() {
+    function joinSelected() {
         const selUtxos = utxos.filter(u => selected.has(utxoKey(u)) && (u.status === 'available' || u.status === 'unconfirmed'));
         if (selUtxos.length < 2) return;
-        const wireHex = await Bridge.call('noble_api', 'getAddressWireHex', { address: state.walletAddress }).catch(() => null);
-        const addrHex = wireHex?.wireHex || state.walletAddress;
-        const total = selUtxos.reduce((s, u) => s + u.value, 0);
-        try {
-            const result = await Bridge.call('noble_crypto', 'signTransfer', {
-                recipient: addrHex, amount: total - feeRate * 300, fee_rate: feeRate,
-                utxos: selUtxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value }))
-            });
-            if (!result.txHex) throw new Error('No txHex');
-            const sub = await Bridge.call('noble_api', 'submitTransaction', { txHex: result.txHex });
-            alert(sub.accepted ? 'Joined ' + selUtxos.length + ' UTXOs.' : 'Rejected: ' + (sub.error || 'unknown'));
-            setTimeout(loadData, 2000);
-        } catch (e) { alert('Join failed: ' + e.message); }
+        openJoinWizard(selUtxos);
+    }
+
+    // ── Join modal (single screen: summary + fee + confirm → inline result) ──
+    function openJoinWizard(sourceUtxos) {
+        let feeLevel = 'recommended';
+        let feeData = null;
+        const count = sourceUtxos.length;
+        const totalIn = sourceUtxos.reduce((s, u) => s + u.value, 0);
+
+        function getSelectedFee() {
+            if (!feeData) return 0;
+            if (feeLevel === 'min') return feeData.minFee;
+            if (feeLevel === 'high') return feeData.highPriorityFee;
+            return feeData.recommendedFee;
+        }
+        function getSelectedFeeRate() {
+            if (!feeData) return 2;
+            if (feeLevel === 'min') return feeData.minFeeRate;
+            if (feeLevel === 'high') return feeData.highPriorityFeeRate;
+            return feeData.recommendedFeeRate;
+        }
+
+        const body = document.createElement('div');
+
+        // ── Summary ──
+        let summaryHtml = '<div class="detail-grid" style="margin-bottom:var(--gap)">'
+            + '<dt>Inputs</dt><dd>' + count + ' UTXOs</dd>'
+            + '<dt>Total Value</dt><dd class="mono">\u25c6 ' + formatAmount(totalIn) + '</dd>'
+            + '</div>';
+        const summaryDiv = document.createElement('div');
+        summaryDiv.innerHTML = summaryHtml;
+        body.appendChild(summaryDiv);
+
+        // ── Fee options (loading placeholder) ──
+        const feeContainer = document.createElement('div');
+        feeContainer.innerHTML = '<p style="color:var(--text-muted);font-size:var(--font-size-sm)">Loading fees\u2026</p>';
+        body.appendChild(feeContainer);
+
+        // ── Output preview ──
+        const outputDiv = el('div', 'text-align:center;margin:var(--gap) 0');
+        body.appendChild(outputDiv);
+
+        // ── Action area (slider → replaced by result) ──
+        const actionDiv = document.createElement('div');
+        actionDiv.style.cssText = 'margin-top:var(--gap)';
+        // Placeholder until fees load
+        const sliderPlaceholder = el('div', 'text-align:center;color:var(--text-muted);font-size:var(--font-size-sm)', 'Loading\u2026');
+        actionDiv.appendChild(sliderPlaceholder);
+        body.appendChild(actionDiv);
+
+        function updateOutput() {
+            const fee = getSelectedFee();
+            const out = totalIn - fee;
+            outputDiv.innerHTML = '<div style="font-size:var(--font-size-sm);color:var(--text-muted)">Combined UTXO</div>'
+                + '<div class="mono" style="font-size:var(--font-size-lg);font-weight:600">\u25c6 ' + formatAmount(Math.max(0, out)) + '</div>'
+                + '<div style="font-size:var(--font-size-xs);color:var(--text-muted)">Fee: \u25c6 ' + formatAmount(fee) + '</div>';
+        }
+
+        function renderFeeOptions() {
+            feeContainer.innerHTML = '';
+            const options = document.createElement('div');
+            options.className = 'fee-options';
+            for (const l of [
+                { key: 'min', label: 'Minimum', value: feeData.minFee },
+                { key: 'recommended', label: 'Recommended', value: feeData.recommendedFee },
+                { key: 'high', label: 'High Priority', value: feeData.highPriorityFee },
+            ]) {
+                const opt = document.createElement('div');
+                opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
+                opt.innerHTML = '<div class="fee-label">' + l.label + '</div><div class="fee-amount">\u25c6 ' + formatAmount(l.value) + '</div>';
+                opt.addEventListener('click', () => { feeLevel = l.key; renderFeeOptions(); updateOutput(); });
+                options.appendChild(opt);
+            }
+            feeContainer.appendChild(options);
+            updateOutput();
+            // Install slider once fees are loaded
+            if (!actionDiv.querySelector('.slide-confirm')) {
+                actionDiv.innerHTML = '';
+                const slider = createSlideConfirm('Slide to Join', doJoin);
+                actionDiv.appendChild(slider);
+            }
+        }
+
+        // Fetch fees
+        Bridge.call('noble_api', 'estimateFee').then(f => {
+            const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
+            const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
+            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
+            const localLow = f.lowFeeRate || f.low_fee_rate || 1;
+            const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
+            const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
+            const minRate = Math.max(localLow, netMin, localMin);
+            const recRate = Math.max(localRec, netMedian, netMin, localMin);
+            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
+            const txSize = (count * 150) + 40 + 60;
+            const eff = txSize + Math.ceil(txSize * 0.02);
+            feeData = {
+                minFee: minRate * eff, recommendedFee: recRate * eff, highPriorityFee: highRate * eff,
+                minFeeRate: minRate, recommendedFeeRate: recRate, highPriorityFeeRate: highRate,
+            };
+            renderFeeOptions();
+        }).catch(err => {
+            feeContainer.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">Fee error: ' + esc(err?.message || 'unknown') + '</div>';
+        });
+
+        // Submit handler (called by slider)
+        async function doJoin() {
+            const label = actionDiv.querySelector('.slide-confirm-label');
+            if (label) label.textContent = 'Submitting\u2026';
+            try {
+                const result = await Bridge.call('noble_crypto', 'buildTransaction', {
+                    mode: 'join', fee_rate: getSelectedFeeRate(),
+                    selected_utxos: sourceUtxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value })),
+                    utxos: sourceUtxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value, status: 'available' }))
+                });
+                if (!result.txHex) throw new Error('No txHex returned');
+                const sub = await Bridge.call('noble_api', 'submitTransaction', { txHex: result.txHex });
+                if (sub.accepted) {
+                    actionDiv.innerHTML = '<div class="receipt-card receipt-success" style="margin:0">'
+                        + '<div class="receipt-title">\u2713 Joined</div>'
+                        + '<div style="font-size:var(--font-size-xs)" class="mono">' + esc(sub.txId || '') + '</div></div>';
+                    setTimeout(loadData, 1500);
+                } else {
+                    actionDiv.innerHTML = '<div class="receipt-card receipt-error" style="margin:0">'
+                        + '<div class="receipt-title">\u2717 Rejected</div>'
+                        + '<div style="font-size:var(--font-size-sm);color:var(--error)">' + esc(sub.error || 'unknown') + '</div></div>';
+                }
+            } catch (err) {
+                actionDiv.innerHTML = '<div class="receipt-card receipt-error" style="margin:0">'
+                    + '<div class="receipt-title">\u2717 Failed</div>'
+                    + '<div style="font-size:var(--font-size-sm);color:var(--error)">' + esc(err.message || String(err)) + '</div></div>';
+            }
+        }
+
+        openModal({ title: 'Join ' + count + ' UTXOs', body });
     }
 
     // ── Auto-config modal (shared modal component) ──

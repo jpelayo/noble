@@ -22,7 +22,7 @@ function _trapFocus(container, closeFn) {
 }
 
 /** Create a slide-to-confirm element. User must drag thumb to the right to trigger onConfirm. */
-function _createSlideConfirm(label, onConfirm) {
+export function createSlideConfirm(label, onConfirm) {
     const el = document.createElement('div');
     el.className = 'slide-confirm';
 
@@ -280,7 +280,7 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
             nav.style.flexDirection = 'column';
             nav.style.gap = 'var(--gap-sm)';
 
-            const slider = _createSlideConfirm(
+            const slider = createSlideConfirm(
                 stepObj.submitLabel || 'Slide to Confirm',
                 async () => {
                     slider.classList.add('processing');
@@ -306,7 +306,8 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
 
             const nextBtn = document.createElement('button');
             nextBtn.className = 'btn btn-primary';
-            nextBtn.textContent = stepObj.submitLabel || (isLast ? 'Submit' : 'Next');
+            const nextStepLabel = (!isLast && !stepObj.submitLabel && steps[currentStep + 1]) ? 'Next: ' + steps[currentStep + 1].label : null;
+            nextBtn.textContent = stepObj.submitLabel || nextStepLabel || (isLast ? 'Submit' : 'Next');
             if (stepObj.canAdvance) nextBtn.disabled = !stepObj.canAdvance();
 
             nextBtn.addEventListener('click', async () => {

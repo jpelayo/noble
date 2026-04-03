@@ -61,7 +61,7 @@ struct MainView: View {
                 tabButton("Home", icon: "house.fill", route: "home")
                 tabButton("Documents", icon: "doc.text.fill", route: "documents")
                 tabButton("Verify", icon: "checkmark.seal.fill", route: "verify")
-                tabButton("Payments", icon: "creditcard.fill", route: "payments")
+                tabButton("Wallet", icon: "wallet.bifold.fill", route: "wallet")
                 tabButton("Contacts", icon: "person.2.fill", route: "contacts")
             }
             .padding(.horizontal, 4)
@@ -83,9 +83,6 @@ struct MainView: View {
                 Menu {
                     Button { navigateTo(.drafts) } label: {
                         Label("Drafts", systemImage: "tray")
-                    }
-                    Button { navigateTo(.wallet) } label: {
-                        Label("Wallet", systemImage: "wallet.bifold.fill")
                     }
                     Button { navigateTo(.faucet) } label: {
                         Label("Faucet", systemImage: "drop")

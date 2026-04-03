@@ -743,6 +743,59 @@ final class WebBridgeHandler {
             )
             return ["txHex": txHex]
 
+        case "buildTransaction":
+            // Unified builder: inject private_key, change_address, chain_id, timestamp,
+            // then forward the entire JSON to the C library.
+            guard let privateKey = appState.loadPrivateKey() else {
+                throw BridgeError.noPrivateKey
+            }
+            let changeAddress = try walletChangeAddress()
+            let walletHex = changeAddress.map { String(format: "%02x", $0) }.joined()
+            var buildParams = params
+            buildParams["private_key"] = privateKey.map { String(format: "%02x", $0) }.joined()
+            buildParams["change_address"] = walletHex
+            buildParams["chain_id"] = appState.resolvedChainId
+            buildParams["timestamp"] = UInt64(Date().timeIntervalSince1970)
+            guard JSONSerialization.isValidJSONObject(buildParams) else {
+                throw BridgeError.operationFailed("buildTransaction: invalid JSON params")
+            }
+            let buildJsonData = try JSONSerialization.data(withJSONObject: buildParams)
+            guard let buildJsonStr = String(data: buildJsonData, encoding: .utf8) else {
+                throw BridgeError.operationFailed("buildTransaction: UTF-8 encoding failed")
+            }
+            guard let buildResultPtr = noble_build_transaction(buildJsonStr) else {
+                throw BridgeError.operationFailed("buildTransaction returned null")
+            }
+            let buildResultStr = String(cString: buildResultPtr)
+            noble_free(buildResultPtr)
+            guard let buildRData = buildResultStr.data(using: .utf8) else {
+                throw BridgeError.operationFailed("buildTransaction: result not valid UTF-8")
+            }
+            let buildRJson: [String: Any]
+            do {
+                guard let parsed = try JSONSerialization.jsonObject(with: buildRData) as? [String: Any] else {
+                    throw BridgeError.operationFailed("buildTransaction: result is not a JSON object")
+                }
+                buildRJson = parsed
+            } catch let error as BridgeError {
+                throw error
+            } catch {
+                throw BridgeError.operationFailed("buildTransaction: \(error.localizedDescription)")
+            }
+            if let err = buildRJson["error"] as? String {
+                throw BridgeError.operationFailed(err)
+            }
+            guard let buildTxHex = buildRJson["tx_hex"] as? String,
+                  let buildTxId = buildRJson["tx_id"] as? String else {
+                throw BridgeError.operationFailed("buildTransaction: missing tx_hex/tx_id")
+            }
+            return [
+                "txHex": buildTxHex,
+                "txId": buildTxId,
+                "fee": buildRJson["fee"] as? UInt64 ?? 0,
+                "size": buildRJson["size"] as? UInt64 ?? 0
+            ]
+
         case "signSplitTransfer":
             guard let outputsArr = params["outputs"] as? [[String: Any]] else {
                 throw BridgeError.missingParam("outputs")

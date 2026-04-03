@@ -12,6 +12,18 @@
 extern "C" {
 #endif
 
+// Unified transaction builder — handles transfer, split, join, and notarize in one function.
+// Input JSON: { "mode": "transfer"|"split"|"join"|"notarize",
+//               "private_key": "<hex32>", "chain_id": <u32>,
+//               "change_address": "<wire_hex>", "fee_rate": <u64>,
+//               "timestamp": <u64>,
+//               "utxos": [{..., "status":"available"|...},...],  // full landscape
+//               "selected_utxos": [{...},...],  // optional: pre-selected inputs
+//               // mode-specific: recipient, amount, outputs, split_count, checksum, metadata
+//             }
+// Output JSON: { "tx_hex", "tx_id", "fee", "size" } or { "error" }
+char *noble_build_transaction(const char *params_json);
+
 // Build, sign, and CBOR-encode a transfer transaction.
 // Input JSON: { "recipient": "<address_wire_hex>", "amount": <u64>,
 //               "fee": <u64>, "utxos": [{"txid":"<hex>","vout":<u32>,"value":<u64>}, ...],

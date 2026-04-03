@@ -24,6 +24,7 @@ extern "C" {
     fn noble_sign_dao_vote(params_json: *const c_char) -> *mut c_char;
     fn noble_build_coinbase(params_json: *const c_char) -> *mut c_char;
     fn noble_build_fee_distribution(params_json: *const c_char) -> *mut c_char;
+    fn noble_build_transaction(params_json: *const c_char) -> *mut c_char;
     fn noble_select_utxos(params_json: *const c_char) -> *mut c_char;
     fn noble_estimate_tx_size(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode(params_json: *const c_char) -> *mut c_char;
@@ -47,6 +48,11 @@ fn call_ffi(
         .into_owned();
     unsafe { noble_free(result_ptr) };
     Ok(result_str)
+}
+
+/// Unified transaction builder — handles transfer, split, join, notarize.
+pub fn build_transaction(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_build_transaction, params_json)
 }
 
 /// Build, sign, and CBOR-encode a transfer transaction.

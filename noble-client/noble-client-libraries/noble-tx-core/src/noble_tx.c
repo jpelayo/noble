@@ -80,6 +80,413 @@ static int parse_private_key(const char *hex_str, uint8_t key_out[32]) {
     return hex_decode(hex_str, hex_len, key_out, 32) == 32 ? 0 : -1;
 }
 
+// ── Helpers: UTXO filtering ─────────────────────────────────────────────
+
+// Filter UTXO array to spendable entries (status "available" or "unconfirmed").
+// Returns count of spendable UTXOs written to out_utxos.
+static size_t filter_spendable_utxos(
+    const json_value_t *utxos_arr,
+    noble_utxo_t *out_utxos,
+    size_t max_out
+) {
+    if (!utxos_arr || utxos_arr->type != JSON_ARRAY) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < utxos_arr->array.count && count < max_out; i++) {
+        const json_value_t *u = &utxos_arr->array.items[i];
+        const char *status = json_get_string(u, "status");
+        // Accept if no status field (backward compat) or available/unconfirmed
+        if (status && strcmp(status, "available") != 0 && strcmp(status, "unconfirmed") != 0)
+            continue;
+        const char *txid = json_get_string(u, "txid");
+        if (!txid) continue;
+        strncpy(out_utxos[count].txid, txid, 64);
+        out_utxos[count].txid[64] = '\0';
+        out_utxos[count].vout = json_get_uint32(u, "vout");
+        out_utxos[count].value = json_get_uint(u, "value");
+        count++;
+    }
+    return count;
+}
+
+// Build a JSON UTXO array from a noble_utxo_t array for parse_utxos_into_inputs.
+// Returns a json_value_t* that caller must json_free().
+static json_value_t *utxos_to_json_array(const noble_utxo_t *utxos, size_t count) {
+    // Build a JSON string and parse it. Simple and correct.
+    // Max per entry: {"txid":"<64>","vout":4294967295,"value":18446744073709551615} ≈ 120 chars
+    size_t cap = 2 + count * 130;
+    char *buf = (char *)malloc(cap);
+    if (!buf) return NULL;
+    size_t pos = 0;
+    buf[pos++] = '[';
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) buf[pos++] = ',';
+        pos += (size_t)snprintf(buf + pos, cap - pos,
+            "{\"txid\":\"%s\",\"vout\":%u,\"value\":%llu}",
+            utxos[i].txid, utxos[i].vout, (unsigned long long)utxos[i].value);
+    }
+    buf[pos++] = ']';
+    buf[pos] = '\0';
+    json_value_t *arr = json_parse(buf);
+    free(buf);
+    return arr;
+}
+
+// ── noble_build_transaction (unified builder) ───────────────────────────
+
+char *noble_build_transaction(const char *params_json) {
+    json_value_t *params = json_parse(params_json);
+    if (!params) return json_emit_error("invalid JSON");
+
+    // ── 1. Common params ──
+    const char *mode_str      = json_get_string(params, "mode");
+    const char *privkey_hex   = json_get_string(params, "private_key");
+    uint32_t chain_id         = json_get_uint32(params, "chain_id");
+    const char *change_hex    = json_get_string(params, "change_address");
+    uint64_t fee_rate         = json_get_uint(params, "fee_rate");
+    uint64_t timestamp        = json_get_uint(params, "timestamp");
+
+    if (!mode_str || !privkey_hex || !change_hex) {
+        json_free(params);
+        return json_emit_error("missing required field (mode, private_key, or change_address)");
+    }
+
+    // Identify mode
+    enum { MODE_TRANSFER, MODE_SPLIT, MODE_JOIN, MODE_NOTARIZE } mode;
+    if (strcmp(mode_str, "transfer") == 0) mode = MODE_TRANSFER;
+    else if (strcmp(mode_str, "split") == 0) mode = MODE_SPLIT;
+    else if (strcmp(mode_str, "join") == 0) mode = MODE_JOIN;
+    else if (strcmp(mode_str, "notarize") == 0) mode = MODE_NOTARIZE;
+    else { json_free(params); return json_emit_error("invalid mode"); }
+
+    uint8_t private_key[32];
+    if (parse_private_key(privkey_hex, private_key) != 0) {
+        json_free(params);
+        return json_emit_error("invalid private_key hex");
+    }
+
+    noble_address_t change_addr;
+    if (parse_address_wire(change_hex, &change_addr) != 0) {
+        json_free(params);
+        return json_emit_error("invalid change_address");
+    }
+
+    // ── 2. UTXO landscape: filter to spendable pool ──
+    const json_value_t *all_utxos = json_get(params, "utxos");
+    noble_utxo_t pool[MAX_UTXOS];
+    size_t pool_count = filter_spendable_utxos(all_utxos, pool, MAX_UTXOS);
+
+    // ── 3. Input selection ──
+    const json_value_t *selected_arr = json_get(params, "selected_utxos");
+    noble_utxo_t inputs[MAX_INPUTS];
+    size_t input_count = 0;
+    uint64_t input_total = 0;
+
+    if (selected_arr && selected_arr->type == JSON_ARRAY && selected_arr->array.count > 0) {
+        // Pre-selected: use exactly these UTXOs
+        size_t n = selected_arr->array.count;
+        if (n > MAX_INPUTS) n = MAX_INPUTS;
+        for (size_t i = 0; i < n; i++) {
+            const json_value_t *u = &selected_arr->array.items[i];
+            const char *txid = json_get_string(u, "txid");
+            if (!txid) { json_free(params); return json_emit_error("invalid selected_utxos entry"); }
+            strncpy(inputs[i].txid, txid, 64);
+            inputs[i].txid[64] = '\0';
+            inputs[i].vout = json_get_uint32(u, "vout");
+            inputs[i].value = json_get_uint(u, "value");
+            input_total += inputs[i].value;
+        }
+        input_count = n;
+    } else if (mode == MODE_JOIN) {
+        // Join requires selected_utxos
+        json_free(params);
+        return json_emit_error("join mode requires selected_utxos");
+    } else {
+        // Auto-select: estimate target, run coin_select
+        uint64_t target_amount = 0;
+        if (mode == MODE_TRANSFER) {
+            target_amount = json_get_uint(params, "amount");
+        } else if (mode == MODE_SPLIT) {
+            const json_value_t *outputs_arr = json_get(params, "outputs");
+            if (outputs_arr && outputs_arr->type == JSON_ARRAY) {
+                for (size_t i = 0; i < outputs_arr->array.count; i++)
+                    target_amount += json_get_uint(&outputs_arr->array.items[i], "amount");
+            }
+            // split_count mode: estimate from count × typical size
+            uint32_t sc = json_get_uint32(params, "split_count");
+            if (sc > 0 && target_amount == 0) {
+                // Can't estimate target without knowing per-output amount yet.
+                // Use largest available UTXO as the source.
+                uint64_t best = 0;
+                size_t best_idx = 0;
+                for (size_t i = 0; i < pool_count; i++) {
+                    if (pool[i].value > best) { best = pool[i].value; best_idx = i; }
+                }
+                if (best == 0) { json_free(params); return json_emit_error("no spendable UTXOs"); }
+                inputs[0] = pool[best_idx];
+                input_count = 1;
+                input_total = best;
+                goto inputs_ready;
+            }
+        }
+        // Estimate fee for coin selection: assume ~200 bytes base + 150/input + 40/output
+        uint64_t est_size = 200 + 150 + 40;  // 1 input, 1 output baseline
+        uint64_t est_fee = est_size * (fee_rate > 0 ? fee_rate : 1);
+        uint64_t target = target_amount + est_fee;
+
+        noble_selection_t sel;
+        if (coin_select(pool, pool_count, target, &sel) != 0) {
+            // Retry with larger estimate (more inputs → larger tx)
+            target = target_amount + est_fee * 3;
+            if (coin_select(pool, pool_count, target, &sel) != 0) {
+                json_free(params);
+                return json_emit_error("insufficient funds");
+            }
+        }
+        for (size_t i = 0; i < sel.count && i < MAX_INPUTS; i++)
+            inputs[i] = sel.selected[i];
+        input_count = sel.count;
+        input_total = sel.total;
+    }
+inputs_ready:
+    ;
+
+    // Build a JSON array for parse_utxos_into_inputs
+    json_value_t *inputs_json = utxos_to_json_array(inputs, input_count);
+    if (!inputs_json) { json_free(params); return json_emit_error("internal: failed to build input JSON"); }
+
+    // ── 4. Build transaction struct ──
+    noble_tx_t tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.version = PROTOCOL_VERSION;
+    tx.timestamp = timestamp;
+
+    if (parse_utxos_into_inputs(inputs_json, &tx, NULL, NULL) != 0) {
+        json_free(inputs_json); json_free(params);
+        return json_emit_error("invalid utxo data");
+    }
+
+    // Recompute input_total from parsed inputs (authoritative)
+    input_total = 0;
+    for (uint8_t i = 0; i < tx.input_count; i++)
+        input_total += inputs[i].value;
+
+    // ── 5. Mode-specific output construction ──
+    uint64_t output_total = 0;
+    int deferred_outputs = 0;  // 1 if outputs are computed after fee
+    uint32_t split_count_param = 0;
+
+    switch (mode) {
+    case MODE_TRANSFER: {
+        tx.tx_type = TX_TYPE_TRANSFER;
+        memset(tx.checksum, 0, HASH256_LEN);
+        const char *recipient_hex = json_get_string(params, "recipient");
+        uint64_t amount = json_get_uint(params, "amount");
+        if (!recipient_hex) {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("transfer mode requires recipient");
+        }
+        if (parse_address_wire(recipient_hex, &tx.outputs[0].address) != 0) {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("invalid recipient address");
+        }
+        tx.outputs[0].value = amount;
+        tx.output_count = 1;
+        output_total = amount;
+        break;
+    }
+    case MODE_SPLIT: {
+        tx.tx_type = TX_TYPE_TRANSFER;
+        memset(tx.checksum, 0, HASH256_LEN);
+        split_count_param = json_get_uint32(params, "split_count");
+        const json_value_t *outputs_arr = json_get(params, "outputs");
+
+        if (split_count_param > 0) {
+            // Deferred: compute per-output amount after fee is known
+            deferred_outputs = 1;
+            if (split_count_param > MAX_OUTPUTS - 1) split_count_param = MAX_OUTPUTS - 1;
+        } else if (outputs_arr && outputs_arr->type == JSON_ARRAY) {
+            // Explicit outputs
+            size_t n = outputs_arr->array.count;
+            if (n > MAX_OUTPUTS - 1) {
+                json_free(inputs_json); json_free(params);
+                return json_emit_error("too many outputs");
+            }
+            for (size_t i = 0; i < n; i++) {
+                const json_value_t *o = &outputs_arr->array.items[i];
+                const char *addr_hex = json_get_string(o, "address");
+                uint64_t amt = json_get_uint(o, "amount");
+                if (!addr_hex || amt == 0) {
+                    json_free(inputs_json); json_free(params);
+                    return json_emit_error("invalid output entry");
+                }
+                if (parse_address_wire(addr_hex, &tx.outputs[i].address) != 0) {
+                    json_free(inputs_json); json_free(params);
+                    return json_emit_error("invalid output address");
+                }
+                tx.outputs[i].value = amt;
+                output_total += amt;
+            }
+            tx.output_count = (uint8_t)n;
+        } else {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("split mode requires outputs[] or split_count");
+        }
+        break;
+    }
+    case MODE_JOIN: {
+        tx.tx_type = TX_TYPE_TRANSFER;
+        memset(tx.checksum, 0, HASH256_LEN);
+        // Output constructed after fee computation (deferred)
+        deferred_outputs = 1;
+        split_count_param = 0;  // signals join mode in deferred block
+        break;
+    }
+    case MODE_NOTARIZE: {
+        tx.tx_type = TX_TYPE_NOTARIZATION;
+        const char *checksum_hex = json_get_string(params, "checksum");
+        if (!checksum_hex || hex_decode(checksum_hex, strlen(checksum_hex), tx.checksum, HASH256_LEN) != HASH256_LEN) {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("invalid checksum hex");
+        }
+        // Metadata
+        const json_value_t *meta = json_get(params, "metadata");
+        if (meta && meta->type == JSON_ARRAY) {
+            size_t mc = meta->array.count;
+            if (mc > MAX_METADATA) mc = MAX_METADATA;
+            for (size_t i = 0; i < mc; i++) {
+                const json_value_t *m = &meta->array.items[i];
+                const char *k = json_get_string(m, "key");
+                const char *v = json_get_string(m, "value");
+                if (k && v) {
+                    strncpy(tx.metadata[tx.metadata_count].key, k, 64);
+                    tx.metadata[tx.metadata_count].key[64] = '\0';
+                    size_t vlen = strlen(v);
+                    if (vlen > 256) vlen = 256;
+                    memcpy(tx.metadata[tx.metadata_count].value, v, vlen);
+                    tx.metadata[tx.metadata_count].value_len = (uint16_t)vlen;
+                    tx.metadata_count++;
+                }
+            }
+        }
+        tx.output_count = 0;
+        output_total = 0;
+        break;
+    }
+    }
+
+    // ── 6. Two-pass fee computation ──
+    uint64_t actual_fee = json_get_uint(params, "fee");  // fallback absolute fee
+
+    if (fee_rate > 0) {
+        // Probe pass: build with preliminary change to measure exact CBOR size
+        uint64_t prelim_change = input_total > output_total ? input_total - output_total : 0;
+        if (deferred_outputs) {
+            // For join/split_count: single output with all value (fee=0 for probe)
+            if (split_count_param > 0) {
+                uint64_t per = input_total / (split_count_param + 1);
+                for (uint32_t i = 0; i < split_count_param; i++) {
+                    tx.outputs[i].address = change_addr;
+                    tx.outputs[i].value = per;
+                }
+                tx.output_count = (uint8_t)split_count_param;
+                prelim_change = input_total - per * split_count_param;
+            } else {
+                // Join: single output
+                tx.outputs[0].address = change_addr;
+                tx.outputs[0].value = input_total;
+                tx.output_count = 1;
+                prelim_change = 0;
+            }
+        }
+        if (prelim_change > 0) {
+            tx.outputs[tx.output_count].address = change_addr;
+            tx.outputs[tx.output_count].value = prelim_change;
+            tx.output_count++;
+        }
+
+        noble_buf_t probe;
+        uint8_t dummy_id[HASH256_LEN];
+        if (sign_and_encode_tx(&tx, private_key, chain_id, &probe, dummy_id) != 0) {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("signing failed (size probe)");
+        }
+        actual_fee = (uint64_t)probe.len * fee_rate;
+        noble_buf_free(&probe);
+    }
+
+    // ── 7. Compute deferred outputs + change ──
+    if (actual_fee > input_total) {
+        json_free(inputs_json); json_free(params);
+        return json_emit_error("insufficient funds for fee");
+    }
+
+    uint64_t change = 0;
+    if (deferred_outputs) {
+        if (split_count_param > 0) {
+            // Split with count: equal shares after fee
+            uint64_t available = input_total - actual_fee;
+            uint64_t per = available / (split_count_param + 1);
+            if (per == 0) {
+                json_free(inputs_json); json_free(params);
+                return json_emit_error("UTXO too small to split at this fee rate");
+            }
+            for (uint32_t i = 0; i < split_count_param; i++) {
+                tx.outputs[i].address = change_addr;
+                tx.outputs[i].value = per;
+            }
+            tx.output_count = (uint8_t)split_count_param;
+            output_total = per * split_count_param;
+            change = input_total - output_total - actual_fee;
+        } else {
+            // Join: single output = input - fee
+            tx.outputs[0].address = change_addr;
+            tx.outputs[0].value = input_total - actual_fee;
+            tx.output_count = 1;
+            output_total = input_total - actual_fee;
+            change = 0;
+        }
+    } else {
+        // Fixed outputs: compute change
+        if (actual_fee + output_total > input_total) {
+            json_free(inputs_json); json_free(params);
+            return json_emit_error("insufficient funds for fee");
+        }
+        change = input_total - output_total - actual_fee;
+    }
+
+    // Add change output if non-zero
+    if (change > 0) {
+        tx.outputs[tx.output_count].address = change_addr;
+        tx.outputs[tx.output_count].value = change;
+        tx.output_count++;
+    }
+
+    // ── 8. Final sign + encode ──
+    noble_buf_t cbor;
+    uint8_t tx_id[HASH256_LEN];
+    int rc = sign_and_encode_tx(&tx, private_key, chain_id, &cbor, tx_id);
+    if (rc != 0) {
+        json_free(inputs_json); json_free(params);
+        return json_emit_error(rc == -2
+            ? "transaction exceeds MAX_TX_SIZE (8192 bytes)"
+            : "signing failed");
+    }
+
+    // ── 9. Result ──
+    char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    hex_encode(cbor.data, cbor.len, tx_hex);
+    char tx_id_hex[65];
+    hex_encode(tx_id, HASH256_LEN, tx_id_hex);
+
+    char *result = json_emit_result_with_fee(tx_hex, tx_id_hex, actual_fee, cbor.len);
+
+    free(tx_hex);
+    noble_buf_free(&cbor);
+    json_free(inputs_json);
+    json_free(params);
+    return result;
+}
+
 // ── noble_sign_transfer ─────────────────────────────────────────────────
 
 char *noble_sign_transfer(const char *params_json) {

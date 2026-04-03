@@ -54,7 +54,7 @@ struct NobleMacApp: App {
                     .keyboardShortcut("2", modifiers: .command)
                 Button("Verify") { appState.selectedSection = .verify }
                     .keyboardShortcut("3", modifiers: .command)
-                Button("Payments") { appState.selectedSection = .payments }
+                Button("Wallet") { appState.selectedSection = .wallet }
                     .keyboardShortcut("4", modifiers: .command)
                 Button("Contacts") { appState.selectedSection = .contacts }
                     .keyboardShortcut("5", modifiers: .command)
