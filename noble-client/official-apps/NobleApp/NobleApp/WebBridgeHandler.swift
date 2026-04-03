@@ -753,6 +753,40 @@ final class WebBridgeHandler {
             )
             return ["txHex": txHex]
 
+        case "decryptLockedTx":
+            guard let txHex = params["tx_hex"] as? String,
+                  let password = params["password"] as? String else {
+                throw BridgeError.missingParam("tx_hex or password")
+            }
+            let decryptParams: [String: Any] = ["tx_hex": txHex, "password": password]
+            let decryptJsonData = try JSONSerialization.data(withJSONObject: decryptParams)
+            guard let decryptJsonStr = String(data: decryptJsonData, encoding: .utf8) else {
+                throw BridgeError.operationFailed("decryptLockedTx: UTF-8 encoding failed")
+            }
+            guard let decryptPtr = noble_tx_decode_locked(decryptJsonStr) else {
+                throw BridgeError.operationFailed("decryptLockedTx returned null")
+            }
+            let decryptStr = String(cString: decryptPtr)
+            noble_free(decryptPtr)
+            guard let decryptData = decryptStr.data(using: .utf8) else {
+                throw BridgeError.operationFailed("decryptLockedTx: result not valid UTF-8")
+            }
+            let decryptJson: [String: Any]
+            do {
+                guard let parsed = try JSONSerialization.jsonObject(with: decryptData) as? [String: Any] else {
+                    throw BridgeError.operationFailed("decryptLockedTx: result is not a JSON object")
+                }
+                decryptJson = parsed
+            } catch let error as BridgeError {
+                throw error
+            } catch {
+                throw BridgeError.operationFailed("decryptLockedTx: \(error.localizedDescription)")
+            }
+            if let err = decryptJson["error"] as? String {
+                throw BridgeError.operationFailed(err)
+            }
+            return decryptJson
+
         case "buildTransaction":
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey

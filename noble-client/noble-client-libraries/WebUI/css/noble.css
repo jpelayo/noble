@@ -1770,13 +1770,16 @@ body {
     padding: var(--gap-sm);
   }
 
-  /* ── Segmented control: full width ── */
+  /* ── Segmented control: scrollable on mobile with many tabs ── */
   .segmented-control {
     width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .segmented-control button {
-    flex: 1;
+    flex: 0 0 auto;
+    padding: 8px 12px;
   }
 
   /* ── QR code: responsive size ── */

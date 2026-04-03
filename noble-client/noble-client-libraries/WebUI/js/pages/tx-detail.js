@@ -110,6 +110,66 @@ export function init(root, ctx) {
             });
         });
 
+        // ── Locked Tx: Password Decrypt ──
+        if (txType === TX_TYPES.LOCKED) {
+            const decryptPanel = document.createElement('div');
+            decryptPanel.className = 'card';
+            decryptPanel.style.cssText = 'padding:var(--gap);margin-bottom:var(--gap);border-left:3px solid var(--warning)';
+            decryptPanel.innerHTML = `
+                <div style="font-size:var(--font-size-sm);font-weight:600;margin-bottom:8px">\u{1F513} Decrypt Document</div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <input type="password" id="locked-pw" class="input" placeholder="Enter password" style="flex:1;min-width:150px;max-width:400px">
+                    <button class="btn btn-primary btn-sm" id="locked-decrypt">Decrypt</button>
+                </div>
+                <div id="locked-result" style="margin-top:8px"></div>
+            `;
+            content.appendChild(decryptPanel);
+
+            const pwInput = decryptPanel.querySelector('#locked-pw');
+            const decryptBtn = decryptPanel.querySelector('#locked-decrypt');
+            const resultDiv = decryptPanel.querySelector('#locked-result');
+
+            decryptBtn.addEventListener('click', async () => {
+                const pw = pwInput.value;
+                if (!pw) return;
+                decryptBtn.disabled = true;
+                decryptBtn.textContent = 'Decrypting...';
+                try {
+                    const result = await Bridge.call('noble_crypto', 'decryptLockedTx', {
+                        tx_hex: tx.tx_hex || tx.raw_hex || '',
+                        password: pw
+                    });
+                    if (result?.decrypted_checksum) {
+                        resultDiv.innerHTML = '<div style="margin-bottom:8px">'
+                            + '<div style="font-size:var(--font-size-xs);color:var(--success);font-weight:600">\u2713 Decrypted</div>'
+                            + '<div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Checksum:</div>'
+                            + '<div class="mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(result.decrypted_checksum) + '</div>'
+                            + '</div>';
+                        if (result.decrypted_metadata?.length > 0) {
+                            resultDiv.innerHTML += '<div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:8px">Metadata:</div>';
+                            for (const m of result.decrypted_metadata) {
+                                resultDiv.innerHTML += '<div style="margin-top:4px">'
+                                    + '<span style="font-size:var(--font-size-xs);color:var(--text-muted)">' + esc(m.key) + ':</span> '
+                                    + '<span class="mono" style="font-size:var(--font-size-xs)">' + esc(m.value) + '</span></div>';
+                            }
+                        }
+                        // Update hero to show decrypted checksum
+                        heroEl.innerHTML = '<div style="font-size:var(--font-size-xs);color:var(--success);margin-bottom:4px">\u{1F513} Decrypted Document Checksum</div>'
+                            + '<div class="mono" style="word-break:break-all;font-size:var(--font-size-sm)">' + esc(result.decrypted_checksum) + '</div>';
+                        decryptBtn.textContent = '\u2713 Done';
+                    } else {
+                        resultDiv.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">\u26A0 Wrong password or corrupted data.</div>';
+                        decryptBtn.disabled = false;
+                        decryptBtn.textContent = 'Decrypt';
+                    }
+                } catch (e) {
+                    resultDiv.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">' + esc(e.message || 'Decryption failed') + '</div>';
+                    decryptBtn.disabled = false;
+                    decryptBtn.textContent = 'Decrypt';
+                }
+            });
+        }
+
         // ── Detail Grid ──
         const grid = document.createElement('div');
         grid.className = 'panel';
@@ -212,8 +272,8 @@ export function init(root, ctx) {
                 const isEcies = slotInfo?.encoding === 'ecies';
                 const isProtected = slotInfo?.encoding === 'aesgcm';
 
-                const sigMatch = signatures.find(s => s.slotIndex === metadata.indexOf(metadata.find(m => m.key === entry.key)));
-                const sigBadge = sigMatch ? ' <span class="badge" style="background:var(--success);color:#fff;font-size:0.5rem;padding:1px 4px">Signed</span>' : '';
+                const sigMatch = signatures.find(s => s.slotIndex === entryIdx);
+                const sigBadge = sigMatch ? ` <span id="sig-badge-${entryIdx}" class="badge" style="background:var(--accent);color:#fff;font-size:0.5rem;padding:1px 4px">Verifying...</span>` : '';
                 const encBadge = isEcies ? ' <span class="badge" style="background:var(--accent);color:#fff;font-size:0.5rem;padding:1px 4px">Encrypted</span>'
                     : isProtected ? ' <span class="badge" style="background:var(--warning);color:#fff;font-size:0.5rem;padding:1px 4px">Protected</span>' : '';
 
@@ -229,7 +289,7 @@ export function init(root, ctx) {
             panel.innerHTML = mhtml;
             content.appendChild(panel);
 
-            // Wire up Decrypt buttons
+            // Wire up Decrypt buttons (ECIES)
             for (const entry of user) {
                 const entryIdx = metadata.indexOf(entry);
                 const slotInfo = schemaSlots?.get(entryIdx);
@@ -246,14 +306,46 @@ export function init(root, ctx) {
                         if (result?.plaintext) {
                             const valEl = root.querySelector(`#meta-val-${entryIdx}`);
                             if (valEl) valEl.textContent = result.plaintext;
-                            btn.textContent = 'Decrypted';
+                            btn.textContent = '\u2713 Decrypted';
+                            btn.style.color = 'var(--success)';
                         } else if (result?.error) {
-                            btn.textContent = 'Failed';
+                            btn.textContent = '\u2717 Failed';
+                            btn.style.color = 'var(--error)';
                         }
                     } catch (e) {
                         btn.textContent = 'Not for you';
+                        btn.style.color = 'var(--text-muted)';
                     }
                 });
+            }
+
+            // Wire up CMS signature verification
+            for (const sig of signatures) {
+                const targetEntry = metadata[sig.slotIndex];
+                if (!targetEntry) continue;
+                const targetIdx = metadata.indexOf(targetEntry);
+                const badgeEl = root.querySelector(`#sig-badge-${targetIdx}`);
+                if (!badgeEl) continue;
+                // Auto-verify on load
+                (async () => {
+                    try {
+                        const result = await Bridge.call('noble_crypto', 'verifyMetadataField', {
+                            signatureHex: sig.value,
+                            fieldValue: targetEntry.value
+                        });
+                        if (result?.valid) {
+                            const name = result.signerName || ('SKI ' + (result.signerSKI || '').slice(0, 12));
+                            badgeEl.innerHTML = '\u2713 Signed by: ' + esc(name);
+                            badgeEl.style.background = 'var(--success)';
+                        } else {
+                            badgeEl.innerHTML = '\u2717 Invalid';
+                            badgeEl.style.background = 'var(--error)';
+                        }
+                    } catch {
+                        badgeEl.innerHTML = '\u26A0 Verify failed';
+                        badgeEl.style.background = 'var(--warning)';
+                    }
+                })();
             }
         }
 

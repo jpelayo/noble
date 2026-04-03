@@ -41,6 +41,9 @@ export function init(root, ctx) {
             { key: 'file', label: 'File' },
             { key: 'checksum', label: 'Checksum' },
             { key: 'locator', label: 'Locator' },
+            { key: 'author', label: 'Author' },
+            { key: 'issuer', label: 'Issuer' },
+            { key: 'mydocs', label: 'My Docs' },
         ];
         for (const m of modes) {
             const btn = document.createElement('button');
@@ -87,6 +90,9 @@ export function init(root, ctx) {
             case 'file': renderFileInput(inputArea); break;
             case 'checksum': renderChecksumInput(inputArea); break;
             case 'locator': renderLocatorInput(inputArea); break;
+            case 'author': renderAuthorSearch(inputArea); break;
+            case 'issuer': renderIssuerSearch(inputArea); break;
+            case 'mydocs': renderMyDocuments(inputArea); break;
         }
 
         // Loading indicator
@@ -484,6 +490,153 @@ export function init(root, ctx) {
         }
 
         container.appendChild(card);
+    }
+
+    // ── Author Search ──
+
+    function renderAuthorSearch(container) {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input';
+        input.placeholder = 'Search author or publisher name...';
+        input.style.cssText = 'width:100%;margin-bottom:var(--gap-sm)';
+        container.appendChild(input);
+
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-primary';
+        btn.textContent = 'Search';
+        btn.style.marginBottom = 'var(--gap)';
+        btn.addEventListener('click', async () => {
+            const q = input.value.trim();
+            if (!q) return;
+            btn.disabled = true;
+            btn.textContent = 'Searching...';
+            try {
+                const [r1, r2] = await Promise.all([
+                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'author', value: q }).catch(() => ({ documents: [] })),
+                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'publisher', value: q }).catch(() => ({ documents: [] })),
+                ]);
+                const all = [...(r1.documents || []), ...(r2.documents || [])];
+                const seen = new Set();
+                const deduped = all.filter(d => {
+                    const id = d.tx_id || d.txId;
+                    if (seen.has(id)) return false;
+                    seen.add(id);
+                    return true;
+                });
+                renderSearchResults(container, deduped, 'author');
+            } catch (e) {
+                container.innerHTML += '<div style="color:var(--error)">Search failed: ' + esc(e.message || 'unknown') + '</div>';
+            }
+            btn.disabled = false;
+            btn.textContent = 'Search';
+        });
+        container.appendChild(btn);
+    }
+
+    // ── Issuer Search ──
+
+    function renderIssuerSearch(container) {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input';
+        input.placeholder = 'Public key (nbl1... or hex)';
+        input.style.cssText = 'width:100%;margin-bottom:var(--gap-sm)';
+        container.appendChild(input);
+
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-primary';
+        btn.textContent = 'Search';
+        btn.style.marginBottom = 'var(--gap)';
+        btn.addEventListener('click', async () => {
+            const q = input.value.trim();
+            if (!q) return;
+            btn.disabled = true;
+            btn.textContent = 'Searching...';
+            try {
+                const r = await Bridge.call('noble_api', 'getDocumentsByIssuer', { publicKey: q });
+                renderSearchResults(container, r.documents || [], 'issuer');
+            } catch (e) {
+                container.innerHTML += '<div style="color:var(--error)">Search failed: ' + esc(e.message || 'unknown') + '</div>';
+            }
+            btn.disabled = false;
+            btn.textContent = 'Search';
+        });
+        container.appendChild(btn);
+    }
+
+    // ── My Documents ──
+
+    function renderMyDocuments(container) {
+        if (!state.walletAddress) {
+            container.appendChild(emptyState({
+                icon: '\u{1F4CB}',
+                title: 'No Wallet',
+                subtitle: 'Connect to a node to see your documents.'
+            }));
+            return;
+        }
+        container.innerHTML = '<p style="color:var(--text-muted)">Loading your documents...</p>';
+        Bridge.call('noble_api', 'getDocumentsByIssuer', { publicKey: state.walletAddress }).then(r => {
+            container.innerHTML = '';
+            renderSearchResults(container, r.documents || [], 'mydocs');
+        }).catch(e => {
+            container.innerHTML = '<div style="color:var(--error)">Failed to load: ' + esc(e.message || 'unknown') + '</div>';
+        });
+    }
+
+    // ── Shared search result renderer ──
+
+    function renderSearchResults(container, docs, source) {
+        // Remove previous results (keep input elements)
+        const existing = container.querySelector('.search-results');
+        if (existing) existing.remove();
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'search-results';
+
+        if (docs.length === 0) {
+            wrapper.innerHTML = '<div style="text-align:center;padding:var(--gap);color:var(--text-muted)">No documents found.</div>';
+            container.appendChild(wrapper);
+            return;
+        }
+
+        const count = document.createElement('div');
+        count.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap-sm)';
+        count.textContent = docs.length + ' document' + (docs.length !== 1 ? 's' : '') + ' found';
+        wrapper.appendChild(count);
+
+        for (const doc of docs) {
+            const txid = doc.tx_id || doc.txId || '';
+            const row = document.createElement('div');
+            row.className = 'panel';
+            row.style.cssText = 'padding:8px 12px;margin-bottom:4px;cursor:pointer;transition:background 0.15s';
+            row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-subtle)'; });
+            row.addEventListener('mouseleave', () => { row.style.background = ''; });
+            row.addEventListener('click', () => {
+                if (window.App) window.App.navigateTo('tx-detail', { txid });
+            });
+
+            const cs = doc.checksum || '';
+            const height = doc.block_height || doc.height || '';
+            const ts = doc.timestamp ? formatTimestamp(doc.timestamp) : '';
+            const ver = doc.version != null ? 'v' + doc.version : '';
+
+            row.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px">'
+                + '<div>'
+                + '<div class="mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(cs.slice(0, 24)) + (cs.length > 24 ? '\u2026' : '') + '</div>'
+                + '<div style="font-size:var(--font-size-xs);color:var(--text-muted)">'
+                + (height ? 'Block ' + height + ' \u00b7 ' : '') + ts
+                + '</div>'
+                + '</div>'
+                + '<div style="display:flex;gap:6px;align-items:center">'
+                + (ver ? '<span class="badge" style="font-size:0.6rem">' + ver + '</span>' : '')
+                + '<span class="mono" style="font-size:0.6rem;color:var(--text-muted)">' + esc(txid.slice(0, 12)) + '\u2026</span>'
+                + '</div>'
+                + '</div>';
+            wrapper.appendChild(row);
+        }
+        container.appendChild(wrapper);
     }
 
     return {

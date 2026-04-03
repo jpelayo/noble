@@ -2071,7 +2071,10 @@ export function init(root, ctx) {
         return errors;
     }
 
+    let submitting = false;
     async function signAllThenSubmitAll(desc, fill, resultsContainer, container) {
+        if (submitting) return; // prevent double-submit
+        submitting = true;
         // ── Auto-reload stale data (old drafts may lack fee/balance) ──
         if (!feeData) {
             desc.textContent = 'Loading fee estimates...';
@@ -2213,6 +2216,7 @@ export function init(root, ctx) {
         }
 
         container.appendChild(summary);
+        submitting = false; // allow retry after "Back to Fee Selection"
     }
 
     /** Sign a single file — returns txHex string. Throws on error. */

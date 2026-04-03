@@ -55,6 +55,11 @@ pub fn build_transaction(params_json: &str) -> Result<String, String> {
     call_ffi(noble_build_transaction, params_json)
 }
 
+/// Decode a locked transaction and decrypt metadata with a password.
+pub fn decode_locked_tx(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_tx_decode_locked, params_json)
+}
+
 /// Build, sign, and CBOR-encode a transfer transaction.
 pub fn sign_transfer(params_json: &str) -> Result<String, String> {
     call_ffi(noble_sign_transfer, params_json)

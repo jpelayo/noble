@@ -114,6 +114,11 @@ export function init(root, ctx) {
     balanceContainer.setAttribute('aria-live', 'polite');
     root.appendChild(balanceContainer);
 
+    // UTXO warning (populated after snapshot loads)
+    const utxoWarning = document.createElement('div');
+    utxoWarning.id = 'home-utxo-warning';
+    root.appendChild(utxoWarning);
+
     // Two-column grid: Recent Activity (left, wide) + Quick Actions (right, narrow)
     const grid = document.createElement('div');
     grid.className = 'home-grid';
@@ -166,6 +171,7 @@ export function init(root, ctx) {
             const balance = snapshot;
             const txs = snapshot.transactions || [];
             renderHeroBalance(balanceContainer, balance, address);
+            renderUtxoWarning(utxoWarning, snapshot);
             renderRecentActivity(activityContainer, txs);
             renderQuickActions(actionsContainer);
         } catch (err) {
@@ -203,6 +209,36 @@ export function init(root, ctx) {
     }
 
     // ── Stitch-inspired render functions ──
+
+    function renderUtxoWarning(container, snapshot) {
+        container.innerHTML = '';
+        const count = snapshot.available_utxo_count;
+        if (count == null || count >= 5) return; // default threshold 5 if no config
+        // Try loading persisted auto-split config
+        let minReady = 5;
+        try {
+            const saved = localStorage.getItem('noble.autoSplit');
+            if (saved) {
+                const cfg = JSON.parse(saved);
+                if (!cfg.enabled) return; // auto-split disabled, no warning
+                minReady = Math.max(2, Math.min(63, parseInt(cfg.minimumReady, 10) || 5));
+            }
+        } catch {}
+        if (count >= minReady) return;
+        const card = document.createElement('div');
+        card.style.cssText = 'background:color-mix(in srgb, var(--warning) 12%, transparent);border:1px solid var(--warning);border-radius:var(--radius);padding:10px 14px;margin-bottom:var(--gap);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px';
+        const msg = document.createElement('div');
+        msg.style.cssText = 'font-size:var(--font-size-sm);color:var(--warning)';
+        msg.innerHTML = '<strong>Low UTXOs:</strong> ' + count + ' available (minimum: ' + minReady + '). Split UTXOs to continue notarizing.';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-sm';
+        btn.textContent = 'Split Now';
+        btn.style.cssText = 'white-space:nowrap;border-color:var(--warning);color:var(--warning)';
+        btn.addEventListener('click', () => { if (window.App) window.App.navigateTo('utxo-maintenance'); });
+        card.appendChild(msg);
+        card.appendChild(btn);
+        container.appendChild(card);
+    }
 
     function renderHeroBalance(container, balance, address) {
         container.innerHTML = '';
@@ -411,6 +447,7 @@ export function init(root, ctx) {
             try {
                 const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
                 if (!alive) return;
+                renderUtxoWarning(utxoWarning, snap);
                 const txMap = new Map((snap.transactions || []).map(t => [t.txId || t.tx_id, t]));
                 const rows = root.querySelectorAll('.activity-row');
                 rows.forEach(row => {

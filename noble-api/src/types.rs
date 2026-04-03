@@ -1713,6 +1713,8 @@ pub struct WalletSnapshotResponse {
     pub pending: u64,
     pub immature_count: usize,
     pub immature_value: u64,
+    pub available_utxo_count: usize,
+    pub total_utxo_count: usize,
     pub transactions: Vec<TransactionResponse>,
 }
 

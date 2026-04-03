@@ -14,10 +14,21 @@ export function init(root, ctx) {
     let utxos = [];
     let selected = new Set();
     let feeRate = 1;
-    let minimumReady = 5;   // trigger auto-split when available drops below this
-    let targetReady = 10;   // how many UTXOs to create when splitting
+    let minimumReady = 5;
+    let targetReady = 10;
     let autoMaintainEnabled = false;
     const TYPICAL_SIZE = 200;
+
+    // Load persisted auto-split config
+    try {
+        const saved = localStorage.getItem('noble.autoSplit');
+        if (saved) {
+            const cfg = JSON.parse(saved);
+            minimumReady = Math.max(2, Math.min(63, parseInt(cfg.minimumReady, 10) || 5));
+            targetReady = Math.max(2, Math.min(63, parseInt(cfg.targetReady, 10) || 10));
+            autoMaintainEnabled = !!cfg.enabled;
+        }
+    } catch {}
 
     root.classList.add('page-content');
     root.style.padding = '8px';
@@ -537,6 +548,11 @@ export function init(root, ctx) {
             autoMaintainEnabled = toggleCb.checked;
             minimumReady = Math.max(2, Math.min(63, parseInt(minInput.value) || 5));
             targetReady = Math.max(minimumReady, Math.min(63, parseInt(targetInput.value) || 10));
+            try {
+                localStorage.setItem('noble.autoSplit', JSON.stringify({
+                    enabled: autoMaintainEnabled, minimumReady, targetReady
+                }));
+            } catch {}
             closeModal();
             render();
         });

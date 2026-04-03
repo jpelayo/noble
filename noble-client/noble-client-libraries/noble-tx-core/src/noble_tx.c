@@ -474,6 +474,12 @@ inputs_ready:
 
     // ── 9. Result ──
     char *tx_hex = (char *)malloc(cbor.len * 2 + 1);
+    if (!tx_hex) {
+        noble_buf_free(&cbor);
+        json_free(inputs_json);
+        json_free(params);
+        return json_emit_error("out of memory");
+    }
     hex_encode(cbor.data, cbor.len, tx_hex);
     char tx_id_hex[65];
     hex_encode(tx_id, HASH256_LEN, tx_id_hex);

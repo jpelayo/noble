@@ -336,6 +336,39 @@ pub fn handle_crypto_action(
             Ok(serde_json::json!({ "txHex": result["tx_hex"], "txId": result["tx_id"] }))
         }
 
+        "buildTransaction" => {
+            let mut input_json = params.clone();
+            input_json["private_key"] = serde_json::json!(hex::encode(private_key));
+            input_json["change_address"] = serde_json::json!(wallet_address);
+            input_json["chain_id"] = serde_json::json!(chain_id);
+            input_json["timestamp"] = serde_json::json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+            );
+            let result_json = noble_tx_core::build_transaction(&input_json.to_string())
+                .map_err(|e| format!("build_transaction: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(serde_json::json!({
+                "txHex": result["tx_hex"], "txId": result["tx_id"],
+                "fee": result["fee"], "size": result["size"]
+            }))
+        }
+
+        "decryptLockedTx" => {
+            let result_json = noble_tx_core::decode_locked_tx(&serde_json::json!(params).to_string())
+                .map_err(|e| format!("decode_locked_tx: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&result_json)
+                .map_err(|e| format!("parse result: {e}"))?;
+            if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                return Err(err.to_string());
+            }
+            Ok(result)
+        }
+
         "estimateTxSize" => {
             let mut estimate_json = serde_json::json!({
                 "tx_type": params.get("tx_type").and_then(|v| v.as_str()).unwrap_or("notarization"),

@@ -306,7 +306,7 @@ export function openWizardModal({ title, steps, onComplete, onCancel, stack = fa
 
             const nextBtn = document.createElement('button');
             nextBtn.className = 'btn btn-primary';
-            const nextStepLabel = (!isLast && !stepObj.submitLabel && steps[currentStep + 1]) ? 'Next: ' + steps[currentStep + 1].label : null;
+            const nextStepLabel = (!isLast && !stepObj.submitLabel && steps[current + 1]) ? 'Next: ' + steps[current + 1].label : null;
             nextBtn.textContent = stepObj.submitLabel || nextStepLabel || (isLast ? 'Submit' : 'Next');
             if (stepObj.canAdvance) nextBtn.disabled = !stepObj.canAdvance();
 

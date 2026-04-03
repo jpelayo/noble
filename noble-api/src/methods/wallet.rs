@@ -864,17 +864,24 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
         // ── Single storage read lock for both balance and transactions ──
         let storage = self.storage.read();
-        let chain_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
+        let chain_height = storage.get_chain_tip()
+            .map_err(ApiError::from)?
+            .map(|t| t.height)
+            .unwrap_or(0);
 
         // ── Balance (same logic as getAddressBalance) ──
         let total_balance = storage.get_balance(&addr).map_err(ApiError::from)?;
-        let all_utxos = storage.get_address_utxos(&addr).unwrap_or_default();
+        let all_utxos = storage.get_address_utxos(&addr).map_err(ApiError::from)?;
+        let total_utxo_count = all_utxos.len();
         let mut immature_count: usize = 0;
         let mut immature_value: u64 = 0;
+        let mut available_utxo_count: usize = 0;
         for (_, entry) in &all_utxos {
             if !entry.is_mature(chain_height) {
                 immature_count += 1;
                 immature_value += entry.value;
+            } else {
+                available_utxo_count += 1;
             }
         }
         let pending = {
@@ -1082,6 +1089,8 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             pending,
             immature_count,
             immature_value,
+            available_utxo_count,
+            total_utxo_count,
             transactions: pending_entries,
         })
     }
