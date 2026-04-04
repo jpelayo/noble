@@ -17,6 +17,24 @@ export function init(root, ctx) {
     let versions = null;
     let selectedFile = null;
 
+    // Handle native file drops from Swift DroppableWebView
+    window._nobleHandleFileDrop = async function(droppedFiles) {
+        if (mode !== 'file' || !alive || !droppedFiles?.length) return;
+        selectedFile = droppedFiles[0];
+        checksum = '';
+        result = null;
+        versions = null;
+        render();
+        try {
+            const hashResult = await Bridge.call('noble_security', 'hashFile', { filePath: selectedFile.path });
+            if (!alive) return;
+            checksum = hashResult.hash;
+            render();
+        } catch (e) {
+            console.error('[verify] hash failed:', e);
+        }
+    };
+
     render();
 
     function render() {
@@ -140,9 +158,26 @@ export function init(root, ctx) {
         const zone = document.createElement('div');
         zone.className = 'drop-zone';
         zone.setAttribute('role', 'button');
-        zone.setAttribute('aria-label', 'Select a file to verify');
+        zone.setAttribute('aria-label', 'Drop a file or click to select');
         zone.setAttribute('tabindex', '0');
-        zone.innerHTML = '<div style="font-size:2rem;margin-bottom:var(--gap-sm)">\u{1F4C4}</div><div>Click to select a file</div>';
+        zone.innerHTML = '<div style="font-size:2rem;margin-bottom:var(--gap-sm)">\u{1F4C4}</div><div>Drop a file here or click to select</div>';
+        zone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'copy';
+            zone.classList.add('drag-over');
+        });
+        zone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+        });
+        zone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            zone.classList.remove('drag-over');
+            // Actual file handling via native Swift drop → window._nobleHandleFileDrop
+        });
         zone.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zone.click(); }
         });
@@ -311,69 +346,122 @@ export function init(root, ctx) {
     }
 
     function renderMatchResult(container) {
-        const card = document.createElement('div');
-        card.className = 'result-card result-success';
+        // ── Section A: Header card ──
+        const header = document.createElement('div');
+        header.className = 'result-card result-success';
+        const regs = result.registrations || [];
+        const firstReg = regs[0];
+        let hHtml = '<div class="result-icon" style="color:var(--success)">\u2705</div>'
+            + '<div class="result-title" style="color:var(--success)">Document Registered</div>'
+            + '<div class="detail-grid" style="margin-top:var(--gap)">'
+            + '<dt>Checksum</dt><dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">' + esc(result.checksum) + '</dd>';
+        if (result.firstSeen) hHtml += '<dt>First Seen</dt><dd>' + formatTimestamp(result.firstSeen) + '</dd>';
+        hHtml += '<dt>Registrations</dt><dd>' + regs.length + '</dd>';
+        hHtml += '</div>';
+        // Copy checksum button
+        hHtml += '<button class="btn btn-sm" id="verify-copy-checksum" style="margin-top:8px">Copy Checksum</button>';
+        header.innerHTML = hHtml;
+        container.appendChild(header);
+        header.querySelector('#verify-copy-checksum')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(result.checksum).then(() => {
+                const b = header.querySelector('#verify-copy-checksum');
+                if (b) { b.textContent = 'Copied!'; setTimeout(() => { b.textContent = 'Copy Checksum'; }, 1500); }
+            });
+        });
 
-        let html = `
-            <div class="result-icon" style="color:var(--success)">\u2705</div>
-            <div class="result-title" style="color:var(--success)">Document Registered</div>
-            <div class="detail-grid" style="margin-top:var(--gap)">
-                <dt>Checksum</dt>
-                <dd class="mono" style="font-size:var(--font-size-xs);word-break:break-all">${esc(result.checksum)}</dd>
-        `;
-
-        if (result.registrations && result.registrations.length > 0) {
-            const reg = result.registrations[0];
-            html += `
-                <dt>Block Height</dt>
-                <dd class="mono">${reg.blockHeight}</dd>
-                <dt>Transaction</dt>
-                <dd class="mono" style="font-size:var(--font-size-xs)">${reg.txId.slice(0, 16)}\u2026</dd>
-                <dt>Timestamp</dt>
-                <dd>${formatTimestamp(reg.timestamp)}</dd>
-            `;
-        }
-
-        if (result.firstSeen) {
-            html += `<dt>First Seen</dt><dd>${formatTimestamp(result.firstSeen)}</dd>`;
-        }
-
-        html += '</div>';
-        card.innerHTML = html;
-        container.appendChild(card);
-
-        // ── Signature verification badges ──
-        if (result.metadata && result.metadata.length > 0) {
-            renderSignatureBadges(container, result.metadata);
-        }
-
-        // Version timeline
-        if (versions && versions.length > 1) {
-            const timeline = document.createElement('div');
-            timeline.className = 'panel';
-            timeline.style.marginTop = 'var(--gap)';
-            timeline.innerHTML = '<div class="panel-header">Version History</div>';
-
-            const body = document.createElement('div');
-            body.className = 'panel-body';
-
-            const tl = document.createElement('div');
-            tl.className = 'version-timeline';
-
-            for (const v of versions) {
-                const entry = document.createElement('div');
-                entry.className = 'version-entry';
-                entry.innerHTML = `
-                    <div class="version-height">Block #${v.blockHeight}</div>
-                    <div class="version-time">${formatTimestamp(v.timestamp)}</div>
-                    <div class="version-hash">${v.checksum ? v.checksum.slice(0, 24) + '\u2026' : ''}</div>
-                `;
-                tl.appendChild(entry);
+        // ── Section B: Registrations table ──
+        if (regs.length > 0) {
+            const panel = document.createElement('div');
+            panel.className = 'panel';
+            panel.style.cssText = 'margin-top:var(--gap);overflow-x:auto';
+            let tHtml = '<div style="font-weight:600;font-size:var(--font-size-sm);padding:8px 10px">Registrations (' + regs.length + ')</div>';
+            tHtml += '<table style="width:100%;border-collapse:collapse;font-size:var(--font-size-xs)">';
+            tHtml += '<thead><tr style="color:var(--text-muted);text-align:left"><th style="padding:4px 10px">Block</th><th style="padding:4px 10px" class="hide-mobile">Time</th><th style="padding:4px 10px">TX ID</th><th style="padding:4px 10px">Type</th></tr></thead><tbody>';
+            for (const r of regs) {
+                const txid = r.txId || '';
+                tHtml += '<tr class="verify-reg-row" data-txid="' + esc(txid) + '" style="cursor:pointer;transition:background 0.15s">'
+                    + '<td style="padding:6px 10px" class="mono">' + esc(String(r.blockHeight || '')) + '</td>'
+                    + '<td style="padding:6px 10px" class="hide-mobile">' + (r.timestamp ? formatTimestamp(r.timestamp) : '') + '</td>'
+                    + '<td style="padding:6px 10px" class="mono">' + esc(txid.slice(0, 16)) + '\u2026</td>'
+                    + '<td style="padding:6px 10px"><span class="badge" style="font-size:0.55rem;padding:1px 4px">' + esc(r.txType || 'Notarization') + '</span></td>'
+                    + '</tr>';
             }
+            tHtml += '</tbody></table>';
+            panel.innerHTML = tHtml;
+            container.appendChild(panel);
+            // Wire clickable rows
+            panel.querySelectorAll('.verify-reg-row').forEach(row => {
+                row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-subtle)'; });
+                row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                row.addEventListener('click', () => {
+                    const txid = row.dataset.txid;
+                    if (txid && window.App) window.App.navigateTo('tx-detail', { txid });
+                });
+            });
+        }
 
-            body.appendChild(tl);
-            timeline.appendChild(body);
-            container.appendChild(timeline);
+        // ── Section C: Version chain ──
+        const vers = result.versions || versions || [];
+        if (vers.length > 1) {
+            const vPanel = document.createElement('div');
+            vPanel.className = 'panel';
+            vPanel.style.cssText = 'margin-top:var(--gap);overflow-x:auto';
+            let vHtml = '<div style="font-weight:600;font-size:var(--font-size-sm);padding:8px 10px">Version Chain (' + vers.length + ')</div>';
+            vHtml += '<table style="width:100%;border-collapse:collapse;font-size:var(--font-size-xs)">';
+            vHtml += '<thead><tr style="color:var(--text-muted);text-align:left"><th style="padding:4px 10px">v</th><th style="padding:4px 10px">Block</th><th style="padding:4px 10px">Checksum</th><th style="padding:4px 10px">TX ID</th></tr></thead><tbody>';
+            for (const v of vers) {
+                const isCurrent = v.checksum === result.checksum;
+                const bg = isCurrent ? 'background:var(--accent-subtle)' : '';
+                const txid = v.txId || '';
+                vHtml += '<tr class="verify-ver-row" data-txid="' + esc(txid) + '" style="cursor:pointer;transition:background 0.15s;' + bg + '">'
+                    + '<td style="padding:6px 10px">' + esc(String(v.version != null ? v.version : '\u2014')) + (isCurrent ? ' <span class="badge" style="font-size:0.5rem;background:var(--success);color:#fff;padding:0 3px">current</span>' : '') + '</td>'
+                    + '<td style="padding:6px 10px" class="mono">' + esc(String(v.blockHeight || '')) + '</td>'
+                    + '<td style="padding:6px 10px" class="mono">' + esc((v.checksum || '').slice(0, 16)) + '\u2026</td>'
+                    + '<td style="padding:6px 10px" class="mono">' + esc(txid.slice(0, 12)) + '\u2026</td>'
+                    + '</tr>';
+            }
+            vHtml += '</tbody></table>';
+            vPanel.innerHTML = vHtml;
+            container.appendChild(vPanel);
+            vPanel.querySelectorAll('.verify-ver-row').forEach(row => {
+                row.addEventListener('mouseenter', () => { if (!row.style.background.includes('accent-subtle')) row.style.background = 'var(--glass-bg)'; });
+                row.addEventListener('mouseleave', () => { const isCur = row.querySelector('.badge'); if (!isCur) row.style.background = ''; });
+                row.addEventListener('click', () => {
+                    const txid = row.dataset.txid;
+                    if (txid && window.App) window.App.navigateTo('tx-detail', { txid });
+                });
+            });
+        }
+
+        // ── Section D: Metadata + Signatures (from first registration's tx) ──
+        if (firstReg?.txId) {
+            const metaPanel = document.createElement('div');
+            metaPanel.className = 'panel';
+            metaPanel.style.cssText = 'margin-top:var(--gap);padding:10px';
+            metaPanel.innerHTML = '<div style="font-weight:600;font-size:var(--font-size-sm);margin-bottom:8px">Metadata & Signatures</div><div style="color:var(--text-muted);font-size:var(--font-size-xs)">Loading...</div>';
+            container.appendChild(metaPanel);
+            // Fetch tx metadata async
+            Bridge.call('noble_api', 'getTransaction', { txId: firstReg.txId }).then(tx => {
+                if (!alive) return; // guard against stale async callback
+                const meta = tx?.metadata || [];
+                if (meta.length === 0) {
+                    metaPanel.querySelector('div:last-child').textContent = 'No metadata';
+                    return;
+                }
+                // Render metadata + signature badges
+                let mHtml = '';
+                const userMeta = meta.filter(m => !m.key.startsWith('schema') && !m.key.startsWith('sig:') && !m.key.startsWith('locked:') && !m.key.startsWith('unlock:'));
+                for (const m of userMeta) {
+                    const val = m.value || '';
+                    const displayVal = val.length > 200 ? val.slice(0, 80) + '\u2026 (' + Math.floor(val.length / 2) + ' bytes)' : val;
+                    mHtml += '<div style="margin-bottom:4px"><span style="font-size:var(--font-size-xs);color:var(--text-muted)">' + esc(m.key) + ':</span> <span class="mono" style="font-size:var(--font-size-xs)">' + esc(displayVal) + '</span></div>';
+                }
+                metaPanel.querySelector('div:last-child').innerHTML = mHtml || 'No user metadata';
+                // Signature verification
+                renderSignatureBadges(metaPanel, meta);
+            }).catch(() => {
+                metaPanel.querySelector('div:last-child').textContent = 'Could not load metadata';
+            });
         }
     }
 
@@ -640,7 +728,7 @@ export function init(root, ctx) {
     }
 
     return {
-        destroy() { alive = false; },
+        destroy() { alive = false; if (window._nobleHandleFileDrop) delete window._nobleHandleFileDrop; },
         refresh(newState) { Object.assign(state, newState); }
     };
 }

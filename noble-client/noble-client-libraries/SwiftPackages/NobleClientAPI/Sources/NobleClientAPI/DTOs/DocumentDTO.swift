@@ -15,14 +15,19 @@ struct ChecksumLookupDTO: Decodable, Sendable {
     let version_chain: [String]?
 }
 
+/// Superset of fields from noble_lookupChecksum, noble_verifyDocument, noble_getDocumentsByIssuer.
+/// All fields optional — each RPC populates a different subset.
 struct RegistrationRecordDTO: Decodable, Sendable {
     let block_height: UInt64?
     let tx_id: String?
     let timestamp: UInt64?
-    let version: String?
+    let version: String?        // lookupChecksum returns string
     let issuer: String?
     let metadata: [MetadataDTO]?
     let fee: UInt64?
+    let tx_type: String?        // verifyDocument returns this
+    let prev_checksum: String?
+    let locked_tx_id: String?
 }
 
 // MARK: - noble_verifyDocument
@@ -30,9 +35,17 @@ struct RegistrationRecordDTO: Decodable, Sendable {
 struct VerifyDocumentDTO: Decodable, Sendable {
     let checksum: String?
     let registered: Bool
-    let registrations: Int?
+    let registrations: [RegistrationRecordDTO]?
     let first_seen: UInt64?
-    let version_chain: [String]?
+    let version_chain: [VersionEntryDTO]?
+}
+
+struct VersionEntryDTO: Decodable, Sendable {
+    let checksum: String?
+    let tx_id: String?
+    let block_height: UInt64?
+    let timestamp: UInt64?
+    let version: UInt32?
 }
 
 // MARK: - noble_getDocumentHistory

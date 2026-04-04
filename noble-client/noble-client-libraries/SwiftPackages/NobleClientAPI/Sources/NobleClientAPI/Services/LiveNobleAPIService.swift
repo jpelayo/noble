@@ -308,8 +308,8 @@ public struct LiveNobleAPIService: NobleAPIService {
         let versions = try await getDocumentVersions(checksum: checksum)
         return VerificationResult(
             isRegistered: dto.registered,
-            registration: nil, // populated from lookupChecksum if needed
-            registrationCount: dto.registrations ?? 0,
+            registration: nil,
+            registrationCount: dto.registrations?.count ?? 0,
             versions: versions
         )
     }

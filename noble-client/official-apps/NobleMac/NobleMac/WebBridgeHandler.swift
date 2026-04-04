@@ -224,16 +224,87 @@ final class WebBridgeHandler {
             guard let checksum = params["checksum"] as? String else {
                 throw BridgeError.missingParam("checksum")
             }
-            let result = try await api.verifyDocument(checksum: checksum)
-            var dict: [String: Any] = [
-                "isRegistered": result.isRegistered,
-                "registrationCount": result.registrationCount,
-                "versions": result.versions.map { versionToDict($0) },
-            ]
-            if let reg = result.registration {
-                dict["registration"] = registrationToDict(reg)
+            guard let liveSvc = api as? LiveNobleAPIService else {
+                throw BridgeError.notConnected
             }
-            return dict
+            // Call RPC directly to get full registrations array + version_chain
+            let dto = try await liveSvc.client.call(
+                method: "noble_verifyDocument",
+                params: LookupChecksumParams(checksum: checksum),
+                expecting: VerifyDocumentDTO.self
+            )
+            let regs: [[String: Any]] = (dto.registrations ?? []).map { r in
+                var d: [String: Any] = [:]
+                if let v = r.block_height { d["blockHeight"] = v }
+                if let v = r.tx_id { d["txId"] = v }
+                if let v = r.timestamp { d["timestamp"] = v }
+                if let v = r.tx_type { d["txType"] = v }
+                if let v = r.prev_checksum { d["prevChecksum"] = v }
+                if let v = r.locked_tx_id { d["lockedTxId"] = v }
+                return d
+            }
+            let vers: [[String: Any]] = (dto.version_chain ?? []).map { v in
+                var d: [String: Any] = [:]
+                if let c = v.checksum { d["checksum"] = c }
+                if let t = v.tx_id { d["txId"] = t }
+                if let b = v.block_height { d["blockHeight"] = b }
+                if let ts = v.timestamp { d["timestamp"] = ts }
+                if let ver = v.version { d["version"] = ver }
+                return d
+            }
+            return [
+                "registered": dto.registered,
+                "checksum": checksum,
+                "registrationCount": regs.count,
+                "registrations": regs,
+                "versions": vers,
+                "firstSeen": dto.first_seen as Any,
+            ] as [String: Any]
+
+        case "getDocumentsByIssuer":
+            guard let publicKey = params["publicKey"] as? String else {
+                throw BridgeError.missingParam("publicKey")
+            }
+            guard let liveSvc = api as? LiveNobleAPIService else {
+                throw BridgeError.notConnected
+            }
+            let issuerDTO = try await liveSvc.client.call(
+                method: "noble_getDocumentsByIssuer",
+                params: [publicKey],
+                expecting: DocumentsByIssuerDTO.self
+            )
+            let docs: [[String: Any]] = (issuerDTO.documents ?? []).map { r in
+                var d: [String: Any] = [:]
+                if let v = r.block_height { d["blockHeight"] = v }
+                if let v = r.tx_id { d["txId"] = v }
+                if let v = r.timestamp { d["timestamp"] = v }
+                if let v = r.tx_type { d["txType"] = v }
+                return d
+            }
+            return ["documents": docs, "count": issuerDTO.count ?? docs.count] as [String: Any]
+
+        case "searchDocumentsByMetadata":
+            guard let key = params["key"] as? String,
+                  let value = params["value"] as? String else {
+                throw BridgeError.missingParam("key or value")
+            }
+            guard let liveSvc = api as? LiveNobleAPIService else {
+                throw BridgeError.notConnected
+            }
+            let searchDTO = try await liveSvc.client.call(
+                method: "noble_searchDocumentsByMetadata",
+                params: [key, value],
+                expecting: DocumentsByIssuerDTO.self // same shape: { documents, count }
+            )
+            let searchDocs: [[String: Any]] = (searchDTO.documents ?? []).map { r in
+                var d: [String: Any] = [:]
+                if let v = r.block_height { d["blockHeight"] = v }
+                if let v = r.tx_id { d["txId"] = v; d["tx_id"] = v }
+                if let v = r.timestamp { d["timestamp"] = v }
+                if let v = r.tx_type { d["txType"] = v }
+                return d
+            }
+            return ["documents": searchDocs, "count": searchDTO.count ?? searchDocs.count] as [String: Any]
 
         case "getDocumentVersions":
             guard let checksum = params["checksum"] as? String else {

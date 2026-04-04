@@ -1626,6 +1626,7 @@ body {
 
 /* ── Mobile (max-width: 480px) ── */
 @media (max-width: 480px) {
+  .hide-mobile { display: none; }
   .home-grid, .home-hero-grid { grid-template-columns: 1fr; }
   .skeleton-balance { height: 120px; }
   .skeleton-section { height: 140px; }
