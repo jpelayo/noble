@@ -48,6 +48,7 @@ const pages = {
 
 let currentPage = null;
 let currentRoute = null;
+let previousRoute = null;
 let appState = {};
 let bootComplete = false;
 
@@ -56,6 +57,10 @@ let bootComplete = false;
 const mountedPages = {};  // section → { root: HTMLElement, page: pageInstance }
 
 const App = {
+    /** Navigate back to previous page, or fallback to wallet. */
+    navigateBack() {
+        this.navigateTo(previousRoute || 'wallet');
+    },
     /** Navigate to a section. Pages are mounted once and hidden/shown, never destroyed.
      *  Parameterized pages (like tx-detail) are always recreated with fresh params. */
     navigateTo(section, params) {
@@ -69,6 +74,7 @@ const App = {
             mountedPages[currentRoute].root.style.display = 'none';
         }
 
+        previousRoute = currentRoute;
         currentRoute = section;
 
         // Parameterized pages: destroy old instance and recreate

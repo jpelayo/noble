@@ -45,7 +45,18 @@ export function init(root, ctx) {
         // Header
         const header = document.createElement('div');
         header.className = 'page-header';
-        header.innerHTML = '<h1>Verify</h1><p>Check if a document is registered on the NOBLE blockchain</p>';
+        header.style.cssText = 'display:flex;justify-content:space-between;align-items:flex-start';
+        header.innerHTML = '<div><h1 style="margin:0">Verify</h1><p style="margin:4px 0 0">Check if a document is registered on the NOBLE blockchain</p></div>';
+        if (result || selectedFile) {
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'btn btn-sm';
+            clearBtn.textContent = 'Clear';
+            clearBtn.addEventListener('click', () => {
+                checksum = ''; result = null; versions = null; selectedFile = null;
+                render();
+            });
+            header.appendChild(clearBtn);
+        }
         root.appendChild(header);
 
         // Mode selector
@@ -459,6 +470,43 @@ export function init(root, ctx) {
                 metaPanel.querySelector('div:last-child').innerHTML = mHtml || 'No user metadata';
                 // Signature verification
                 renderSignatureBadges(metaPanel, meta);
+                // Batch document linking
+                const batchEntry = meta.find(m => m.key === 'doc:batch');
+                if (batchEntry?.value && alive) {
+                    const batchDiv = document.createElement('div');
+                    batchDiv.style.cssText = 'margin-top:var(--gap);padding-top:var(--gap-sm);border-top:1px solid var(--border)';
+                    batchDiv.innerHTML = '<div style="font-weight:600;font-size:var(--font-size-sm);margin-bottom:6px">Batch Documents</div><div style="color:var(--text-muted);font-size:var(--font-size-xs)">Loading...</div>';
+                    metaPanel.appendChild(batchDiv);
+                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'doc:batch', value: batchEntry.value }).then(r => {
+                        if (!alive) return;
+                        const docs = (r.documents || []).filter(d => (d.txId || d.tx_id) !== firstReg.txId);
+                        if (docs.length === 0) {
+                            batchDiv.querySelector('div:last-child').textContent = 'No other documents in this batch.';
+                            return;
+                        }
+                        let bHtml = '';
+                        for (const d of docs) {
+                            const dtxid = d.txId || d.tx_id || '';
+                            bHtml += '<div class="verify-batch-row" data-txid="' + esc(dtxid) + '" style="padding:4px 6px;cursor:pointer;border-radius:var(--radius-sm);transition:background 0.15s;font-size:var(--font-size-xs)">'
+                                + '<span class="mono">' + esc(dtxid.slice(0, 16)) + '\u2026</span>'
+                                + (d.blockHeight ? ' <span style="color:var(--text-muted)">Block ' + esc(String(d.blockHeight)) + '</span>' : '')
+                                + '</div>';
+                        }
+                        batchDiv.querySelector('div:last-child').innerHTML = docs.length + ' linked document' + (docs.length > 1 ? 's' : '') + ':';
+                        const list = document.createElement('div');
+                        list.innerHTML = bHtml;
+                        batchDiv.appendChild(list);
+                        list.querySelectorAll('.verify-batch-row').forEach(row => {
+                            row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-subtle)'; });
+                            row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                            row.addEventListener('click', () => {
+                                if (window.App) window.App.navigateTo('tx-detail', { txid: row.dataset.txid });
+                            });
+                        });
+                    }).catch(() => {
+                        batchDiv.querySelector('div:last-child').textContent = 'Could not load batch documents.';
+                    });
+                }
             }).catch(() => {
                 metaPanel.querySelector('div:last-child').textContent = 'Could not load metadata';
             });
