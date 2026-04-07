@@ -3400,6 +3400,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .as_secs();
                     let result = self.healing.try_sync_import(&block, vote_data.as_deref());
                     self.healing.advance_after_import(block.header.height, &result, now);
+                    // S55-equivalent for sync-imported commits: re-publish NodeAnnounce so
+                    // peers refresh our chain_tip_height. Gated on burst-tail (!is_syncing)
+                    // to avoid flooding gossipsub during long catch-up runs.
+                    if matches!(result, crate::healing::SyncImportResult::Accepted { .. })
+                        && !self.healing.is_syncing()
+                    {
+                        self.publish_node_announce(shared_identity, network_cmd, cycle_phase_tx);
+                    }
                 } else {
                     // Live proposal — route to consensus engine.
                     let cycle_event = bridge::network_event_to_cycle_event(
