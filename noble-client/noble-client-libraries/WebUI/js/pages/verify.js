@@ -649,8 +649,8 @@ export function init(root, ctx) {
             btn.textContent = 'Searching...';
             try {
                 const [r1, r2] = await Promise.all([
-                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'author', value: q }).catch(() => ({ documents: [] })),
-                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'publisher', value: q }).catch(() => ({ documents: [] })),
+                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'doc:author', value: q }).catch(() => ({ documents: [] })),
+                    Bridge.call('noble_api', 'searchDocumentsByMetadata', { key: 'doc:publisher', value: q }).catch(() => ({ documents: [] })),
                 ]);
                 const all = [...(r1.documents || []), ...(r2.documents || [])];
                 const seen = new Set();

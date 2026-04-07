@@ -714,11 +714,13 @@ export function init(root, ctx) {
         { key: 'doc:url',         code: 'T04', label: 'URL',               icon: '\u{1F517}', placeholder: 'https://...' },
         { key: 'doc:bridge',      code: 'T05', label: 'Linked Document',   icon: '\u{1F4CE}', placeholder: 'Checksum, locator, or tx_id of linked document' },
         { key: 'doc:relation',    code: 'T06', label: 'Relation',          icon: '\u{1F4CB}', placeholder: 'e.g. amendment, annex, supersedes' },
-        { key: 'author',          code: 'T07', label: 'Author',            icon: '\u{1F464}', placeholder: 'Document author or uploader name' },
-        { key: 'publisher',       code: 'T08', label: 'Publisher',         icon: '\u{1F3E2}', placeholder: 'Distributing organization' },
+        { key: 'doc:author',      code: 'T07', label: 'Author',            icon: '\u{1F464}', placeholder: 'Document author or uploader name' },
+        { key: 'doc:publisher',   code: 'T08', label: 'Publisher',         icon: '\u{1F3E2}', placeholder: 'Distributing organization' },
         { key: 'signer:pubkey',   code: 'T09', label: 'Sender Public Key', icon: '\u{1F511}', placeholder: 'nbl1... or hex public key' },
-        { key: 'contact:email',   code: 'T10', label: 'Email',             icon: '\u{2709}\uFE0F', placeholder: 'email@example.com', forceEncrypt: true },
-        { key: 'contact:phone',   code: 'T11', label: 'Phone',             icon: '\u{1F4F1}', placeholder: '+1 555-0100', forceEncrypt: true },
+        { key: 'signer:email',    code: 'T10', label: 'Email',             icon: '\u{2709}\uFE0F', placeholder: 'email@example.com', forceEncrypt: true },
+        { key: 'signer:phone',    code: 'T11', label: 'Phone',             icon: '\u{1F4F1}', placeholder: '+1 555-0100', forceEncrypt: true },
+        { key: 'doc:type',        code: 'T12', label: 'Document Type',     icon: '\u{1F3F7}\uFE0F', placeholder: 'e.g. invoice, contract, receipt' },
+        { key: 'doc:date',        code: 'T13', label: 'Date',              icon: '\u{1F4C5}', placeholder: 'YYYY-MM-DD' },
         { key: 'custom',          code: 'T99', label: 'Custom Field',      icon: '\u{2795}', placeholder: 'Value', customKey: true },
     ];
 

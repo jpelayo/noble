@@ -250,7 +250,7 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             input_schema: obj(serde_json::json!({"tx_type": s()}), &["tx_type"]),
             annotations: ro.clone() },
         ToolDef { name: "validateMetadata", handler: "noble_mcp", action: "validateMetadata",
-            description: "Validate metadata fields before building a transaction. Checks slot budget (max 16), field pairing (doc:bridge+doc:relation), forced encryption (contact:email/phone), mode requirements, key/value size limits, and version chain rules.",
+            description: "Validate metadata fields before building a transaction. Checks slot budget (max 16), field pairing (doc:bridge+doc:relation), forced encryption (signer:email/phone), mode requirements, key/value size limits, and version chain rules.",
             input_schema: obj(serde_json::json!({
                 "metadata": arr(serde_json::json!({"type": "object", "properties": {
                     "key": s(), "value": s(), "mode": s(),
@@ -534,7 +534,7 @@ fn validate_metadata_tool(
         seen_keys.push(key.to_string());
 
         // Force-encrypt contact fields
-        if (key == "contact:email" || key == "contact:phone") && mode != "encrypted" {
+        if (key == "signer:email" || key == "signer:phone") && mode != "encrypted" {
             errors.push(format!("[{i}] '{key}' must be mode 'encrypted' (forced encryption)"));
         }
 
@@ -742,8 +742,9 @@ async fn handle_mcp_request(
                             "1. Hash the file with hashFile\n",
                             "2. Choose metadata fields. Available types:\n",
                             "   - doc:title (auto-populate from filename), doc:description, doc:url\n",
-                            "   - author, publisher, signer:pubkey\n",
-                            "   - contact:email (MUST be encrypted), contact:phone (MUST be encrypted)\n",
+                            "   - doc:type (e.g. invoice/contract), doc:date (YYYY-MM-DD)\n",
+                            "   - doc:author, doc:publisher, signer:pubkey\n",
+                            "   - signer:email (MUST be encrypted), signer:phone (MUST be encrypted)\n",
                             "   - doc:bridge + doc:relation (always paired)\n",
                             "   - custom fields (any key name)\n",
                             "3. For each field, choose mode: plaintext, protected (password), or encrypted (ECIES recipient)\n",
@@ -755,7 +756,7 @@ async fn handle_mcp_request(
                             "Rules:\n",
                             "- Max 16 metadata slots (1 schema + fields + signatures)\n",
                             "- Signed fields consume 2 slots (field + CMS signature)\n",
-                            "- contact:email and contact:phone MUST be mode 'encrypted'\n",
+                            "- signer:email and signer:phone MUST be mode 'encrypted'\n",
                             "- doc:bridge requires doc:relation (and vice versa)\n",
                             "- Encrypted fields: max 134 bytes plaintext (ECIES overhead = 121 bytes)\n",
                             "- Multi-recipient encryption: create one entry per recipient (same key, different ciphertext)"
