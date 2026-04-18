@@ -223,6 +223,10 @@ fn main() {
                     let script = bridge::build_state_update_script(&state_json);
                     let _ = webview.evaluate_script(&script);
                 }
+
+                UserEvent::EvalScript(script) => {
+                    let _ = webview.evaluate_script(&script);
+                }
             },
 
             _ => {}
@@ -276,7 +280,13 @@ async fn dispatch_bridge_action(
             crypto::handle_crypto_action(action, params, &private_key, &wallet_address, &chain_id)
         }
 
-        "noble_security" => security::handle_security_action(action, params),
+        "noble_security" => {
+            if action == "downloadAndHash" {
+                security::download_and_hash(params, proxy).await
+            } else {
+                security::handle_security_action(action, params)
+            }
+        }
 
         "noble_app" => {
             app::handle_app_action(action, params, state, proxy, callback_id, tokio_handle).await

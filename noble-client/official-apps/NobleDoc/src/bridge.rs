@@ -33,6 +33,8 @@ pub enum UserEvent {
     },
     /// Periodic poll tick — pushes state update to WebView.
     PollTick(Value),
+    /// Evaluate arbitrary JavaScript in the WebView (e.g. streaming progress).
+    EvalScript(String),
 }
 
 /// Build the JavaScript callback invocation string.

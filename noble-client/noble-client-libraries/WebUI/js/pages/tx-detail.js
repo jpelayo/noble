@@ -302,11 +302,14 @@ export function init(root, ctx) {
                 const decryptBtnId = showDecrypt ? `decrypt-${entryIdx}` : '';
                 const btnLabel = isEcies ? 'Decrypt' : isProtected ? 'Unlock' : 'Try Decrypt';
                 const decryptBtn = showDecrypt ? ` <button class="btn btn-sm" id="${decryptBtnId}" style="margin-left:4px;font-size:0.6rem;padding:1px 6px">${btnLabel}</button>` : '';
+                // Verify button for doc:download (plain URL) when tx has a checksum to compare against
+                const isDownloadField = entry.key === 'doc:download' && !isEcies && !isProtected && !maybeEncrypted && !isZeroChecksum(tx.checksum);
+                const verifyBtn = isDownloadField ? ` <button class="btn btn-sm" id="verify-dl-${entryIdx}" style="margin-left:4px;font-size:0.6rem;padding:1px 6px">Verify</button>` : '';
                 // Schema line shown above field in subdued color
                 const schemaHtml = schemaLine ? `<div style="font-size:0.55rem;color:var(--text-muted);opacity:0.5;margin-bottom:1px;font-family:var(--font-mono)">${esc(schemaLine)}</div>` : '';
 
                 mhtml += `<div style="margin-bottom:6px">${schemaHtml}
-                    <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(entry.key)}${sigBadge}${encBadge}${decryptBtn}</div>
+                    <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${esc(entry.key)}${sigBadge}${encBadge}${decryptBtn}${verifyBtn}</div>
                     <div class="mono" id="meta-val-${entryIdx}" style="font-size:var(--font-size-xs);word-break:break-all">${esc(val)}</div>
                 </div>`;
             }
@@ -327,6 +330,20 @@ export function init(root, ctx) {
                 if (!btn) continue;
                 btn.addEventListener('click', () => {
                     openDecryptModal(entry, entryIdx, isEciesField, isProtectedField);
+                });
+            }
+
+            // Wire up Verify buttons on doc:download fields
+            for (let ui = 0; ui < user.length; ui++) {
+                const entry = user[ui];
+                if (entry.key !== 'doc:download') continue;
+                if (isZeroChecksum(tx.checksum)) continue;
+                const entryIdx = metadata.indexOf(entry);
+                const btn = panel.querySelector(`#verify-dl-${entryIdx}`);
+                if (!btn) continue;
+                const url = decodeMetadataValue(entry.value);
+                btn.addEventListener('click', () => {
+                    openVerifyDownloadModal(url, tx.checksum, entryIdx);
                 });
             }
 
@@ -429,6 +446,232 @@ export function init(root, ctx) {
                 }
             }
 
+            function openVerifyDownloadModal(url, expectedChecksum, entryIdx) {
+                const body = document.createElement('div');
+                body.style.cssText = 'display:flex;flex-direction:column;gap:var(--gap)';
+                const { close } = openModal({ title: 'Verify Download', body });
+
+                const state = {
+                    phase: 'permission',
+                    bytesDownloaded: 0,
+                    totalBytes: null,
+                    startedAt: 0,
+                    aborted: false,
+                };
+
+                const parsedUrl = (() => { try { return new URL(url); } catch { return null; } })();
+                const insecure = parsedUrl && parsedUrl.protocol === 'http:';
+                const unsupported = parsedUrl && parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:';
+
+                renderPermission();
+
+                function renderPermission() {
+                    body.innerHTML = '';
+                    const urlBox = document.createElement('div');
+                    urlBox.className = 'mono';
+                    urlBox.style.cssText = 'font-size:var(--font-size-xs);word-break:break-all;background:var(--glass-bg);padding:8px;border-radius:var(--radius-sm)';
+                    urlBox.textContent = url || '(empty URL)';
+                    body.appendChild(urlBox);
+
+                    const checksumBox = document.createElement('div');
+                    checksumBox.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted)';
+                    checksumBox.innerHTML = 'Expected checksum (SHA-256):<br><span class="mono" style="color:var(--text);word-break:break-all">' + esc(expectedChecksum) + '</span>';
+                    body.appendChild(checksumBox);
+
+                    if (!parsedUrl) {
+                        const err = document.createElement('div');
+                        err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm)';
+                        err.textContent = 'Invalid URL — cannot verify.';
+                        body.appendChild(err);
+                        const cancel = document.createElement('button');
+                        cancel.className = 'btn';
+                        cancel.textContent = 'Close';
+                        cancel.addEventListener('click', close);
+                        body.appendChild(cancel);
+                        return;
+                    }
+
+                    if (unsupported) {
+                        const err = document.createElement('div');
+                        err.style.cssText = 'color:var(--error);font-size:var(--font-size-sm)';
+                        err.textContent = 'Unsupported URL scheme (' + esc(parsedUrl.protocol) + '). Only http:// and https:// are allowed.';
+                        body.appendChild(err);
+                        const cancel = document.createElement('button');
+                        cancel.className = 'btn';
+                        cancel.textContent = 'Close';
+                        cancel.addEventListener('click', close);
+                        body.appendChild(cancel);
+                        return;
+                    }
+
+                    if (insecure) {
+                        const warn = document.createElement('div');
+                        warn.style.cssText = 'background:color-mix(in srgb,var(--error) 15%,transparent);color:var(--error);padding:8px;border-radius:var(--radius-sm);font-size:var(--font-size-xs);line-height:1.4';
+                        warn.innerHTML = '<strong>\u26A0 Unencrypted transport (http://).</strong> The server and any network path can observe this request. Prefer https:// URLs when possible.';
+                        body.appendChild(warn);
+                    }
+
+                    const notice = document.createElement('div');
+                    notice.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);line-height:1.4';
+                    notice.textContent = 'Your IP address will be visible to the server hosting this URL. The file (max 64 MB) will be downloaded and hashed locally, then compared to the notarized checksum.';
+                    body.appendChild(notice);
+
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;gap:8px';
+                    const cancel = document.createElement('button');
+                    cancel.className = 'btn';
+                    cancel.textContent = 'Cancel';
+                    cancel.style.flex = '1';
+                    cancel.addEventListener('click', close);
+                    const go = document.createElement('button');
+                    go.className = 'btn btn-primary';
+                    go.textContent = 'Connect & Download';
+                    go.style.flex = '2';
+                    go.addEventListener('click', () => { state.phase = 'downloading'; startDownload(); });
+                    row.appendChild(cancel);
+                    row.appendChild(go);
+                    body.appendChild(row);
+                }
+
+                function renderProgress() {
+                    body.innerHTML = '';
+                    const title = document.createElement('div');
+                    title.style.cssText = 'font-size:var(--font-size-sm)';
+                    title.textContent = state.phase === 'hashing' ? 'Computing SHA-256\u2026' : 'Downloading\u2026';
+                    body.appendChild(title);
+
+                    const bar = document.createElement('div');
+                    bar.style.cssText = 'height:8px;border-radius:4px;background:var(--glass-bg);overflow:hidden;position:relative';
+                    const fill = document.createElement('div');
+                    const pct = state.totalBytes ? Math.min(100, (state.bytesDownloaded / state.totalBytes) * 100) : null;
+                    if (pct !== null) {
+                        fill.style.cssText = 'height:100%;width:' + pct.toFixed(1) + '%;background:var(--accent);transition:width 0.1s linear';
+                    } else {
+                        fill.style.cssText = 'height:100%;width:35%;background:var(--accent);animation:pulse 1.2s ease-in-out infinite;position:absolute;left:0';
+                    }
+                    bar.appendChild(fill);
+                    body.appendChild(bar);
+
+                    const count = document.createElement('div');
+                    count.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted);font-family:var(--font-mono)';
+                    count.textContent = state.totalBytes
+                        ? formatBytes(state.bytesDownloaded) + ' / ' + formatBytes(state.totalBytes) + (pct !== null ? ' (' + pct.toFixed(1) + '%)' : '')
+                        : formatBytes(state.bytesDownloaded);
+                    body.appendChild(count);
+                }
+
+                function renderResult(ok, actualChecksum, size, elapsedMs, errorMsg) {
+                    body.innerHTML = '';
+                    const badge = document.createElement('div');
+                    if (errorMsg) {
+                        badge.style.cssText = 'background:var(--error);color:#fff;padding:4px 10px;border-radius:var(--radius-sm);font-weight:600;display:inline-block;font-size:var(--font-size-xs)';
+                        badge.textContent = 'ERROR';
+                    } else if (ok) {
+                        badge.style.cssText = 'background:var(--success);color:#fff;padding:4px 10px;border-radius:var(--radius-sm);font-weight:600;display:inline-block;font-size:var(--font-size-xs)';
+                        badge.textContent = '\u2713 MATCH';
+                    } else {
+                        badge.style.cssText = 'background:var(--error);color:#fff;padding:4px 10px;border-radius:var(--radius-sm);font-weight:600;display:inline-block;font-size:var(--font-size-xs)';
+                        badge.textContent = '\u2717 MISMATCH';
+                    }
+                    body.appendChild(badge);
+
+                    if (errorMsg) {
+                        const msg = document.createElement('div');
+                        msg.style.cssText = 'color:var(--error);font-size:var(--font-size-sm);line-height:1.4';
+                        msg.textContent = errorMsg;
+                        body.appendChild(msg);
+                    } else {
+                        const summary = document.createElement('div');
+                        summary.style.cssText = 'font-size:var(--font-size-xs);line-height:1.4';
+                        summary.innerHTML = ok
+                            ? 'This file matches the notarized checksum.'
+                            : 'The downloaded bytes do NOT match the notarized checksum. The file at this URL has changed or is a different document.';
+                        body.appendChild(summary);
+
+                        const cmp = document.createElement('div');
+                        cmp.style.cssText = 'font-size:var(--font-size-xs);display:flex;flex-direction:column;gap:6px';
+                        cmp.innerHTML = '<div><span style="color:var(--text-muted)">Expected:</span><br><span class="mono" style="word-break:break-all">' + esc(expectedChecksum) + '</span></div>'
+                            + '<div><span style="color:var(--text-muted)">Actual:</span><br><span class="mono" style="word-break:break-all;color:' + (ok ? 'var(--success)' : 'var(--error)') + '">' + esc(actualChecksum) + '</span></div>';
+                        body.appendChild(cmp);
+
+                        const meta = document.createElement('div');
+                        meta.style.cssText = 'font-size:var(--font-size-xs);color:var(--text-muted)';
+                        meta.textContent = formatBytes(size) + ' in ' + (elapsedMs / 1000).toFixed(2) + 's';
+                        body.appendChild(meta);
+                    }
+
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;gap:8px';
+                    const done = document.createElement('button');
+                    done.className = 'btn btn-primary';
+                    done.textContent = 'Done';
+                    done.style.flex = '1';
+                    done.addEventListener('click', close);
+                    row.appendChild(done);
+                    body.appendChild(row);
+
+                    // Reflect result in the parent row's Verify button
+                    const parentBtn = root.querySelector(`#verify-dl-${entryIdx}`);
+                    if (parentBtn && !errorMsg) {
+                        parentBtn.textContent = ok ? '\u2713 Verified' : '\u2717 Mismatch';
+                        parentBtn.style.color = ok ? 'var(--success)' : 'var(--error)';
+                    }
+                }
+
+                async function startDownload() {
+                    state.startedAt = performance.now();
+                    renderProgress();
+
+                    const MAX_BYTES = 64 * 1024 * 1024;
+                    const onProgress = (evt) => {
+                        state.bytesDownloaded = evt.bytesDownloaded;
+                        if (evt.totalBytes) state.totalBytes = evt.totalBytes;
+                        renderProgress();
+                    };
+
+                    try {
+                        let result;
+                        if (Bridge.isNative && Bridge.callWithProgress) {
+                            try {
+                                result = await Bridge.callWithProgress(
+                                    'noble_security', 'downloadAndHash',
+                                    { url, maxBytes: MAX_BYTES },
+                                    onProgress
+                                );
+                            } catch (nativeErr) {
+                                // Native handler missing or failed — fall through to fetch path.
+                                console.warn('[verify] native downloadAndHash failed, falling back to fetch:', nativeErr);
+                                result = await fetchDownloadAndHash(url, MAX_BYTES, onProgress);
+                            }
+                        } else {
+                            result = await fetchDownloadAndHash(url, MAX_BYTES, onProgress);
+                        }
+
+                        if (!result || result.ok === false) {
+                            const code = result?.errorCode || '';
+                            const msg = mapErrorCode(code, result?.error);
+                            renderResult(false, '', state.bytesDownloaded, performance.now() - state.startedAt, msg);
+                            return;
+                        }
+
+                        state.phase = 'hashing';
+                        state.bytesDownloaded = result.size || state.bytesDownloaded;
+                        state.totalBytes = result.size || state.totalBytes;
+                        renderProgress();
+
+                        const actual = (result.hash || '').toLowerCase();
+                        const expected = (expectedChecksum || '').toLowerCase();
+                        const match = actual === expected && actual.length === 64;
+                        renderResult(match, actual, result.size || 0, performance.now() - state.startedAt, null);
+                    } catch (e) {
+                        const msg = e instanceof TypeError
+                            ? 'This URL could not be fetched in the browser (likely a CORS or network error). Open the Noble desktop/mobile app to verify.'
+                            : (e.message || String(e));
+                        renderResult(false, '', state.bytesDownloaded, performance.now() - state.startedAt, msg);
+                    }
+                }
+            }
+
             // Wire up CMS signature verification
             for (const sig of signatures) {
                 const targetEntry = metadata[sig.slotIndex];
@@ -507,6 +750,76 @@ export function init(root, ctx) {
 }
 
 // ── Helpers ──
+
+async function fetchDownloadAndHash(url, maxBytes, onProgress) {
+    const res = await fetch(url, { redirect: 'follow', mode: 'cors' });
+    if (!res.ok) {
+        return { ok: false, errorCode: 'HTTP_' + res.status, error: 'HTTP ' + res.status + ' ' + res.statusText };
+    }
+    const total = parseInt(res.headers.get('content-length') || '', 10) || null;
+    if (total && total > maxBytes) {
+        return { ok: false, errorCode: 'SIZE_LIMIT_EXCEEDED', error: 'File is larger than the 64 MB verify limit.' };
+    }
+    if (!res.body || !res.body.getReader) {
+        // Fallback: arrayBuffer() with no progress.
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (buf.length > maxBytes) {
+            return { ok: false, errorCode: 'SIZE_LIMIT_EXCEEDED', error: 'File is larger than the 64 MB verify limit.' };
+        }
+        onProgress({ bytesDownloaded: buf.length, totalBytes: total || buf.length });
+        const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+        return { ok: true, hash: bytesToHex(new Uint8Array(hashBuf)), size: buf.length };
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    let lastTick = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.length;
+        if (received > maxBytes) {
+            try { reader.cancel(); } catch {}
+            return { ok: false, errorCode: 'SIZE_LIMIT_EXCEEDED', error: 'File is larger than the 64 MB verify limit.' };
+        }
+        chunks.push(value);
+        const now = performance.now();
+        if (now - lastTick >= 100) {
+            lastTick = now;
+            onProgress({ bytesDownloaded: received, totalBytes: total });
+        }
+    }
+    onProgress({ bytesDownloaded: received, totalBytes: total || received });
+    const merged = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    const hashBuf = await crypto.subtle.digest('SHA-256', merged);
+    return { ok: true, hash: bytesToHex(new Uint8Array(hashBuf)), size: received };
+}
+
+function mapErrorCode(code, fallback) {
+    switch (code) {
+        case 'SIZE_LIMIT_EXCEEDED': return 'File exceeds the 64 MB verify limit.';
+        case 'UNSUPPORTED_SCHEME': return 'Unsupported URL scheme.';
+        case 'NETWORK': return 'Network error — could not reach the URL.';
+        case 'TIMEOUT': return 'Download timed out.';
+        default: return fallback || (code ? 'Download failed: ' + code : 'Download failed.');
+    }
+}
+
+function bytesToHex(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, '0');
+    return s;
+}
+
+function formatBytes(n) {
+    if (!n && n !== 0) return '\u2014';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
 
 async function decryptFieldWithPassword(encryptedHex, password) {
     const bytes = new Uint8Array(encryptedHex.match(/.{2}/g).map(b => parseInt(b, 16)));

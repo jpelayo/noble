@@ -721,6 +721,8 @@ export function init(root, ctx) {
         { key: 'signer:phone',    code: 'T11', label: 'Phone',             icon: '\u{1F4F1}', placeholder: '+1 555-0100', forceEncrypt: true },
         { key: 'doc:type',        code: 'T12', label: 'Document Type',     icon: '\u{1F3F7}\uFE0F', placeholder: 'e.g. invoice, contract, receipt' },
         { key: 'doc:date',        code: 'T13', label: 'Date',              icon: '\u{1F4C5}', placeholder: 'YYYY-MM-DD' },
+        { key: 'signer:url',      code: 'T14', label: 'Signer URL',        icon: '\u{1F310}', placeholder: 'https://signer.example/' },
+        { key: 'doc:download',    code: 'T15', label: 'Download URL',      icon: '\u{1F4E5}', placeholder: 'https://host.example/path/to/file' },
         { key: 'custom',          code: 'T99', label: 'Custom Field',      icon: '\u{2795}', placeholder: 'Value', customKey: true },
     ];
 

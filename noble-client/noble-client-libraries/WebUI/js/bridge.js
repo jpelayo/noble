@@ -3,9 +3,13 @@
 
 let _callbackId = 0;
 const _callbacks = {};
+const _progressHandlers = new Map();
+let _requestId = 0;
 const DEFAULT_TIMEOUT_MS = 10000;
 const TX_TIMEOUT_MS = 30000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const TX_ACTIONS = new Set(['submitTransaction', 'signNotarization', 'signTransfer']);
+const LONG_ACTIONS = new Set(['downloadAndHash']);
 
 /** Real bridge for native hosts — WKWebView (Swift) or WRY (Rust).
  *
@@ -19,7 +23,9 @@ class NativeBridge {
     }
 
     static call(handler, action, params = {}) {
-        const timeoutMs = TX_ACTIONS.has(action) ? TX_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+        const timeoutMs = LONG_ACTIONS.has(action) ? DOWNLOAD_TIMEOUT_MS
+            : TX_ACTIONS.has(action) ? TX_TIMEOUT_MS
+            : DEFAULT_TIMEOUT_MS;
         return new Promise((resolve, reject) => {
             const id = 'cb_' + (++_callbackId);
             const timer = setTimeout(() => {
@@ -44,6 +50,21 @@ class NativeBridge {
                 window.webkit.messageHandlers[handler].postMessage(msg);
             }
         });
+    }
+
+    /** Call a bridge action that reports streaming progress via
+     *  `window.NobleBridge._onDownloadProgress`. The onProgress callback
+     *  receives `{ bytesDownloaded, totalBytes }`. Returns the final
+     *  `{ ok, hash, ... }` payload from the native handler.
+     */
+    static callWithProgress(handler, action, params = {}, onProgress) {
+        const requestId = 'req_' + (++_requestId);
+        if (typeof onProgress === 'function') {
+            _progressHandlers.set(requestId, onProgress);
+        }
+        const finalParams = Object.assign({}, params, { requestId });
+        return NativeBridge.call(handler, action, finalParams)
+            .finally(() => { _progressHandlers.delete(requestId); });
     }
 
     /** Called from Swift to resolve a pending callback. */
@@ -74,6 +95,12 @@ class MockBridge {
         return new Promise(resolve => {
             setTimeout(() => resolve(MockBridge._mock(handler, action, params)), 200);
         });
+    }
+
+    static callWithProgress(handler, action, params = {}, _onProgress) {
+        // In mock mode the native download path doesn't exist; callers should
+        // detect this via Bridge.isNative and use the fetch fallback.
+        return MockBridge.call(handler, action, params);
     }
 
     static _mock(handler, action, params) {
@@ -273,5 +300,16 @@ class MockBridge {
 
 const Bridge = NativeBridge.isNative ? NativeBridge : MockBridge;
 window.NativeBridge = NativeBridge;
+
+// Global dispatcher for streaming progress events from native hosts.
+// Native side calls `window.NobleBridge._onDownloadProgress({ requestId, ... })`.
+window.NobleBridge = window.NobleBridge || {};
+window.NobleBridge._onDownloadProgress = function(evt) {
+    if (!evt || !evt.requestId) return;
+    const cb = _progressHandlers.get(evt.requestId);
+    if (cb) {
+        try { cb(evt); } catch (e) { console.warn('[bridge] progress callback threw:', e); }
+    }
+};
 
 export { Bridge, NativeBridge, MockBridge };

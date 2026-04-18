@@ -7,7 +7,7 @@
  * Schema format v2 (5-field, from client WebUI):
  *   <slot>:<typeCode>:<visibility>:<encoding>:<fieldKey>
  *   Example: 1:T07:pub:utf8:author
- *            2:T10:priv:ecies:contact:email
+ *            2:T10:priv:ecies:signer:email
  *            3:SIG:pub:cms:sig:2
  *
  * Schema format v1 (5-field, legacy dashboard):

@@ -1273,6 +1273,46 @@ final class WebBridgeHandler {
             let hash = try appState.documentHasher.hash(fileURL: url)
             return ["hash": hash.hex]
 
+        case "downloadAndHash":
+            guard let urlStr = params["url"] as? String,
+                  let url = URL(string: urlStr) else {
+                throw BridgeError.missingParam("url")
+            }
+            let scheme = url.scheme?.lowercased() ?? ""
+            if scheme != "http" && scheme != "https" {
+                return [
+                    "ok": false,
+                    "errorCode": "UNSUPPORTED_SCHEME",
+                    "error": "Only http:// and https:// are allowed",
+                ] as [String: Any]
+            }
+            let maxBytes = (params["maxBytes"] as? Int) ?? (64 * 1024 * 1024)
+            let requestId = params["requestId"] as? String
+            let coordinator = appState.webViewCoordinator
+            let outcome = await DownloadAndHash.run(
+                url: url,
+                maxBytes: maxBytes,
+                requestId: requestId,
+                coordinator: coordinator
+            )
+            switch outcome {
+            case .success(let hash, let size, let elapsedMs, let contentType):
+                var res: [String: Any] = [
+                    "ok": true,
+                    "hash": hash,
+                    "size": size,
+                    "elapsedMs": elapsedMs,
+                ]
+                if let contentType { res["contentType"] = contentType }
+                return res
+            case .failure(let code, let message):
+                return [
+                    "ok": false,
+                    "errorCode": code,
+                    "error": message,
+                ] as [String: Any]
+            }
+
         case "loadPrivateKey":
             // Security: never send the raw key to JS. Only report availability.
             let available = appState.loadPrivateKey() != nil
@@ -1913,5 +1953,156 @@ private final class PKCS12PickerDelegate: NSObject, UIDocumentPickerDelegate {
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         continuation?.resume(throwing: BridgeError.operationFailed("cancelled"))
         continuation = nil
+    }
+}
+
+// MARK: - Download + Hash (doc:download Verify)
+
+enum DownloadOutcome {
+    case success(hash: String, size: Int, elapsedMs: Int, contentType: String?)
+    case failure(code: String, message: String)
+}
+
+enum DownloadAndHash {
+    static func run(
+        url: URL,
+        maxBytes: Int,
+        requestId: String?,
+        coordinator: WebContentView.Coordinator?
+    ) async -> DownloadOutcome {
+        await withCheckedContinuation { continuation in
+            let delegate = DownloadHashDelegate(
+                maxBytes: maxBytes,
+                requestId: requestId,
+                coordinator: coordinator,
+                completion: { outcome in continuation.resume(returning: outcome) }
+            )
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 300
+            let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+            let task = session.dataTask(with: url)
+            delegate.session = session
+            delegate.startedAt = Date()
+            task.resume()
+        }
+    }
+}
+
+private final class DownloadHashDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    let maxBytes: Int
+    let requestId: String?
+    weak var coordinator: WebContentView.Coordinator?
+    let completion: (DownloadOutcome) -> Void
+    var session: URLSession?
+    var startedAt = Date()
+
+    private var hasher = SHA256()
+    private var received = 0
+    private var totalBytes: Int?
+    private var contentType: String?
+    private var lastProgressTick: Date = .distantPast
+    private var lastProgressBytes: Int = 0
+    private var finished = false
+
+    init(
+        maxBytes: Int,
+        requestId: String?,
+        coordinator: WebContentView.Coordinator?,
+        completion: @escaping (DownloadOutcome) -> Void
+    ) {
+        self.maxBytes = maxBytes
+        self.requestId = requestId
+        self.coordinator = coordinator
+        self.completion = completion
+        super.init()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if let http = response as? HTTPURLResponse {
+            if !(200..<300).contains(http.statusCode) {
+                finish(.failure(code: "HTTP_\(http.statusCode)", message: "HTTP \(http.statusCode)"))
+                completionHandler(.cancel)
+                return
+            }
+        }
+        let expected = response.expectedContentLength
+        if expected > 0 {
+            if expected > Int64(maxBytes) {
+                finish(.failure(code: "SIZE_LIMIT_EXCEEDED", message: "File is larger than the verify limit."))
+                completionHandler(.cancel)
+                return
+            }
+            totalBytes = Int(expected)
+        }
+        contentType = response.mimeType
+        emitProgress(force: true)
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        received += data.count
+        if received > maxBytes {
+            finish(.failure(code: "SIZE_LIMIT_EXCEEDED", message: "File is larger than the verify limit."))
+            dataTask.cancel()
+            return
+        }
+        data.withUnsafeBytes { raw in
+            hasher.update(bufferPointer: raw)
+        }
+        emitProgress(force: false)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if finished { return }
+        if let error {
+            let ns = error as NSError
+            let code: String
+            if ns.domain == NSURLErrorDomain {
+                switch ns.code {
+                case NSURLErrorTimedOut: code = "TIMEOUT"
+                case NSURLErrorCancelled: code = "CANCELLED"
+                default: code = "NETWORK"
+                }
+            } else {
+                code = "NETWORK"
+            }
+            finish(.failure(code: code, message: ns.localizedDescription))
+            return
+        }
+        let digest = hasher.finalize()
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        finish(.success(hash: hex, size: received, elapsedMs: elapsedMs, contentType: contentType))
+    }
+
+    private func emitProgress(force: Bool) {
+        guard let coordinator else { return }
+        let now = Date()
+        let bytesDelta = received - lastProgressBytes
+        let timeDelta = now.timeIntervalSince(lastProgressTick)
+        if !force && timeDelta < 0.1 && bytesDelta < (256 * 1024) { return }
+        lastProgressTick = now
+        lastProgressBytes = received
+        let rid = requestId ?? ""
+        let totalJson: String
+        if let totalBytes { totalJson = "\(totalBytes)" } else { totalJson = "null" }
+        let js = "window.NobleBridge && window.NobleBridge._onDownloadProgress && window.NobleBridge._onDownloadProgress({requestId:'\(rid)',bytesDownloaded:\(received),totalBytes:\(totalJson)})"
+        Task { @MainActor [weak coordinator] in
+            coordinator?.evaluateJS(js)
+        }
+    }
+
+    private func finish(_ outcome: DownloadOutcome) {
+        if finished { return }
+        finished = true
+        completion(outcome)
+        session?.invalidateAndCancel()
+        session = nil
     }
 }
