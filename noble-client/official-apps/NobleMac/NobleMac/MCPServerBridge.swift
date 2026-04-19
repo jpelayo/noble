@@ -6,7 +6,12 @@ import NobleMCPServer
 
 /// Swift bridge to the Rust-based embedded RPC + MCP servers.
 /// Routes incoming JSON-RPC requests through the app's WebBridgeHandler.
-@MainActor
+///
+/// The Rust FFI functions wrapped here are thread-safe (internal `Mutex`
+/// guards around a global `ServerHandle`), so the static members are
+/// `nonisolated` — callable from any thread, including a detached task
+/// spawned to avoid freezing MainActor during the synchronous
+/// `Runtime::drop` that `stopRPC`/`stopMCP` trigger.
 final class MCPServerBridge {
 
     /// Shared handler callback. Set once at app startup.
@@ -14,7 +19,7 @@ final class MCPServerBridge {
     nonisolated(unsafe) static var handler: ((String) -> String)?
 
     /// Start the plain JSON-RPC server on the given port.
-    static func startRPC(port: UInt16) {
+    nonisolated static func startRPC(port: UInt16) {
         guard let h = handler else { return }
         // Store handler in a global so the C callback can access it.
         _globalHandler = h
@@ -22,29 +27,29 @@ final class MCPServerBridge {
     }
 
     /// Stop the plain JSON-RPC server.
-    static func stopRPC() {
+    nonisolated static func stopRPC() {
         noble_rpc_server_stop()
     }
 
     /// Start the MCP protocol server on the given port.
-    static func startMCP(port: UInt16) {
+    nonisolated static func startMCP(port: UInt16) {
         guard let h = handler else { return }
         _globalHandler = h
         noble_mcp_server_start(port, _cHandler)
     }
 
     /// Stop the MCP protocol server.
-    static func stopMCP() {
+    nonisolated static func stopMCP() {
         noble_mcp_server_stop()
     }
 
     /// Whether the RPC server is running.
-    static var isRPCRunning: Bool {
+    nonisolated static var isRPCRunning: Bool {
         noble_rpc_server_is_running()
     }
 
     /// Whether the MCP server is running.
-    static var isMCPRunning: Bool {
+    nonisolated static var isMCPRunning: Bool {
         noble_mcp_server_is_running()
     }
 }

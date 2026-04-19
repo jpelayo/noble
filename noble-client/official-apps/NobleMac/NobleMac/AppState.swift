@@ -35,6 +35,12 @@ final class AppState {
     /// Reference to the WebView coordinator for JS evaluation.
     weak var webViewCoordinator: WebContentView.Coordinator?
 
+    /// Shared bridge router used by both the WKWebView coordinator and the
+    /// MCP/RPC FFI callback. Single instance keeps ownership simple and
+    /// survives WebView reloads.
+    @ObservationIgnored
+    lazy var webBridgeHandler: WebBridgeHandler = WebBridgeHandler(appState: self)
+
     // MARK: - Onboarding
 
     /// Whether onboarding has been completed.
@@ -371,74 +377,68 @@ final class AppState {
         connectionError = nil
     }
 
-    /// Start RPC + MCP servers if enabled in settings.
+    /// Start RPC + MCP servers if enabled in settings. Installs the FFI
+    /// handler closure on first call; subsequent calls are no-ops for the
+    /// handler and only (re)start the configured ports.
     private func startDeveloperApiServers() {
-        // Set up the handler that routes incoming API requests to the node's RPC.
-        // The Rust server calls this synchronously from a background thread.
-        if MCPServerBridge.handler == nil {
-            let nodeURLCapture = self.nodeURL
-            MCPServerBridge.handler = { requestJSON in
-                // Parse the request: { handler, action, params }
-                guard let data = requestJSON.data(using: .utf8),
-                      let req = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let handler = req["handler"] as? String,
-                      let action = req["action"] as? String else {
-                    return "{\"error\":\"invalid request\"}"
-                }
-                let params = req["params"] as? [String: Any] ?? [:]
-
-                // For noble_api actions, forward to the node as JSON-RPC.
-                if handler == "noble_api" {
-                    guard let baseURL = URL(string: nodeURLCapture) else {
-                        return "{\"error\":\"not connected\"}"
-                    }
-                    let sem = DispatchSemaphore(value: 0)
-                    var resultJSON = "{\"error\":\"timeout\"}"
-                    let rpcBody: [String: Any] = [
-                        "jsonrpc": "2.0", "id": 1,
-                        "method": "noble_\(action)",
-                        "params": [params],
-                    ]
-                    guard let bodyData = try? JSONSerialization.data(withJSONObject: rpcBody) else {
-                        return "{\"error\":\"encode failed\"}"
-                    }
-                    var request = URLRequest(url: baseURL.appendingPathComponent("rpc"))
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.setValue("noble", forHTTPHeaderField: "Gatekeeper")
-                    request.httpBody = bodyData
-                    request.timeoutInterval = 10
-
-                    let task = URLSession.shared.dataTask(with: request) { data, _, _ in
-                        defer { sem.signal() }
-                        guard let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-                        if let result = json["result"] {
-                            resultJSON = (try? String(data: JSONSerialization.data(withJSONObject: ["result": result]), encoding: .utf8)) ?? "{}"
-                        } else if let error = json["error"] {
-                            resultJSON = (try? String(data: JSONSerialization.data(withJSONObject: ["error": error]), encoding: .utf8)) ?? "{\"error\":\"rpc error\"}"
-                        }
-                    }
-                    task.resume()
-                    _ = sem.wait(timeout: .now() + 10)
-                    return resultJSON
-                }
-
-                // For non-API handlers (noble_app, noble_crypto, etc.),
-                // return a stub — full bridge routing requires @MainActor context.
-                // Future: dispatch to main thread via DispatchQueue.main.sync.
-                if handler == "noble_app" && action == "getState" {
-                    return "{\"result\":{\"isConnected\":true,\"nodeURL\":\"\(nodeURLCapture)\"}}"
-                }
-
-                return "{\"error\":\"handler '\(handler).\(action)' not yet routed via MCP\"}"
-            }
-        }
-
+        installMcpHandlerIfNeeded()
         if rpcApiEnabled {
             MCPServerBridge.startRPC(port: UInt16(rpcApiPort))
         }
         if mcpServerEnabled {
             MCPServerBridge.startMCP(port: UInt16(mcpServerPort))
+        }
+    }
+
+    /// Install the FFI handler that routes Rust-side MCP/RPC requests through
+    /// the WebBridgeHandler used by the WebView. Idempotent — install runs
+    /// once per process. The Rust server invokes this callback synchronously
+    /// from a tokio worker thread; we hop to MainActor via Task +
+    /// DispatchSemaphore so the actor-isolated handlers run on their proper
+    /// executor. Callable from MainActor only.
+    func installMcpHandlerIfNeeded() {
+        guard MCPServerBridge.handler == nil else { return }
+        MCPServerBridge.handler = { [weak self] requestJSON in
+            guard let data = requestJSON.data(using: .utf8),
+                  let req = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let handler = req["handler"] as? String,
+                  let action = req["action"] as? String else {
+                return "{\"error\":\"invalid request\"}"
+            }
+            let params = req["params"] as? [String: Any] ?? [:]
+
+            guard let self else {
+                return "{\"error\":\"app state unavailable\"}"
+            }
+
+            let sem = DispatchSemaphore(value: 0)
+            // Boxed to keep @Sendable happy — closure writes, FFI thread reads.
+            let box = BridgeResponseBox()
+
+            Task { @MainActor [weak self] in
+                defer { sem.signal() }
+                guard let self else {
+                    box.set("{\"error\":\"app state unavailable\"}")
+                    return
+                }
+                do {
+                    let result = try await self.webBridgeHandler
+                        .dispatch(handler: handler, action: action, params: params)
+                    let data = try JSONSerialization.data(withJSONObject: ["result": result])
+                    box.set(String(data: data, encoding: .utf8) ?? "{\"result\":null}")
+                } catch {
+                    let msg = error.localizedDescription
+                    let data = try? JSONSerialization.data(withJSONObject: ["error": msg])
+                    box.set(data.flatMap { String(data: $0, encoding: .utf8) }
+                        ?? "{\"error\":\"dispatch failed\"}")
+                }
+            }
+
+            // 20-second bridge-hop ceiling. Per-action timeouts (network
+            // calls, downloadAndHash, etc.) live inside the action handlers.
+            // This cap bounds the FFI thread park if MainActor ever stalls.
+            _ = sem.wait(timeout: .now() + 20)
+            return box.value ?? "{\"error\":\"timeout\"}"
         }
     }
 
@@ -448,13 +448,24 @@ final class AppState {
         MCPServerBridge.stopMCP()
     }
 
-    /// Apply developer-API toggle/port changes live — call after Settings → Save.
-    /// Stops anything currently running, then re-starts per the current toggles.
-    /// Safe to call even when the handler has not been installed yet.
+    /// Apply developer-API toggle/port changes live — called after Settings
+    /// → Save. Runs the FFI stop/start chain on a detached background task
+    /// so MainActor returns immediately (the synchronous tokio runtime
+    /// teardown inside stopRPC/stopMCP used to freeze the UI for up to
+    /// 120 s when a request was in flight).
     func applyDeveloperApiToggles() {
-        if MCPServerBridge.isRPCRunning { MCPServerBridge.stopRPC() }
-        if MCPServerBridge.isMCPRunning { MCPServerBridge.stopMCP() }
-        startDeveloperApiServers()
+        let desiredRpcOn = rpcApiEnabled
+        let desiredRpcPort = UInt16(rpcApiPort)
+        let desiredMcpOn = mcpServerEnabled
+        let desiredMcpPort = UInt16(mcpServerPort)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            if MCPServerBridge.isRPCRunning { MCPServerBridge.stopRPC() }
+            if MCPServerBridge.isMCPRunning { MCPServerBridge.stopMCP() }
+            // Handler install touches MainActor state, so hop back briefly.
+            await MainActor.run { self?.installMcpHandlerIfNeeded() }
+            if desiredRpcOn { MCPServerBridge.startRPC(port: desiredRpcPort) }
+            if desiredMcpOn { MCPServerBridge.startMCP(port: desiredMcpPort) }
+        }
     }
 
     // MARK: - RPC Polling
@@ -680,5 +691,24 @@ final class AppState {
         mnemonicWords = []
         mnemonicBackupConfirmed = false
         walletSetupMode = nil
+    }
+}
+
+// MARK: - Bridge response box
+
+/// Mutable reference cell for carrying the MCP/RPC bridge response out of a
+/// Task back to the FFI thread. Writes happen on MainActor before the
+/// semaphore signal; reads happen on the FFI thread after wait. A single lock
+/// around the string makes it `Sendable` without needing ordered barriers.
+private final class BridgeResponseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+    var value: String? {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+    func set(_ s: String) {
+        lock.lock(); defer { lock.unlock() }
+        stored = s
     }
 }

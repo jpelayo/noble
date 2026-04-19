@@ -244,11 +244,9 @@ struct WebContentView: NSViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let appState: AppState
         weak var webView: WKWebView?
-        private let bridgeHandler: WebBridgeHandler
 
         init(appState: AppState) {
             self.appState = appState
-            self.bridgeHandler = WebBridgeHandler(appState: appState)
             super.init()
         }
 
@@ -287,7 +285,7 @@ struct WebContentView: NSViewRepresentable {
             let params = body["params"] as? [String: Any] ?? [:]
 
             Task { @MainActor in
-                await self.bridgeHandler.handle(
+                await self.appState.webBridgeHandler.handle(
                     handler: message.name,
                     action: action,
                     params: params,

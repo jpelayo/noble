@@ -39,7 +39,31 @@ final class WebBridgeHandler {
         self.appState = appState
     }
 
-    /// Handle an incoming bridge message and resolve the callback.
+    /// Dispatch a bridge message to its handler and return the raw result.
+    /// Does not touch the web view — reusable by the MCP/RPC FFI bridge.
+    func dispatch(
+        handler: String,
+        action: String,
+        params: [String: Any]
+    ) async throws -> Any {
+        switch handler {
+        case "noble_api":
+            return try await handleAPI(action: action, params: params)
+        case "noble_crypto":
+            return try await handleCrypto(action: action, params: params)
+        case "noble_security":
+            return try await handleSecurity(action: action, params: params)
+        case "noble_app":
+            return try await handleApp(action: action, params: params)
+        case "noble_storage":
+            return try await handleStorage(action: action, params: params)
+        default:
+            throw BridgeError.unknownHandler(handler)
+        }
+    }
+
+    /// Handle an incoming bridge message from the WebView and resolve the
+    /// JS callback. Thin wrapper over `dispatch` plus `evaluateJS`.
     func handle(
         handler: String,
         action: String,
@@ -48,22 +72,7 @@ final class WebBridgeHandler {
         coordinator: WebContentView.Coordinator
     ) async {
         do {
-            let result: Any
-            switch handler {
-            case "noble_api":
-                result = try await handleAPI(action: action, params: params)
-            case "noble_crypto":
-                result = try await handleCrypto(action: action, params: params)
-            case "noble_security":
-                result = try await handleSecurity(action: action, params: params)
-            case "noble_app":
-                result = try await handleApp(action: action, params: params)
-            case "noble_storage":
-                result = try await handleStorage(action: action, params: params)
-            default:
-                throw BridgeError.unknownHandler(handler)
-            }
-
+            let result = try await dispatch(handler: handler, action: action, params: params)
             let json = try serializeToJSON(result)
             let escaped = json.replacingOccurrences(of: "'", with: "\\'")
             coordinator.evaluateJS("NativeBridge._handleCallback('\(callbackId)', null, '\(escaped)')")
@@ -262,15 +271,16 @@ final class WebBridgeHandler {
             ] as [String: Any]
 
         case "getDocumentsByIssuer":
-            guard let publicKey = params["publicKey"] as? String else {
-                throw BridgeError.missingParam("publicKey")
+            // Accept both `issuer` (MCP registry) and `publicKey` (legacy WebUI) param names.
+            guard let issuer = (params["issuer"] as? String) ?? (params["publicKey"] as? String) else {
+                throw BridgeError.missingParam("issuer")
             }
             guard let liveSvc = api as? LiveNobleAPIService else {
                 throw BridgeError.notConnected
             }
             let issuerDTO = try await liveSvc.client.call(
                 method: "noble_getDocumentsByIssuer",
-                params: [publicKey],
+                params: [issuer],
                 expecting: DocumentsByIssuerDTO.self
             )
             let docs: [[String: Any]] = (issuerDTO.documents ?? []).map { r in
@@ -310,11 +320,26 @@ final class WebBridgeHandler {
             guard let checksum = params["checksum"] as? String else {
                 throw BridgeError.missingParam("checksum")
             }
-            let versions = try await api.getDocumentVersions(checksum: checksum)
-            return [
-                "checksum": checksum,
-                "versions": versions.map { versionToDict($0) },
-            ] as [String: Any]
+            // Not-found should not error — mirror verifyDocument's shape and
+            // return `registered: false`. Other errors (network, etc.) still propagate.
+            do {
+                let versions = try await api.getDocumentVersions(checksum: checksum)
+                return [
+                    "checksum": checksum,
+                    "registered": !versions.isEmpty,
+                    "versions": versions.map { versionToDict($0) },
+                ] as [String: Any]
+            } catch {
+                let msg = error.localizedDescription.lowercased()
+                if msg.contains("not found") || msg.contains("[ne-701]") || msg.contains(checksum.lowercased()) {
+                    return [
+                        "checksum": checksum,
+                        "registered": false,
+                        "versions": [],
+                    ] as [String: Any]
+                }
+                throw error
+            }
 
         case "submitTransaction":
             guard let rawHex = params["rawHex"] as? String ?? params["txHex"] as? String else {
