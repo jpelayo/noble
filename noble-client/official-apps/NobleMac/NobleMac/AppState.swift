@@ -448,6 +448,15 @@ final class AppState {
         MCPServerBridge.stopMCP()
     }
 
+    /// Apply developer-API toggle/port changes live — call after Settings → Save.
+    /// Stops anything currently running, then re-starts per the current toggles.
+    /// Safe to call even when the handler has not been installed yet.
+    func applyDeveloperApiToggles() {
+        if MCPServerBridge.isRPCRunning { MCPServerBridge.stopRPC() }
+        if MCPServerBridge.isMCPRunning { MCPServerBridge.stopMCP() }
+        startDeveloperApiServers()
+    }
+
     // MARK: - RPC Polling
 
     /// Start the 30-second poll timer for live data refresh.

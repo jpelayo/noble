@@ -1628,6 +1628,7 @@ final class WebBridgeHandler {
             if let v = params["mcpServerEnabled"] as? Bool { appState.mcpServerEnabled = v }
             if let v = params["mcpServerPort"] as? Int { appState.mcpServerPort = v }
             appState.saveSecuritySettings()
+            appState.applyDeveloperApiToggles()
             return ["ok": true]
 
         case "getSecuritySettings":

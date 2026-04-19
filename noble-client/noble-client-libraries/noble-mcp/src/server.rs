@@ -141,8 +141,7 @@ struct ToolDef {
     annotations: serde_json::Value,
 }
 
-// The full tool registry — 57 tools across 5 domains.
-// Lazy-initialized on first tools/list call.
+// The full tool registry — lazy-initialized on first tools/list call.
 static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock::new(|| {
     let ro = serde_json::json!({"readOnlyHint": true, "idempotentHint": true});
     let rw = serde_json::json!({"destructiveHint": true});
@@ -221,6 +220,22 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             description: "Get UTXOs for an address with lifecycle status.",
             input_schema: obj(serde_json::json!({"address": s()}), &["address"]),
             annotations: ro.clone() },
+        ToolDef { name: "getDocumentsByIssuer", handler: "noble_api", action: "getDocumentsByIssuer",
+            description: "List notarization transactions signed by a given pubkey (hex or nbl1 bech32).",
+            input_schema: obj(serde_json::json!({
+                "issuer": s(),
+                "limit": n(),
+                "offset": n()
+            }), &["issuer"]),
+            annotations: ro.clone() },
+        ToolDef { name: "searchDocumentsByMetadata", handler: "noble_api", action: "searchDocumentsByMetadata",
+            description: "Search notarized documents by metadata key and value (e.g. key='doc:author', value='Alice'). Returns matching tx ids and document records.",
+            input_schema: obj(serde_json::json!({
+                "key": s(),
+                "value": s(),
+                "limit": n()
+            }), &["key", "value"]),
+            annotations: ro.clone() },
         ToolDef { name: "faucetStatus", handler: "noble_api", action: "faucetStatus",
             description: "Get faucet availability and balance.",
             input_schema: empty.clone(), annotations: ro.clone() },
@@ -249,6 +264,31 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             description: "Estimate transaction wire size.",
             input_schema: obj(serde_json::json!({"tx_type": s()}), &["tx_type"]),
             annotations: ro.clone() },
+        ToolDef { name: "buildTransaction", handler: "noble_crypto", action: "buildTransaction",
+            description: "Build and sign a transfer transaction with automatic UTXO coin selection, change output, and fee computation. Returns txHex ready for submitTransaction — avoids the fee double-counting possible when callers pre-subtract fees.",
+            input_schema: obj(serde_json::json!({
+                "recipient": s(),
+                "amount": n(),
+                "fee_rate": n(),
+                "metadata": arr(serde_json::json!({"type": "object"}))
+            }), &["recipient", "amount"]),
+            annotations: rw.clone() },
+        ToolDef { name: "signSplitTransfer", handler: "noble_crypto", action: "signSplitTransfer",
+            description: "Build and sign a split-UTXO transfer (one UTXO → N outputs) for wallet management or batch-pay flows.",
+            input_schema: obj(serde_json::json!({
+                "utxo_txid": s(),
+                "utxo_vout": n(),
+                "outputs": arr(serde_json::json!({"type": "object"})),
+                "fee_rate": n()
+            }), &["utxo_txid", "utxo_vout", "outputs"]),
+            annotations: rw.clone() },
+        ToolDef { name: "decryptLockedTx", handler: "noble_crypto", action: "decryptLockedTx",
+            description: "Decrypt a Locked-tx (type 0x06) payload using its password. Returns the revealed checksum and plaintext metadata fields.",
+            input_schema: obj(serde_json::json!({
+                "txId": s(),
+                "password": s()
+            }), &["txId", "password"]),
+            annotations: safe.clone() },
         ToolDef { name: "validateMetadata", handler: "noble_mcp", action: "validateMetadata",
             description: "Validate metadata fields before building a transaction. Checks slot budget (max 16), field pairing (doc:bridge+doc:relation), forced encryption (signer:email/phone), mode requirements, key/value size limits, and version chain rules.",
             input_schema: obj(serde_json::json!({
@@ -287,6 +327,13 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
         ToolDef { name: "hashFile", handler: "noble_security", action: "hashFile",
             description: "Compute SHA-256 hash of a file.",
             input_schema: obj(serde_json::json!({"filePath": s()}), &["filePath"]),
+            annotations: ro.clone() },
+        ToolDef { name: "downloadAndHash", handler: "noble_security", action: "downloadAndHash",
+            description: "Download a URL (http/https, ≤64 MB by default) and return the streaming SHA-256 of the body. Use to verify a doc:download URL against a tx checksum. Rejects file:// and other schemes. Returns {ok, hash, size, elapsedMs} on success or {ok:false, errorCode, error} on failure.",
+            input_schema: obj(serde_json::json!({
+                "url": s(),
+                "maxBytes": n()
+            }), &["url"]),
             annotations: ro.clone() },
         ToolDef { name: "loadPrivateKey", handler: "noble_security", action: "loadPrivateKey",
             description: "Load a private key from the keychain.",
@@ -743,7 +790,8 @@ async fn handle_mcp_request(
                             "2. Choose metadata fields. Available types:\n",
                             "   - doc:title (auto-populate from filename), doc:description, doc:url\n",
                             "   - doc:type (e.g. invoice/contract), doc:date (YYYY-MM-DD)\n",
-                            "   - doc:author, doc:publisher, signer:pubkey\n",
+                            "   - doc:download (URL where the notarized file can be fetched and verified against tx.checksum)\n",
+                            "   - doc:author, doc:publisher, signer:pubkey, signer:url\n",
                             "   - signer:email (MUST be encrypted), signer:phone (MUST be encrypted)\n",
                             "   - doc:bridge + doc:relation (always paired)\n",
                             "   - custom fields (any key name)\n",
