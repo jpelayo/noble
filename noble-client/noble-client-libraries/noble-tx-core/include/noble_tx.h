@@ -142,6 +142,36 @@ char *noble_sign_cms_ffi(const char *params_json);
 char *noble_verify_cms_ffi(const char *params_json);
 char *noble_import_pkcs12_ffi(const char *params_json);
 
+// Notarization metadata-field catalog (T-codes T01..T15, plus T99 for custom).
+// Output JSON: { "fields": [{"key", "code", "label", "force_encrypt", "plaintext_only"}, ...],
+//                "rules": { "max_slots": 16, "signed_consumes_two_slots": true,
+//                           "pairings": [["doc:bridge", "doc:relation"]],
+//                           "unknown_key_code": "T99" } }
+char *noble_metadata_registry_json(void);
+
+// Build the full notarization metadata array (slot-0 schema descriptor +
+// per-field entries, with SIG slots interleaved when "signed":true).
+//
+// Input JSON: array of objects:
+//   [{ "key": "<canonical or custom>",
+//      "value": "<plaintext, or hex ciphertext if mode != plaintext>",
+//      "mode": "plaintext"|"protected"|"encrypted",
+//      "signed": <bool, optional> }, ...]
+//
+// Output JSON: { "metadata": [
+//     { "key": "schema", "value": "1:T01:pub:utf8:doc:title\n2:...", "mode": "plaintext" },
+//     { "key": "doc:title", "value": "...", "mode": "plaintext" },
+//     ...
+//     { "key": "sig:<n>", "value": "", "mode": "plaintext", "is_sig": true },  // placeholder
+//     ...
+//   ] }
+// or { "error": "..." }
+//
+// SIG entries are emitted with empty `value` strings; the host bridge
+// fills them in with the actual CMS signature bytes (matched by `key`)
+// before passing the array to noble_sign_notarization.
+char *noble_build_metadata_array(const char *params_json);
+
 // Free a string returned by any noble_* function.
 void noble_free(char *ptr);
 

@@ -182,6 +182,99 @@ impl NobleAddress {
         let output_key = noble_crypto::bitcoin_addr::taproot_tweak_pubkey(&compressed)?;
         Some(NobleAddress::BitcoinTaproot(output_key))
     }
+
+    /// Parse any canonical public-key / address string into a `NobleAddress`.
+    ///
+    /// Accepts (in priority order):
+    /// - Noble bech32m: `nbl1q…` (Ed25519 v0 — reserved), `nbl1p…` (secp256k1 v1)
+    /// - Bitcoin bech32: `bc1q…` (P2WPKH), `bc1p…` (P2TR), `tb1…` (testnet)
+    /// - Bitcoin Base58: `1…` (P2PKH), `3…` (P2SH), `m`/`n`/`2` (testnet)
+    /// - Hex wire format: `[scheme_id || key_bytes]` for Noble or
+    ///   `[0x80 || hash160]` / `[0x81 || xonly]` for Bitcoin
+    /// - Bare 33-byte compressed secp256k1 (`0x02` / `0x03` SEC1 prefix)
+    ///
+    /// This is the single canonical entry point that all client RPC handlers
+    /// (Swift WebBridgeHandler, WRY Rust handlers, the noble-tx-core C library,
+    /// and the node API methods) should use to accept user input. Mirrors the
+    /// acceptance set of `noble_api::types::parse_address` but without that
+    /// crate's jsonrpc error dependency, so any crate linking `noble-core`
+    /// can call this.
+    pub fn parse_any(input: &str) -> Result<Self, AddressError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(AddressError::EmptyInput);
+        }
+
+        // 1. Noble bech32 (`nbl1…`).
+        if noble_crypto::noble_addr::is_noble_address(trimmed) {
+            let pk = noble_crypto::noble_addr::decode(trimmed)
+                .map_err(|e| AddressError::InvalidKey(e.to_string()))?;
+            return Ok(NobleAddress::Noble(pk));
+        }
+
+        // 2. Bitcoin address formats.
+        let lower = trimmed.to_lowercase();
+        let starts = trimmed.chars().next().unwrap_or(' ');
+        if lower.starts_with("bc1")
+            || lower.starts_with("tb1")
+            || matches!(starts, '1' | '3' | 'm' | 'n' | '2')
+        {
+            use noble_crypto::bitcoin_addr::{parse_bitcoin_address, BitcoinAddressType};
+            let parsed = parse_bitcoin_address(trimmed)
+                .map_err(|e| AddressError::InvalidBitcoinAddress(e.to_string()))?;
+            return match parsed.address_type {
+                BitcoinAddressType::P2pkh | BitcoinAddressType::P2wpkh => {
+                    if parsed.data.len() != 20 {
+                        return Err(AddressError::InvalidLength {
+                            expected: 20,
+                            got: parsed.data.len(),
+                            kind: "Bitcoin Hash160",
+                        });
+                    }
+                    let mut hash = [0u8; 20];
+                    hash.copy_from_slice(&parsed.data);
+                    Ok(NobleAddress::BitcoinHash160(hash))
+                }
+                BitcoinAddressType::P2tr => {
+                    if parsed.data.len() != 32 {
+                        return Err(AddressError::InvalidLength {
+                            expected: 32,
+                            got: parsed.data.len(),
+                            kind: "Bitcoin Taproot",
+                        });
+                    }
+                    let mut xonly = [0u8; 32];
+                    xonly.copy_from_slice(&parsed.data);
+                    Ok(NobleAddress::BitcoinTaproot(xonly))
+                }
+            };
+        }
+
+        // 3. Hex (cap input length to prevent OOM on hostile input).
+        if trimmed.len() > 256 {
+            return Err(AddressError::UnsupportedFormat("input too long".into()));
+        }
+        let bytes = hex::decode(trimmed)
+            .map_err(|e| AddressError::InvalidHex(e.to_string()))?;
+        // Try wire-format prefix decode first (covers all scheme_ids).
+        if let Ok(addr) = NobleAddress::from_wire_bytes(&bytes) {
+            return Ok(addr);
+        }
+        // Fallback: bare 33-byte compressed secp256k1 SEC1 (0x02/0x03 prefix).
+        if bytes.len() == 33 && (bytes[0] == 0x02 || bytes[0] == 0x03) {
+            return Ok(NobleAddress::Noble(NoblePublicKey::Secp256k1(bytes)));
+        }
+        Err(AddressError::UnsupportedFormat(
+            "not a valid address or public key".into(),
+        ))
+    }
+
+    /// Convenience: parse any input and return canonical wire-format hex
+    /// (scheme_id + key/hash bytes). Equivalent to
+    /// `parse_any(s)?.to_hex()`.
+    pub fn parse_to_wire_hex(input: &str) -> Result<String, AddressError> {
+        Self::parse_any(input).map(|a| a.to_hex())
+    }
 }
 
 impl From<NoblePublicKey> for NobleAddress {

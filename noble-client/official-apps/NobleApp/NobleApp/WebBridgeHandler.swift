@@ -60,6 +60,254 @@ final class WebBridgeHandler {
         self.appState = appState
     }
 
+    // MARK: - Coin-spending defaults & safety caps
+
+    /// Hard ceiling on caller-supplied `fee_rate` (groats/byte).
+    static let MAX_FEE_RATE_GROATS_PER_BYTE: UInt64 = 1_000_000
+    /// Hard ceiling on caller-supplied absolute `fee` (groats). 1 NOBLE.
+    static let MAX_ABSOLUTE_FEE_GROATS: UInt64 = 100_000_000
+    /// Used when `estimateFee` is unavailable. 1 groat/byte = protocol minimum.
+    static let FALLBACK_FEE_RATE: UInt64 = 1
+
+    /// Resolve the UTXO set for a coin-spending action. Auto-fetches the
+    /// wallet's full spendable set when caller omits `params["utxos"]`.
+    private func resolveSpendableUtxos(params: [String: Any]) async throws -> [UtxoOutpoint] {
+        let supplied = (params["utxos"] as? [[String: Any]]) ?? []
+        if !supplied.isEmpty {
+            return try parseUtxoParams(params)
+        }
+        guard let api = appState.apiService,
+              let walletAddr = appState.walletAddress else {
+            throw BridgeError.notConnected
+        }
+        let result = try await api.getAddressUtxos(address: walletAddr)
+        let avail = result.utxos.filter { $0.status == "available" }
+        guard !avail.isEmpty else {
+            throw BridgeError.operationFailed("no spendable UTXOs at \(walletAddr)")
+        }
+        return avail.map { u in
+            UtxoOutpoint(txidHex: u.txid, vout: u.vout, value: u.value)
+        }
+    }
+
+    // MARK: - Document registration orchestration (Layer 4 + Layer 6)
+
+    /// Single-call notarization. See NobleMac/WebBridgeHandler.swift for the
+    /// full contract — this is a byte-for-byte mirror.
+    private func orchestrateRegisterDocument(params: [String: Any]) async throws -> [String: Any] {
+        guard let filePath = params["filePath"] as? String, !filePath.isEmpty else {
+            throw BridgeError.missingParam("filePath")
+        }
+        let url = URL(fileURLWithPath: filePath)
+        let hash = try appState.documentHasher.hash(fileURL: url)
+        let checksumHex = hash.hex
+
+        let rawMetadata = (params["metadata"] as? [[String: Any]]) ?? []
+        var simpleEntries: [[String: Any]] = []
+        struct SignReq { let entryIdx: Int; let keyId: String }
+        var signingPlan: [SignReq] = []
+
+        for (i, entry) in rawMetadata.enumerated() {
+            guard let key = entry["key"] as? String, !key.isEmpty else {
+                throw BridgeError.missingParam("metadata[\(i)].key")
+            }
+            let rawValue = (entry["value"] as? String) ?? ""
+            let mode = (entry["mode"] as? String) ?? "plaintext"
+            let signed = (entry["signed"] as? Bool) ?? false
+
+            var finalValue = rawValue
+            if mode == "encrypted" {
+                guard let recipient = entry["recipient_pubkey"] as? String, !recipient.isEmpty else {
+                    throw BridgeError.missingParam("metadata[\(i)].recipient_pubkey (encrypted mode)")
+                }
+                let r = try await dispatch(handler: "noble_crypto", action: "encryptField",
+                    params: ["value": rawValue, "mode": "encrypted", "recipient_pubkey": recipient])
+                guard let d = r as? [String: Any], let hex = d["encrypted_hex"] as? String else {
+                    throw BridgeError.operationFailed("encryptField (encrypted) failed for [\(i)] '\(key)'")
+                }
+                finalValue = hex
+            } else if mode == "protected" {
+                guard let password = entry["password"] as? String, !password.isEmpty else {
+                    throw BridgeError.missingParam("metadata[\(i)].password (protected mode)")
+                }
+                let r = try await dispatch(handler: "noble_crypto", action: "encryptField",
+                    params: ["value": rawValue, "mode": "protected", "password": password])
+                guard let d = r as? [String: Any], let hex = d["encrypted_hex"] as? String else {
+                    throw BridgeError.operationFailed("encryptField (protected) failed for [\(i)] '\(key)'")
+                }
+                finalValue = hex
+            } else if mode != "plaintext" {
+                throw BridgeError.operationFailed("metadata[\(i)].mode '\(mode)' invalid (must be plaintext|protected|encrypted)")
+            }
+
+            var simple: [String: Any] = ["key": key, "value": finalValue, "mode": mode]
+            if signed {
+                simple["signed"] = true
+                guard let signingKeyId = entry["signingKeyId"] as? String, !signingKeyId.isEmpty else {
+                    throw BridgeError.missingParam("metadata[\(i)].signingKeyId (signed entry)")
+                }
+                signingPlan.append(SignReq(entryIdx: i, keyId: signingKeyId))
+            }
+            simpleEntries.append(simple)
+        }
+
+        let simpleData = try JSONSerialization.data(withJSONObject: simpleEntries)
+        guard let simpleStr = String(data: simpleData, encoding: .utf8) else {
+            throw BridgeError.operationFailed("registerDocument: simple metadata JSON encoding failed")
+        }
+        guard let buildPtr = noble_build_metadata_array(simpleStr) else {
+            throw BridgeError.operationFailed("noble_build_metadata_array returned null")
+        }
+        let buildStr = String(cString: buildPtr)
+        noble_free(buildPtr)
+        guard let buildData = buildStr.data(using: .utf8),
+              let buildJson = try? JSONSerialization.jsonObject(with: buildData) as? [String: Any] else {
+            throw BridgeError.operationFailed("metadata builder: malformed JSON output")
+        }
+        if let err = buildJson["error"] as? String {
+            throw BridgeError.operationFailed(err)
+        }
+        guard var fullMeta = buildJson["metadata"] as? [[String: Any]] else {
+            throw BridgeError.operationFailed("metadata builder: missing 'metadata' array")
+        }
+
+        var sigQueue: [String] = []
+        for plan in signingPlan {
+            let fieldValue = (simpleEntries[plan.entryIdx]["value"] as? String) ?? ""
+            let r = try await dispatch(handler: "noble_crypto", action: "signMetadataField",
+                params: ["keyId": plan.keyId, "fieldValue": fieldValue])
+            guard let d = r as? [String: Any], let sigHex = d["signatureHex"] as? String else {
+                throw BridgeError.operationFailed("signMetadataField failed for [\(plan.entryIdx)]")
+            }
+            sigQueue.append(sigHex)
+        }
+
+        var sigIdx = 0
+        for i in 0..<fullMeta.count {
+            if let isSig = fullMeta[i]["is_sig"] as? Bool, isSig {
+                guard sigIdx < sigQueue.count else {
+                    throw BridgeError.operationFailed("registerDocument: SIG placeholder count > sig count")
+                }
+                fullMeta[i]["value"] = sigQueue[sigIdx]
+                fullMeta[i].removeValue(forKey: "is_sig")
+                sigIdx += 1
+            }
+        }
+        if sigIdx != sigQueue.count {
+            throw BridgeError.operationFailed("registerDocument: SIG count mismatch (\(sigIdx) injected, \(sigQueue.count) signed)")
+        }
+
+        let signResult = try await dispatch(handler: "noble_crypto", action: "signNotarization",
+            params: ["checksum": checksumHex, "metadata": fullMeta])
+        guard let signDict = signResult as? [String: Any], let txHex = signDict["txHex"] as? String else {
+            throw BridgeError.operationFailed("signNotarization returned no txHex")
+        }
+        let submitResult = try await dispatch(handler: "noble_api", action: "submitTransaction",
+            params: ["txHex": txHex])
+        guard let submitDict = submitResult as? [String: Any], let txId = submitDict["txId"] as? String else {
+            throw BridgeError.operationFailed("submitTransaction returned no txId")
+        }
+        return ["txId": txId, "checksum": checksumHex]
+    }
+
+    /// Batch wrapper. See NobleMac counterpart for full notes.
+    private func orchestrateRegisterDocumentBatch(params: [String: Any]) async throws -> [String: Any] {
+        guard let files = params["files"] as? [[String: Any]], !files.isEmpty else {
+            throw BridgeError.missingParam("files (non-empty array)")
+        }
+        let providedUUID = params["batchUUID"] as? String
+        let batchUUID = (providedUUID?.isEmpty == false ? providedUUID! : UUID().uuidString.lowercased())
+        let batchName = params["batchName"] as? String
+
+        var sharedMeta: [[String: Any]] = [
+            ["key": "doc:batch",    "value": batchUUID, "mode": "plaintext"],
+            ["key": "doc:bridge",   "value": batchUUID, "mode": "plaintext"],
+            ["key": "doc:relation", "value": "same batch", "mode": "plaintext"],
+        ]
+        if let name = batchName, !name.isEmpty {
+            sharedMeta.append(["key": "doc:batch", "value": name, "mode": "plaintext"])
+        }
+
+        var results: [[String: Any]] = []
+        var successCount = 0
+        var errorCount = 0
+
+        for (i, fileEntry) in files.enumerated() {
+            guard let filePath = fileEntry["filePath"] as? String, !filePath.isEmpty else {
+                results.append([
+                    "filePath": fileEntry["filePath"] ?? "",
+                    "ok": false,
+                    "error": "files[\(i)].filePath missing",
+                ])
+                errorCount += 1
+                continue
+            }
+            let perFileMeta = (fileEntry["metadata"] as? [[String: Any]]) ?? []
+            let mergedMeta = sharedMeta + perFileMeta
+            do {
+                let r = try await orchestrateRegisterDocument(params: [
+                    "filePath": filePath,
+                    "metadata": mergedMeta,
+                ])
+                var entry: [String: Any] = ["filePath": filePath, "ok": true]
+                if let txId = r["txId"] as? String { entry["txId"] = txId }
+                if let cs = r["checksum"] as? String { entry["checksum"] = cs }
+                results.append(entry)
+                successCount += 1
+            } catch {
+                results.append([
+                    "filePath": filePath,
+                    "ok": false,
+                    "error": error.localizedDescription,
+                ])
+                errorCount += 1
+            }
+        }
+
+        return [
+            "batchUUID": batchUUID,
+            "results": results,
+            "successCount": successCount,
+            "errorCount": errorCount,
+        ]
+    }
+
+    /// Resolve fee inputs. Returns `(fee, feeRate)`; exactly one is non-zero.
+    /// Caller-supplied values are sanity-capped; if neither supplied the
+    /// node's recommended rate is fetched and floored against safety caps.
+    private func resolveFee(params: [String: Any]) async throws -> (fee: UInt64, feeRate: UInt64) {
+        let supRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
+        let supFee  = (params["fee"]      as? NSNumber)?.uint64Value ?? 0
+
+        if supRate > 0 {
+            if supRate > Self.MAX_FEE_RATE_GROATS_PER_BYTE {
+                throw BridgeError.operationFailed(
+                    "fee_rate \(supRate) groats/byte exceeds safety cap of \(Self.MAX_FEE_RATE_GROATS_PER_BYTE) (0.01 NOBLE/byte). " +
+                    "If intentional, set it through the dashboard's advanced UI."
+                )
+            }
+            return (fee: 0, feeRate: supRate)
+        }
+        if supFee > 0 {
+            if supFee > Self.MAX_ABSOLUTE_FEE_GROATS {
+                throw BridgeError.operationFailed(
+                    "fee \(supFee) groats exceeds safety cap of \(Self.MAX_ABSOLUTE_FEE_GROATS) (1 NOBLE). " +
+                    "Re-check the value or use the dashboard's advanced UI for large fees."
+                )
+            }
+            return (fee: supFee, feeRate: 0)
+        }
+        guard let api = appState.apiService else {
+            return (fee: 0, feeRate: Self.FALLBACK_FEE_RATE)
+        }
+        let est = try? await api.estimateFee()
+        let networkMin  = est?.networkMinFeeRate  ?? Self.FALLBACK_FEE_RATE
+        let localMin    = est?.localMinFeeRate    ?? Self.FALLBACK_FEE_RATE
+        let recommended = est?.recommendedFeeRate ?? Self.FALLBACK_FEE_RATE
+        let chosen = max(recommended, max(networkMin, max(localMin, Self.FALLBACK_FEE_RATE)))
+        return (fee: 0, feeRate: chosen)
+    }
+
     /// Handle an incoming bridge message and resolve the callback.
     func handle(
         handler: String,
@@ -422,10 +670,28 @@ final class WebBridgeHandler {
             guard let address = params["address"] as? String else {
                 throw BridgeError.missingParam("address")
             }
-            let valid = try await api.validateAddress(address)
-            return [
-                "valid": valid,
+            // Local parse first — covers all canonical forms without round-tripping
+            // to the node. Returns the canonical wire hex + bech32 forms so MCP
+            // callers can discover them without bringing their own decoder.
+            guard let parsed = NobleAddress(wireHex: address) else {
+                return ["valid": false] as [String: Any]
+            }
+            let nodeValid = (try? await api.validateAddress(address)) ?? true
+            var out: [String: Any] = [
+                "valid": nodeValid,
+                "scheme": parsed.schemeName,
+                "wireHex": parsed.wireHex,
             ]
+            if parsed.isNobleBech32 || parsed.schemeId == 0x02 {
+                out["nobleBech32"] = parsed.nobleBech32
+            }
+            if parsed.schemeId == 0x80 || parsed.schemeId == 0x81 {
+                out["bitcoin"] = [
+                    "kind": parsed.schemeId == 0x80 ? "hash160" : "taproot",
+                    "raw": parsed.raw,
+                ] as [String: Any]
+            }
+            return out
 
         case "getAddressUtxos":
             guard let address = params["address"] as? String else {
@@ -726,8 +992,7 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
-            let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
+            let (feeAtomic, feeRate) = try await resolveFee(params: params)
             let rawMetadata = params["metadata"] as? [[String: Any]] ?? []
             var metadataItems: [MetadataItem] = []
             var metadata: [[String: String]] = []
@@ -756,7 +1021,7 @@ final class WebBridgeHandler {
             }
 
             // Parse available UTXOs and estimate real tx size for accurate coin selection.
-            let allUtxos = try parseUtxoParams(params)
+            let allUtxos = try await resolveSpendableUtxos(params: params)
             let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
             let feeEstimate: UInt64
@@ -783,21 +1048,24 @@ final class WebBridgeHandler {
             return ["txHex": txHex]
 
         case "signTransfer":
-            guard let recipientHex = params["recipient"] as? String,
-                  let to = NobleAddress(wireHex: recipientHex) else {
+            // Accept any canonical address form (nbl1, bc1, 1/3, hex). The
+            // NobleAddress parser already handles all of them; we then
+            // canonicalize to wire hex for downstream C-library/signer use.
+            guard let rawRecipient = params["recipient"] as? String,
+                  let to = NobleAddress(wireHex: rawRecipient) else {
                 throw BridgeError.missingParam("recipient")
             }
+            let recipientHex = to.wireHex
             guard let amountAtomic = (params["amount"] as? NSNumber)?.uint64Value else {
                 throw BridgeError.missingParam("amount")
             }
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
-            let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
+            let (feeAtomic, feeRate) = try await resolveFee(params: params)
 
             // Parse available UTXOs and estimate real tx size for accurate coin selection.
-            let allUtxos = try parseUtxoParams(params)
+            let allUtxos = try await resolveSpendableUtxos(params: params)
             let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
             let feeEstimate: UInt64
@@ -916,11 +1184,10 @@ final class WebBridgeHandler {
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
             }
-            let allUtxos = try parseUtxoParams(params)
+            let allUtxos = try await resolveSpendableUtxos(params: params)
             let changeAddress = try walletChangeAddress()
             let chainId = appState.resolvedChainId
-            let feeRate = (params["fee_rate"] as? NSNumber)?.uint64Value ?? 0
-            let feeAtomic = (params["fee"] as? NSNumber)?.uint64Value ?? 0
+            let (feeAtomic, feeRate) = try await resolveFee(params: params)
 
             // Build outputs JSON array
             let walletHex = changeAddress.map { String(format: "%02x", $0) }.joined()
@@ -986,6 +1253,27 @@ final class WebBridgeHandler {
             }
             return ["txHex": txHex, "txId": txId]
 
+        case "getMetadataFieldRegistry":
+            // Return the canonical T-code catalog (T01..T15 plus rules) so MCP
+            // callers can discover metadata-field types without hardcoding.
+            // Source of truth lives in noble-tx-core/src/metadata_fields.c.
+            guard let resultPtr = noble_metadata_registry_json() else {
+                throw BridgeError.operationFailed("metadata registry unavailable")
+            }
+            let resultStr = String(cString: resultPtr)
+            noble_free(resultPtr)
+            guard let data = resultStr.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw BridgeError.operationFailed("metadata registry: malformed JSON")
+            }
+            return parsed
+
+        case "registerDocument":
+            return try await orchestrateRegisterDocument(params: params)
+
+        case "registerDocumentBatch":
+            return try await orchestrateRegisterDocumentBatch(params: params)
+
         case "estimateTxSize":
             guard let privateKey = appState.loadPrivateKey() else {
                 throw BridgeError.noPrivateKey
@@ -997,7 +1285,17 @@ final class WebBridgeHandler {
             let metaArr = (params["metadata"] as? [[String: Any]] ?? []).map {
                 ["key": $0["key"] as? String ?? "", "value": $0["value"] as? String ?? ""]
             }
-            let recipient = params["recipient"] as? String ?? changeAddress.map { String(format: "%02x", $0) }.joined()
+            // Canonicalize the recipient (any nbl1/bc1/1/3/hex form) to wire hex.
+            // Default to change address (self) if recipient is not provided.
+            let recipient: String
+            if let raw = params["recipient"] as? String {
+                guard let parsed = NobleAddress(wireHex: raw) else {
+                    throw BridgeError.missingParam("recipient")
+                }
+                recipient = parsed.wireHex
+            } else {
+                recipient = changeAddress.map { String(format: "%02x", $0) }.joined()
+            }
 
             let estimateParams: [String: Any] = [
                 "tx_type": txType,
@@ -1032,12 +1330,52 @@ final class WebBridgeHandler {
                   let mode = params["mode"] as? String else {
                 throw BridgeError.missingParam("value, mode")
             }
-            guard mode == "encrypted" else {
-                throw BridgeError.operationFailed("encryptField: only mode 'encrypted' (ECIES) supported in bridge; protected fields use client-side Web Crypto")
+            if mode == "protected" {
+                // AES-256-GCM with password-derived key. Wire layout matches the
+                // WebUI's Web Crypto path (decoded by tx-detail.js#decryptFieldWithPassword):
+                //   salt(16) || nonce(12) || ciphertext || tag(16)
+                // Key = SHA-256(password_utf8 || salt). Nonce: 12 random bytes.
+                guard let pw = params["password"] as? String, !pw.isEmpty else {
+                    throw BridgeError.missingParam("password")
+                }
+                let salt = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
+                let pwData = pw.data(using: .utf8) ?? Data()
+                var keyMaterial = pwData
+                keyMaterial.append(salt)
+                let keyDigest = SHA256.hash(data: keyMaterial)
+                let key = SymmetricKey(data: keyDigest)
+                let nonce = AES.GCM.Nonce()
+                let plaintext = value.data(using: .utf8) ?? Data()
+                let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce)
+                var payload = Data()
+                payload.append(salt)
+                nonce.withUnsafeBytes { payload.append(contentsOf: Array($0)) }
+                payload.append(sealed.ciphertext)
+                payload.append(sealed.tag)
+                return ["encrypted_hex": payload.map { String(format: "%02x", $0) }.joined()]
             }
-            guard let recipientPubkey = params["recipient_pubkey"] as? String, !recipientPubkey.isEmpty else {
+            guard mode == "encrypted" else {
+                throw BridgeError.operationFailed("encryptField: mode must be 'encrypted' or 'protected'")
+            }
+            guard let rawRcp = params["recipient_pubkey"] as? String, !rawRcp.isEmpty else {
                 throw BridgeError.missingParam("recipient_pubkey")
             }
+            // ECIES needs a bare 33-byte SEC1 compressed secp256k1 key (66 hex chars).
+            // Accept any canonical form (nbl1p…, hex, Noble wire) and normalize.
+            let recipientPubkey: String = try {
+                let t = rawRcp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if t.count == 66 && (t.hasPrefix("02") || t.hasPrefix("03"))
+                    && t.allSatisfy({ $0.isHexDigit }) {
+                    return t
+                }
+                guard let parsed = NobleAddress(wireHex: t) else {
+                    throw BridgeError.operationFailed("recipient_pubkey: unrecognized format")
+                }
+                let wh = parsed.wireHex
+                if wh.count == 68 && wh.hasPrefix("02") { return String(wh.dropFirst(2)) }
+                if wh.count == 66 && (wh.hasPrefix("02") || wh.hasPrefix("03")) { return wh }
+                throw BridgeError.operationFailed("recipient_pubkey: ECIES requires a 33-byte secp256k1 key (Bitcoin Hash160 / Taproot not supported)")
+            }()
             let plaintextHex = value.data(using: .utf8)?.map { String(format: "%02x", $0) }.joined() ?? ""
             let encInput = "{\"plaintext_hex\":\"\(plaintextHex)\",\"recipient_pubkey_hex\":\"\(recipientPubkey)\"}"
             guard let cStr = encInput.cString(using: .utf8),

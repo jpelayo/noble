@@ -42,6 +42,7 @@ let package = Package(
                 "src/aes_gcm.c",
                 "src/hkdf.c",
                 "src/ecies.c",
+                "src/metadata_fields.c",
                 "src/noble_tx.c",
             ],
             publicHeadersPath: "include",

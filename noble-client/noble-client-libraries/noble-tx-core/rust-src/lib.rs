@@ -30,6 +30,8 @@ extern "C" {
     fn noble_tx_decode(params_json: *const c_char) -> *mut c_char;
     fn noble_tx_decode_locked(params_json: *const c_char) -> *mut c_char;
     fn noble_verify_tx(params_json: *const c_char) -> *mut c_char;
+    fn noble_metadata_registry_json() -> *mut c_char;
+    fn noble_build_metadata_array(params_json: *const c_char) -> *mut c_char;
     fn noble_free(ptr: *mut c_char);
 }
 
@@ -50,9 +52,71 @@ fn call_ffi(
     Ok(result_str)
 }
 
+/// Canonicalize address-bearing string fields in a JSON params object.
+///
+/// Walks the top-level fields named `recipient`, `change_address`, and
+/// `outputs[].address`, and for each one runs the value through
+/// `noble_core::address::NobleAddress::parse_any` so that any canonical
+/// input form (`nbl1q…`, `nbl1p…`, `bc1q…`, `bc1p…`, `1…`, `3…`, or hex)
+/// is converted to the wire-format hex the C library expects.
+///
+/// This is the universal-acceptance contract: callers (Swift bridge, WRY
+/// Rust bridge, MCP, anywhere) can pass any canonical form and the C
+/// library never sees anything other than canonical wire hex.
+///
+/// On unparseable input we leave the field untouched so the C library
+/// produces its own error message in its own format — preserves error
+/// fidelity for already-broken upstream callers.
+fn canonicalize_address_fields(params_json: &str) -> Result<String, String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    canonicalize_value_recursive(&mut v);
+    serde_json::to_string(&v).map_err(|e| format!("re-serialize: {e}"))
+}
+
+fn canonicalize_value_recursive(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if matches!(k.as_str(), "recipient" | "change_address" | "address") {
+                    if let Some(s) = val.as_str() {
+                        if !s.is_empty() {
+                            if let Ok(addr) =
+                                noble_core::address::NobleAddress::parse_any(s)
+                            {
+                                *val = serde_json::Value::String(addr.to_hex());
+                            }
+                        }
+                    }
+                } else {
+                    // Recurse into nested objects/arrays (covers `outputs: [{address: …}]`).
+                    canonicalize_value_recursive(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                canonicalize_value_recursive(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Same as `call_ffi` but pre-canonicalizes the JSON params so the C
+/// library always sees wire-format hex for address fields.
+fn call_ffi_canonical(
+    f: unsafe extern "C" fn(*const c_char) -> *mut c_char,
+    params_json: &str,
+) -> Result<String, String> {
+    let canonical = canonicalize_address_fields(params_json)
+        .unwrap_or_else(|_| params_json.to_string());
+    call_ffi(f, &canonical)
+}
+
 /// Unified transaction builder — handles transfer, split, join, notarize.
 pub fn build_transaction(params_json: &str) -> Result<String, String> {
-    call_ffi(noble_build_transaction, params_json)
+    call_ffi_canonical(noble_build_transaction, params_json)
 }
 
 /// Decode a locked transaction and decrypt metadata with a password.
@@ -60,19 +124,42 @@ pub fn decode_locked_tx(params_json: &str) -> Result<String, String> {
     call_ffi(noble_tx_decode_locked, params_json)
 }
 
+/// Returns the canonical notarization-metadata field catalog (T-codes,
+/// labels, force-encrypt + plaintext-only flags) as JSON. Used by the
+/// MCP `getMetadataFieldRegistry` tool.
+pub fn metadata_registry_json() -> Result<String, String> {
+    let result_ptr = unsafe { noble_metadata_registry_json() };
+    if result_ptr.is_null() {
+        return Err("FFI returned null".to_string());
+    }
+    let result_str = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { noble_free(result_ptr) };
+    Ok(result_str)
+}
+
+/// Build the full notarization metadata array (slot-0 schema descriptor
+/// + per-field entries, with SIG placeholders for `signed:true` fields).
+/// See `include/noble_tx.h::noble_build_metadata_array` for the I/O
+/// contract. Used by the host bridge's `registerDocument` orchestrator.
+pub fn build_metadata_array(params_json: &str) -> Result<String, String> {
+    call_ffi(noble_build_metadata_array, params_json)
+}
+
 /// Build, sign, and CBOR-encode a transfer transaction.
 pub fn sign_transfer(params_json: &str) -> Result<String, String> {
-    call_ffi(noble_sign_transfer, params_json)
+    call_ffi_canonical(noble_sign_transfer, params_json)
 }
 
 /// Build, sign, and CBOR-encode a multi-output transfer (UTXO split/join).
 pub fn sign_split_transfer(params_json: &str) -> Result<String, String> {
-    call_ffi(noble_sign_split_transfer, params_json)
+    call_ffi_canonical(noble_sign_split_transfer, params_json)
 }
 
 /// Build, sign, and CBOR-encode a notarization transaction.
 pub fn sign_notarization(params_json: &str) -> Result<String, String> {
-    call_ffi(noble_sign_notarization, params_json)
+    call_ffi_canonical(noble_sign_notarization, params_json)
 }
 
 /// Build, sign, and CBOR-encode a key rotation transaction (0x02).

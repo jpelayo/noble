@@ -18,6 +18,7 @@ fn main() {
         .file("src/aes_gcm.c")
         .file("src/hkdf.c")
         .file("src/ecies.c")
+        .file("src/metadata_fields.c")
         .file("src/noble_tx.c")
         // Bitcoin Core's libsecp256k1
         .file("vendor/secp256k1/src/secp256k1.c")

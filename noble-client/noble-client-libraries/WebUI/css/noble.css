@@ -2330,3 +2330,12 @@ body {
   background: color-mix(in srgb, var(--info, #6366f1) 15%, transparent);
   color: var(--info, #6366f1);
 }
+
+/* Client-side hint for unrecognized address-format inputs (set by
+   utils/address.js#attachAddressValidation). The bridge still does the
+   real parsing — this is a hint, not a hard block. */
+.addr-invalid,
+input.addr-invalid {
+  border-color: var(--error, #ef4444) !important;
+  box-shadow: 0 0 0 1px var(--error, #ef4444) inset;
+}

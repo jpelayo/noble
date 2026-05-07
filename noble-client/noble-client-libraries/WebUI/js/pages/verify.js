@@ -1,5 +1,6 @@
 // NOBLE Document Client — Document Verification (3 input modes)
 import { Bridge } from '../bridge.js';
+import { attachAddressValidation } from '../utils/address.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { statusBadge } from '../components/status-badge.js';
@@ -676,9 +677,10 @@ export function init(root, ctx) {
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'input';
-        input.placeholder = 'Public key (nbl1... or hex)';
+        input.placeholder = 'nbl1… / bc1… / 1… or hex';
         input.style.cssText = 'width:100%;margin-bottom:var(--gap-sm)';
         container.appendChild(input);
+        attachAddressValidation(input);
 
         const btn = document.createElement('button');
         btn.className = 'btn btn-primary';

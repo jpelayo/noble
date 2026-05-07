@@ -3328,6 +3328,7 @@ version = "0.115.0"
 dependencies = [
  "cc",
  "hex",
+ "noble-core",
  "noble-crypto",
  "serde",
  "serde_json",

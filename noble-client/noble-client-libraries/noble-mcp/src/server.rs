@@ -213,15 +213,17 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             input_schema: obj(serde_json::json!({"checksum": s()}), &["checksum"]),
             annotations: ro.clone() },
         ToolDef { name: "validateAddress", handler: "noble_api", action: "validateAddress",
-            description: "Validate a Noble address format.",
-            input_schema: obj(serde_json::json!({"address": s()}), &["address"]),
+            description: "Validate any canonical address (nbl1q…/nbl1p…, bc1q…/bc1p…, 1…/3…, or hex wire) and return the canonical forms. Returns {valid: bool, scheme: 'secp256k1'|'bitcoin_hash160'|'bitcoin_taproot', wireHex: '<canonical hex>', nobleBech32?: '<nbl1…>' (Noble keys only), bitcoin?: {kind: 'hash160'|'taproot', raw: '<bc1… or base58>'}}. Use this when an MCP caller needs the wire-hex form of a bech32 input without bringing its own decoder.",
+            input_schema: obj(serde_json::json!({
+                "address": serde_json::json!({"type":"string","description":"any canonical Noble or Bitcoin address"})
+            }), &["address"]),
             annotations: ro.clone() },
         ToolDef { name: "getAddressUtxos", handler: "noble_api", action: "getAddressUtxos",
             description: "Get UTXOs for an address with lifecycle status.",
             input_schema: obj(serde_json::json!({"address": s()}), &["address"]),
             annotations: ro.clone() },
         ToolDef { name: "getDocumentsByIssuer", handler: "noble_api", action: "getDocumentsByIssuer",
-            description: "List notarization transactions signed by a given pubkey (hex or nbl1 bech32).",
+            description: "List notarization transactions signed by a given pubkey. Issuer accepts any canonical address: nbl1q…/nbl1p… (Noble bech32m), bc1q…/bc1p… (Bitcoin bech32), 1…/3… (Bitcoin Base58), or hex wire. Returns {documents:[{blockHeight,txId,timestamp,txType}], count}.",
             input_schema: obj(serde_json::json!({
                 "issuer": s(),
                 "limit": n(),
@@ -229,7 +231,7 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             }), &["issuer"]),
             annotations: ro.clone() },
         ToolDef { name: "searchDocumentsByMetadata", handler: "noble_api", action: "searchDocumentsByMetadata",
-            description: "Search notarized documents by metadata key and value (e.g. key='doc:author', value='Alice'). Returns matching tx ids and document records.",
+            description: "Search notarized documents by an exact metadata key/value pair (e.g. key='doc:author', value='Alice'). Returns {documents:[{blockHeight,txId,timestamp,txType}], count}. Encrypted-field values are NOT searchable; use plaintext keys only.",
             input_schema: obj(serde_json::json!({
                 "key": s(),
                 "value": s(),
@@ -253,41 +255,93 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
 
         // ── noble_crypto (5 tools) ──
         ToolDef { name: "signNotarization", handler: "noble_crypto", action: "signNotarization",
-            description: "Sign a document notarization transaction.",
-            input_schema: obj(serde_json::json!({"checksum": s(), "fee": n(), "fee_rate": n(), "metadata": arr(serde_json::json!({"type":"object"})), "utxos": arr(serde_json::json!({"type":"object"}))}), &["checksum", "fee", "utxos"]),
+            description: "Sign a document notarization (tx_type=0x00). Checksum is the SHA-256 hex of the file (64 chars). Metadata is an array of {key,value} objects, with any protected/encrypted-mode values pre-encrypted via encryptField. `utxos` is optional — by default the host fetches all spendable UTXOs from the connected wallet automatically; supply a `utxos` array only to scope this tx to a specific subset. `fee`/`fee_rate` are optional too — by default the host picks the network's recommended rate; values above 1,000,000 groats/byte (fee_rate) or 100,000,000 groats (1 NOBLE absolute fee) are rejected as likely typos.",
+            input_schema: obj(serde_json::json!({
+                "checksum": serde_json::json!({"type":"string","description":"SHA-256 hex, 64 chars"}),
+                "metadata": arr(serde_json::json!({"type":"object","properties":{"key":s(),"value":s()},"required":["key","value"]})),
+                "fee": serde_json::json!({"type":"integer","description":"absolute fee in groats; optional, defaults to recommended rate × tx size"}),
+                "fee_rate": serde_json::json!({"type":"integer","description":"groats per byte; optional, defaults to network recommended"}),
+                "utxos": arr(serde_json::json!({"type":"object","description":"optional explicit subset; auto-fetched when omitted"}))
+            }), &["checksum"]),
             annotations: rw.clone() },
         ToolDef { name: "signTransfer", handler: "noble_crypto", action: "signTransfer",
-            description: "Sign a transfer transaction.",
-            input_schema: obj(serde_json::json!({"recipient": s(), "amount": n(), "fee_rate": n(), "utxos": arr(serde_json::json!({"type":"object"}))}), &["recipient", "amount", "utxos"]),
-            annotations: rw.clone() },
-        ToolDef { name: "estimateTxSize", handler: "noble_crypto", action: "estimateTxSize",
-            description: "Estimate transaction wire size.",
-            input_schema: obj(serde_json::json!({"tx_type": s()}), &["tx_type"]),
-            annotations: ro.clone() },
-        ToolDef { name: "buildTransaction", handler: "noble_crypto", action: "buildTransaction",
-            description: "Build and sign a transfer transaction with automatic UTXO coin selection, change output, and fee computation. Returns txHex ready for submitTransaction — avoids the fee double-counting possible when callers pre-subtract fees.",
+            description: "Sign a NOBLE coin transfer. Recipient accepts any canonical address: nbl1q…/nbl1p… (Noble bech32m), bc1q…/bc1p… (Bitcoin bech32), 1…/3… (Bitcoin Base58), or 66-char hex — the host canonicalizes internally. Amount in groats (1 NOBLE = 100,000,000 groats). `utxos` is optional — by default the host fetches all spendable UTXOs from the connected wallet automatically; supply a `utxos` array only to scope this tx to a specific subset (e.g. coin consolidation). `fee`/`fee_rate` are optional too — by default the host picks the network's recommended rate; values above 1,000,000 groats/byte (fee_rate) or 100,000,000 groats (1 NOBLE absolute fee) are rejected as likely typos. Returns {txHex} ready for submitTransaction.",
             input_schema: obj(serde_json::json!({
-                "recipient": s(),
-                "amount": n(),
-                "fee_rate": n(),
-                "metadata": arr(serde_json::json!({"type": "object"}))
+                "recipient": serde_json::json!({"type":"string","description":"any canonical Noble or Bitcoin address"}),
+                "amount": serde_json::json!({"type":"integer","description":"groats"}),
+                "fee": serde_json::json!({"type":"integer","description":"absolute fee in groats; optional, defaults to recommended rate × tx size"}),
+                "fee_rate": serde_json::json!({"type":"integer","description":"groats per byte; optional, defaults to network recommended"}),
+                "utxos": arr(serde_json::json!({"type":"object","description":"optional explicit subset; auto-fetched when omitted","properties":{"txid":s(),"vout":n(),"value":n(),"status":s()},"required":["txid","vout","value"]}))
             }), &["recipient", "amount"]),
             annotations: rw.clone() },
-        ToolDef { name: "signSplitTransfer", handler: "noble_crypto", action: "signSplitTransfer",
-            description: "Build and sign a split-UTXO transfer (one UTXO → N outputs) for wallet management or batch-pay flows.",
+        ToolDef { name: "estimateTxSize", handler: "noble_crypto", action: "estimateTxSize",
+            description: "Estimate transaction wire size in bytes (used to convert fee_rate → absolute fee).",
+            input_schema: obj(serde_json::json!({"tx_type": s()}), &["tx_type"]),
+            annotations: ro.clone() },
+        ToolDef { name: "registerDocument", handler: "noble_crypto", action: "registerDocument",
+            description: "High-level single-call notarization. Hashes the file, encrypts protected/encrypted metadata, signs CMS-signed metadata, builds the slot-0 schema descriptor, signs the notarization tx, and submits — all internally. Caller passes file path + simple {key,value,mode,signed,…} entries; the host handles T-codes, slot indexing, schema construction, encryption, signing, fee, and UTXO selection. Returns {txId, checksum}. mode defaults to 'plaintext'; protected requires `password`; encrypted requires `recipient_pubkey` (any canonical Noble secp256k1 form); signed requires `signingKeyId`. Use getMetadataFieldRegistry to discover the canonical T-code keys.",
             input_schema: obj(serde_json::json!({
-                "utxo_txid": s(),
-                "utxo_vout": n(),
-                "outputs": arr(serde_json::json!({"type": "object"})),
+                "filePath": serde_json::json!({"type":"string","description":"absolute path to the file to notarize"}),
+                "metadata": arr(serde_json::json!({
+                    "type":"object",
+                    "properties": {
+                        "key": s(),
+                        "value": s(),
+                        "mode": serde_json::json!({"type":"string","enum":["plaintext","protected","encrypted"]}),
+                        "password": serde_json::json!({"type":"string","description":"required for mode='protected'"}),
+                        "recipient_pubkey": serde_json::json!({"type":"string","description":"required for mode='encrypted'"}),
+                        "signed": b(),
+                        "signingKeyId": serde_json::json!({"type":"string","description":"required when signed=true; UUID of an imported PKCS#12 signing key"})
+                    },
+                    "required": ["key", "value"]
+                })),
+                "previousChecksum": serde_json::json!({"type":"string","description":"optional — for new versions of an existing notarized doc"})
+            }), &["filePath"]),
+            annotations: rw.clone() },
+        ToolDef { name: "registerDocumentBatch", handler: "noble_crypto", action: "registerDocumentBatch",
+            description: "Register multiple documents as a linked batch. Mints (or accepts) a batch UUID, prepends shared `doc:batch`/`doc:bridge`/`doc:relation` metadata to every file, and calls registerDocument per file in serial (parallel would double-spend wallet UTXOs). Returns {batchUUID, results:[{filePath, txId?, checksum?, ok, error?}], successCount, errorCount}. Partial failures do NOT roll back successful registrations — re-run with the same batchUUID to recover missing files (idempotent on linkage).",
+            input_schema: obj(serde_json::json!({
+                "files": arr(serde_json::json!({
+                    "type":"object",
+                    "properties": {
+                        "filePath": s(),
+                        "metadata": arr(serde_json::json!({"type":"object"}))
+                    },
+                    "required": ["filePath"]
+                })),
+                "batchName": serde_json::json!({"type":"string","description":"optional human-readable batch name (added as a second doc:batch entry)"}),
+                "batchUUID": serde_json::json!({"type":"string","description":"optional — pass an existing batch UUID to retry/extend an in-progress batch"})
+            }), &["files"]),
+            annotations: rw.clone() },
+        ToolDef { name: "getMetadataFieldRegistry", handler: "noble_crypto", action: "getMetadataFieldRegistry",
+            description: "Returns the canonical notarization metadata-field catalog: T-codes (T01..T15), labels, force-encrypt and plaintext-only flags, plus rules (max 16 slots, signed-fields-consume-two-slots, doc:bridge↔doc:relation pairing, T99 for custom keys). Call once per session to discover what keys exist instead of hardcoding them.",
+            input_schema: empty.clone(),
+            annotations: ro.clone() },
+        ToolDef { name: "buildTransaction", handler: "noble_crypto", action: "buildTransaction",
+            description: "UTXO maintenance: split one UTXO into N equal outputs (mode='split') or join multiple UTXOs into one (mode='join'). NOT for paying a recipient — use signTransfer for that. All outputs go to the wallet's own change address. Returns {txHex} ready for submitTransaction.",
+            input_schema: obj(serde_json::json!({
+                "mode": serde_json::json!({"type":"string","enum":["split","join"]}),
+                "selected_utxos": arr(serde_json::json!({"type":"object","properties":{"txid":s(),"vout":n(),"value":n()},"required":["txid","vout","value"]})),
+                "utxos": arr(serde_json::json!({"type":"object"})),
+                "split_count": serde_json::json!({"type":"integer","description":"Number of outputs (mode='split' only)"}),
                 "fee_rate": n()
-            }), &["utxo_txid", "utxo_vout", "outputs"]),
+            }), &["mode", "selected_utxos", "utxos"]),
+            annotations: rw.clone() },
+        ToolDef { name: "signSplitTransfer", handler: "noble_crypto", action: "signSplitTransfer",
+            description: "Sign a transfer that splits inputs into N self-owned outputs (each with its own amount). All outputs go to the wallet's own change address — useful for batch-pay preparation or coin-denomination management. NOT for paying others; use signTransfer for that. `utxos` is optional (auto-fetched). `fee`/`fee_rate` are optional (defaults to network recommended; safety-capped at 1,000,000 groats/byte or 1 NOBLE absolute).",
+            input_schema: obj(serde_json::json!({
+                "outputs": arr(serde_json::json!({"type":"object","properties":{"amount":n()},"required":["amount"]})),
+                "utxos": arr(serde_json::json!({"type":"object","description":"optional; auto-fetched when omitted"})),
+                "fee_rate": serde_json::json!({"type":"integer","description":"groats per byte; optional"}),
+                "fee": serde_json::json!({"type":"integer","description":"absolute fee in groats; optional"})
+            }), &["outputs"]),
             annotations: rw.clone() },
         ToolDef { name: "decryptLockedTx", handler: "noble_crypto", action: "decryptLockedTx",
-            description: "Decrypt a Locked-tx (type 0x06) payload using its password. Returns the revealed checksum and plaintext metadata fields.",
+            description: "Decrypt a Locked-tx (type 0x06) payload using its password. Pass the full transaction hex (not just txId) and the password. Returns {checksum, metadata} with the revealed plaintext fields.",
             input_schema: obj(serde_json::json!({
-                "txId": s(),
+                "tx_hex": s(),
                 "password": s()
-            }), &["txId", "password"]),
+            }), &["tx_hex", "password"]),
             annotations: safe.clone() },
         ToolDef { name: "validateMetadata", handler: "noble_mcp", action: "validateMetadata",
             description: "Validate metadata fields before building a transaction. Checks slot budget (max 16), field pairing (doc:bridge+doc:relation), forced encryption (signer:email/phone), mode requirements, key/value size limits, and version chain rules.",
@@ -301,17 +355,20 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             }), &["metadata"]),
             annotations: safe.clone() },
         ToolDef { name: "encryptField", handler: "noble_crypto", action: "encryptField",
-            description: "Encrypt a metadata field value. For mode 'protected': AES-256-GCM with password. For mode 'encrypted': ECIES with recipient public key. Returns hex-encoded ciphertext to use as the field value in signNotarization.",
+            description: "Encrypt a metadata field value before signing. mode='protected' uses AES-256-GCM with key=SHA-256(password||salt); wire layout salt(16)||nonce(12)||ct||tag(16) — round-trip-compatible with the WebUI's Web Crypto path. mode='encrypted' requires recipient_pubkey (a Noble secp256k1 key in any canonical form: nbl1p…, 33-byte SEC1 hex, or 68-char Noble wire hex; host canonicalizes). ECIES does not work on Bitcoin Hash160/Taproot addresses (no pubkey available). Returns hex ciphertext suitable as the field 'value' in signNotarization with mode='plaintext'.",
             input_schema: obj(serde_json::json!({
-                "value": s(), "mode": s(),
-                "password": s(), "recipient_pubkey": s()
+                "value": s(),
+                "mode": serde_json::json!({"type":"string","enum":["protected","encrypted"]}),
+                "password": serde_json::json!({"type":"string","description":"required for mode='protected'"}),
+                "recipient_pubkey": serde_json::json!({"type":"string","description":"required for mode='encrypted' — Noble secp256k1 key in any canonical form (nbl1p…, hex)"})
             }), &["value", "mode"]),
             annotations: safe.clone() },
         ToolDef { name: "decryptField", handler: "noble_crypto", action: "decryptField",
-            description: "Decrypt a metadata field value. For mode 'protected': AES-256-GCM with password. For mode 'encrypted': ECIES with user's private key (loaded from keystore).",
+            description: "Inverse of encryptField. mode='protected' needs password. mode='encrypted' uses the wallet private key from the keystore (no password input). Returns plaintext UTF-8 string.",
             input_schema: obj(serde_json::json!({
-                "encrypted_hex": s(), "mode": s(),
-                "password": s()
+                "encrypted_hex": s(),
+                "mode": serde_json::json!({"type":"string","enum":["protected","encrypted"]}),
+                "password": serde_json::json!({"type":"string","description":"required for mode='protected'"})
             }), &["encrypted_hex", "mode"]),
             annotations: safe.clone() },
         ToolDef { name: "signMetadataField", handler: "noble_crypto", action: "signMetadataField",
@@ -329,7 +386,7 @@ static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock
             input_schema: obj(serde_json::json!({"filePath": s()}), &["filePath"]),
             annotations: ro.clone() },
         ToolDef { name: "downloadAndHash", handler: "noble_security", action: "downloadAndHash",
-            description: "Download a URL (http/https, ≤64 MB by default) and return the streaming SHA-256 of the body. Use to verify a doc:download URL against a tx checksum. Rejects file:// and other schemes. Returns {ok, hash, size, elapsedMs} on success or {ok:false, errorCode, error} on failure.",
+            description: "Download an http/https URL (≤64 MB by default), stream-compute SHA-256, and return {ok:true, hash, size, elapsedMs, contentType?} on success or {ok:false, errorCode, error} on failure. Use to verify a doc:download URL against tx.checksum. Rejects file:// and other schemes.",
             input_schema: obj(serde_json::json!({
                 "url": s(),
                 "maxBytes": n()
@@ -785,6 +842,11 @@ async fn handle_mcp_request(
                         "role": "user",
                         "content": { "type": "text", "text": concat!(
                             "I want to register a document on the Noble blockchain.\n\n",
+                            "Tool selection guide (avoid common mistakes):\n",
+                            "- Pay NOBLE coins to another address: signTransfer (NOT buildTransaction).\n",
+                            "- UTXO maintenance (split/join): buildTransaction with mode='split' or 'join'.\n",
+                            "- Document registration: signNotarization (this prompt's main flow).\n",
+                            "- Verify a checksum is registered on-chain: verifyDocument.\n\n",
                             "Steps:\n",
                             "1. Hash the file with hashFile\n",
                             "2. Choose metadata fields. Available types:\n",

@@ -1,5 +1,6 @@
 // NOBLE Document Client — Payments (Send / Receive / History)
 import { Bridge } from '../bridge.js';
+import { attachAddressValidation } from '../utils/address.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { formatAmount, formatSignedAmount } from '../components/amount-text.js';
@@ -352,8 +353,9 @@ export function init(root, ctx) {
             input.autocapitalize = 'none';
             input.autocorrect = 'off';
             input.spellcheck = false;
-            input.placeholder = 'nbl1... address';
+            input.placeholder = 'nbl1… / bc1… / 1… or hex';
             input.value = recipient;
+            attachAddressValidation(input);
 
             const feedback = document.createElement('div');
             feedback.style.cssText = 'font-size:var(--font-size-xs); margin-top:var(--gap-xs); min-height:1.2em';

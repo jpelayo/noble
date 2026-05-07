@@ -1,5 +1,6 @@
 // NOBLE Document Client — Document Registration (7-step wizard)
 import { Bridge } from '../bridge.js';
+import { attachAddressValidation } from '../utils/address.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { formatAmount } from '../components/amount-text.js';
@@ -985,6 +986,13 @@ export function init(root, ctx) {
         valInput.style.flex = '1';
         valInput.addEventListener('input', () => { m.value = valInput.value; });
         valRow.appendChild(valInput);
+
+        // For pubkey-bearing fields (signer:pubkey), give live address-format
+        // feedback. Bridge accepts any canonical form; this only flags clearly
+        // malformed input client-side.
+        if (fieldDef.key === 'signer:pubkey') {
+            attachAddressValidation(valInput);
+        }
 
         // Contact picker for email fields
         if (fieldDef.contactPicker) {
