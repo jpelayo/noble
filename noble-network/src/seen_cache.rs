@@ -33,6 +33,19 @@ impl SeenCache {
         }
     }
 
+    /// Read-only check: is this key currently in the cache (still live)?
+    ///
+    /// Audit follow-up: used by the announce handlers to gate "globally
+    /// seen" hashes WITHOUT mutating the cache. Mutation (insertion)
+    /// happens only after the body has been received and admitted.
+    pub fn contains(&self, key: &[u8; 32]) -> bool {
+        if let Some(inserted_at) = self.entries.get(key) {
+            inserted_at.elapsed() < self.ttl
+        } else {
+            false
+        }
+    }
+
     /// Insert a key if it has not been seen recently.
     ///
     /// Returns `true` if the key is **new** (not seen before or expired).

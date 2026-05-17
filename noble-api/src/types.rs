@@ -1055,6 +1055,20 @@ pub struct RotateTotpResponse {
     pub otpauth_uri: String,
 }
 
+/// Response for `noble_getFaucetAdminToken` and `noble_rotateFaucetAdminToken`.
+/// The token gates all faucet HTTP admin endpoints
+/// (e.g. `/api/faucet/reset-limits`); the faucet binary fetches it via the
+/// `getFaucetAdminToken` RPC and refreshes every 60 seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct FaucetAdminTokenResponse {
+    /// 64-char hex (32 random bytes) — the bearer value clients send.
+    pub token: String,
+    /// Wall-clock seconds since UNIX epoch when the token was last rotated.
+    pub created_at_unix: u64,
+    /// First 8 chars of SHA-256(token) — for log correlation without leaking the token.
+    pub fingerprint: String,
+}
+
 /// Response for `noble_decryptLocator`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecryptLocatorResponse {

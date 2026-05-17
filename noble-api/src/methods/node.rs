@@ -183,28 +183,32 @@ pub trait NodeApi {
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
-    /// Retrieve the faucet keystore passphrase from the node's unified keystore.
-    ///
-    /// Called by the faucet child process on subsequent boots to unlock its keystore.
-    /// Returns the passphrase stored by `storeFaucetSecret`, or null if not yet stored.
-    #[method(name = "getFaucetSecret")]
-    async fn get_faucet_secret(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Store the faucet keystore passphrase in the node's unified keystore.
-    ///
-    /// Called by the faucet child process after generating its keypair on first boot.
-    /// The passphrase is stored as `SCHEME_FAUCET_PASSPHRASE (0x85)` so the node
-    /// can pass it back on subsequent boots.
-    #[method(name = "storeFaucetSecret")]
-    async fn store_faucet_secret(
-        &self,
-        passphrase: String,
-        faucet_address: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+    // ── Legacy faucet RPCs removed in open-node hardening PR ──
+    // `getFaucetSecret` and `storeFaucetSecret` are deleted. The faucet binary
+    // now reads chain_meta + passphrase + admin token directly from the node's
+    // on-disk keystore (via `--node-data-dir`). The node eagerly creates both
+    // secrets at startup so the faucet never has to write to the keystore over
+    // RPC. Address propagation moved to a local-FS file (`faucet-address.txt`).
 
     /// Reset faucet rate limits by calling the faucet's HTTP API internally.
     #[method(name = "resetFaucetLimits")]
     async fn reset_faucet_limits(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get the current faucet admin bearer token. Required by all faucet
+    /// HTTP admin endpoints (e.g. `/api/faucet/reset-limits`). Operators see
+    /// this in the GUI's Faucet settings panel; the faucet binary fetches it
+    /// at boot and refreshes every 60 seconds.
+    ///
+    /// Auth-gated (NOT a `get*` read pattern — explicit carve-out in
+    /// middleware.rs `is_read_method`).
+    #[method(name = "getFaucetAdminToken")]
+    async fn get_faucet_admin_token(&self) -> Result<FaucetAdminTokenResponse, ErrorObjectOwned>;
+
+    /// Rotate the faucet admin bearer token. Generates new 32 random bytes,
+    /// persists to keystore (scheme 0x86), returns the new token. The faucet
+    /// binary picks up the change within 60 seconds via its refresh poller.
+    #[method(name = "rotateFaucetAdminToken")]
+    async fn rotate_faucet_admin_token(&self) -> Result<FaucetAdminTokenResponse, ErrorObjectOwned>;
 
     /// Detect the node's external (public) IP address by querying public services.
     ///
@@ -297,8 +301,19 @@ pub trait NodeApi {
     ///
     /// Writes to `{data_dir}/../noble-backup-{YYYYMMDD-HHMMSS}.tar.gz`.
     /// Returns the backup file path and size.
+    /// Tarball the node's data directory to a sibling file. The default
+    /// invocation EXCLUDES operator secret material (keystore, chain_meta,
+    /// TLS key, validator key, TOTP secret). Pass `include_secrets: true`
+    /// to produce a full archive — the boolean makes operator intent
+    /// explicit in audit logs.
+    ///
+    /// TOTP-gated (open-node hardening): anonymous callers cannot trigger
+    /// disk-fill DoS via unbounded tarball creation.
     #[method(name = "backupChain")]
-    async fn backup_chain(&self) -> Result<BackupChainResponse, ErrorObjectOwned>;
+    async fn backup_chain(
+        &self,
+        include_secrets: Option<bool>,
+    ) -> Result<BackupChainResponse, ErrorObjectOwned>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -364,8 +379,21 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             sync_current_height,
             sync_progress_pct,
             faucet_address: {
+                // In-memory value (set by legacy storeFaucetSecret) takes
+                // precedence; falls back to <data_dir>/faucet-address.txt
+                // written by the faucet binary in local-FS mode.
                 let addr = self.faucet_address.read().clone();
-                if addr.is_empty() { None } else { Some(addr) }
+                if !addr.is_empty() {
+                    Some(addr)
+                } else {
+                    self.data_dir.as_ref().and_then(|d| {
+                        let p = d.join("faucet-address.txt");
+                        std::fs::read_to_string(&p)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    })
+                }
             },
             faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
             faucet_listen: {
@@ -1130,54 +1158,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         })
     }
 
-    async fn get_faucet_secret(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
-        let mut ks = self.wallet_keystore.lock();
-        if !ks.is_unlocked() {
-            ks.unlock(&wallet_pass)
-                .map_err(|e| ApiError::Internal(format!("unlock keystore: {e}")))?;
-        }
-        let passphrase = match ks.get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE) {
-            Ok(bytes) => String::from_utf8(bytes).ok(),
-            Err(_) => None,
-        };
-        Ok(serde_json::json!({
-            "passphrase": passphrase,
-            "chain_meta": hex::encode(&self.chain_meta),
-        }))
-    }
-
-    async fn store_faucet_secret(
-        &self,
-        passphrase: String,
-        faucet_address: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        if passphrase.is_empty() {
-            return Err(ApiError::InvalidParam("passphrase must not be empty".into()).into());
-        }
-        let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
-        let mut ks = self.wallet_keystore.lock();
-        // Delete existing faucet passphrase if any (store_raw rejects duplicates).
-        if ks.has_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE).unwrap_or(false) {
-            tracing::info!(task = "faucet", "Replacing existing faucet passphrase in keystore");
-            ks.delete_by_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE);
-        }
-        ks.store_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE, passphrase.as_bytes(), &wallet_pass)
-            .map_err(|e| ApiError::Internal(format!("store faucet passphrase: {e}")))?;
-        tracing::info!(task = "faucet", "Faucet passphrase stored in unified keystore");
-
-        // Store the faucet address in TOML + in-memory for GUI display.
-        if let Some(ref addr) = faucet_address {
-            *self.faucet_address.write() = addr.clone();
-            if let Some(ref set_fn) = self.set_config_value {
-                if let Err(e) = set_fn("faucet", "address", addr) {
-                    tracing::warn!(task = "faucet", "Failed to persist faucet address: {e}");
-                }
-            }
-        }
-
-        Ok(serde_json::json!({ "success": true }))
-    }
+    // ── Legacy faucet RPCs removed in open-node hardening ──
+    // `get_faucet_secret` and `store_faucet_secret` deleted. Both were
+    // operator-internal IPC channels that became dead code once the
+    // faucet binary moved to local-FS bootstrap (`--node-data-dir`).
+    // See node startup: `ensure_faucet_passphrase` + `ensure_faucet_admin_token`.
+    // See faucet `main.rs`: writes address to `faucet-address.txt` instead.
 
     async fn reset_faucet_limits(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         /// Accepts any TLS cert — safe for localhost loopback only.
@@ -1204,6 +1190,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let port = listen.rsplit(':').next().unwrap_or("8786");
         let url = format!("https://127.0.0.1:{port}/api/faucet/reset-limits");
 
+        // Forward the admin bearer token so the faucet's AdminAuthLayer
+        // accepts the call. The node owns the token; we read it from our
+        // keystore on every call (cheap, in-memory) and pass it on the
+        // loopback request alongside the legacy Gatekeeper header.
+        let (admin_token, _, _) = read_or_create_faucet_admin_token(self)
+            .map_err(ErrorObjectOwned::from)?;
+
         let json = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
             let agent = ureq::AgentBuilder::new()
                 .tls_config(std::sync::Arc::new(
@@ -1215,6 +1208,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 .build();
             let resp = agent.post(&url)
                 .set("Gatekeeper", "noble")
+                .set("Authorization", &format!("Bearer {admin_token}"))
                 .call()
                 .map_err(|e| format!("faucet request failed: {e}"))?;
             let body = resp
@@ -1228,6 +1222,23 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         .map_err(|e| ApiError::Internal(e))?;
 
         Ok(json)
+    }
+
+    async fn get_faucet_admin_token(&self) -> Result<FaucetAdminTokenResponse, ErrorObjectOwned> {
+        let (token, created_at_unix, fingerprint) =
+            read_or_create_faucet_admin_token(self).map_err(ErrorObjectOwned::from)?;
+        Ok(FaucetAdminTokenResponse { token, created_at_unix, fingerprint })
+    }
+
+    async fn rotate_faucet_admin_token(&self) -> Result<FaucetAdminTokenResponse, ErrorObjectOwned> {
+        let (token, created_at_unix, fingerprint) =
+            rotate_faucet_admin_token_inner(self).map_err(ErrorObjectOwned::from)?;
+        tracing::info!(
+            task = "faucet_admin",
+            fingerprint = %fingerprint,
+            "faucet admin token rotated"
+        );
+        Ok(FaucetAdminTokenResponse { token, created_at_unix, fingerprint })
     }
 
     async fn detect_external_ip(&self) -> Result<DetectIpResponse, ErrorObjectOwned> {
@@ -1302,29 +1313,31 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let available_bytes: u64;
         let mut error: Option<String> = None;
 
+        // Writability check by metadata (no `.noble_write_test` files left
+        // littering the filesystem). On Unix, walking up the path until we
+        // find an existing ancestor gives us the right answer for both
+        // "exists" and "would be created here" cases. This method is
+        // TOTP-gated (audit follow-up #1), so it's only called by operators.
         if exists {
-            // Test writeability with a temp file
-            let test_file = p.join(".noble_write_test");
-            match std::fs::write(&test_file, b"test") {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(&test_file);
-                    writable = true;
-                }
-                Err(e) => {
-                    error = Some(format!("not writable: {e}"));
-                }
+            writable = path_appears_writable(p);
+            if !writable {
+                error = Some("path metadata indicates not writable".into());
             }
         } else {
-            // Try to create the directory
-            match std::fs::create_dir_all(p) {
-                Ok(_) => {
-                    writable = true;
-                    // Clean up the test directory if we just created it
-                    let _ = std::fs::remove_dir(p);
+            // Walk up to the first existing ancestor and check its writability.
+            let mut probe = p.parent();
+            while let Some(parent) = probe {
+                if parent.exists() {
+                    writable = path_appears_writable(parent);
+                    if !writable {
+                        error = Some(format!(
+                            "ancestor {} appears not writable",
+                            parent.display()
+                        ));
+                    }
+                    break;
                 }
-                Err(e) => {
-                    error = Some(format!("cannot create directory: {e}"));
-                }
+                probe = parent.parent();
             }
         }
 
@@ -1376,16 +1389,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with('.') { continue; } // Skip hidden dirs.
                     let full_path = entry.path().display().to_string();
-                    // Quick writability test.
-                    let writable = {
-                        let test = entry.path().join(".noble_write_test");
-                        if std::fs::write(&test, b"t").is_ok() {
-                            let _ = std::fs::remove_file(&test);
-                            true
-                        } else {
-                            false
-                        }
-                    };
+                    // Writability via metadata check — no `.noble_write_test`
+                    // files left across the host filesystem. This method is
+                    // TOTP-gated; called only by operators.
+                    let writable = path_appears_writable(&entry.path());
                     entries.push(DirectoryEntry { name, path: full_path, is_dir, writable });
                 }
                 entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1755,7 +1762,10 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         })
     }
 
-    async fn backup_chain(&self) -> Result<BackupChainResponse, ErrorObjectOwned> {
+    async fn backup_chain(
+        &self,
+        include_secrets: Option<bool>,
+    ) -> Result<BackupChainResponse, ErrorObjectOwned> {
         let data_dir = self.data_dir.as_ref().ok_or_else(|| {
             ApiError::InvalidParam("data_dir not configured".into())
         })?;
@@ -1764,6 +1774,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             return Err(ApiError::InvalidParam("data directory does not exist".into()).into());
         }
 
+        let include_secrets = include_secrets.unwrap_or(false);
+
         // Build backup filename: noble-backup-YYYYMMDD-HHMMSS.tar.gz
         let now = chrono_timestamp();
         let parent = data_dir.parent().unwrap_or(data_dir);
@@ -1771,10 +1783,37 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let data_dir_clone = data_dir.clone();
         let backup_clone = backup_path.clone();
 
+        // Operator-secret files relative to the tar -C root (the data_dir's
+        // parent), so they need the data_dir's leaf name as the prefix.
+        let dir_name = data_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let secret_excludes: Vec<String> = if include_secrets {
+            tracing::warn!(
+                task = "backup",
+                "backupChain called with include_secrets=true — tarball will contain operator secrets"
+            );
+            Vec::new()
+        } else {
+            vec![
+                format!("{dir_name}/keystore.noble"),
+                format!("{dir_name}/.chain_meta"),
+                format!("{dir_name}/tls-key.pem"),
+                format!("{dir_name}/validator.key"),
+                format!("{dir_name}/totp-secret.txt"),
+                format!("{dir_name}/totp.secret"),
+            ]
+        };
+
         // Run tar in a blocking task to avoid blocking the async runtime.
         let result = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("tar")
-                .arg("czf")
+            let mut cmd = std::process::Command::new("tar");
+            for excl in &secret_excludes {
+                cmd.arg("--exclude").arg(excl);
+            }
+            cmd.arg("czf")
                 .arg(&backup_clone)
                 .arg("-C")
                 .arg(data_dir_clone.parent().unwrap_or(&data_dir_clone))
@@ -1885,6 +1924,32 @@ pub(crate) fn disk_capacity(path: &std::path::Path) -> u64 {
     #[cfg(not(unix))]
     { let _ = path; }
     0
+}
+
+/// Best-effort "is this path writable by the current process?" check that
+/// does NOT write anything to disk. Avoids the `.noble_write_test` litter
+/// pattern of the prior implementation. On Unix, uses `access(2)` via
+/// `libc::access`. On other platforms, falls back to metadata read-only
+/// check (returns true if the path exists and isn't readonly).
+///
+/// Used by the TOTP-gated `checkDataDir` + `listDirectory` operator tools.
+pub(crate) fn path_appears_writable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // W_OK = 2 — check write permission for the calling process.
+        unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::metadata(path) {
+            Ok(md) => !md.permissions().readonly(),
+            Err(_) => false,
+        }
+    }
 }
 
 /// Get the available (free) disk space at the given path.
@@ -2016,4 +2081,213 @@ fn decode_evidence_detail(cbor: &[u8]) -> Option<(String, String, serde_json::Va
         }
     };
     Some((ty, validator, detail))
+}
+
+// ── Faucet admin token helpers ────────────────────────────────────────────
+//
+// Storage format in keystore scheme 0x86 (`SCHEME_FAUCET_ADMIN_TOKEN`):
+//   [0..8]   little-endian u64, creation/rotation timestamp (UNIX seconds)
+//   [8..40]  32 raw random bytes, hex-encoded only when returned via RPC
+//
+// `read_or_create` lazily bootstraps the token on first call (matches the
+// faucet passphrase pattern). `rotate` always generates a new value and
+// replaces the previous one atomically. Fingerprint is the first 8 hex
+// chars of SHA-256(token_hex) — for log correlation without leaking the token.
+
+fn faucet_admin_token_fingerprint(token_hex: &str) -> String {
+    let digest = noble_crypto::sha256(token_hex.as_bytes());
+    hex::encode(&digest.as_bytes()[..4])
+}
+
+/// Get-or-create the faucet admin token in the supplied keystore.
+/// Parameter-shaped helper (not generic over `ApiState<S>`) so callers
+/// without RPC state — e.g. node startup — can use it. Returns
+/// `(token_hex, created_at_unix, fingerprint)`.
+///
+/// Audit follow-up #4: this function is now callable from node startup
+/// (via [`ensure_faucet_admin_token`]) so the token is present in the
+/// keystore before the faucet subprocess starts reading via local-FS.
+pub fn read_or_create_faucet_admin_token_with(
+    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    chain_meta: &[u8; 32],
+) -> Result<(String, u64, String), String> {
+    let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));
+    let mut ks = keystore.lock();
+    if !ks.is_unlocked() {
+        ks.unlock(&wallet_pass)
+            .map_err(|e| format!("unlock keystore: {e}"))?;
+    }
+    if let Ok(bytes) = ks.get_raw(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN) {
+        if bytes.len() == 40 {
+            let ts_bytes: [u8; 8] = bytes[..8].try_into().unwrap_or([0u8; 8]);
+            let timestamp = u64::from_le_bytes(ts_bytes);
+            let token_hex = hex::encode(&bytes[8..]);
+            let fp = faucet_admin_token_fingerprint(&token_hex);
+            return Ok((token_hex, timestamp, fp));
+        }
+        // Corrupt entry — fall through to regenerate.
+        tracing::warn!(
+            task = "faucet_admin",
+            "stored admin token has unexpected length ({} bytes) — regenerating",
+            bytes.len()
+        );
+    }
+
+    // Generate new token (lazy bootstrap on first call after node install,
+    // or eager via ensure_faucet_admin_token at node startup).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut token_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
+    let mut stored = Vec::with_capacity(40);
+    stored.extend_from_slice(&now.to_le_bytes());
+    stored.extend_from_slice(&token_bytes);
+
+    if ks
+        .has_scheme(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN)
+        .unwrap_or(false)
+    {
+        let _ = ks.delete_by_scheme(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN);
+    }
+    ks.store_raw(
+        noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN,
+        &stored,
+        &wallet_pass,
+    )
+    .map_err(|e| format!("store admin token: {e}"))?;
+
+    let token_hex = hex::encode(token_bytes);
+    let fp = faucet_admin_token_fingerprint(&token_hex);
+    tracing::info!(
+        task = "faucet_admin",
+        fingerprint = %fp,
+        "faucet admin token bootstrapped"
+    );
+    Ok((token_hex, now, fp))
+}
+
+/// Always-rotate variant of [`read_or_create_faucet_admin_token_with`].
+/// Generates a fresh token even if one already exists; persists
+/// atomically (delete + store). Returns the new value.
+pub fn rotate_faucet_admin_token_with(
+    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    chain_meta: &[u8; 32],
+) -> Result<(String, u64, String), String> {
+    let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));
+    let mut ks = keystore.lock();
+    if !ks.is_unlocked() {
+        ks.unlock(&wallet_pass)
+            .map_err(|e| format!("unlock keystore: {e}"))?;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut token_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
+    let mut stored = Vec::with_capacity(40);
+    stored.extend_from_slice(&now.to_le_bytes());
+    stored.extend_from_slice(&token_bytes);
+
+    if ks
+        .has_scheme(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN)
+        .unwrap_or(false)
+    {
+        let _ = ks.delete_by_scheme(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN);
+    }
+    ks.store_raw(
+        noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN,
+        &stored,
+        &wallet_pass,
+    )
+    .map_err(|e| format!("store admin token: {e}"))?;
+
+    let token_hex = hex::encode(token_bytes);
+    let fp = faucet_admin_token_fingerprint(&token_hex);
+    Ok((token_hex, now, fp))
+}
+
+/// Idempotent "ensure the admin token exists in the keystore." Returns
+/// the current token's fingerprint (creating one if absent). Designed to
+/// be called from node startup so the faucet subprocess finds the token
+/// already present on local-FS bootstrap — eliminates the "admin endpoint
+/// returns 503 until the operator clicks the GUI" failure mode.
+///
+/// Audit follow-up #4.
+pub fn ensure_faucet_admin_token(
+    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    chain_meta: &[u8; 32],
+) -> Result<String, String> {
+    read_or_create_faucet_admin_token_with(keystore, chain_meta)
+        .map(|(_token, _ts, fp)| fp)
+}
+
+/// Idempotent "ensure the faucet passphrase exists in the keystore."
+/// Symmetric to [`ensure_faucet_admin_token`]: if the keystore already
+/// has `SCHEME_FAUCET_PASSPHRASE` populated, leaves it alone; otherwise
+/// generates 32 random bytes (hex-encoded → 64 chars) and stores them.
+/// Designed for node startup, so the faucet subprocess on local-FS
+/// bootstrap finds the passphrase pre-existing and never calls the
+/// legacy `storeFaucetSecret` RPC.
+///
+/// Open-node hardening Group 4 (audit follow-up #4 + #5).
+pub fn ensure_faucet_passphrase(
+    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    chain_meta: &[u8; 32],
+) -> Result<(), String> {
+    let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));
+    let mut ks = keystore.lock();
+    if !ks.is_unlocked() {
+        ks.unlock(&wallet_pass)
+            .map_err(|e| format!("unlock keystore: {e}"))?;
+    }
+    if ks
+        .has_scheme(noble_crypto::SCHEME_FAUCET_PASSPHRASE)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    // First boot: generate fresh passphrase. 32 random bytes hex-encoded
+    // (same format the faucet binary used when generating itself).
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    let passphrase = hex::encode(bytes);
+    ks.store_raw(
+        noble_crypto::SCHEME_FAUCET_PASSPHRASE,
+        passphrase.as_bytes(),
+        &wallet_pass,
+    )
+    .map_err(|e| format!("store faucet passphrase: {e}"))?;
+    tracing::info!(
+        task = "faucet_passphrase",
+        "faucet passphrase bootstrapped in keystore"
+    );
+    Ok(())
+}
+
+// ── State-shaped wrappers for the RPC impl ─────────────────────────────
+// These stay generic over `S` for the existing `Arc<ApiState<S>>` call
+// sites (RPC method bodies). They delegate to the parameter-shaped
+// helpers above.
+
+fn read_or_create_faucet_admin_token<S>(
+    state: &Arc<ApiState<S>>,
+) -> Result<(String, u64, String), ApiError>
+where
+    S: noble_storage::StorageEngine + Send + Sync + 'static,
+{
+    read_or_create_faucet_admin_token_with(&state.wallet_keystore, &state.chain_meta)
+        .map_err(ApiError::Internal)
+}
+
+fn rotate_faucet_admin_token_inner<S>(
+    state: &Arc<ApiState<S>>,
+) -> Result<(String, u64, String), ApiError>
+where
+    S: noble_storage::StorageEngine + Send + Sync + 'static,
+{
+    rotate_faucet_admin_token_with(&state.wallet_keystore, &state.chain_meta)
+        .map_err(ApiError::Internal)
 }

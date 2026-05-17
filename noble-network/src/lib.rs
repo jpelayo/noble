@@ -27,6 +27,7 @@ pub mod codec;
 pub mod config;
 pub mod diversity;
 pub mod error;
+pub mod gossip_outcome;
 pub mod messages;
 pub mod peer_manager;
 pub mod rate_limiter;

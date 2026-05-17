@@ -35,11 +35,17 @@ pub trait AddressApi {
         limit: u32,
     ) -> Result<AddressHistoryResponse, ErrorObjectOwned>;
 
-    /// Get all unspent transaction outputs (UTXOs) for an address.
+    /// Get unspent transaction outputs (UTXOs) for an address.
+    ///
+    /// Paginated since open-node hardening (audit follow-up #7). Default
+    /// page size 256, server-enforced max 256. Caller supplies `limit`
+    /// (clamped) and `offset` to walk longer histories.
     #[method(name = "getAddressUtxos")]
     async fn get_address_utxos(
         &self,
         address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<AddressUtxosResponse, ErrorObjectOwned>;
 
     /// Validate whether a string is a valid NOBLE or Bitcoin address.
@@ -180,10 +186,18 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
     async fn get_address_utxos(
         &self,
         address: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<AddressUtxosResponse, ErrorObjectOwned> {
+        const DEFAULT_PAGE: u32 = 256;
+        const MAX_PAGE: u32 = 256;
+        let limit = limit.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE) as usize;
+        let offset = offset.unwrap_or(0) as usize;
+
         let addr = parse_address(&address)?;
         let storage = self.storage.read();
         let utxos = storage.get_address_utxos(&addr).map_err(ApiError::from)?;
+        let total_utxos = utxos.len();
 
         let chain_height = storage
             .get_chain_tip()
@@ -198,35 +212,33 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
         let mut immature_count: usize = 0;
         let mut immature_value: u64 = 0;
 
-        // Return ALL UTXOs with lifecycle status so the client has full visibility.
-        let entries: Vec<UtxoResponse> = utxos
-            .iter()
-            .map(|(outpoint, entry)| {
-                let status = if !entry.is_mature(chain_height) {
-                    immature_count += 1;
-                    immature_value += entry.value;
-                    "immature"
-                } else if mempool.is_outpoint_spent(outpoint) {
-                    "pending_spend"
-                } else {
-                    "available"
-                };
-                UtxoResponse {
-                    txid: hash_to_hex(&outpoint.txid),
-                    vout: outpoint.vout,
-                    value: entry.value,
-                    height: entry.height,
-                    is_coinbase: entry.is_coinbase,
-                    status: status.to_string(),
-                }
-            })
-            .collect();
+        // Walk ALL committed UTXOs to compute immature totals (small data,
+        // fast scan), but only materialize the requested page.
+        let mut all_entries: Vec<UtxoResponse> = Vec::with_capacity(utxos.len());
+        for (outpoint, entry) in utxos.iter() {
+            let status = if !entry.is_mature(chain_height) {
+                immature_count += 1;
+                immature_value += entry.value;
+                "immature"
+            } else if mempool.is_outpoint_spent(outpoint) {
+                "pending_spend"
+            } else {
+                "available"
+            };
+            all_entries.push(UtxoResponse {
+                txid: hash_to_hex(&outpoint.txid),
+                vout: outpoint.vout,
+                value: entry.value,
+                height: entry.height,
+                is_coinbase: entry.is_coinbase,
+                status: status.to_string(),
+            });
+        }
 
         // Include unconfirmed mempool outputs (change from pending txs) for this address.
         let addr_wire = addr.to_wire_bytes();
-        let mut entries = entries;
         for (outpoint, value) in mempool.outputs_for_address(&addr_wire) {
-            entries.push(UtxoResponse {
+            all_entries.push(UtxoResponse {
                 txid: hash_to_hex(&outpoint.txid),
                 vout: outpoint.vout,
                 value,
@@ -235,12 +247,31 @@ impl<S: StorageEngine + Send + Sync + 'static> AddressApiServer for Arc<ApiState
                 status: "unconfirmed".to_string(),
             });
         }
-
         drop(mempool);
+
+        // Apply pagination AFTER assembly so immature totals reflect the
+        // whole set, not just the page.
+        let total_returned = all_entries.len();
+        let page: Vec<UtxoResponse> = all_entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+        if total_returned > limit + offset {
+            tracing::debug!(
+                task = "address_utxos",
+                "returning page of {} of {} total UTXOs (limit={}, offset={})",
+                page.len(),
+                total_returned,
+                limit,
+                offset
+            );
+        }
+        let _ = total_utxos; // retained for clarity; immature counts use the live walk
 
         Ok(AddressUtxosResponse {
             address,
-            utxos: entries,
+            utxos: page,
             immature_count,
             immature_value,
         })

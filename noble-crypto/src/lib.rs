@@ -26,6 +26,6 @@ pub use hash::{double_sha256, sha256, tagged_hash, Hash256};
 pub use keys::{NoblePrivateKey, NoblePublicKey, NobleSigner, NobleVerifier, SignatureEnvelope};
 pub use schemes::{
     is_recognized_scheme, is_signing_scheme, SCHEME_BIP137,
-    SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY, SCHEME_SECP256K1, SCHEME_TLS_KEY,
-    SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
+    SCHEME_FAUCET_ADMIN_TOKEN, SCHEME_FAUCET_PASSPHRASE, SCHEME_P2P_IDENTITY,
+    SCHEME_SECP256K1, SCHEME_TLS_KEY, SCHEME_TOTP_SECRET, SCHEME_VALIDATOR_SECP256K1,
 };

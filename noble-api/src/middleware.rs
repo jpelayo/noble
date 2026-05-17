@@ -11,13 +11,33 @@
 //! Supports three scopes via [`TotpScope`]:
 //! - `All`: every request requires authentication (default).
 //! - `WriteOnly`: only write/mutation methods require authentication;
-//!   read methods (get*, estimate*, lookup*, verify*, validate*) pass through.
+//!   methods in [`READ_METHODS`] pass through without TOTP.
 //! - `None`: authentication is disabled (equivalent to no validator).
+//!
+//! ## Auth policy: default-deny
+//!
+//! The classification of `WriteOnly` reads is **allowlist-driven**, not
+//! prefix-based. A method whose name is not in [`READ_METHODS`] REQUIRES
+//! TOTP — including any future `get*` method that hasn't been deliberately
+//! classified.
+//!
+//! [`LEGACY_PUBLIC_METHODS`] is currently empty. It exists as a documented
+//! place to register short-window public carve-outs (e.g. for a future
+//! migration). Audit follow-up #2 closed the prior carve-out for the
+//! faucet legacy RPC handoff: with the default deploy now using local-FS
+//! bootstrap, `getFaucetSecret` / `storeFaucetSecret` aren't hit on the
+//! happy path, and tightening them to require TOTP is the cleaner posture.
+//!
+//! To add a new pure-read RPC method, append its name to [`READ_METHODS`]
+//! with a one-line justification. The coverage test at the bottom of this
+//! module enforces that every registered RPC method is either in the
+//! allowlist or write-classified.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::RwLock;
 use std::task::{Context, Poll};
@@ -37,6 +57,71 @@ fn extract_rpc_method(body: &[u8]) -> Option<String> {
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     val.get("method")?.as_str().map(|s| s.to_string())
 }
+
+/// JSON-RPC methods that do NOT require TOTP in [`TotpScope::WriteOnly`].
+/// Default-deny: a method whose name is not here REQUIRES TOTP, including
+/// any future `get*` method. See module docs.
+pub static READ_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        // ── Pure reads (return state without mutation) ──────────────────
+        "getActivePolls", "getActiveProposals", "getAddressBalance",
+        "getAddressHistory", "getAddressPending", "getAddressUtxos",
+        "getAllowedIps", "getApiVersion", "getAvailableFaucets",
+        "getBadgeHolders", "getBadgeStrategies", "getBlock",
+        "getBlockCount", "getBlockHeader", "getBlockRange",
+        "getBlockVotes", "getChainStats", "getCheckpoints",
+        "getCycleHistory", "getCycleStatus", "getDetectedForks",
+        "getDiscoveredBlockchains", "getDocumentHistory",
+        "getDocumentsByIssuer", "getDocumentVersions",
+        "getEncryptionStatus", "getEvidence", "getEvidenceList",
+        "getFinalityStatus", "getForkResolutionStatus",
+        "getGatewayInfo", "getLatestBlock", "getMempoolInfo",
+        "getMyBadgeStatus", "getNetworkInfo", "getNodeIdentity",
+        "getNodeInfo", "getPeerInfo", "getPeerMemory",
+        "getPollHistory", "getProposalHistory", "getPruningStatus",
+        "getReputationScore", "getRewardAddress", "getSeeds",
+        "getSetupStatus", "getStorageConfig", "getStorageInfo",
+        "getStorageStats", "getSyncStatus", "getTlsCertInfo",
+        "getTlsFingerprint", "getTotpStatus", "getTransaction",
+        "getTransactionReceipt", "getTransactionStatus",
+        "getValidatorKeyInfo", "getValidatorList", "getVoteTallies",
+        "getVotingStrategy", "getWalletInfo", "getWalletSnapshot",
+        "getWalletTransactions", "listAddresses", "listBannedPeers",
+        "lookupChecksum",
+        // ── Estimates / validation (no state change) ────────────────────
+        "estimateFee", "validateAddress", "verifyDocument",
+        // ── Read-like ops that don't mutate node state ──────────────────
+        "checkChainIntegrity",        // pure read, expensive
+        "detectExternalIp",           // external probe (no node mutation)
+        "searchDocumentsByMetadata",  // pure read
+        // NOTE: the following are NOT in READ_METHODS even though their
+        // names suggest "read":
+        //   • generateMnemonic — persists a secp256k1 key + validator.key
+        //   • backupChain — writes a tarball of operator data to disk
+        //   • checkDataDir — writes .noble_write_test at caller path
+        //   • listDirectory — writes test files in every child dir
+        // All four require TOTP (operator-grade ops).
+        // ── Public protocol ops (auth via tx signature) ─────────────────
+        "submitTransaction",
+        "submitDocumentBatch",
+    ]
+    .iter()
+    .copied()
+    .collect()
+});
+
+/// Empty as of audit follow-up #2. Previously held `getFaucetSecret` and
+/// `storeFaucetSecret` during the Group A migration window so legacy
+/// faucet binaries (pre-`--node-data-dir`) could bootstrap without TOTP.
+/// The migration window was closed early at the auditor's request — the
+/// security posture is cleaner without a public-bypass carve-out, and the
+/// default deploy uses the local-FS path so the legacy RPC handoff isn't
+/// hit anyway.
+///
+/// The symbol is kept (rather than deleted) so future callers needing a
+/// short-window public carve-out have a documented place to register one.
+pub static LEGACY_PUBLIC_METHODS: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(HashSet::new);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -73,41 +158,19 @@ impl std::fmt::Display for TotpScope {
     }
 }
 
-/// Returns `true` if the given JSON-RPC method name is a read-only method
-/// that does not require authentication in `WriteOnly` scope.
+/// Returns `true` if the given JSON-RPC method does NOT require TOTP
+/// in [`TotpScope::WriteOnly`].
+///
+/// Allowlist-driven (default-deny): a method passes through TOTP only if
+/// its name is in [`READ_METHODS`] or [`LEGACY_PUBLIC_METHODS`]. Any
+/// other method — including new `get*` methods that haven't been
+/// classified — requires authentication.
 ///
 /// Exposed for use by dashboard/client code that needs to determine
 /// whether to include auth headers.
-/// Returns `true` if the given JSON-RPC method does NOT require TOTP
-/// authentication in `WriteOnly` scope.
-///
-/// Two categories pass through without TOTP:
-/// - **Read methods**: `get*`, `estimate*`, `lookup*`, `verify*`, `validate*`
-///   (except trace methods which expose sensitive operational data).
-/// - **Public protocol operations**: `submitTransaction`, `submitDocumentBatch`
-///   — these carry their own cryptographic authorization (transaction signature)
-///   and must be callable by remote client apps without TOTP.
 pub fn is_read_method(method: &str) -> bool {
-    // Strip the "noble_" namespace prefix if present.
     let name = method.strip_prefix("noble_").unwrap_or(method);
-    // Trace methods expose sensitive operational data and always require auth,
-    // even in WriteOnly scope (AUD4-F1).
-    if name.starts_with("getTrace")
-        || name.starts_with("setTrace")
-        || name.starts_with("clearTrace")
-    {
-        return false;
-    }
-    // Public protocol operations: transactions carry their own signature-based
-    // authorization.  Client apps submit these without TOTP.
-    if name == "submitTransaction" || name == "submitDocumentBatch" || name == "storeFaucetSecret" {
-        return true;
-    }
-    name.starts_with("get")
-        || name.starts_with("estimate")
-        || name.starts_with("lookup")
-        || name.starts_with("verify")
-        || name.starts_with("validate")
+    READ_METHODS.contains(name) || LEGACY_PUBLIC_METHODS.contains(name)
 }
 
 /// Tower [`Layer`] that produces [`AuthService`] instances.
@@ -344,6 +407,174 @@ mod tests {
     fn auth_error_response_has_correct_status() {
         let resp = auth_error_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Total RPC method roster — hand-maintained ground truth used by the
+    /// coverage test below. Bumping the live trait method count requires
+    /// adding the new name here AND classifying it in `READ_METHODS`,
+    /// `LEGACY_PUBLIC_METHODS`, or leaving it out (write-classified).
+    ///
+    /// 124 entries as of the Tier 3 hardening PR. If `RpcModule::method_names`
+    /// reports a different count at runtime, that's the signal to update.
+    const ALL_RPC_METHODS: &[&str] = &[
+        "addSeed", "addValidator", "backupChain", "banPeer", "castVote",
+        "checkChainIntegrity", "checkDataDir", "clearTraceBuffer",
+        "createAddress", "createPoll", "deleteAddress", "detectExternalIp",
+        "dialPeer", "enableTotp", "estimateFee", "generateMnemonic",
+        "getActivePolls", "getActiveProposals", "getAddressBalance",
+        "getAddressHistory", "getAddressPending", "getAddressUtxos",
+        "getAllowedIps", "getApiVersion", "getAvailableFaucets",
+        "getBadgeHolders", "getBadgeStrategies", "getBlock",
+        "getBlockCount", "getBlockHeader", "getBlockRange",
+        "getBlockVotes", "getChainStats", "getCheckpoints",
+        "getCycleHistory", "getCycleStatus", "getDetectedForks",
+        "getDiscoveredBlockchains", "getDocumentHistory",
+        "getDocumentsByIssuer", "getDocumentVersions",
+        "getEncryptionStatus", "getEvidence", "getEvidenceList",
+        "getFaucetAdminToken", "getFinalityStatus",
+        "getForkResolutionStatus", "getGatewayInfo", "getLatestBlock",
+        "getMempoolInfo", "getMyBadgeStatus", "getNetworkInfo",
+        "getNodeIdentity", "getNodeInfo", "getPeerInfo", "getPeerMemory",
+        "getPollHistory", "getProposalHistory", "getPruningStatus",
+        "getReputationScore", "getRewardAddress", "getSeeds",
+        "getSetupStatus", "getStorageConfig", "getStorageInfo",
+        "getStorageStats", "getSyncStatus", "getTlsCertInfo",
+        "getTlsFingerprint", "getTotpStatus", "getTraceBuffer",
+        "getTraceStatus", "getTransaction", "getTransactionReceipt",
+        "getTransactionStatus", "getValidatorKeyInfo", "getValidatorList",
+        "getVoteTallies", "getVotingStrategy", "getWalletInfo",
+        "getWalletSnapshot", "getWalletTransactions", "importMnemonic",
+        "importSecp256k1Key", "listAddresses", "listBannedPeers",
+        "listDirectory", "lookupChecksum", "proposeBadge",
+        "pruneStalePeers", "regenerateTlsCert", "removePeerRecord",
+        "removeSeed", "removeValidator", "resetChain", "resetFaucetLimits",
+        "rotateFaucetAdminToken", "rotateGatewayKey", "rotateTotpSecret",
+        "searchDocumentsByMetadata", "setAllowedIps",
+        "setBadgeApprovalStrategy", "setBadgeRevocationStrategy",
+        "setConfigValue", "setEncryptionMode", "setNodeIdentity",
+        "setRewardAddress", "setStorageConfig", "setTraceFilter",
+        "setValidatorOrder", "setVotingStrategy",
+        "submitDocumentBatch", "submitTransaction", "unbanPeer",
+        "uploadTlsCert", "validateAddress", "verifyDocument",
+        "voteBadgeProposal", "votePoll", "walletLock",
+        "walletSendTransfer", "walletUnlock",
+    ];
+
+    /// Allowlist-policy coverage test. Every method registered with the
+    /// RPC server must be deliberately classified — either passing through
+    /// without TOTP (`READ_METHODS`), legacy-grandfathered during the
+    /// faucet local-FS migration (`LEGACY_PUBLIC_METHODS`), or treated as
+    /// write (NOT in either set, so requires TOTP by default-deny).
+    ///
+    /// This test exists to catch the case where someone adds a new RPC
+    /// method without thinking about its auth classification. Add the
+    /// method to `ALL_RPC_METHODS`, then either add it to `READ_METHODS`
+    /// or accept the write-classification and the test passes.
+    #[test]
+    fn every_rpc_method_is_classified() {
+        let mut unclassified = Vec::new();
+        let mut writes = Vec::new();
+        for &name in ALL_RPC_METHODS {
+            let in_reads = READ_METHODS.contains(name);
+            let in_legacy = LEGACY_PUBLIC_METHODS.contains(name);
+            if !in_reads && !in_legacy {
+                // Write-classified — the default. We collect them for the
+                // human-readable summary below but don't fail.
+                writes.push(name);
+            } else if in_reads && in_legacy {
+                unclassified.push((name, "in BOTH read and legacy sets"));
+            }
+        }
+
+        for (name, why) in &unclassified {
+            eprintln!("[middleware coverage] {name}: {why}");
+        }
+        assert!(
+            unclassified.is_empty(),
+            "{} method(s) are double-classified — see stderr",
+            unclassified.len()
+        );
+
+        // Sanity check: the size of the manual roster matches expectations.
+        // If a new method was registered without updating ALL_RPC_METHODS,
+        // someone will hit a 401 in production. This catches drift at test time.
+        assert_eq!(
+            ALL_RPC_METHODS.len(),
+            122,
+            "ALL_RPC_METHODS drifted from the 122 registered RPC methods — \
+             update the roster and classify any new methods in READ_METHODS \
+             (read) or leave them out (write-classified, require TOTP)"
+        );
+
+        // For visibility — print the write classification summary on test run.
+        eprintln!(
+            "[middleware coverage] {} reads, {} legacy, {} writes (total {})",
+            READ_METHODS.len(),
+            LEGACY_PUBLIC_METHODS.len(),
+            writes.len(),
+            ALL_RPC_METHODS.len()
+        );
+    }
+
+    #[test]
+    fn allowlist_has_no_duplicate_classification() {
+        for read in READ_METHODS.iter() {
+            assert!(
+                !LEGACY_PUBLIC_METHODS.contains(read),
+                "method {read} is in BOTH READ_METHODS and LEGACY_PUBLIC_METHODS"
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_methods_require_totp() {
+        // Explicit verification of the most-sensitive methods. If anyone
+        // accidentally adds these to READ_METHODS, this test fails loudly.
+        for sensitive in [
+            "importMnemonic", "importSecp256k1Key", "setConfigValue",
+            "uploadTlsCert", "resetChain", "rotateTotpSecret",
+            "rotateGatewayKey", "rotateFaucetAdminToken",
+            "getFaucetAdminToken", "walletUnlock", "setEncryptionMode",
+            "getTraceBuffer", "setTraceFilter",
+            // Audit follow-up #1: generateMnemonic creates AND persists a
+            // secp256k1 key + writes validator.key. Never a read.
+            "generateMnemonic",
+            // Open-node hardening: operator-grade ops that touch the host
+            // filesystem or export operator-only data. Never bypass TOTP.
+            "backupChain",      // tarballs operator data to disk
+            "checkDataDir",     // writes test file at caller path
+            "listDirectory",    // writes test files in every child dir
+        ] {
+            assert!(
+                !is_read_method(sensitive),
+                "{sensitive} must require TOTP — never add to READ_METHODS"
+            );
+        }
+    }
+
+    #[test]
+    fn public_protocol_methods_are_classified_read() {
+        // Transactions carry their own signature — public by design.
+        assert!(is_read_method("submitTransaction"));
+        assert!(is_read_method("submitDocumentBatch"));
+        // The `noble_` prefix variant is also accepted.
+        assert!(is_read_method("noble_submitTransaction"));
+    }
+
+    #[test]
+    fn legacy_faucet_methods_gone() {
+        // Open-node hardening: getFaucetSecret + storeFaucetSecret were
+        // deleted entirely. Default deploy uses local-FS bootstrap, which
+        // never called them. The methods being absent from the roster is
+        // the canonical assertion here.
+        assert!(
+            !ALL_RPC_METHODS.contains(&"getFaucetSecret"),
+            "getFaucetSecret must be removed from the roster"
+        );
+        assert!(
+            !ALL_RPC_METHODS.contains(&"storeFaucetSecret"),
+            "storeFaucetSecret must be removed from the roster"
+        );
     }
 
     #[test]

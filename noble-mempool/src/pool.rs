@@ -24,10 +24,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use noble_core::{
-    OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM, PROTOCOL_VERSION,
+    OutPoint, Transaction, MAX_TX_SIZE, META_KEY_PREV_CHECKSUM,
     wire::WireFormat,
 };
-use noble_crypto::{is_recognized_scheme, Hash256};
+use noble_crypto::Hash256;
 
 use crate::error::MempoolError;
 use crate::sigcache::SigCache;
@@ -517,29 +517,34 @@ impl Mempool {
             }
         }
 
-        // Step 3: Version check
-        tracing::trace!("mempool step 3: version check");
-        if tx.version != PROTOCOL_VERSION {
-            return Err(MempoolError::UnrecognizedVersion(tx.version));
-        }
-
-        // Step 4: Structural validation (T1-T5, T8-T10 — everything except sigs and fee)
-        tracing::trace!("mempool step 4: structural validation");
-        self.validate_structure(tx)?;
-
-        // Step 5: Signature cache lookup
-        tracing::trace!("mempool step 5: signature cache lookup");
-        let sigs_verified = self.sig_cache.contains(&tx_id);
-
-        // Step 6: Signature verification (skip if cached)
-        tracing::trace!(
-            "mempool step 6: signature verification (cached={})",
-            sigs_verified
-        );
-        if !sigs_verified {
-            self.verify_signatures(tx)?;
-            self.sig_cache.insert(tx_id);
-        }
+        // Step 3-6: Full stateless validation via the shared core validator.
+        //
+        // Audit follow-up: mempool admission now runs the SAME stateless
+        // checks as block validation — T1 size/counts, T2 version, T4
+        // timestamp skew, T5 issuer scheme, T6/T7 signatures, T8 metadata,
+        // T10 tx_id, T15 duplicate inputs in same tx, T29-T32 type-specific
+        // metadata, T-EXPIRY (RealTime). Closes the cheap-flood vector
+        // where adversaries could admit signed-but-invalid txs that only
+        // failed at block-validation time.
+        //
+        // Stateful checks (T11 fee, UTXO existence, double-spend across
+        // mempool, maturity) remain below — they are NOT in noble_core's
+        // stateless `validate_transaction`.
+        tracing::trace!("mempool steps 3-6: stateless validation via noble_core");
+        let validation_ctx = noble_core::TxValidationContext {
+            chain_id: self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed),
+            // RealTime is the ONLY correct context for live mempool admission.
+            // Historical would relax the T4 skew check, which is wrong here.
+            time_context: noble_core::TimeContext::RealTime {
+                wall_clock: current_time,
+            },
+            chain_height,
+        };
+        noble_core::validate_transaction(tx, &tx_id, &validation_ctx)
+            .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
+        // Track signature verification for sig_cache so future re-admissions
+        // (after eviction/expiry) skip the heavy crypto when possible.
+        self.sig_cache.insert(tx_id);
 
         // Step 6.5: UTXO existence + double-spend check
         tracing::trace!("mempool step 6.5: UTXO validation");
@@ -751,52 +756,11 @@ impl Mempool {
     }
 
     // --- Internal helpers ---
-
-    fn validate_structure(&self, tx: &Transaction) -> Result<(), MempoolError> {
-        // T5: Issuer scheme recognized
-        if !is_recognized_scheme(tx.issuer_sig.scheme_id) {
-            return Err(MempoolError::StructuralValidation(format!(
-                "unrecognized issuer scheme {:#04x}",
-                tx.issuer_sig.scheme_id
-            )));
-        }
-
-        // T7 prereq: Additional sig schemes recognized
-        for (i, sig) in tx.additional_sigs.iter().enumerate() {
-            if !is_recognized_scheme(sig.scheme_id) {
-                return Err(MempoolError::StructuralValidation(format!(
-                    "additional sig {} has unrecognized scheme {:#04x}",
-                    i, sig.scheme_id
-                )));
-            }
-        }
-
-        // T8+T9: Metadata validation
-        noble_core::validate_metadata(&tx.metadata)
-            .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
-
-        Ok(())
-    }
-
-    fn verify_signatures(&self, tx: &Transaction) -> Result<(), MempoolError> {
-        // AUD3-D7: Chain-aware signing message prevents cross-chain replay.
-        let signing_msg = tx
-            .compute_signing_message_for_chain(self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed))
-            .map_err(|e| MempoolError::Internal(e.to_string()))?;
-
-        // T6: Issuer signature
-        tx.issuer_sig
-            .verify_standalone(&signing_msg)
-            .map_err(|e| MempoolError::SignatureInvalid(format!("issuer: {e}")))?;
-
-        // T7: Additional signatures
-        for (i, sig) in tx.additional_sigs.iter().enumerate() {
-            sig.verify_standalone(&signing_msg)
-                .map_err(|e| MempoolError::SignatureInvalid(format!("additional sig {i}: {e}")))?;
-        }
-
-        Ok(())
-    }
+    //
+    // The previous `validate_structure` and `verify_signatures` helpers were
+    // removed: their work is now done by `noble_core::validate_transaction`
+    // (called from `admit_with_size`), which runs the full stateless pass
+    // including the metadata and signature checks they implemented.
 
     // Fee rate is checked at admission time (step 7) against MIN_RELAY_FEE_RATE.
     // No dynamic fee scaling — the market decides via fee rate competition.
@@ -1048,17 +1012,139 @@ mod tests {
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
-    // --- Step 3: Version check ---
+    // --- Step 3-6: noble_core stateless validation (audit follow-up) ---
 
     #[test]
     fn step3_reject_bad_version() {
+        // After the audit fix, the version check is part of noble_core::
+        // validate_transaction. The error becomes StructuralValidation with
+        // the version number in the message instead of the dedicated
+        // UnrecognizedVersion variant.
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = secp256k1::generate_keypair();
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.version = 99;
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        assert!(matches!(result, Err(MempoolError::UnrecognizedVersion(99))));
+        match result {
+            Err(MempoolError::StructuralValidation(msg)) => {
+                assert!(msg.contains("99") || msg.to_lowercase().contains("version"),
+                    "expected version-related error, got: {msg}");
+            }
+            other => panic!("expected StructuralValidation, got {other:?}"),
+        }
+    }
+
+    // === Audit follow-up: mempool admission == block validation ===
+    //
+    // Six regression tests guarding the unification: each constructs a tx
+    // that would be rejected at block validation, and asserts mempool
+    // admission rejects it at the same gate — not later, at proposal time.
+    //
+    // All use chain_height=100 to bypass the unrelated COINBASE_MATURITY
+    // check on the test-fixture UTXO (creation_height=0); the focus is
+    // on the new stateless validators.
+
+    #[test]
+    fn audit_unknown_tx_type_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        tx.tx_type = 0xFF; // unknown
+        // Re-sign with new tx_type (signing payload changes)
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "unknown tx_type 0xFF must be rejected at admission, got {result:?}");
+    }
+
+    #[test]
+    fn audit_future_timestamp_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        // Set tx.timestamp far in the future relative to current_time.
+        let current_time: u64 = 1_700_000_000;
+        tx.timestamp = current_time + noble_core::MAX_TX_TIMESTAMP_SKEW + 100;
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, current_time, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "future timestamp must be rejected at admission, got {result:?}");
+    }
+
+    #[test]
+    fn audit_past_timestamp_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        let current_time: u64 = 1_700_000_000;
+        tx.timestamp = current_time
+            .saturating_sub(noble_core::MAX_TX_TIMESTAMP_SKEW)
+            .saturating_sub(100);
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, current_time, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "stale timestamp must be rejected at admission, got {result:?}");
+    }
+
+    #[test]
+    fn audit_duplicate_inputs_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        // Add a SECOND copy of the same input outpoint.
+        let dup = tx.inputs[0].prev_output.clone();
+        tx.inputs.push(TxIn { prev_output: dup });
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "duplicate inputs must be rejected at admission, got {result:?}");
+    }
+
+    #[test]
+    fn audit_locked_tx_missing_metadata_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        tx.tx_type = noble_core::TX_TYPE_LOCKED; // 0x06
+        // Intentionally omit locked:checksum / locked:salt / locked:nonce.
+        tx.metadata.clear();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "locked tx without required metadata must be rejected, got {result:?}");
+    }
+
+    #[test]
+    fn audit_unlocking_tx_missing_metadata_rejected() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
+        tx.tx_type = noble_core::TX_TYPE_UNLOCKING; // 0x07
+        // No unlock:txid / unlock:password metadata.
+        tx.metadata.clear();
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 100);
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+            "unlocking tx without required metadata must be rejected, got {result:?}");
     }
 
     // --- Step 4: Structural validation ---

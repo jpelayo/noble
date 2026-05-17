@@ -8,6 +8,7 @@ pub mod error;
 pub mod gatekeeper;
 pub mod ip_filter;
 pub mod middleware;
+pub mod peer_addr;
 pub mod rate_limit;
 pub mod rpc_metrics;
 pub mod state;

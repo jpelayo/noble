@@ -10,6 +10,7 @@
 //! Auto-detects the connected chain via `noble_getNodeInfo`.
 //! Rate limits: 1 request per IP per 24h, 1 request per address per 7d, daily cap.
 
+pub mod admin_auth;
 pub mod db;
 pub mod handlers;
 pub mod rpc_client;
@@ -187,6 +188,154 @@ struct Cli {
     /// Hex-encoded 32-byte chain_meta for decrypting Noble-envelope TLS key files.
     #[arg(long)]
     chain_meta: Option<String>,
+
+    /// Path to the noble-node's data directory for local-FS secret bootstrap.
+    /// When set, the faucet reads chain_meta + faucet passphrase + admin token
+    /// directly from the node's on-disk keystore instead of fetching them over
+    /// JSON-RPC. Eliminates the cross-process secret boundary that goes over
+    /// loopback HTTPS today.
+    ///
+    /// Requires the faucet process to have read access to:
+    ///   <node_data_dir>/.chain_meta
+    ///   <node_data_dir>/keystore.noble
+    ///
+    /// Hard-fails at startup if either file is missing or unreadable — no
+    /// silent fallback to RPC.
+    ///
+    /// Also reads `NOBLE_NODE_DATA_DIR` env var (CLI flag takes precedence).
+    #[arg(long)]
+    node_data_dir: Option<PathBuf>,
+}
+
+/// Secrets fetched from the node's on-disk keystore (Group A local-FS bootstrap).
+struct LocalSecrets {
+    passphrase: String,
+    chain_meta_hex: String,
+    admin_token_hex: Option<String>,
+}
+
+/// Read faucet passphrase + admin token directly from the node's keystore.
+/// Replaces RPC-based handoff in noble_getFaucetSecret / noble_getFaucetAdminToken.
+///
+/// Reuses the same noble-wallet + noble-crypto helpers the node uses, so the
+/// decrypt path is bit-identical. Hard-fails on any error — caller should
+/// `eprintln + std::process::exit(1)` on Err.
+fn bootstrap_via_local_fs(
+    node_data_dir: &std::path::Path,
+) -> Result<LocalSecrets, String> {
+    use noble_wallet::KeyStore;
+
+    if !node_data_dir.is_dir() {
+        return Err(format!(
+            "--node-data-dir {} is not an existing directory",
+            node_data_dir.display()
+        ));
+    }
+
+    // 1. Read chain_meta. Use "automatic" encryption mode — manual mode is
+    //    explicitly out of scope for the local-FS path (see plan, Open
+    //    Question §). Operators on manual mode get a clear hint to use the
+    //    RPC fallback instead.
+    let chain_meta = noble_crypto::file_encrypt::load_chain_meta(
+        node_data_dir,
+        "automatic",
+        None,
+    )
+    .map_err(|e| format!(
+        "failed to read chain_meta from {}: {e}. \
+         If encryption_mode=\"manual\" is set on the node, omit --node-data-dir \
+         and use the legacy RPC bootstrap path instead.",
+        node_data_dir.display()
+    ))?;
+
+    // 2. Open the node's keystore.
+    let keystore_path = node_data_dir.join("keystore.noble");
+    let mut ks = KeyStore::open(&keystore_path, &chain_meta).map_err(|e| {
+        format!("failed to open node keystore at {}: {e}", keystore_path.display())
+    })?;
+    let wallet_pass = hex::encode(
+        noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
+    );
+    ks.unlock(&wallet_pass)
+        .map_err(|e| format!("failed to unlock node keystore: {e}"))?;
+
+    // 3. Extract the faucet passphrase (must be present — node-side has
+    //    already bootstrapped it via the prior --passphrase / RPC path).
+    let passphrase_bytes = ks
+        .get_raw(noble_crypto::SCHEME_FAUCET_PASSPHRASE)
+        .map_err(|e| format!(
+            "faucet passphrase not present in node keystore ({e}). \
+             Has the faucet been bootstrapped on this node before? \
+             Run once with the legacy RPC path to generate it, then switch back."
+        ))?;
+    let passphrase = String::from_utf8(passphrase_bytes)
+        .map_err(|e| format!("faucet passphrase in keystore is not valid UTF-8: {e}"))?;
+
+    // 4. Extract the admin token if present. Format is
+    //    [8-byte LE u64 timestamp][32 raw token bytes] (Tier 2 plan §1).
+    //    Returns None if not yet provisioned (node lazily generates on first
+    //    getFaucetAdminToken call); the AdminAuthLayer will refuse with 503
+    //    until the node generates and the next refresh tick picks it up.
+    let admin_token_hex = match ks.get_raw(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN) {
+        Ok(bytes) if bytes.len() == 40 => Some(hex::encode(&bytes[8..])),
+        Ok(other) => {
+            tracing::warn!(
+                "admin token in keystore has unexpected length ({} bytes) — \
+                 ignoring; node will regenerate on next getFaucetAdminToken call",
+                other.len()
+            );
+            None
+        }
+        Err(_) => None,
+    };
+
+    Ok(LocalSecrets {
+        passphrase,
+        chain_meta_hex: hex::encode(chain_meta),
+        admin_token_hex,
+    })
+}
+
+/// SHA-256-based fingerprint used to identify a token in logs without
+/// leaking the token itself. Matches the node-side fingerprint
+/// computation in `noble-api/src/methods/node.rs::faucet_admin_token_fingerprint`.
+fn admin_auth_fingerprint(token_hex: &str) -> String {
+    let digest = noble_crypto::sha256(token_hex.as_bytes());
+    hex::encode(&digest.as_bytes()[..4])
+}
+
+/// Re-read the admin token from the node's on-disk keystore. Used by the
+/// local-FS refresh path when the keystore.noble file mtime changes.
+/// Returns `Ok(Some(token_hex))` when the token is present, `Ok(None)` when
+/// the keystore parsed cleanly but the token entry is absent (node hasn't
+/// bootstrapped it yet), and `Err` on any I/O / decrypt failure.
+fn refresh_admin_token_from_disk(
+    node_data_dir: &std::path::Path,
+    chain_meta_hex: &str,
+) -> Result<Option<String>, String> {
+    use noble_wallet::KeyStore;
+
+    let chain_meta_bytes = hex::decode(chain_meta_hex)
+        .map_err(|e| format!("cached chain_meta is not valid hex: {e}"))?;
+    let chain_meta: [u8; 32] = chain_meta_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "cached chain_meta is not 32 bytes".to_string())?;
+
+    let keystore_path = node_data_dir.join("keystore.noble");
+    let mut ks = KeyStore::open(&keystore_path, &chain_meta)
+        .map_err(|e| format!("open keystore: {e}"))?;
+    let wallet_pass = hex::encode(
+        noble_crypto::file_encrypt::derive_wallet_key(&chain_meta),
+    );
+    ks.unlock(&wallet_pass)
+        .map_err(|e| format!("unlock keystore: {e}"))?;
+
+    match ks.get_raw(noble_crypto::SCHEME_FAUCET_ADMIN_TOKEN) {
+        Ok(bytes) if bytes.len() == 40 => Ok(Some(hex::encode(&bytes[8..]))),
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
 }
 
 #[tokio::main]
@@ -196,7 +345,15 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // CLI flag takes precedence over env var. Only resolve env when flag absent.
+    if cli.node_data_dir.is_none() {
+        if let Ok(s) = std::env::var("NOBLE_NODE_DATA_DIR") {
+            if !s.is_empty() {
+                cli.node_data_dir = Some(PathBuf::from(s));
+            }
+        }
+    }
 
     // Resolve paths using the canonical directory resolver (noble.toml → platform default).
     let base_dir = noble_core::paths::resolve_data_dir(std::path::Path::new(""));
@@ -208,52 +365,70 @@ async fn main() {
         .expect("Failed to create RPC client (check URL scheme)");
 
     // Resolve passphrase via RPC or CLI fallback.
-    // Check if a keystore exists — either old directory format or new .noble file format.
-    let ks_noble_file = keystore_dir.with_extension("noble");
-    let keystore_is_empty = !ks_noble_file.exists()
-        && (!keystore_dir.exists()
-            || std::fs::read_dir(&keystore_dir).map(|mut d| d.next().is_none()).unwrap_or(true));
+    // Faucet keystore existence: retained for legacy diagnostics. The
+    // legacy `keystore_is_empty` branch was removed alongside the
+    // getFaucetSecret RPC.
+    let _ks_noble_file = keystore_dir.with_extension("noble");
 
-    // Priority: --passphrase CLI > env var > RPC getFaucetSecret > generate new (first boot)
-    // Also capture chain_meta from RPC for TLS key decryption.
-    let mut rpc_chain_meta: Option<String> = None;
+    // ── Local-FS bootstrap (Group A) ─────────────────────────────────
+    // If --node-data-dir is set, read all secrets directly from the node's
+    // on-disk keystore. Eliminates the RPC handoff for chain_meta + passphrase
+    // + admin token — narrows the cross-process boundary to local filesystem
+    // permissions, which already chmod 0600 the relevant files.
+    let local_secrets: Option<LocalSecrets> = if let Some(dir) = &cli.node_data_dir {
+        match bootstrap_via_local_fs(dir) {
+            Ok(s) => {
+                tracing::info!(
+                    node_data_dir = %dir.display(),
+                    "Local-FS bootstrap: chain_meta + passphrase{} loaded from disk; RPC handoff bypassed",
+                    if s.admin_token_hex.is_some() { " + admin token" } else { "" }
+                );
+                Some(s)
+            }
+            Err(e) => {
+                tracing::error!("Local-FS bootstrap failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::warn!(
+            task = "faucet_secrets",
+            "Bootstrapping via RPC — co-deploy with --node-data-dir (or set \
+             NOBLE_NODE_DATA_DIR) for a tighter cross-process secret boundary. \
+             This RPC handoff path will be removed in a future release."
+        );
+        None
+    };
 
-    let (passphrase, is_first_boot) = if let Some(p) = cli.passphrase.clone() {
+    // Priority: local-FS > --passphrase CLI > env var > error (legacy RPC path deleted)
+    // Also capture chain_meta from local-FS for TLS key decryption.
+    let rpc_chain_meta: Option<String> = local_secrets
+        .as_ref()
+        .map(|s| s.chain_meta_hex.clone());
+
+    let (passphrase, is_first_boot) = if let Some(s) = &local_secrets {
+        (s.passphrase.clone(), false)
+    } else if let Some(p) = cli.passphrase.clone() {
         (p, false)
     } else if let Ok(p) = std::env::var("NOBLE_FAUCET_PASSPHRASE") {
         (p, false)
     } else {
         // Try to retrieve passphrase + chain_meta from node via RPC.
-        match rpc.get_faucet_secret().await {
-            Ok(resp) => {
-                rpc_chain_meta = Some(resp.chain_meta);
-                if let Some(p) = resp.passphrase {
-                    tracing::info!("Faucet passphrase retrieved from node keystore via RPC");
-                    (p, false)
-                } else if keystore_is_empty {
-                    // Node has no stored passphrase — first boot, generate one.
-                    let entropy = format!(
-                        "{}:{}:{}",
-                        std::process::id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos(),
-                        std::env::current_exe().unwrap_or_default().display(),
-                    );
-                    let rng_bytes = noble_crypto::sha256(entropy.as_bytes());
-                    (hex::encode(rng_bytes.as_bytes()), true)
-                } else {
-                    tracing::error!("Faucet keystore exists but node has no stored passphrase. Delete faucet-keystore to re-generate.");
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Cannot reach node RPC to get faucet secret: {e}");
-                std::process::exit(1);
-            }
-        }
+        // Legacy `getFaucetSecret` was deleted (open-node hardening). The
+        // faucet now bootstraps via `--node-data-dir` and reads chain_meta +
+        // passphrase + admin token directly from the node's keystore on disk.
+        // Operators without `--node-data-dir` must either pass `--passphrase`
+        // explicitly or set NOBLE_FAUCET_PASSPHRASE.
+        tracing::error!(
+            "Cannot bootstrap faucet without --node-data-dir, --passphrase, or NOBLE_FAUCET_PASSPHRASE.\n\
+             Default deploy: ensure noble-node starts the faucet with --node-data-dir set\n\
+             (this happens automatically when faucet.server_enabled = true in noble.toml).\n\
+             Manual deploy: pass --node-data-dir=<path-to-node-data> to noble-faucet."
+        );
+        std::process::exit(1);
     };
+    // chain_meta retained for backwards compat with TLS key decryption below.
+    let _ = &rpc_chain_meta;
 
     // Get chain_id from node for correct signing message computation.
     let chain_id = rpc.get_node_info().await
@@ -269,33 +444,53 @@ async fn main() {
             Ok(w) => {
                 tracing::info!("Faucet wallet address: {}", w.address());
 
-                // Always report the faucet address to the node so the GUI can display it.
-                // On first boot, also store the passphrase (MUST succeed or the keystore is orphaned).
-                if is_first_boot {
-                    tracing::info!("First boot — storing faucet passphrase + address in node keystore via RPC");
-                    let mut stored = false;
-                    for attempt in 1..=3 {
-                        match rpc.store_faucet_secret(&passphrase, Some(&w.address())).await {
-                            Ok(()) => {
-                                tracing::info!("Faucet passphrase + address stored in node keystore");
-                                stored = true;
-                                break;
+                // Address propagation to the node:
+                //   • Local-FS mode (--node-data-dir set): write the address to
+                //     <node_data_dir>/faucet-address.txt for the node to read.
+                //     No RPC call, no secret on the wire — the address isn't
+                //     secret anyway (it's where coins go).
+                //   • Legacy mode (RPC bootstrap): fall back to storeFaucetSecret
+                //     which sends BOTH passphrase and address. Retained only for
+                //     pre-Group 4 faucet binaries; will be removed in a future PR.
+                if let Some(ref node_dir) = cli.node_data_dir {
+                    let addr_path = node_dir.join("faucet-address.txt");
+                    let tmp_path = node_dir.join("faucet-address.txt.tmp");
+                    let addr_text = format!("{}\n", w.address());
+                    match std::fs::write(&tmp_path, addr_text.as_bytes()) {
+                        Ok(_) => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &tmp_path,
+                                    std::fs::Permissions::from_mode(0o644),
+                                );
                             }
-                            Err(e) => {
-                                tracing::warn!("Attempt {attempt}/3 — failed to store faucet secret: {e}");
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            match std::fs::rename(&tmp_path, &addr_path) {
+                                Ok(_) => tracing::info!(
+                                    "Faucet address written to {} (local-FS mode)",
+                                    addr_path.display()
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "Failed to rename faucet-address.txt: {e} — node will not see updated address until next boot"
+                                ),
                             }
                         }
-                    }
-                    if !stored {
-                        tracing::error!("FATAL: Could not store faucet passphrase after 3 attempts. Exiting to prevent orphaned keystore.");
-                        std::process::exit(1);
+                        Err(e) => tracing::warn!(
+                            "Failed to write faucet-address.txt at {}: {e}",
+                            tmp_path.display()
+                        ),
                     }
                 } else {
-                    // Subsequent boot: passphrase already stored, just update the address.
-                    if let Err(e) = rpc.store_faucet_secret(&passphrase, Some(&w.address())).await {
-                        tracing::warn!("Failed to update faucet address on node: {e}");
-                    }
+                    // Legacy mode (no --node-data-dir) lost its address-propagation
+                    // path with the deletion of storeFaucetSecret. Address visible
+                    // in the dashboard requires the file-write path above.
+                    tracing::warn!(
+                        "No --node-data-dir set — faucet address will not propagate to node \
+                         dashboard. Address: {}",
+                        w.address()
+                    );
+                    let _ = is_first_boot;
                 }
 
                 Some(w)
@@ -348,24 +543,176 @@ async fn main() {
         wallet: faucet_wallet,
     });
 
-    // CORS: allow any origin for the faucet (public service).
-    let cors = tower_http::cors::CorsLayer::permissive();
+    // ── Admin token: cache + refresh ──
+    // Token is owned by the node (keystore scheme 0x86), visible/rotatable in
+    // the node GUI's Faucet settings panel. The faucet binary just consumes
+    // it. Cache starts empty; admin endpoint returns 503 until populated
+    // (secure-by-default: refuse rather than serve unauthenticated).
+    //
+    // Two refresh sources, chosen at boot:
+    //   • Local-FS  (--node-data-dir set) — watch keystore.noble mtime, re-read
+    //     on change. Zero RPC traffic, no secret on the wire.
+    //   • RPC       (legacy)              — poll noble_getFaucetAdminToken every
+    //     60 s. Kept for back-compat during the Group A migration window.
+    let admin_token_cache: admin_auth::AdminTokenCache =
+        std::sync::Arc::new(std::sync::RwLock::new(None));
+
+    // Initial seed: local-FS bootstrap may have grabbed the token already.
+    if let Some(s) = &local_secrets {
+        if let Some(tok) = &s.admin_token_hex {
+            tracing::info!(
+                task = "faucet_admin",
+                fingerprint = %admin_auth_fingerprint(tok),
+                "admin token loaded from node keystore (local-FS)"
+            );
+            if let Ok(mut w) = admin_token_cache.write() {
+                *w = Some(tok.clone());
+            }
+        } else {
+            tracing::info!(
+                task = "faucet_admin",
+                "admin token not yet present in node keystore — will appear after \
+                 first noble_getFaucetAdminToken call on the node side; refresh \
+                 task will pick it up"
+            );
+        }
+    } else {
+        // Legacy RPC fetch at boot.
+        match state.rpc.get_faucet_admin_token().await {
+            Ok(resp) => {
+                tracing::info!(
+                    task = "faucet_admin",
+                    fingerprint = %resp.fingerprint,
+                    "admin token loaded from node (RPC)"
+                );
+                if let Ok(mut w) = admin_token_cache.write() {
+                    *w = Some(resp.token);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task = "faucet_admin",
+                    "could not fetch admin token from node at boot ({e}) — admin endpoints will return 503 until refresh succeeds"
+                );
+            }
+        }
+    }
+
+    // Refresh task: source depends on bootstrap mode.
+    {
+        let cache_clone = admin_token_cache.clone();
+        let state_clone = state.clone();
+        let node_data_dir = cli.node_data_dir.clone();
+        let chain_meta_for_refresh = local_secrets
+            .as_ref()
+            .map(|s| s.chain_meta_hex.clone());
+        tokio::spawn(async move {
+            let mut last_fp = String::new();
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // discard the immediate first tick
+
+            if let (Some(dir), Some(chain_meta_hex)) = (node_data_dir, chain_meta_for_refresh) {
+                // ── Local-FS refresh: check mtime, re-read on change ──
+                let keystore_path = dir.join("keystore.noble");
+                let mut last_mtime: Option<std::time::SystemTime> = None;
+                loop {
+                    tick.tick().await;
+                    let mtime = std::fs::metadata(&keystore_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    if mtime == last_mtime {
+                        continue; // no change, skip the re-read
+                    }
+                    last_mtime = mtime;
+                    match refresh_admin_token_from_disk(&dir, &chain_meta_hex) {
+                        Ok(Some(tok)) => {
+                            let fp = admin_auth_fingerprint(&tok);
+                            if fp != last_fp {
+                                tracing::info!(
+                                    task = "faucet_admin",
+                                    fingerprint = %fp,
+                                    "admin token refreshed (local-FS, keystore mtime changed)"
+                                );
+                                last_fp = fp;
+                            }
+                            if let Ok(mut w) = cache_clone.write() {
+                                *w = Some(tok);
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                task = "faucet_admin",
+                                "keystore changed but admin token absent — node has not bootstrapped it yet"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                task = "faucet_admin",
+                                "local-FS admin token refresh failed ({e}) — keeping last good value"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ── Legacy RPC refresh: 60s poll ──
+            loop {
+                tick.tick().await;
+                match state_clone.rpc.get_faucet_admin_token().await {
+                    Ok(resp) => {
+                        if resp.fingerprint != last_fp {
+                            tracing::info!(
+                                task = "faucet_admin",
+                                fingerprint = %resp.fingerprint,
+                                "admin token refreshed (RPC)"
+                            );
+                            last_fp = resp.fingerprint;
+                        }
+                        if let Ok(mut w) = cache_clone.write() {
+                            *w = Some(resp.token);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            task = "faucet_admin",
+                            "admin token refresh failed ({e}) — keeping last good value"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    // Public faucet CORS — unchanged (token form must work cross-origin).
+    let public_cors = tower_http::cors::CorsLayer::permissive();
+    // Admin endpoint: same-origin only, no permissive CORS.
+    let admin_cors = tower_http::cors::CorsLayer::new()
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS]);
+    let admin_auth_layer = admin_auth::AdminAuthLayer::new(admin_token_cache.clone());
 
     // Gatekeeper: require `Gatekeeper: noble` header on all requests.
     // Drops drive-by scanners before they touch application logic.
     let gatekeeper = axum::middleware::from_fn(gatekeeper_middleware);
 
-    // Layer order: outermost runs first.
-    // 1. Gatekeeper (reject scanners) — but allows OPTIONS preflight through
-    // 2. CORS (add Access-Control headers for browser clients)
-    // 3. Router (handlers)
-    let mut app = Router::new()
+    // Split routes:
+    //   public  → permissive CORS, no auth (token-distribution form must work
+    //             from any origin)
+    //   admin   → tight CORS + AdminAuthLayer bearer check
+    let public_routes = Router::new()
         .route("/api/faucet", post(handlers::handle_faucet))
         .route("/api/faucet/status", get(handlers::handle_status))
+        .with_state(state.clone())
+        .layer(public_cors);
+    let admin_routes = Router::new()
         .route("/api/faucet/reset-limits", post(handlers::handle_reset_limits))
         .with_state(state)
-        .layer(gatekeeper)
-        .layer(cors);
+        .layer(admin_cors)
+        .layer(admin_auth_layer);
+
+    let mut app = Router::new()
+        .merge(public_routes)
+        .merge(admin_routes)
+        .layer(gatekeeper);
 
     // Optionally serve static web files.
     if let Some(web_dir) = &cli.web_dir {

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use jsonrpsee::server::Server;
 use jsonrpsee::RpcModule;
+use tower::Layer;
 
 use noble_storage::StorageEngine;
 
@@ -194,9 +195,12 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
         let stop_outer = stop_handle.clone();
         tokio::spawn(async move {
             loop {
-                let sock = tokio::select! {
+                // Capture the peer SocketAddr at accept time so the per-connection
+                // PeerAddrLayer can inject it into request extensions. Without it,
+                // IpFilterLayer and RateLimitLayer silently pass every TLS request.
+                let (sock, peer_addr) = tokio::select! {
                     res = listener.accept() => match res {
-                        Ok((s, _)) => s,
+                        Ok(pair) => pair,
                         Err(e) => {
                             tracing::warn!(task = "rpc_server", "accept error: {e}");
                             continue;
@@ -211,7 +215,7 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
                     Err(_) => {
                         tracing::warn!(
                             task = "rpc_server",
-                            "max_connections ({max_connections}) reached — dropping connection"
+                            "max_connections ({max_connections}) reached — dropping connection from {peer_addr}"
                         );
                         drop(sock);
                         continue;
@@ -232,8 +236,11 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
                             return;
                         }
                     };
-                    // Build one TowerService per connection (builder is consumed).
+                    // Build one TowerService per connection (builder is consumed),
+                    // then wrap with PeerAddrLayer so the captured peer SocketAddr
+                    // reaches IpFilterLayer / RateLimitLayer via request extensions.
                     let svc = svc_builder_c.build(module_c, stop_conn.clone());
+                    let svc = crate::peer_addr::PeerAddrLayer::new(peer_addr).layer(svc);
                     let _ = jsonrpsee::server::serve_with_graceful_shutdown(
                         tls,
                         svc,

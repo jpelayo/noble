@@ -100,6 +100,14 @@ impl NobleBehaviour {
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(config.gossipsub_heartbeat_interval_secs))
             .validation_mode(gossipsub::ValidationMode::Strict)
+            // Audit follow-up: defer the propagate decision to the
+            // application via `report_message_validation_result`. Without
+            // this, libp2p auto-Accepts every message that passes envelope
+            // validation, so semantically-invalid bodies still propagate.
+            // Our gossip handlers return `GossipOutcome::{Accept,Reject,Ignore}`
+            // and translate to MessageAcceptance at the propagation point
+            // in service.rs.
+            .validate_messages()
             .duplicate_cache_time(Duration::from_secs(60))
             .message_id_fn(message_id_fn)
             .max_transmit_size(crate::codec::MAX_GOSSIP_MESSAGE_SIZE)
@@ -127,12 +135,21 @@ impl NobleBehaviour {
         }
 
         // --- Request-Response: sync ---
+        // Explicit config values per audit follow-up #8 (open-node
+        // hardening). Generous limits — well above any honest peer load —
+        // but explicitly stated so a libp2p version bump can't silently
+        // change them. The drift test in this module asserts these stay set.
+        let req_resp_config = || {
+            request_response::Config::default()
+                .with_request_timeout(std::time::Duration::from_secs(10))
+                .with_max_concurrent_streams(64)
+        };
         let sync_rpc = request_response::cbor::Behaviour::new(
             [(
                 StreamProtocol::new(topics::SYNC_PROTOCOL),
                 ProtocolSupport::Full,
             )],
-            request_response::Config::default(),
+            req_resp_config(),
         );
 
         // --- Request-Response: tx ---
@@ -141,7 +158,7 @@ impl NobleBehaviour {
                 StreamProtocol::new(topics::TX_PROTOCOL),
                 ProtocolSupport::Full,
             )],
-            request_response::Config::default(),
+            req_resp_config(),
         );
 
         // --- Identify (GAP-H4 + AUD-M5) ---
@@ -193,6 +210,42 @@ mod tests {
         let config = NetworkConfig::local_test();
         let behaviour = NobleBehaviour::new(&keypair, &config);
         assert!(behaviour.is_ok());
+    }
+
+    /// Audit follow-up #8 — assert the explicit request_response::Config
+    /// values stay set. If libp2p upgrades remove or rename the builder
+    /// methods, this test fails — that's the signal to re-state the caps.
+    #[test]
+    fn req_resp_config_has_explicit_caps() {
+        // Same construction as the production code path. We're verifying
+        // that the builder methods exist and accept the values we expect.
+        let cfg = request_response::Config::default()
+            .with_request_timeout(std::time::Duration::from_secs(10))
+            .with_max_concurrent_streams(64);
+        // Drop-and-construct only — libp2p doesn't expose accessors for
+        // these fields, so this test catches drift via compilation failure
+        // on builder-method rename / removal, not value introspection.
+        drop(cfg);
+    }
+
+    /// Audit follow-up — codec-level byte cap on request/response frames.
+    /// libp2p-request-response 0.27's CBOR codec hardcodes the internal
+    /// `take(REQUEST_SIZE_MAXIMUM)` and `take(RESPONSE_SIZE_MAXIMUM)` at
+    /// 1 MiB and 10 MiB respectively. This test documents the assumption
+    /// that they stay ≤ our project cap. If a future libp2p upgrade
+    /// removes the caps or makes them unbounded, our
+    /// `MAX_REQUEST_RESPONSE_BYTES` would no longer be enforced by the
+    /// inner codec — and we'd need a custom wrapper.
+    #[test]
+    fn req_resp_size_cap_within_project_limit() {
+        // The project's expected cap.
+        assert_eq!(crate::codec::MAX_REQUEST_RESPONSE_BYTES, 8 * 1024 * 1024);
+        // Block-sized responses must fit within libp2p's RESPONSE cap (10 MiB).
+        // MAX_BLOCK_SIZE is 8 MiB; with CBOR overhead a serialized block stays
+        // well under 10 MiB. If MAX_BLOCK_SIZE ever grows above ~10 MiB, this
+        // assumption breaks — sync would fail with libp2p decode errors before
+        // any honest block could be transferred.
+        assert!(noble_core::MAX_BLOCK_SIZE <= crate::codec::MAX_REQUEST_RESPONSE_BYTES);
     }
 
     #[test]

@@ -288,22 +288,14 @@ impl NodeRpcClient {
         .await
     }
 
-    /// Retrieve the faucet passphrase and chain_meta from the node's unified keystore.
-    pub async fn get_faucet_secret(&self) -> Result<FaucetSecretResponse, FaucetError> {
-        self.call("noble_getFaucetSecret", &()).await
-    }
-    /// Store the faucet passphrase in the node's unified keystore.
-    pub async fn store_faucet_secret(&self, passphrase: &str, faucet_address: Option<&str>) -> Result<(), FaucetError> {
-        #[derive(Serialize)]
-        struct Params<'a> {
-            passphrase: &'a str,
-            faucet_address: Option<&'a str>,
-        }
-        let _: serde_json::Value = self.call(
-            "noble_storeFaucetSecret",
-            &Params { passphrase, faucet_address },
-        ).await?;
-        Ok(())
+    /// Retrieve the faucet admin bearer token from the node's keystore.
+    /// Required by all faucet HTTP admin endpoints. Legacy entrypoint
+    /// retained for the (now rare) case where `--node-data-dir` is not
+    /// available; default deploy reads the token from the keystore on disk.
+    pub async fn get_faucet_admin_token(
+        &self,
+    ) -> Result<FaucetAdminTokenResponse, FaucetError> {
+        self.call("noble_getFaucetAdminToken", &()).await
     }
 
     async fn call<P: Serialize, R: for<'de> Deserialize<'de>>(
@@ -486,9 +478,10 @@ impl NodeRpcClient {
     }
 }
 
-/// Response from `noble_getFaucetSecret`.
-#[derive(serde::Deserialize)]
-pub struct FaucetSecretResponse {
-    pub passphrase: Option<String>,
-    pub chain_meta: String,
+/// Response from `noble_getFaucetAdminToken` / `noble_rotateFaucetAdminToken`.
+#[derive(serde::Deserialize, Clone)]
+pub struct FaucetAdminTokenResponse {
+    pub token: String,
+    pub created_at_unix: u64,
+    pub fingerprint: String,
 }

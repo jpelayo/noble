@@ -94,6 +94,15 @@ impl IpFilter {
         }
     }
 
+    /// Deny every IP. Fail-safe used by setup mode when allowed_ips
+    /// parsing errors mid-bootstrap — better to lock everyone out than
+    /// silently fall back to allow-all on bad config.
+    pub fn deny_all() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
     /// Whether the allow-list is non-empty (remote access enabled).
     pub fn has_remote_access(&self) -> bool {
         let guard = self.inner.read();

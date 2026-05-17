@@ -447,7 +447,6 @@ export function init(root, ctx) {
       generateBtn.textContent = 'Generating...';
       const result = await rpc.call('noble_generateMnemonic', {
         word_count: 24,
-        passphrase: '',
       });
       generateArea.innerHTML = '';
 
@@ -538,7 +537,6 @@ export function init(root, ctx) {
       try {
         const result = await rpc.call('noble_importMnemonic', {
           mnemonic: words,
-          passphrase: '',
         });
         // Wipe inputs
         wipeInput(textarea);

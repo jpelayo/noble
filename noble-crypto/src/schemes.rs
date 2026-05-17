@@ -27,6 +27,12 @@ pub const SCHEME_TOTP_SECRET: u8 = 0x84;
 /// Faucet keystore passphrase (random 32 bytes, hex-encoded when passed via CLI).
 pub const SCHEME_FAUCET_PASSPHRASE: u8 = 0x85;
 
+/// Faucet admin bearer token (random 32 bytes, hex-encoded to 64 chars).
+/// Owned by the node, displayed/rotated in the Faucet settings panel,
+/// consumed by the faucet binary via `noble_getFaucetAdminToken` RPC.
+/// Gates all faucet HTTP admin endpoints (e.g. `/api/faucet/reset-limits`).
+pub const SCHEME_FAUCET_ADMIN_TOKEN: u8 = 0x86;
+
 /// Check whether a scheme ID is recognized by the protocol (on-chain or internal).
 pub fn is_recognized_scheme(scheme_id: u8) -> bool {
     matches!(
@@ -38,6 +44,7 @@ pub fn is_recognized_scheme(scheme_id: u8) -> bool {
             | SCHEME_TLS_KEY
             | SCHEME_TOTP_SECRET
             | SCHEME_FAUCET_PASSPHRASE
+            | SCHEME_FAUCET_ADMIN_TOKEN
     )
 }
 
@@ -59,13 +66,14 @@ mod tests {
         assert!(is_recognized_scheme(SCHEME_TLS_KEY));
         assert!(is_recognized_scheme(SCHEME_TOTP_SECRET));
         assert!(is_recognized_scheme(SCHEME_FAUCET_PASSPHRASE));
+        assert!(is_recognized_scheme(SCHEME_FAUCET_ADMIN_TOKEN));
     }
 
     #[test]
     fn unrecognized_scheme() {
         assert!(!is_recognized_scheme(0x00));
         assert!(!is_recognized_scheme(0x04));
-        assert!(!is_recognized_scheme(0x86));
+        assert!(!is_recognized_scheme(0x87));
         assert!(!is_recognized_scheme(0xFF));
     }
 

@@ -624,7 +624,6 @@ export function init(root, ctx) {
         generateBtn.textContent = 'Generating...';
         const result = await rpc.call('noble_generateMnemonic', {
           word_count: 24,
-          passphrase: '',
         });
         walletResult = result;
         generateArea.innerHTML = '';
@@ -712,7 +711,7 @@ export function init(root, ctx) {
         const mWords = textarea.value.trim();
         if (!mWords) { resultEl.style.display = 'block'; resultEl.innerHTML = '<span style="color:var(--error)">Please enter your mnemonic phrase.</span>'; return; }
         try {
-          const result = await rpc.call('noble_importMnemonic', { mnemonic: mWords, passphrase: '' });
+          const result = await rpc.call('noble_importMnemonic', { mnemonic: mWords });
           walletResult = result;
           wipeInput(textarea);
 

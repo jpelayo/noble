@@ -1506,24 +1506,23 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         let ip_filter = if setup_mode {
             let gui_scheme = if config.api.tls_enabled { "https" } else { "http" };
-            if config.api.remote_setup {
-                // Operator explicitly opted-in to remote setup access.
-                tracing::warn!(
-                    task = "node_startup",
-                    "SETUP MODE (remote): No identity.json found — GUI/RPC bound to 0.0.0.0 (remote_setup = true)"
-                );
-                tracing::warn!(
-                    task = "node_startup",
-                    "Complete the setup wizard at {gui_scheme}://<this-host>:8785, then restart the node"
-                );
-                Some(noble_api::ip_filter::IpFilter::allow_all())
-            } else if !config.api.allowed_ips.is_empty() {
-                // allowed_ips configured — honour the whitelist during setup mode.
+            // Allowlist takes precedence over remote_setup. If the operator
+            // configured allowed_ips, honour it during setup mode — defense in
+            // depth at zero usability cost (they clearly know their network).
+            // Only fall back to allow_all() when no allowlist is set AND
+            // remote_setup was explicitly requested (the "fresh box, safe env,
+            // no LAN preconfig" case).
+            if !config.api.allowed_ips.is_empty() {
                 match noble_api::ip_filter::IpFilter::new(&config.api.allowed_ips) {
                     Ok(filter) => {
+                        let scope = if config.api.remote_setup {
+                            "SETUP MODE (remote, allowlisted)"
+                        } else {
+                            "SETUP MODE (whitelist)"
+                        };
                         tracing::warn!(
                             task = "node_startup",
-                            "SETUP MODE (whitelist): No identity.json — GUI/RPC restricted to allowed_ips ({} entries)",
+                            "{scope}: No identity.json — GUI/RPC restricted to allowed_ips ({} entries)",
                             config.api.allowed_ips.len()
                         );
                         tracing::warn!(
@@ -1533,17 +1532,32 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         Some(filter)
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::error!(
                             task = "node_startup",
-                            "SETUP MODE: Failed to parse allowed_ips ({e}) — falling back to localhost-only"
+                            "SETUP MODE: Failed to parse allowed_ips ({e}) — refusing to allow remote access"
                         );
                         tracing::warn!(
                             task = "node_startup",
                             "Complete the setup wizard at {gui_scheme}://127.0.0.1:8785, then restart the node"
                         );
-                        None
+                        Some(noble_api::ip_filter::IpFilter::deny_all())
                     }
                 }
+            } else if config.api.remote_setup {
+                // No allowlist, operator opted into remote setup → allow all.
+                // This is the frictionless first-deployment path: fresh box,
+                // safe environment (LAN / Tailscale), no LAN CIDR known upfront.
+                tracing::warn!(
+                    task = "node_startup",
+                    "SETUP MODE (remote, OPEN): No identity.json found — GUI/RPC bound to 0.0.0.0 \
+                     (remote_setup = true, no allowed_ips). Anyone reaching this port can \
+                     complete the setup wizard."
+                );
+                tracing::warn!(
+                    task = "node_startup",
+                    "Complete the setup wizard at {gui_scheme}://<this-host>:8785, then restart the node"
+                );
+                Some(noble_api::ip_filter::IpFilter::allow_all())
             } else {
                 // Default: localhost-only setup. Safe for headless and remote nodes.
                 tracing::warn!(
@@ -2132,14 +2146,25 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Start Prometheus metrics server ---
         if let Some(ref m) = metrics {
-            let metrics_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
-                config
-                    .metrics
-                    .prometheus_addr
-                    .replace("127.0.0.1", "0.0.0.0")
-            } else {
-                config.metrics.prometheus_addr.clone()
-            };
+            // Bind exactly what's configured. Previously this auto-rewrote
+            // 127.0.0.1 → 0.0.0.0 whenever remote access was enabled, silently
+            // exposing unauthenticated metrics. Operators who genuinely want
+            // remote scrape now set the bind address explicitly OR proxy
+            // through nginx OR reach via Tailscale. Default install has metrics
+            // disabled entirely, so this is no-op for most.
+            let metrics_addr = config.metrics.prometheus_addr.clone();
+            let is_non_loopback = metrics_addr.starts_with("0.0.0.0")
+                || metrics_addr.starts_with("[::]")
+                || (!metrics_addr.starts_with("127.")
+                    && !metrics_addr.starts_with("[::1]")
+                    && !metrics_addr.starts_with("localhost"));
+            if is_non_loopback {
+                tracing::warn!(
+                    task = "metrics_startup",
+                    "Prometheus metrics binding to non-loopback address {metrics_addr} — \
+                     UNAUTHENTICATED. Put behind nginx/Tailscale or revert to 127.0.0.1:8787."
+                );
+            }
             match crate::metrics::start_metrics_server(&metrics_addr, m.clone()).await {
                 Ok(_handle) => {
                     tracing::info!(
@@ -2206,6 +2231,38 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // --- Start embedded faucet process if enabled ---
         let mut _faucet_child: Option<tokio::process::Child> = None;
         if self.faucet_config.server_enabled {
+            // Audit follow-up #4: eagerly bootstrap BOTH the faucet
+            // passphrase AND the admin token so they're present in the
+            // keystore BEFORE the faucet subprocess starts reading via
+            // local-FS. Eliminates the legacy RPC handoff entirely:
+            //   • Without passphrase pre-creation, faucet would call the
+            //     legacy storeFaucetSecret (sends passphrase over RPC).
+            //   • Without admin-token pre-creation, admin endpoints
+            //     return 503 until the operator clicks the GUI panel.
+            if let Err(e) = noble_api::methods::node::ensure_faucet_passphrase(
+                &self.wallet_keystore,
+                &self.chain_meta,
+            ) {
+                tracing::warn!(
+                    task = "faucet_passphrase",
+                    "could not pre-create faucet passphrase: {e} — faucet will fall back to legacy bootstrap"
+                );
+            }
+            match noble_api::methods::node::ensure_faucet_admin_token(
+                &self.wallet_keystore,
+                &self.chain_meta,
+            ) {
+                Ok(fingerprint) => tracing::info!(
+                    task = "faucet_admin",
+                    fingerprint = %fingerprint,
+                    "admin token ready in keystore before faucet spawn"
+                ),
+                Err(e) => tracing::warn!(
+                    task = "faucet_admin",
+                    "could not pre-create admin token: {e} — faucet will retry via refresh"
+                ),
+            }
+
             let faucet_port = self.faucet_config.server_port;
             // Find noble-faucet binary next to noble-node.
             let faucet_bin = std::env::current_exe()
@@ -2232,9 +2289,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
                 };
 
-                // Faucet retrieves its own passphrase from the node via RPC
-                // (getFaucetSecret on subsequent boots, storeFaucetSecret on first boot).
-                // No passphrase passed via CLI args or env vars.
+                // Audit follow-up #3: pass --node-data-dir so the faucet
+                // reads chain_meta + passphrase + admin token directly from
+                // the node's keystore via local-FS bootstrap (Group A
+                // Tier 3). No secret crosses the loopback RPC port in the
+                // default deploy.
                 let tls_cert_path = config.storage.data_dir.join("tls-cert.pem");
                 let tls_key_path = config.storage.data_dir.join("tls-key.pem");
 
@@ -2242,10 +2301,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
                     .arg("--rpc-url").arg(&rpc_url)
                     .arg("--db-path").arg(&db_path)
-                    .arg("--keystore-dir").arg(&ks_dir);
+                    .arg("--keystore-dir").arg(&ks_dir)
+                    .arg("--node-data-dir").arg(&config.storage.data_dir);
 
-                // Pass TLS cert + encrypted key path. The faucet gets chain_meta
-                // via the getFaucetSecret RPC to decrypt the key in memory.
+                // Pass TLS cert + encrypted key path. The faucet now gets
+                // chain_meta directly from --node-data-dir's .chain_meta
+                // file to decrypt the key in memory (no RPC roundtrip).
                 if tls_cert_path.exists() && tls_key_path.exists() {
                     cmd.arg("--tls-cert").arg(&tls_cert_path)
                         .arg("--tls-key").arg(&tls_key_path);

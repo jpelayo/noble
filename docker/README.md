@@ -122,6 +122,75 @@ Replace `100.x.x.x` with the host's Tailscale IP. Do **not** bind to
 `0.0.0.0` — that exposes the dashboard publicly, bypassing nginx and
 inviting SSL confusion.
 
+## Faucet as a separate sidecar (advanced, optional)
+
+By default the faucet runs **inside** noble-node when
+`NOBLE_FAUCET_SERVER=true` — same process, same data dir, no
+cross-process secrets. The recipes above assume that mode.
+
+If you want the faucet as a **separate container** (e.g. different
+resource limits, restart policy, or scaling), give the faucet container
+read access to the node's data dir and point it at the node via
+`NOBLE_NODE_DATA_DIR`. The faucet then reads chain_meta, its
+passphrase, and the admin bearer directly from the node's keystore on
+disk — zero RPC handoff for secrets.
+
+Add a second service alongside `noble:` in `docker-compose.yml`:
+
+```yaml
+  faucet:
+    image: noble:latest
+    container_name: noble-faucet
+    restart: unless-stopped
+    depends_on:
+      noble:
+        condition: service_healthy
+    command: ["noble-faucet", "--listen", "0.0.0.0:8786", "--rpc-url", "https://noble:8783"]
+    environment:
+      # Local-FS secret bootstrap — read chain_meta + passphrase + admin
+      # token directly from the node's on-disk keystore. Tighter than the
+      # legacy RPC-based handoff; no secret crosses the wire.
+      NOBLE_NODE_DATA_DIR: /var/lib/noble
+    volumes:
+      # Read-only mount of the node's data dir. The keystore + chain_meta
+      # files are already chmod 0600 on the host side.
+      - noble-data:/var/lib/noble:ro
+      # Faucet keeps its own writable dir for its signing wallet + DB.
+      - faucet-data:/var/lib/noble-faucet
+    networks:
+      - default
+      - proxy
+```
+
+And add the new volume next to `noble-data`:
+
+```yaml
+volumes:
+  noble-data:
+    name: noble-data
+  faucet-data:
+    name: faucet-data
+```
+
+**Why this is better than legacy RPC handoff**:
+- Secrets never traverse the loopback HTTPS port — they're read from
+  files the node already protects with `0600` permissions.
+- Admin token rotation propagates within ~60 s via filesystem mtime
+  watch (no extra RPC traffic).
+- Faucet refuses to operate as an unauthenticated admin surface even
+  if the node briefly becomes unreachable.
+
+**Operational requirement**: the faucet container must run as a UID
+that can read the node's `keystore.noble` and `.chain_meta` (both
+chmod 0600, owned by the node's user). Both containers use UID 10000
+in the noble image, so the read-only mount works out of the box.
+
+**Legacy mode** (without `NOBLE_NODE_DATA_DIR`): the faucet falls back
+to the RPC handoff and logs a one-time `task = "faucet_secrets"` WARN
+on boot. Continues to work; you just lose the secret-on-the-wire
+hardening. The RPC path will be removed in a future release —
+consider this the migration window.
+
 ## Operational one-shots
 
 The entrypoint recognises these as the first argument:

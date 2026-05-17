@@ -2084,26 +2084,28 @@ impl CycleEngine {
         //   - not a duplicate (P0.2)
         //   - peer not banned (handled at the network layer)
 
-        // If we receive a vote for a candidate we haven't seen yet, request
-        // the block from ALL connected peers.  The voter (from_peer) likely
-        // didn't propose the block and may not have it cached.  Only the
-        // proposer has the block in pending_proposals; other peers may have
-        // committed it or received it via gossip.  Broadcasting the request
-        // maximises the chance of actually obtaining the block body before
-        // the cycle boundary.
-        if self.candidate_tracker.get(&vote.candidate_hash).is_none() {
-            outputs.push(CycleIo::RequestBlockFromAll {
-                block_hash: vote.candidate_hash,
-            });
-        }
-
-        // Record the vote (includes signature verification via GAP-C7)
+        // Record the vote (includes signature verification via GAP-C7).
+        // Audit follow-up: verification must precede any side-effects so an
+        // attacker can't trigger block-fetch fanout by forging votes for
+        // arbitrary candidate hashes.
         match self.vote_mgr.record_vote(&from_peer, &vote) {
             Ok(true) => {
                 outputs.push(CycleIo::Log(format!(
                     "recorded vote from peer for candidate {}",
                     self.candidate_label(&vote.candidate_hash)
                 )));
+                // Now (authenticated vote) — if we don't have the candidate
+                // block yet, request it from ALL connected peers. The voter
+                // (from_peer) likely didn't propose the block and may not
+                // have it cached. Only the proposer has the block in
+                // pending_proposals; other peers may have committed it or
+                // received it via gossip. Broadcasting maximises the chance
+                // of obtaining the block body before the cycle boundary.
+                if self.candidate_tracker.get(&vote.candidate_hash).is_none() {
+                    outputs.push(CycleIo::RequestBlockFromAll {
+                        block_hash: vote.candidate_hash,
+                    });
+                }
             }
             Ok(false) => {
                 outputs.push(CycleIo::Log(

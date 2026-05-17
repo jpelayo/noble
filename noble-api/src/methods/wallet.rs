@@ -19,18 +19,23 @@ use crate::types::*;
 #[rpc(server, namespace = "noble")]
 pub trait WalletApi {
     /// Create a new address (key pair) in the wallet.
+    ///
+    /// Noble is a single-operator open node — there's one keystore, owned
+    /// by the operator and auto-unlocked via chain_meta. No per-caller
+    /// password concept exists. Auth for this method is TOTP at the RPC
+    /// boundary; no passphrase parameter.
     #[method(name = "createAddress")]
     async fn create_address(
         &self,
         scheme_id: u8,
-        passphrase: String,
     ) -> Result<CreateAddressResponse, ErrorObjectOwned>;
 
     /// Unlock the wallet for a given timeout (seconds).
+    ///
+    /// Auth is TOTP-only (single-operator architecture). No passphrase parameter.
     #[method(name = "walletUnlock")]
     async fn wallet_unlock(
         &self,
-        passphrase: String,
         timeout_secs: u64,
     ) -> Result<WalletUnlockResponse, ErrorObjectOwned>;
 
@@ -73,29 +78,32 @@ pub trait WalletApi {
     /// Generate a new BIP-39 mnemonic (12 or 24 words) and create a key from it.
     /// Returns the mnemonic phrase and the derived address.
     /// The user MUST back up the mnemonic — it cannot be recovered from the node.
+    ///
+    /// Auth is TOTP-only (single-operator architecture). No passphrase parameter.
     #[method(name = "generateMnemonic")]
     async fn generate_mnemonic(
         &self,
         word_count: Option<u32>,
-        passphrase: String,
     ) -> Result<GenerateMnemonicResponse, ErrorObjectOwned>;
 
     /// Import an existing BIP-39 mnemonic phrase and derive the corresponding key.
     /// If the key already exists, returns it without re-encrypting.
+    ///
+    /// Auth is TOTP-only (single-operator architecture). No passphrase parameter.
     #[method(name = "importMnemonic")]
     async fn import_mnemonic(
         &self,
         mnemonic: String,
-        passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned>;
 
     /// Import a secp256k1 private key (WIF or hex) into the wallet.
     /// Returns the public key and derived Bitcoin address.
+    ///
+    /// Auth is TOTP-only (single-operator architecture). No passphrase parameter.
     #[method(name = "importSecp256k1Key")]
     async fn import_secp256k1_key(
         &self,
         key_input: String,
-        passphrase: String,
     ) -> Result<ImportKeyResponse, ErrorObjectOwned>;
 
     /// List all public keys in the wallet keystore.
@@ -105,13 +113,13 @@ pub trait WalletApi {
     async fn list_addresses(&self) -> Result<ListAddressesResponse, ErrorObjectOwned>;
 
     /// Delete a wallet key from the keystore.
-    /// Requires the wallet passphrase for verification.
     /// Refuses to delete the active gateway key.
+    ///
+    /// Auth is TOTP-only (single-operator architecture). No passphrase parameter.
     #[method(name = "deleteAddress")]
     async fn delete_address(
         &self,
         pubkey_hex: String,
-        passphrase: String,
     ) -> Result<DeleteAddressResponse, ErrorObjectOwned>;
 
     /// Get wallet transaction history.
@@ -155,7 +163,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn create_address(
         &self,
         scheme_id: u8,
-        _passphrase: String,
     ) -> Result<CreateAddressResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
@@ -189,7 +196,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
 
     async fn wallet_unlock(
         &self,
-        _passphrase: String,
         timeout_secs: u64,
     ) -> Result<WalletUnlockResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
@@ -365,7 +371,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn generate_mnemonic(
         &self,
         word_count: Option<u32>,
-        _passphrase: String,
     ) -> Result<GenerateMnemonicResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let wc = word_count.unwrap_or(24) as usize;
@@ -420,7 +425,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn import_secp256k1_key(
         &self,
         key_input: String,
-        _passphrase: String,
     ) -> Result<ImportKeyResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
@@ -497,7 +501,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn import_mnemonic(
         &self,
         mnemonic: String,
-        _passphrase: String,
     ) -> Result<ImportMnemonicResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         let mut keystore = self.wallet_keystore.lock();
@@ -543,7 +546,6 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     async fn delete_address(
         &self,
         pubkey_hex: String,
-        _passphrase: String,
     ) -> Result<DeleteAddressResponse, ErrorObjectOwned> {
         let passphrase = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&self.chain_meta));
         // Parse the public key
@@ -606,8 +608,20 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         }
 
         // Include client-provided addresses (bech32m or hex wire).
+        // Cap at 64 entries (audit follow-up #7 — bounded public reads).
+        // 64 addresses × 256-entry history per address = ~16K txs ceiling,
+        // far above any honest wallet workload.
+        const MAX_CLIENT_ADDRESSES: usize = 64;
         if let Some(extra_addrs) = addresses {
-            for addr_str in &extra_addrs {
+            let total_requested = extra_addrs.len();
+            let capped = &extra_addrs[..total_requested.min(MAX_CLIENT_ADDRESSES)];
+            if total_requested > MAX_CLIENT_ADDRESSES {
+                tracing::debug!(
+                    task = "wallet_txs",
+                    "addresses parameter clamped from {total_requested} to {MAX_CLIENT_ADDRESSES}"
+                );
+            }
+            for addr_str in capped {
                 if let Ok(addr) = crate::types::parse_address(addr_str) {
                     let wire = addr.to_wire_bytes();
                     if !my_wires.contains(&wire) {
@@ -628,10 +642,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let tip_height = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
 
         // Query history from ALL three address variants, deduplicate, sort newest first.
+        // Per-address history cap: 256 (audit follow-up #7). Combined with the
+        // 64-address cap above, the upper bound on tx_id collection per call
+        // is ~16K — generous for any honest wallet, bounded for adversaries.
+        const HISTORY_PER_ADDRESS: u32 = 256;
         let mut seen = std::collections::HashSet::new();
         let mut all_tx_ids: Vec<(noble_crypto::Hash256, u64)> = Vec::new();
         for addr in &all_addrs {
-            let ids = match storage.get_address_history(addr, 0, 1000) {
+            let ids = match storage.get_address_history(addr, 0, HISTORY_PER_ADDRESS) {
                 Ok(ids) => ids,
                 Err(e) => {
                     tracing::warn!(task = "wallet_txs", "address history query failed: {e}");

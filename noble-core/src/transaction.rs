@@ -80,8 +80,13 @@ pub struct Transaction {
 impl Transaction {
     /// Compute the transaction ID: `double_sha256(chain_id_be || wire_bytes(tx))`.
     ///
-    /// Uses the frozen wire format (no serde, no ciborium) for
-    /// architecture-independent determinism.
+    /// Uses the frozen wire format (Rust, no serde, no ciborium) for
+    /// architecture-independent determinism. **This is the consensus
+    /// source of truth** for tx_id derivation — every validator computes
+    /// the same bytes from the same Transaction. The C library in
+    /// `noble-client-libraries/noble-tx-core` mirrors this encoding for
+    /// Apple-side and WRY client tx construction; the two are bound by
+    /// the frozen vectors in `noble-wire/src/vectors.rs`.
     pub fn compute_tx_id(&self, chain_id: u32) -> Result<Hash256, noble_codec::CodecError> {
         use crate::wire::WireFormat;
         let tx_bytes = self.wire_bytes();

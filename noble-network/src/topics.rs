@@ -46,6 +46,24 @@ pub const IDENTIFY_AGENT: &str = "noble-node/0.1.0";
 /// Protocol identifier for Kademlia DHT.
 pub const KAD_PROTOCOL: &str = "/noble/kad/1.0.0";
 
+/// Audit follow-up: the canonical topic for a given gossip message variant.
+/// Enforced at the dispatch site to reject "crossed wires" (e.g. a peer
+/// publishing a BlockAnnounce payload on the vote topic).
+pub fn expected_topic_for(msg: &crate::messages::GossipMessage) -> &'static str {
+    use crate::messages::GossipMessage as G;
+    match msg {
+        G::BlockAnnounce { .. } => TOPIC_BLOCK_ANNOUNCE,
+        G::TxAnnounce { .. } => TOPIC_TX_ANNOUNCE,
+        G::PorVote { .. } => TOPIC_POR_VOTE,
+        G::PeerExchange { .. } => TOPIC_PEER_EXCHANGE,
+        G::NodeAnnounce { .. } => TOPIC_NODE_ANNOUNCE,
+        G::DoubleProposalEvidence { .. }
+        | G::VoteEquivocationEvidence { .. }
+        | G::InvalidBlockEvidence { .. }
+        | G::AnnounceEquivocationEvidence { .. } => TOPIC_EVIDENCE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

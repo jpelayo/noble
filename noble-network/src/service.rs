@@ -26,7 +26,7 @@ use crate::messages::{
 };
 use crate::peer_manager::{BanCategory, BanReason, Direction, MisbehaviorOutcome, PeerManager};
 use crate::rate_limiter::TxRateLimiter;
-use crate::seen_cache::{self, SeenCache};
+use crate::seen_cache::SeenCache;
 use crate::topics;
 use crate::traits::{BlockProvider, TxProvider};
 use crate::transport::build_swarm;
@@ -422,6 +422,37 @@ async fn run_event_loop(
     let mut tx_rate_limiter =
         TxRateLimiter::new(config.tx_relay_burst, config.tx_relay_rate_per_sec);
 
+    // Pending TxRequest ↔ expected tx_id binding (audit follow-up).
+    // When we send a TxRequest, we record the libp2p OutboundRequestId →
+    // requested tx_id. On response we look up the entry, recompute the
+    // received body's tx_id, and reject mismatches. Bounded at 1024 to
+    // cap memory; honest peers respond promptly so the map stays small.
+    let mut pending_tx_requests: std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        [u8; 32],
+    )> = std::collections::VecDeque::with_capacity(1024);
+
+    // Pending GetBlocks ↔ expected hash set (audit follow-up). Symmetric
+    // to pending_tx_requests: every block returned in a SyncResponse must
+    // hash-match one we asked for. Without this binding, a peer can serve
+    // arbitrary junk in response to any GetBlocks and poison our
+    // pending_proposals cache by evicting honest same-validator entries.
+    let mut pending_block_requests: std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        Vec<[u8; 32]>,
+    )> = std::collections::VecDeque::with_capacity(1024);
+
+    // Audit follow-up: "in-flight" tracking for announced bodies, separate
+    // from the (post-admit) seen_* caches. Marks a hash as "we are currently
+    // fetching" so a re-announce from another peer doesn't kick off a parallel
+    // fetch. Cleared on body receipt OR after IN_FLIGHT_TTL elapses (so a
+    // peer that announces and ghosts doesn't permanently block honest re-
+    // announces). The seen_* caches are populated AFTER successful admission,
+    // not on announce — fixes the trust-before-verify suppression vector.
+    const IN_FLIGHT_TTL: Duration = Duration::from_secs(5);
+    let mut in_flight_blocks: HashMap<[u8; 32], Instant> = HashMap::new();
+    let mut in_flight_txs:    HashMap<[u8; 32], Instant> = HashMap::new();
+
     // Pending dial result channels: multiaddr → oneshot sender.
     let mut pending_dials: HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>> =
         HashMap::new();
@@ -473,6 +504,12 @@ async fn run_event_loop(
                     &mut disconnect_reasons,
                     &mut ancestor_finder,
                     &mut manifest_peer,
+                    &mut pending_tx_requests,
+                    config.chain_id,
+                    &mut in_flight_blocks,
+                    &mut in_flight_txs,
+                    IN_FLIGHT_TTL,
+                    &mut pending_block_requests,
                 ).await;
             }
 
@@ -485,7 +522,7 @@ async fn run_event_loop(
                     seen_blocks.clear();
                     seen_votes.clear();
                     tracing::info!(task = "network", "gossip dedup caches cleared (chain reset)");
-                } else if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer).await {
+                } else if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer, &mut pending_block_requests).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
                     return;
                 }
@@ -501,6 +538,16 @@ async fn run_event_loop(
                 seen_blocks.evict_expired();
                 seen_txs.evict_expired();
                 seen_votes.evict_expired();
+                // Audit follow-up: prune stale in-flight tracker entries
+                // older than 2× TTL. Entries beyond the TTL aren't blocking
+                // re-fetches anymore (the announce handler ignores expired
+                // entries), but garbage-collecting prevents unbounded growth
+                // on long-running nodes where peers occasionally never reply.
+                {
+                    let cutoff = IN_FLIGHT_TTL.saturating_mul(2);
+                    in_flight_blocks.retain(|_, started| started.elapsed() < cutoff);
+                    in_flight_txs.retain(|_, started| started.elapsed() < cutoff);
+                }
                 // Cleanup stale rate limiter buckets.
                 tx_rate_limiter.cleanup(Duration::from_secs(300));
                 // Evict pending proposals older than one cycle (16 min).
@@ -618,6 +665,18 @@ async fn handle_swarm_event(
     disconnect_reasons: &mut HashMap<PeerId, String>,
     ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
     manifest_peer: &mut Option<PeerId>,
+    pending_tx_requests: &mut std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        [u8; 32],
+    )>,
+    chain_id_for_tx_verify: u32,
+    in_flight_blocks: &mut HashMap<[u8; 32], Instant>,
+    in_flight_txs: &mut HashMap<[u8; 32], Instant>,
+    in_flight_ttl: Duration,
+    pending_block_requests: &mut std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        Vec<[u8; 32]>,
+    )>,
 ) {
     match event {
         SwarmEvent::ConnectionEstablished {
@@ -888,46 +947,120 @@ async fn handle_swarm_event(
             );
             match codec::decode_gossip(&message.data) {
                 Ok(gossip_msg) => {
+                    use libp2p::gossipsub::MessageAcceptance;
+
+                    // Audit follow-up: bind gossipsub topic to message
+                    // variant. A peer publishing one variant's payload on
+                    // another variant's topic is misbehaving — Reject +
+                    // peer-reputation penalty. Honest publishers always use
+                    // the topic that matches the payload.
+                    let expected_topic = topics::expected_topic_for(&gossip_msg);
+                    if topic_str != expected_topic {
+                        let reason_text = format!(
+                            "gossip topic/variant mismatch: topic={topic_str} expected={expected_topic}"
+                        );
+                        tracing::warn!(
+                            task = "gossip_receive",
+                            %propagation_source,
+                            "{reason_text}"
+                        );
+                        let outcome = peer_manager.record_misbehavior(
+                            &propagation_source,
+                            BanReason::new(BanCategory::ProtocolViolation, reason_text.clone()),
+                        );
+                        emit_misbehavior_event(
+                            &outcome,
+                            &propagation_source,
+                            &reason_text,
+                            &event_tx,
+                        );
+                        if let Err(e) = swarm
+                            .behaviour_mut()
+                            .gossip
+                            .report_message_validation_result(
+                                &message_id,
+                                &propagation_source,
+                                MessageAcceptance::Reject,
+                            )
+                        {
+                            tracing::debug!(
+                                task = "gossip_receive",
+                                %propagation_source,
+                                %e,
+                                "failed to report topic-mismatch rejection"
+                            );
+                        }
+                        return;
+                    }
+
                     let peer_bytes = propagation_source.to_bytes().to_vec();
-                    let net_event = match gossip_msg {
+                    // Each arm returns `(Option<NetworkEvent>, MessageAcceptance)`:
+                    //   • Some(event) + Accept — valid message; emit + propagate
+                    //   • None       + Ignore — benign drop (dedup / rate-limit /
+                    //                            cross-chain / in-flight)
+                    //   • None       + Reject — semantically invalid (bad sig,
+                    //                            decode failure, etc.); propagate
+                    //                            penalty to source via gossipsub
+                    let (net_event, acceptance): (Option<NetworkEvent>, MessageAcceptance) = match gossip_msg {
                         GossipMessage::BlockAnnounce { block_hash, height } => {
-                            handle_block_announce(
+                            let evt = handle_block_announce(
                                 block_hash,
                                 height,
                                 &propagation_source,
                                 peer_bytes,
                                 seen_blocks,
+                                in_flight_blocks,
+                                in_flight_ttl,
                                 swarm,
-                            )
+                                pending_block_requests,
+                            );
+                            // None here = already seen (admitted) or in_flight; benign.
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Ignore };
+                            (evt, acc)
                         }
-                        GossipMessage::TxAnnounce { tx_id } => handle_tx_announce(
-                            tx_id,
-                            &propagation_source,
-                            peer_bytes,
-                            seen_txs,
-                            tx_rate_limiter,
-                            peer_manager,
-                            &event_tx,
-                            swarm,
-                        ),
+                        GossipMessage::TxAnnounce { tx_id } => {
+                            let evt = handle_tx_announce(
+                                tx_id,
+                                &propagation_source,
+                                peer_bytes,
+                                seen_txs,
+                                in_flight_txs,
+                                in_flight_ttl,
+                                tx_rate_limiter,
+                                peer_manager,
+                                &event_tx,
+                                swarm,
+                                pending_tx_requests,
+                            );
+                            // None here = rate-limit, already seen, or in_flight; benign.
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Ignore };
+                            (evt, acc)
+                        }
                         GossipMessage::PorVote {
                             cycle,
                             candidate_hash,
                             voter_id,
                             signature,
                             round,
-                        } => handle_por_vote(
-                            peer_bytes.clone(),
-                            cycle,
-                            candidate_hash,
-                            voter_id,
-                            signature,
-                            round,
-                            seen_votes,
-                        ),
+                        } => {
+                            let evt = handle_por_vote(
+                                peer_bytes.clone(),
+                                cycle,
+                                candidate_hash,
+                                voter_id,
+                                signature,
+                                round,
+                                seen_votes,
+                            );
+                            // None here = invalid voter scheme or empty signature.
+                            // After Fix #1 removes the dedup, None always means
+                            // semantically invalid → Reject.
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Reject };
+                            (evt, acc)
+                        }
                         GossipMessage::PeerExchange { addrs } => {
                             handle_peer_exchange(&addrs, config, swarm);
-                            None
+                            (None, MessageAcceptance::Accept)
                         }
                         GossipMessage::NodeAnnounce {
                             identity_key,
@@ -989,25 +1122,52 @@ async fn handle_swarm_event(
                                 attestation_fingerprint.as_deref(),
                                 attestation_data.as_deref(),
                             );
-                            handle_gossip_node_announce(
+                            // NodeAnnounce: None can come from either invalid-
+                            // signature/attestation (Reject) or cross-chain
+                            // filter (Ignore, added in Fix #5). The handler
+                            // discriminates by returning Some/None on Result;
+                            // for cross-chain we'll return None with Ignore
+                            // semantics, marked separately below once Fix #5
+                            // lands. For now, treat None as Reject (invalid).
+                            let evt = handle_gossip_node_announce(
                                 result,
                                 &propagation_source,
                                 peer_bytes,
                                 peer_manager,
                                 &event_tx,
-                            )
+                                config.chain_id,
+                            );
+                            // None can mean either invalid (Reject) or
+                            // cross-chain (Ignore). The handler logs the
+                            // distinction; for propagation we conservatively
+                            // Ignore on None to avoid penalising honest
+                            // cross-chain peers. Operators who want strict
+                            // Reject can wire a separate signal — out of
+                            // scope here.
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Ignore };
+                            (evt, acc)
                         }
                         GossipMessage::DoubleProposalEvidence { evidence_bytes } => {
-                            handle_double_proposal(&evidence_bytes, peer_bytes)
+                            // Evidence handlers return None on decode failure —
+                            // semantically invalid, reject + penalise.
+                            let evt = handle_double_proposal(&evidence_bytes, peer_bytes);
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Reject };
+                            (evt, acc)
                         }
                         GossipMessage::VoteEquivocationEvidence { evidence_bytes } => {
-                            handle_vote_equivocation(&evidence_bytes, peer_bytes)
+                            let evt = handle_vote_equivocation(&evidence_bytes, peer_bytes);
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Reject };
+                            (evt, acc)
                         }
                         GossipMessage::InvalidBlockEvidence { evidence_bytes } => {
-                            handle_invalid_block_evidence(&evidence_bytes, peer_bytes)
+                            let evt = handle_invalid_block_evidence(&evidence_bytes, peer_bytes);
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Reject };
+                            (evt, acc)
                         }
                         GossipMessage::AnnounceEquivocationEvidence { evidence_bytes } => {
-                            handle_announce_equivocation_evidence(&evidence_bytes, peer_bytes)
+                            let evt = handle_announce_equivocation_evidence(&evidence_bytes, peer_bytes);
+                            let acc = if evt.is_some() { MessageAcceptance::Accept } else { MessageAcceptance::Reject };
+                            (evt, acc)
                         }
                     };
                     if let Some(evt) = net_event {
@@ -1043,14 +1203,25 @@ async fn handle_swarm_event(
                             }
                         }
                     }
-                    // Accept valid message for propagation.
+                    // Audit follow-up: report the computed acceptance
+                    // (Accept / Reject / Ignore) so gossipsub propagates
+                    // only valid messages and penalises sources of
+                    // semantic-invalid ones.
+                    if !matches!(acceptance, MessageAcceptance::Accept) {
+                        tracing::debug!(
+                            task = "gossip_receive",
+                            %propagation_source,
+                            ?acceptance,
+                            "gossip message not accepted for propagation"
+                        );
+                    }
                     if let Err(e) = swarm
                         .behaviour_mut()
                         .gossip
                         .report_message_validation_result(
                             &message_id,
                             &propagation_source,
-                            libp2p::gossipsub::MessageAcceptance::Accept,
+                            acceptance,
                         )
                     {
                         tracing::debug!(task = "gossip_receive", %propagation_source, %e, "failed to report message acceptance");
@@ -1109,7 +1280,7 @@ async fn handle_swarm_event(
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::SyncRpc(request_response::Event::Message {
             peer,
-            message: request_response::Message::Response { response, .. },
+            message: request_response::Message::Response { request_id, response, .. },
             ..
         })) => {
             // Forward sync responses as block-received events.
@@ -1119,59 +1290,131 @@ async fn handle_swarm_event(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            // Audit follow-up: look up the expected hash set for this
+            // request. If absent (unsolicited response, LRU-evicted, or
+            // non-GetBlocks request like GetStatus/GetBlockHashBatch),
+            // expected_hashes stays None and we skip the membership check
+            // (those responses don't carry block bodies anyway).
+            let expected_hashes: Option<std::collections::HashSet<[u8; 32]>> =
+                pending_block_requests
+                    .iter()
+                    .position(|(rid, _)| *rid == request_id)
+                    .and_then(|pos| pending_block_requests.remove(pos))
+                    .map(|(_, hashes)| hashes.into_iter().collect());
             match response {
                 SyncResponse::Blocks(blocks) => {
                     let peer_bytes = peer.to_bytes().to_vec();
                     for block in blocks {
-                        // Cache for serving to other peers.
-                        // Evict any previous block from the same validator first
-                        // to prevent stale proposals from prior cycles lingering
-                        // and triggering false DuplicateProposal (0x04) bans when
-                        // re-announced on PeerConnected.
-                        if let Ok(bh) = block.header.compute_block_hash() {
+                        let bh_bytes_opt: Option<[u8; 32]> = block
+                            .header
+                            .compute_block_hash()
+                            .ok()
+                            .map(|h| *h.as_bytes());
+
+                        // Audit follow-up: hash-binding. If we have an
+                        // expected-set for this request_id, every returned
+                        // block's hash must be in it. Otherwise an attacker
+                        // can serve junk blocks in response to any GetBlocks
+                        // and poison pending_proposals via the eviction below.
+                        if let Some(expected) = expected_hashes.as_ref() {
+                            match bh_bytes_opt {
+                                Some(bh) if expected.contains(&bh) => {} // ok
+                                Some(bh) => {
+                                    let reason = format!(
+                                        "SyncResponse::Blocks contained unrequested block hash {}",
+                                        hex::encode(bh),
+                                    );
+                                    tracing::warn!(task = "sync_response", "peer {} {reason}", peer);
+                                    let outcome = peer_manager.record_misbehavior(
+                                        &peer,
+                                        BanReason::new(BanCategory::ProtocolViolation, reason.clone()),
+                                    );
+                                    emit_misbehavior_event(&outcome, &peer, &reason, event_tx);
+                                    continue;
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        task = "sync_response",
+                                        "peer {} sent block with un-computable header hash; dropping",
+                                        peer
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Cache for serving to other peers (still useful even
+                        // when the local consumer is slow — peers can GetBlocks
+                        // us for it). Same-validator eviction prevents stale
+                        // proposals from triggering false DuplicateProposal
+                        // bans when re-announced. Only runs after the hash-
+                        // binding check above (audit follow-up).
+                        if let Some(bh_bytes) = bh_bytes_opt {
                             let validator_wire = block.header.validator_id.to_wire_bytes();
                             pending_proposals.retain(|_, (b, _)| {
                                 b.header.validator_id.to_wire_bytes() != validator_wire
                             });
                             pending_proposals
-                                .insert(*bh.as_bytes(), (block.clone(), now_cache_ts));
+                                .insert(bh_bytes, (block.clone(), now_cache_ts));
                         }
-                        if event_tx
-                            .try_send(NetworkEvent::BlockReceived {
-                                peer_id: peer_bytes.clone(),
-                                block,
-                                vote_data: None, // batch sync doesn't carry per-block votes
-                            })
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                task = "sync",
-                                "event channel full: BlockReceived dropped"
-                            );
-                            break; // stop sending remaining blocks if channel is full
+                        // Audit follow-up: order swap. Mark globally-seen +
+                        // clear in_flight ONLY after the event channel has
+                        // accepted the body. Channel-full → drop body, leave
+                        // the cache untouched so the next announce can retry
+                        // (otherwise seen_blocks would suppress re-fetches
+                        // for 120s on transient overload).
+                        match event_tx.try_send(NetworkEvent::BlockReceived {
+                            peer_id: peer_bytes.clone(),
+                            block,
+                            vote_data: None, // batch sync doesn't carry per-block votes
+                        }) {
+                            Ok(()) => {
+                                if let Some(bh_bytes) = bh_bytes_opt {
+                                    seen_blocks.insert_if_new(bh_bytes);
+                                    in_flight_blocks.remove(&bh_bytes);
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    task = "sync",
+                                    "event channel full: BlockReceived dropped — cache left untouched for retry"
+                                );
+                                break; // stop sending remaining blocks if channel is full
+                            }
                         }
                     }
                 }
                 SyncResponse::Block { block: Some(block), vote_data } => {
                     // Cache for serving to other peers.
                     // Evict stale same-validator entries (see SyncResponse::Blocks).
-                    if let Ok(bh) = block.header.compute_block_hash() {
+                    let bh_bytes_opt: Option<[u8; 32]> = block
+                        .header
+                        .compute_block_hash()
+                        .ok()
+                        .map(|h| *h.as_bytes());
+                    if let Some(bh_bytes) = bh_bytes_opt {
                         let validator_wire = block.header.validator_id.to_wire_bytes();
                         pending_proposals.retain(|_, (b, _)| {
                             b.header.validator_id.to_wire_bytes() != validator_wire
                         });
                         pending_proposals
-                            .insert(*bh.as_bytes(), (block.clone(), now_cache_ts));
+                            .insert(bh_bytes, (block.clone(), now_cache_ts));
                     }
-                    if event_tx
-                        .try_send(NetworkEvent::BlockReceived {
-                            peer_id: peer.to_bytes().to_vec(),
-                            block,
-                            vote_data,
-                        })
-                        .is_err()
-                    {
-                        tracing::warn!(task = "sync", "event channel full: BlockReceived dropped");
+                    // Audit follow-up: order swap (same as Blocks arm above).
+                    match event_tx.try_send(NetworkEvent::BlockReceived {
+                        peer_id: peer.to_bytes().to_vec(),
+                        block,
+                        vote_data,
+                    }) {
+                        Ok(()) => {
+                            if let Some(bh_bytes) = bh_bytes_opt {
+                                seen_blocks.insert_if_new(bh_bytes);
+                                in_flight_blocks.remove(&bh_bytes);
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(task = "sync", "event channel full: BlockReceived dropped — cache left untouched for retry");
+                        }
                     }
                 }
                 SyncResponse::Block { block: None, .. } => {
@@ -1343,22 +1586,83 @@ async fn handle_swarm_event(
         // TxRpc response: we requested a tx after receiving TxAnnounce.
         SwarmEvent::Behaviour(NobleBehaviourEvent::TxRpc(request_response::Event::Message {
             peer,
-            message: request_response::Message::Response { response, .. },
+            message: request_response::Message::Response { request_id, response, .. },
             ..
         })) => {
+            // Audit follow-up: bind the response body to the requested tx_id.
+            // Look up the expected tx_id for this outbound request, recompute
+            // the body's tx_id, and reject any mismatch. Stops dishonest peers
+            // from converting fetches into arbitrary injection attempts.
+            let expected_tx_id: Option<[u8; 32]> = pending_tx_requests
+                .iter()
+                .position(|(rid, _)| *rid == request_id)
+                .map(|pos| {
+                    let entry = pending_tx_requests.remove(pos);
+                    entry.map(|(_, tx_id)| tx_id).unwrap_or([0u8; 32])
+                });
+
             match response.transaction {
                 Some(tx) => {
-                    if event_tx
-                        .try_send(NetworkEvent::TransactionReceived {
-                            peer_id: peer.to_bytes().to_vec(),
-                            transaction: tx,
-                        })
-                        .is_err()
-                    {
-                        tracing::debug!(
-                            task = "network",
-                            "event channel full: TransactionReceived dropped"
-                        );
+                    // Recompute the body's tx_id and verify against what we asked for.
+                    let actual_id_result = tx.compute_tx_id(chain_id_for_tx_verify);
+                    let actual_id = match actual_id_result {
+                        Ok(id) => *id.as_bytes(),
+                        Err(e) => {
+                            tracing::warn!(
+                                task = "tx_relay",
+                                "peer {} sent tx with un-encodable wire bytes: {e}",
+                                peer
+                            );
+                            return;
+                        }
+                    };
+                    match expected_tx_id {
+                        Some(expected) if expected != actual_id => {
+                            let reason = format!(
+                                "TxResponse body tx_id mismatch: expected={}, actual={}",
+                                hex::encode(expected),
+                                hex::encode(actual_id),
+                            );
+                            tracing::warn!(task = "tx_relay", "peer {} {reason}", peer);
+                            let outcome = peer_manager.record_misbehavior(
+                                &peer,
+                                BanReason::new(BanCategory::ProtocolViolation, reason.clone()),
+                            );
+                            emit_misbehavior_event(&outcome, &peer, &reason, event_tx);
+                            return;
+                        }
+                        None => {
+                            // No pending request for this id — peer responded
+                            // unsolicited or after our entry was LRU-evicted.
+                            tracing::debug!(
+                                task = "tx_relay",
+                                "peer {} responded with tx for unknown/expired request_id",
+                                peer
+                            );
+                            return;
+                        }
+                        _ => {} // id matches — proceed
+                    }
+                    // Audit follow-up: order swap. Mark globally-seen +
+                    // clear in_flight ONLY after the event channel has
+                    // accepted the body. Channel-full → drop body, leave
+                    // the cache untouched so the next announce can retry
+                    // (otherwise seen_txs would suppress re-fetches for
+                    // 120s on transient overload).
+                    match event_tx.try_send(NetworkEvent::TransactionReceived {
+                        peer_id: peer.to_bytes().to_vec(),
+                        transaction: tx,
+                    }) {
+                        Ok(()) => {
+                            seen_txs.insert_if_new(actual_id);
+                            in_flight_txs.remove(&actual_id);
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                task = "network",
+                                "event channel full: TransactionReceived dropped — cache left untouched for retry"
+                            );
+                        }
                     }
                 }
                 None => {
@@ -1489,27 +1793,53 @@ async fn handle_swarm_event(
 }
 
 /// Handle a block announce gossip message.
+///
+/// Audit follow-up: 3-way gate (seen / in-flight / new). Mark-seen-on-
+/// announce was a relay suppression vector — a peer could announce a hash,
+/// never deliver the body, and the seen entry would block honest re-
+/// announces for 60s. Now the seen cache is populated only AFTER the body
+/// is received and validated (in the SyncRpc response handler).
 fn handle_block_announce(
     block_hash: [u8; 32],
     height: u64,
     source: &PeerId,
     peer_bytes: Vec<u8>,
-    seen_blocks: &mut SeenCache,
+    seen_blocks: &SeenCache,
+    in_flight_blocks: &mut HashMap<[u8; 32], Instant>,
+    in_flight_ttl: Duration,
     swarm: &mut Swarm<NobleBehaviour>,
+    pending_block_requests: &mut std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        Vec<[u8; 32]>,
+    )>,
 ) -> Option<NetworkEvent> {
-    if !seen_blocks.insert_if_new(block_hash) {
-        None
-    } else {
-        let request = SyncRequest::GetBlocks {
-            hashes: vec![block_hash],
-        };
-        swarm.behaviour_mut().sync_rpc.send_request(source, request);
-        Some(NetworkEvent::BlockAnnounced {
-            peer_id: peer_bytes,
-            hash: block_hash,
-            height,
-        })
+    if seen_blocks.contains(&block_hash) {
+        // Already received + admitted the body — re-announce is benign.
+        return None;
     }
+    if let Some(started) = in_flight_blocks.get(&block_hash) {
+        if started.elapsed() < in_flight_ttl {
+            // Active fetch in progress; let it complete or time out.
+            return None;
+        }
+    }
+    // Either new or the previous fetch timed out. Mark in-flight + request.
+    in_flight_blocks.insert(block_hash, Instant::now());
+    let request = SyncRequest::GetBlocks {
+        hashes: vec![block_hash],
+    };
+    let request_id = swarm.behaviour_mut().sync_rpc.send_request(source, request);
+    // Audit follow-up: bind the request_id to the requested hash set so
+    // the response handler can reject unrequested blocks.
+    if pending_block_requests.len() >= 1024 {
+        pending_block_requests.pop_front();
+    }
+    pending_block_requests.push_back((request_id, vec![block_hash]));
+    Some(NetworkEvent::BlockAnnounced {
+        peer_id: peer_bytes,
+        hash: block_hash,
+        height,
+    })
 }
 
 /// Handle a transaction announce gossip message.
@@ -1517,15 +1847,23 @@ fn handle_block_announce(
 /// After dedup + rate limiting, requests the full transaction from the
 /// announcing peer via the `/noble/tx/1.0.0` request-response protocol
 /// (same pattern as `handle_block_announce` → `GetBlocks`).
+/// Audit follow-up: same 3-way gate as `handle_block_announce`. Seen cache
+/// populated AFTER admission, not on announce.
 fn handle_tx_announce(
     tx_id: [u8; 32],
     source: &PeerId,
     peer_bytes: Vec<u8>,
-    seen_txs: &mut SeenCache,
+    seen_txs: &SeenCache,
+    in_flight_txs: &mut HashMap<[u8; 32], Instant>,
+    in_flight_ttl: Duration,
     tx_rate_limiter: &mut TxRateLimiter,
     peer_manager: &mut PeerManager,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
     swarm: &mut Swarm<NobleBehaviour>,
+    pending_tx_requests: &mut std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        [u8; 32],
+    )>,
 ) -> Option<NetworkEvent> {
     if !tx_rate_limiter.try_consume(source) {
         let reason = "tx relay rate limit exceeded".to_string();
@@ -1534,20 +1872,33 @@ fn handle_tx_announce(
             BanReason::new(BanCategory::TxFlood, reason.clone()),
         );
         emit_misbehavior_event(&outcome, source, &reason, event_tx);
-        None
-    } else if !seen_txs.insert_if_new(tx_id) {
-        None
-    } else {
-        // Fetch the full transaction body from the announcing peer.
-        swarm
-            .behaviour_mut()
-            .tx_rpc
-            .send_request(source, TxRequest { tx_id });
-        Some(NetworkEvent::TransactionAnnounced {
-            peer_id: peer_bytes,
-            tx_id,
-        })
+        return None;
     }
+    if seen_txs.contains(&tx_id) {
+        return None;
+    }
+    if let Some(started) = in_flight_txs.get(&tx_id) {
+        if started.elapsed() < in_flight_ttl {
+            return None;
+        }
+    }
+    in_flight_txs.insert(tx_id, Instant::now());
+
+    // Fetch the full transaction body from the announcing peer.
+    let request_id = swarm
+        .behaviour_mut()
+        .tx_rpc
+        .send_request(source, TxRequest { tx_id });
+    // Record the binding so the response handler can verify the
+    // returned body's tx_id matches what we asked for.
+    if pending_tx_requests.len() >= 1024 {
+        pending_tx_requests.pop_front();
+    }
+    pending_tx_requests.push_back((request_id, tx_id));
+    Some(NetworkEvent::TransactionAnnounced {
+        peer_id: peer_bytes,
+        tx_id,
+    })
 }
 
 /// Handle a Proof of Reputation vote gossip message.
@@ -1597,12 +1948,42 @@ fn handle_por_vote(
         );
         return None;
     }
-
-    // Dedup: check seen-cache AFTER basic validation passes.
-    let dedup_key = seen_cache::vote_dedup_key(cycle, &voter_id, round);
-    if !seen_votes.insert_if_new(dedup_key) {
+    // Audit follow-up: enforce signature envelope structure at the gossip
+    // gate so malformed CBOR doesn't propagate through us to peers. Real
+    // secp256k1 envelopes serialize to ~70-80 bytes; 256 is 3× headroom.
+    const MAX_VOTE_SIG_BYTES: usize = 256;
+    if signature.len() > MAX_VOTE_SIG_BYTES {
+        tracing::debug!(
+            task = "gossip_vote",
+            len = signature.len(),
+            max = MAX_VOTE_SIG_BYTES,
+            "rejected vote with oversize signature"
+        );
         return None;
     }
+    use noble_codec::NobleCbor;
+    if noble_crypto::SignatureEnvelope::from_cbor(&signature).is_err() {
+        tracing::debug!(
+            task = "gossip_vote",
+            "rejected vote with un-decodable signature envelope"
+        );
+        return None;
+    }
+
+    // Audit follow-up: NO network-layer dedup by (cycle, voter_id, round).
+    // Two layers downstream already handle dedup of AUTHENTICATED votes:
+    //   1. libp2p gossipsub dedups identical message envelopes for 60s
+    //      (`duplicate_cache_time` in behaviour.rs).
+    //   2. The consensus engine's `vote_mgr.record_vote()` rejects
+    //      duplicates (Ok(false)) AFTER verifying the signature.
+    //
+    // The previous pre-verify dedup let an attacker who knew a real
+    // validator's pubkey publish a fake-sig vote with that voter_id,
+    // consuming the (cycle, voter_id, round) slot for 60s and causing
+    // the real vote to be deduped + dropped before verification.
+    // The `seen_votes` parameter is unused here; kept on the signature
+    // for now to avoid churning all call sites in one PR.
+    let _ = seen_votes;
 
     // AUD3-D9: Include transport PeerId so the consensus engine can verify
     // that the vote source matches the claimed voter identity.
@@ -1622,8 +2003,23 @@ fn handle_peer_exchange(
     config: &NetworkConfig,
     swarm: &mut Swarm<NobleBehaviour>,
 ) {
+    // Cap inbound at 2× the outbound exchange size (default 1000 → 2000 inbound)
+    // so peers sending exactly the configured maximum are never partially
+    // rejected, while pathological floods that try to pollute the Kademlia
+    // table are bounded. Config-derived so it auto-scales if operators tune
+    // max_addrs_per_exchange up or down.
+    let inbound_cap = config.max_addrs_per_exchange.saturating_mul(2);
+    let capped = &addrs[..addrs.len().min(inbound_cap)];
+    if addrs.len() > inbound_cap {
+        tracing::debug!(
+            task = "peer_exchange",
+            "inbound PeX list capped: {} → {} (cap = 2× outbound max)",
+            addrs.len(),
+            inbound_cap
+        );
+    }
     if config.enable_kademlia {
-        for addr_str in addrs {
+        for addr_str in capped {
             if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
                 let pid = maddr.iter().find_map(|p| {
                     if let libp2p::multiaddr::Protocol::P2p(id) = p {
@@ -1650,9 +2046,25 @@ fn handle_gossip_node_announce(
     peer_bytes: Vec<u8>,
     peer_manager: &mut PeerManager,
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+    our_chain_id: u32,
 ) -> Option<NetworkEvent> {
     match result {
         Ok(announce) => {
+            // Audit follow-up: filter cross-chain announces at network ingress.
+            // Previously, peer_manager.update_chain_tip + PeerChainTipUpdated
+            // fired regardless of announce.chain_id, so cross-chain peers'
+            // tips drove our healing logic before the node-layer filter ran.
+            if announce.chain_id != 0 && announce.chain_id != our_chain_id {
+                tracing::debug!(
+                    task = "node_announce",
+                    %source,
+                    announce_chain = %format!("{:#010X}", announce.chain_id),
+                    our_chain = %format!("{:#010X}", our_chain_id),
+                    "cross-chain NodeAnnounce ignored (no chain-tip update, no event)"
+                );
+                return None;
+            }
+
             // S49: Compute clock offset from NodeAnnounce timestamp.
             if announce.timestamp > 0 {
                 let local_now = std::time::SystemTime::now()
@@ -1917,15 +2329,51 @@ fn handle_sync_request(
         }
 
         SyncRequest::GetBlocks { hashes } => {
-            let blocks: Vec<_> = hashes
-                .iter()
-                .filter_map(|h| {
-                    // Check committed storage first, then pending proposals cache.
-                    block_provider
-                        .get_block(h)
-                        .or_else(|| pending_proposals.get(h).map(|(b, _)| b.clone()))
-                })
-                .collect();
+            // Generous caps that no honest sync workload approaches:
+            //   - 256 hashes matches the existing GetBlockHashBatch cap (line below).
+            //   - 32 MB byte budget protects against pathological max-size blocks
+            //     (8 MB × 256 = 2 GB worst case without this guard).
+            // Honest sync chunks at far smaller batches; this only stops
+            // adversarial single-message dumps of the entire chain. Byte
+            // estimate is intentionally a loose upper bound (2 KB/tx + overhead)
+            // so we never re-encode just to measure.
+            const MAX_HASHES: usize = 256;
+            const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+            let capped = &hashes[..hashes.len().min(MAX_HASHES)];
+            let mut blocks: Vec<noble_core::Block> = Vec::with_capacity(capped.len());
+            let mut total_bytes: usize = 0;
+            for h in capped {
+                let block = block_provider
+                    .get_block(h)
+                    .or_else(|| pending_proposals.get(h).map(|(b, _)| b.clone()));
+                if let Some(b) = block {
+                    // Cheap upper-bound estimate: 512 B header overhead + 2 KB per tx.
+                    // Real serialized size is typically much smaller; this just bounds
+                    // memory if the chain ever has near-MAX_BLOCK_SIZE blocks.
+                    let est = 512usize.saturating_add(b.transactions.len().saturating_mul(2048));
+                    total_bytes = total_bytes.saturating_add(est);
+                    if total_bytes > MAX_RESPONSE_BYTES {
+                        tracing::debug!(
+                            task = "sync_response",
+                            "GetBlocks response capped: returning {} of {} requested ({} MB budget hit)",
+                            blocks.len(),
+                            capped.len(),
+                            MAX_RESPONSE_BYTES / 1_048_576
+                        );
+                        break;
+                    }
+                    blocks.push(b);
+                }
+            }
+            if hashes.len() > MAX_HASHES {
+                tracing::debug!(
+                    task = "sync_response",
+                    "GetBlocks: clamped hash list from {} to {}",
+                    hashes.len(),
+                    MAX_HASHES
+                );
+            }
             SyncResponse::Blocks(blocks)
         }
 
@@ -1977,6 +2425,10 @@ async fn handle_command(
     event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
     ancestor_finder: &mut Option<crate::ancestor::AncestorFinder>,
     manifest_peer: &mut Option<PeerId>,
+    pending_block_requests: &mut std::collections::VecDeque<(
+        libp2p::request_response::OutboundRequestId,
+        Vec<[u8; 32]>,
+    )>,
 ) -> bool {
     match cmd {
         NetworkCommand::PublishBlock(block) => {
@@ -2068,7 +2520,11 @@ async fn handle_command(
         NetworkCommand::RequestBlock { peer_id, hash } => {
             if let Ok(pid) = PeerId::from_bytes(&peer_id) {
                 let request = SyncRequest::GetBlocks { hashes: vec![hash] };
-                swarm.behaviour_mut().sync_rpc.send_request(&pid, request);
+                let rid = swarm.behaviour_mut().sync_rpc.send_request(&pid, request);
+                if pending_block_requests.len() >= 1024 {
+                    pending_block_requests.pop_front();
+                }
+                pending_block_requests.push_back((rid, vec![hash]));
             }
         }
 
@@ -2212,7 +2668,11 @@ async fn handle_command(
             let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
             if let Some(pid) = peers.first() {
                 let request = SyncRequest::GetBlocks { hashes: vec![hash] };
-                swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+                let rid = swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+                if pending_block_requests.len() >= 1024 {
+                    pending_block_requests.pop_front();
+                }
+                pending_block_requests.push_back((rid, vec![hash]));
             }
         }
 
@@ -2229,7 +2689,11 @@ async fn handle_command(
             );
             for pid in &peers {
                 let request = SyncRequest::GetBlocks { hashes: vec![hash] };
-                swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+                let rid = swarm.behaviour_mut().sync_rpc.send_request(pid, request);
+                if pending_block_requests.len() >= 1024 {
+                    pending_block_requests.pop_front();
+                }
+                pending_block_requests.push_back((rid, vec![hash]));
             }
         }
 

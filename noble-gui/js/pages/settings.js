@@ -206,6 +206,28 @@ export function init(root, ctx) {
             <button id="s-faucet-reset-limits" class="btn-sm" style="padding:6px 14px;background:var(--warning, #f59e0b);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Reset Rate Limits</button>
             <span id="s-faucet-dist-msg" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
           </div>
+
+          <!-- Admin Token: gates all faucet HTTP admin endpoints -->
+          <div style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--gap-sm)">
+              <span style="font-size:var(--font-size-sm);font-weight:600">Admin Token</span>
+              <span id="s-faucet-token-fingerprint" class="mono" style="font-size:var(--font-size-xs);color:var(--text-muted)">…</span>
+            </div>
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+              Required by all faucet admin endpoints (currently <code>/api/faucet/reset-limits</code>).
+              External callers (curl, monitoring scripts) must supply this token as
+              <code>Authorization: Bearer &lt;token&gt;</code>. The dashboard's "Reset Rate Limits"
+              button uses the token internally — no manual handling needed.
+            </p>
+            <div style="display:flex;gap:var(--gap-sm);align-items:center">
+              <input id="s-faucet-token-value" type="password" class="mono" readonly
+                style="flex:1;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font-mono);font-size:var(--font-size-sm)">
+              <button id="s-faucet-token-reveal" class="btn-sm" style="padding:6px 14px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Show</button>
+              <button id="s-faucet-token-copy" class="btn-sm" style="padding:6px 14px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Copy</button>
+              <button id="s-faucet-token-rotate" class="btn-sm" style="padding:6px 14px;background:var(--warning, #f59e0b);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Rotate</button>
+            </div>
+            <div id="s-faucet-token-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1474,6 +1496,78 @@ export function init(root, ctx) {
       }
     });
   }
+
+  // ── Faucet admin token: load / show / copy / rotate ─────────────────────
+  const tokenInput = root.querySelector('#s-faucet-token-value');
+  const tokenFp    = root.querySelector('#s-faucet-token-fingerprint');
+  const tokenReveal= root.querySelector('#s-faucet-token-reveal');
+  const tokenCopy  = root.querySelector('#s-faucet-token-copy');
+  const tokenRotate= root.querySelector('#s-faucet-token-rotate');
+  const tokenMsg   = root.querySelector('#s-faucet-token-msg');
+
+  async function loadAdminToken() {
+    if (!tokenInput) return;
+    try {
+      const resp = await rpc.call('noble_getFaucetAdminToken');
+      tokenInput.value = resp.token || '';
+      if (tokenFp) tokenFp.textContent = resp.fingerprint ? `fingerprint ${resp.fingerprint}` : '';
+    } catch (e) {
+      tokenMsg.style.color = 'var(--error)';
+      tokenMsg.textContent = e.message || 'Failed to load admin token';
+    }
+  }
+
+  if (tokenReveal && tokenInput) {
+    tokenReveal.addEventListener('click', () => {
+      if (tokenInput.type === 'password') {
+        tokenInput.type = 'text';
+        tokenReveal.textContent = 'Hide';
+      } else {
+        tokenInput.type = 'password';
+        tokenReveal.textContent = 'Show';
+      }
+    });
+  }
+
+  if (tokenCopy && tokenInput) {
+    tokenCopy.addEventListener('click', async () => {
+      if (!tokenInput.value) return;
+      try {
+        await navigator.clipboard.writeText(tokenInput.value);
+        tokenMsg.style.color = 'var(--success)';
+        tokenMsg.textContent = 'Token copied to clipboard';
+        setTimeout(() => { tokenMsg.textContent = ''; }, 2500);
+      } catch (e) {
+        tokenMsg.style.color = 'var(--error)';
+        tokenMsg.textContent = 'Copy failed: ' + (e.message || e);
+      }
+    });
+  }
+
+  if (tokenRotate) {
+    tokenRotate.addEventListener('click', async () => {
+      if (!window.confirm('Rotate admin token? The faucet binary picks up the new token within ~60 s; old token stops working after that. The dashboard "Reset Rate Limits" button continues to work seamlessly.')) {
+        return;
+      }
+      tokenRotate.disabled = true;
+      tokenMsg.style.color = 'var(--text-muted)';
+      tokenMsg.textContent = 'Rotating...';
+      try {
+        const resp = await rpc.call('noble_rotateFaucetAdminToken');
+        tokenInput.value = resp.token || '';
+        if (tokenFp) tokenFp.textContent = resp.fingerprint ? `fingerprint ${resp.fingerprint}` : '';
+        tokenMsg.style.color = 'var(--success)';
+        tokenMsg.textContent = `Token rotated (new fingerprint ${resp.fingerprint}). Faucet picks up within ~60 s.`;
+      } catch (e) {
+        tokenMsg.style.color = 'var(--error)';
+        tokenMsg.textContent = e.message || 'Rotation failed';
+      } finally {
+        tokenRotate.disabled = false;
+      }
+    });
+  }
+
+  loadAdminToken();
 
   // Auto-poll faucet balance every 30s.
   const faucetPollInterval = setInterval(loadFaucet, 30_000);

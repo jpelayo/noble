@@ -12,6 +12,21 @@
 //! These vectors are verified by:
 //! - `cargo test -p noble-wire` (CI)
 //! - `noble-tool verify-wire` (runtime, brew post_install)
+//!
+//! ## Cross-implementation contract (Rust ↔ C)
+//!
+//! The Rust node owns the wire format at the consensus boundary. The C
+//! library (`noble-tx-core`) used by Apple-side and WRY clients is a
+//! mirror — same byte output, separate implementation. These vectors
+//! are the **bridge contract** that asserts the two stay byte-identical
+//! for the covered code paths.
+//!
+//! **Coverage gap (tracked):** today the vectors exercise coinbase + fee
+//! distribution + a few notarization shapes. They do NOT exhaustively
+//! cover every tx type × every optional-field combination. Drift on
+//! uncovered paths would only be caught by end-to-end client-to-node
+//! testing, not at CI time. Expanding coverage to every tx type is a
+//! follow-up.
 
 use crate::WireFormat;
 use noble_core::address::NobleAddress;

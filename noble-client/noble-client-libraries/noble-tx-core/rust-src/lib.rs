@@ -2,8 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Rust wrapper for the noble-tx-core C library.
-// The C library is the SINGLE source of truth for transaction CBOR encoding.
-// Used by all clients (iOS, macOS, Windows, Linux) and the node itself.
+//
+// ── Architecture: Rust owns the consensus wire format ──────────────────
+//
+// The Rust node (`noble-core`, `noble-wire`) holds the canonical wire
+// encoding used for `Transaction::compute_tx_id()` and signing payloads.
+// That's the single source of truth at the consensus boundary — every
+// tx_id derivation and every signing-message computation on the
+// validating node goes through Rust's `WireFormat::wire_bytes()`.
+//
+// This C library is a **mirror** used by Apple-side clients (NobleMac,
+// NobleApp) and the WRY clients (NobleDoc, NobleWin) for their local
+// tx construction and signing. It does NOT replace the Rust encoder
+// on the node side.
+//
+// The **bridge contract** between the two is the frozen test-vector
+// set in `noble-wire/src/vectors.rs`. Those vectors assert that C
+// output equals Rust output byte-for-byte for the covered tx types.
+// If the two implementations drift on any path covered by a vector,
+// CI fails. Coverage today: coinbase + fee paths. Extending vectors
+// to every tx type and every optional-field combination is tracked
+// as a follow-up — until then, divergence in uncovered paths is only
+// caught by end-to-end testing.
 //
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
