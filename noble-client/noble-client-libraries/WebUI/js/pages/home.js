@@ -137,6 +137,81 @@ export function init(root, ctx) {
 
     loadDashboard();
 
+    // ── Soft-poll: keep balance + tx list in sync with mempool ──
+    // Pure RPC (clients are RPC-only). Coexists with — never replaces — the
+    // existing refresh paths:
+    //   - heartbeat (15s in app.js) → page.refresh() ONLY on conn/wallet change
+    //   - manual Refresh button     → loadDashboard() full re-render
+    //   - reconnect retry           → 5× loadDashboard() with 3s spacing
+    // We never call loadDashboard() from here. Only leaf-node text updates,
+    // the same primitives refresh() further below already uses.
+    const POLL_INTERVAL_MS = 6000;
+    let pollTimer = null;
+    let pollInFlight = false;
+
+    async function softPollSnapshot() {
+        if (!alive || pollInFlight || loadInFlight) return;
+        if (!state.walletAddress || !state.isConnected) return;
+        if (typeof document !== 'undefined' && document.hidden) return;
+        pollInFlight = true;
+        try {
+            const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
+            if (!alive) return;
+
+            // Balance leaf-node updates — same pattern as refresh() below
+            const total = root.querySelector('#bal-total');
+            if (total && snap.balance != null) total.textContent = formatAmount(snap.balance);
+            const avail = root.querySelector('#bal-available');
+            if (avail && snap.available != null) avail.textContent = formatAmount(snap.available);
+            const pend = root.querySelector('#bal-pending');
+            if (pend && snap.pending != null) {
+                pend.textContent = (snap.pending > 0 ? '−' : '') + formatAmount(snap.pending);
+            }
+            const credit = root.querySelector('#bal-pending-credit');
+            if (credit) {
+                if (snap.pending_credit != null && snap.pending_credit > 0) {
+                    credit.textContent = '+' + formatAmount(snap.pending_credit);
+                    const tile = credit.closest('[data-role="incoming-tile"]');
+                    if (tile) tile.style.display = '';
+                } else {
+                    const tile = credit.closest('[data-role="incoming-tile"]');
+                    if (tile) tile.style.display = 'none';
+                }
+            }
+            const mat = root.querySelector('#bal-maturing');
+            if (mat && snap.immature_value != null) mat.textContent = formatAmount(snap.immature_value);
+
+            // UTXO warning re-evaluate (small badge)
+            renderUtxoWarning(utxoWarning, snap);
+
+            // Tx list — same gating as refresh() below
+            const freshTxs = snap.transactions || [];
+            const txMap = new Map(freshTxs.map(t => [t.txId || t.tx_id, t]));
+            const rows = root.querySelectorAll('.activity-row');
+            rows.forEach(row => {
+                const tx = txMap.get(row.dataset.txid);
+                if (!tx) return;
+                const el = row.querySelector('[data-role="status"]');
+                if (el) {
+                    const b = txStatusBadge(tx.confirmations, tx.status);
+                    el.textContent = b.html.replace(/<[^>]+>/g, '');
+                }
+            });
+            const topFresh = freshTxs[0]?.txId || freshTxs[0]?.tx_id || '';
+            const topShown = rows[0]?.dataset.txid || '';
+            if (freshTxs.length !== rows.length || topFresh !== topShown) {
+                renderRecentActivity(activityContainer, freshTxs);
+            }
+        } catch { /* silent — next tick will retry */ }
+        finally { pollInFlight = false; }
+    }
+
+    function startPoll() { if (!pollTimer) pollTimer = setInterval(softPollSnapshot, POLL_INTERVAL_MS); }
+    function stopPoll()  { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+    function onVis()     { if (document.hidden) stopPoll(); else { softPollSnapshot(); startPoll(); } }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis);
+    startPoll();
+
     async function loadDashboard() {
         if (!alive || loadInFlight) return;
         loadInFlight = true;
@@ -265,6 +340,10 @@ export function init(root, ctx) {
                     <div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Pending</div>
                         <div id="bal-pending" class="mono" style="font-size:clamp(0.8rem, 3vw, 1.1rem);font-weight:600;${balance.pending > 0 ? 'color:var(--warning)' : ''}">${balance.pending > 0 ? '\u2212' : ''}${formatAmount(balance.pending)}</div>
+                    </div>
+                    <div data-role="incoming-tile" style="${balance.pending_credit && balance.pending_credit > 0 ? '' : 'display:none'}">
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Incoming</div>
+                        <div id="bal-pending-credit" class="mono" style="font-size:clamp(0.8rem, 3vw, 1.1rem);font-weight:600;color:var(--success)">${balance.pending_credit && balance.pending_credit > 0 ? '+' + formatAmount(balance.pending_credit) : ''}</div>
                     </div>
                     ${balance.immature_value > 0 ? `<div>
                         <div style="font-size:var(--font-size-xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">Maturing</div>
@@ -424,7 +503,11 @@ export function init(root, ctx) {
 
 
     return {
-        destroy() { alive = false; },
+        destroy() {
+            alive = false;
+            stopPoll();
+            if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis);
+        },
         async refresh(newState) {
             Object.assign(state, newState);
             // Banner: only re-render if nodeState changed (avoids innerHTML wipe)
@@ -448,6 +531,17 @@ export function init(root, ctx) {
                 const snap = await Bridge.call('noble_api', 'getWalletSnapshot');
                 if (!alive) return;
                 renderUtxoWarning(utxoWarning, snap);
+                // Incoming-pending tile (driven by snap, not appState)
+                const credit = root.querySelector('#bal-pending-credit');
+                if (credit) {
+                    const tile = credit.closest('[data-role="incoming-tile"]');
+                    if (snap.pending_credit != null && snap.pending_credit > 0) {
+                        credit.textContent = '+' + fmt(snap.pending_credit);
+                        if (tile) tile.style.display = '';
+                    } else if (tile) {
+                        tile.style.display = 'none';
+                    }
+                }
                 const txMap = new Map((snap.transactions || []).map(t => [t.txId || t.tx_id, t]));
                 const rows = root.querySelectorAll('.activity-row');
                 rows.forEach(row => {

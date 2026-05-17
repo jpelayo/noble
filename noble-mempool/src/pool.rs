@@ -291,6 +291,33 @@ impl Mempool {
             .fold(0u64, |acc, v| acc.saturating_add(v))
     }
 
+    /// Net pending credit for an address: outputs going TO `addr` from txs
+    /// whose signer is NOT in `exclude_signers_wire`. Caller passes the
+    /// wire-bytes of every key it owns, so self-transfers between own
+    /// buckets (Noble → my-Hash160 change, etc.) are correctly classified
+    /// as outflow-with-self-change rather than incoming credit.
+    pub fn pending_credit_for_address(
+        &self,
+        addr: &noble_core::NobleAddress,
+        exclude_signers_wire: &[Vec<u8>],
+    ) -> u64 {
+        let addr_wire = addr.to_wire_bytes();
+        self.by_id.values()
+            .filter(|entry| {
+                entry.tx.issuer_sig.to_noble_public_key()
+                    .map(|pk| {
+                        let s = noble_core::NobleAddress::Noble(pk).to_wire_bytes();
+                        !exclude_signers_wire.iter().any(|w| w == &s)
+                    })
+                    .unwrap_or(true)
+            })
+            .map(|entry| entry.tx.outputs.iter()
+                .filter(|o| o.address.to_wire_bytes() == addr_wire)
+                .map(|o| o.value)
+                .sum::<u64>())
+            .fold(0u64, |acc, v| acc.saturating_add(v))
+    }
+
     /// Pending change returning to an address from its own mempool txs.
     /// These are outputs in the sender's txs that go BACK to the sender.
     pub fn pending_change_for_address(&self, addr: &noble_core::NobleAddress) -> u64 {

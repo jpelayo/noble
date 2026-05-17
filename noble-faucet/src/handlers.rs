@@ -128,7 +128,7 @@ pub async fn handle_faucet(
             db_blocking(move || db.ip_recent_distribution(&ip_clone, cooldown)).await?;
         if is_limited {
             return Err(error_json(&format!(
-                "Rate limited: try again in {} hours",
+                "Rate limited: try again {}h after the last request",
                 state.config.ip_cooldown_secs / 3600
             )));
         }
@@ -143,7 +143,7 @@ pub async fn handle_faucet(
             db_blocking(move || db.address_recent_distribution(&address, cooldown)).await?;
         if is_limited {
             return Err(error_json(&format!(
-                "This address already received tokens. Try again in {} days",
+                "This address already received tokens. Try again {}d after the last request",
                 state.config.address_cooldown_secs / 86400
             )));
         }

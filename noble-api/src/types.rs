@@ -773,6 +773,10 @@ pub struct WalletInfoResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
+    /// Pending CREDIT (incoming mempool outputs from external senders).
+    /// None or omitted means zero / not computed; older clients see no field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_credit: Option<u64>,
     /// Immature UTXO value (depth < COINBASE_MATURITY). Not yet spendable.
     #[serde(skip_serializing_if = "is_zero")]
     pub immature: u64,
@@ -1711,6 +1715,10 @@ pub struct WalletSnapshotResponse {
     pub balance: u64,
     pub available: u64,
     pub pending: u64,
+    /// Pending CREDIT (incoming mempool outputs from external senders).
+    /// None or omitted means zero / not computed; older clients see no field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_credit: Option<u64>,
     pub immature_count: usize,
     pub immature_value: u64,
     pub available_utxo_count: usize,

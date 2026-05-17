@@ -243,9 +243,18 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
         let mut total_balance = 0u64;
         let mut total_immature = 0u64;
         let mut total_pending = 0u64;
+        let mut total_credit = 0u64;
         let mut noble_bal = 0u64;
         let mut hash160_bal = 0u64;
         let mut taproot_bal = 0u64;
+
+        // Pre-compute exclusion list once: wire-bytes of every key the wallet
+        // owns. Used by pending_credit_for_address to filter out our own
+        // outgoing txs (so self-transfers between own buckets are not double-
+        // counted as both debit and credit).
+        let exclude_wires: Vec<Vec<u8>> = all_keys.iter()
+            .map(|pk| noble_core::NobleAddress::Noble(pk.clone()).to_wire_bytes())
+            .collect();
 
         // Scan UTXOs per address to separate mature from immature.
         let scan_address = |addr: &noble_core::NobleAddress| -> (u64, u64) {
@@ -291,6 +300,21 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
                 total_pending = total_pending.saturating_add(mempool.pending_debit_for_address(&tap_addr));
             }
+
+            // Pending credits per bucket: outputs going to this address from txs
+            // signed by anyone NOT in `exclude_wires`. Available math is unchanged
+            // (credits aren't spendable), but the value is surfaced separately so
+            // the wallet can show inbound mempool activity.
+            total_credit = total_credit.saturating_add(
+                mempool.pending_credit_for_address(&noble_addr, &exclude_wires));
+            if let Some(h160_addr) = noble_core::NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                total_credit = total_credit.saturating_add(
+                    mempool.pending_credit_for_address(&h160_addr, &exclude_wires));
+            }
+            if let Some(tap_addr) = noble_core::NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                total_credit = total_credit.saturating_add(
+                    mempool.pending_credit_for_address(&tap_addr, &exclude_wires));
+            }
         }
         drop(mempool);
         drop(storage);
@@ -310,6 +334,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             balance: total_balance,
             available,
             pending: total_pending,
+            pending_credit: if total_credit > 0 { Some(total_credit) } else { None },
             immature: total_immature,
             noble_balance: if has_bitcoin { Some(noble_bal) } else { None },
             hash160_balance: if has_bitcoin { Some(hash160_bal) } else { None },
@@ -884,9 +909,37 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
                 available_utxo_count += 1;
             }
         }
-        let pending = {
+        // Build the exclusion set for credit accounting: include the queried
+        // address itself and (for secp256k1 keys) its Hash160/Taproot bucket
+        // forms, so self-transfers between own buckets aren't classified as
+        // incoming credit. The exclusion is by SIGNER, so we only add the
+        // canonical Noble form derived from the same pubkey.
+        let mut exclude_wires: Vec<Vec<u8>> = Vec::with_capacity(1);
+        if let NobleAddress::Noble(ref pk) = addr {
+            exclude_wires.push(NobleAddress::Noble(pk.clone()).to_wire_bytes());
+        } else {
+            // Hash160/Taproot queries: we don't know the originating pubkey
+            // from address alone, so no exclusion. Worst case is a self-
+            // transfer from a Noble form to its own Hash160/Taproot form
+            // that gets counted as a credit — caller can filter if needed.
+            exclude_wires.push(addr.to_wire_bytes());
+        }
+        let (pending, pending_credit) = {
             let mempool = self.mempool.lock();
-            mempool.pending_debit_for_address(&addr)
+            let debit = mempool.pending_debit_for_address(&addr);
+            // Aggregate credit across all buckets the wallet owns for this key.
+            let mut credit = mempool.pending_credit_for_address(&addr, &exclude_wires);
+            if let NobleAddress::Noble(ref pk) = addr {
+                if let Some(h160) = NobleAddress::bitcoin_hash160_for_pubkey(pk) {
+                    credit = credit.saturating_add(
+                        mempool.pending_credit_for_address(&h160, &exclude_wires));
+                }
+                if let Some(tap) = NobleAddress::bitcoin_taproot_for_pubkey(pk) {
+                    credit = credit.saturating_add(
+                        mempool.pending_credit_for_address(&tap, &exclude_wires));
+                }
+            }
+            (debit, credit)
         };
         let available = total_balance.saturating_sub(pending).saturating_sub(immature_value);
 
@@ -1087,6 +1140,7 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             balance: total_balance,
             available,
             pending,
+            pending_credit: if pending_credit > 0 { Some(pending_credit) } else { None },
             immature_count,
             immature_value,
             available_utxo_count,
