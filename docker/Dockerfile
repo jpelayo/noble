@@ -48,7 +48,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/target/release/noble-node   /usr/local/bin/noble-node
 COPY --from=builder /src/target/release/noble-tool   /usr/local/bin/noble-tool
 COPY --from=builder /src/target/release/noble-faucet /usr/local/bin/noble-faucet
-COPY --from=builder /src/noble-gui                   /opt/noble/noble-gui
+# detect_gui_dir() looks at `<binary_dir>/../noble-gui/` first. With binaries
+# in /usr/local/bin, that resolves to /usr/local/noble-gui — matches the brew
+# install layout.
+COPY --from=builder /src/noble-gui                   /usr/local/noble-gui
 COPY docker/entrypoint.sh                            /usr/local/bin/noble-entrypoint
 RUN chmod +x /usr/local/bin/noble-entrypoint
 
