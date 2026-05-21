@@ -58,10 +58,16 @@ WORKDIR /var/lib/noble
 # Documentation only; compose decides what crosses to the host.
 EXPOSE 8780 8783 8784 8785 8786
 
-# Healthcheck hits the no-auth noble_getSetupStatus JSON-RPC. Default uses
-# HTTPS + -k since NOBLE_TLS_ENABLED defaults to true (mirroring the brew
-# install). If you disable TLS (nginx-fronting override), the same probe
-# still works against http://127.0.0.1:8783 because curl -k follows either.
+# Healthcheck probes that the JSON-RPC server is responding — NOT that
+# setup is complete. A freshly booted node is healthy even though the
+# operator hasn't run the wizard yet; otherwise the container sits
+# "unhealthy" forever until the GUI is touched.
+#
+# Tries HTTPS first (default, NOBLE_TLS_ENABLED=true), falls back to plain
+# HTTP for the nginx-fronting override. Success criteria: the response
+# contains a JSON-RPC envelope (`"jsonrpc":"2.0"`), proving the server
+# parsed our request and answered. The method itself (`noble_getSetupStatus`)
+# is no-auth, so this works pre-wizard.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
   CMD sh -c '\
     curl -fskS -X POST https://127.0.0.1:8783/ \
@@ -70,6 +76,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
       || curl -fsS  -X POST http://127.0.0.1:8783/ \
               -H "Content-Type: application/json" \
               -d "{\"jsonrpc\":\"2.0\",\"method\":\"noble_getSetupStatus\",\"id\":1}" \
-    ' | grep -q '"setup_complete":true' || exit 1
+    ' | grep -q '"jsonrpc":"2.0"' || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/noble-entrypoint"]
