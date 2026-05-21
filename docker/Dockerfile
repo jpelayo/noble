@@ -61,24 +61,23 @@ WORKDIR /var/lib/noble
 # Documentation only; compose decides what crosses to the host.
 EXPOSE 8780 8783 8784 8785 8786
 
-# Healthcheck probes that the JSON-RPC server is responding — NOT that
-# setup is complete. A freshly booted node is healthy even though the
-# operator hasn't run the wizard yet; otherwise the container sits
-# "unhealthy" forever until the GUI is touched.
+# Healthcheck is a transport-level probe: did the RPC port accept a TCP
+# connection and complete a TLS handshake? That's the correct notion of
+# "healthy" for Docker. Application-level checks (setup_complete, auth,
+# allowlist membership) are NOT the orchestrator's concern.
 #
-# Tries HTTPS first (default, NOBLE_TLS_ENABLED=true), falls back to plain
-# HTTP for the nginx-fronting override. Success criteria: the response
-# contains a JSON-RPC envelope (`"jsonrpc":"2.0"`), proving the server
-# parsed our request and answered. The method itself (`noble_getSetupStatus`)
-# is no-auth, so this works pre-wizard.
+# Why not a JSON-RPC call? Noble's middleware enforces an IP allowlist
+# (allowed_ips). Inside the container the probe's source IP is 127.0.0.1
+# which is not in the operator's CIDR (e.g. 100.64.0.0/10 for Tailscale),
+# so any RPC call returns 403 — the container would sit "unhealthy"
+# despite being perfectly fine.
+#
+# `curl -ksS -o /dev/null` with no `-f` returns exit 0 for ANY HTTP
+# response (incl. 403) and non-zero only when the connection failed.
+# That's exactly what we want: "RPC port is alive."
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
-  CMD sh -c '\
-    curl -fskS -X POST https://127.0.0.1:8783/ \
-         -H "Content-Type: application/json" \
-         -d "{\"jsonrpc\":\"2.0\",\"method\":\"noble_getSetupStatus\",\"id\":1}" \
-      || curl -fsS  -X POST http://127.0.0.1:8783/ \
-              -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"2.0\",\"method\":\"noble_getSetupStatus\",\"id\":1}" \
-    ' | grep -q '"jsonrpc":"2.0"' || exit 1
+  CMD curl -ksS -o /dev/null --max-time 2 https://127.0.0.1:8783/ \
+   || curl -sS  -o /dev/null --max-time 2 http://127.0.0.1:8783/ \
+   || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/noble-entrypoint"]
