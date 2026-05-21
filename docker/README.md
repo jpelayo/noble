@@ -8,11 +8,21 @@ noble serves self-signed TLS directly, with an app-level CIDR allowlist
 An optional override (`docker-compose.override.yml.npm`) switches to the
 nginx-proxy-manager fronting layout for public deployments with a real cert.
 
+## Get the source
+
+Pull from the same GitHub repo brew uses:
+
+```sh
+git clone https://github.com/jpelayo/noble.git
+cd noble/docker
+```
+
+Updates later: `git pull && docker compose up -d --build` (mirrors
+`brew upgrade noble`).
+
 ## Quick start (brew-mirror default)
 
 ```sh
-cd docker
-
 # Pick your access pattern (same semantics as brew --with-X flags):
 NOBLE_ALLOWED_IPS=192.168.0.0/16  docker compose up -d --build   # home LAN
 NOBLE_ALLOWED_IPS=100.64.0.0/10   docker compose up -d --build   # Tailscale
@@ -21,9 +31,15 @@ docker compose up -d --build                                     # localhost onl
 
 docker compose logs -f noble                  # watch first-boot config render
 docker compose ps                             # status should become "healthy" in ~30s
-
-open https://<server-ip>:8785                 # complete GUI wizard
 ```
+
+Then open the GUI:
+
+| Access | URL |
+|---|---|
+| LAN / corporate | `https://<server-ip>:8785` |
+| Tailscale       | `https://<server-tailscale-name>:8785` (e.g. `https://noble.<tail-scale-name>.ts.net:8785`) |
+| Localhost-only  | `https://127.0.0.1:8785` (on the server itself, or via SSH tunnel) |
 
 Self-signed cert: accept the browser warning once. Same as brew's flow.
 
