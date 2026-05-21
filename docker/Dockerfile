@@ -9,11 +9,16 @@
 # toolchain pin.
 FROM rust:1-slim-bookworm AS builder
 
-# librocksdb-sys: cmake + libclang for bindgen
-# openssl-sys:    libssl-dev + pkg-config
-# noble-core:     git for build.rs commit-sha embedding
+# librocksdb-sys:  cmake + libclang for bindgen
+# openssl-sys:     libssl-dev + pkg-config (system) OR make+perl (vendored)
+#                  Workspace uses `openssl = { features = ["vendored"] }` so
+#                  the vendored path applies — make+perl required.
+# noble-core:      git for build.rs commit-sha embedding
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake pkg-config llvm-dev libclang-dev clang libssl-dev ca-certificates git \
+    build-essential cmake perl pkg-config \
+    llvm llvm-dev libclang-dev clang \
+    libssl-dev openssl \
+    ca-certificates git curl file procps \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
