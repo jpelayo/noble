@@ -261,6 +261,17 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Path to the data directory (for storage_bytes calculation).
     pub data_dir: Option<std::path::PathBuf>,
 
+    /// Snapshot of the multi-path sharding tiers passed to RocksDB at
+    /// boot (`[storage] extra_data_dirs` resolved to `(path, target_bytes)`).
+    /// Drives `noble_getStoragePaths`, `noble_discoverShards`,
+    /// `noble_reconcileStorage`. Empty in legacy single-volume mode.
+    pub extra_data_dirs: Vec<(std::path::PathBuf, u64)>,
+
+    /// Reconciliation mode the node booted with. Echoed back through
+    /// `noble_getStoragePaths.reconcile_mode`. String form to avoid
+    /// importing the `ReconcileMode` enum into `noble-api`.
+    pub reconcile_mode: String,
+
     /// Pruning mode string: "archive", "moderate", "aggressive".
     pub pruning_mode: String,
 
@@ -302,9 +313,6 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Whether Zstd compression is enabled on the blocks CF (from `[storage] compression`).
     pub compression_enabled: bool,
-
-    /// Maximum database size in GB (from `[storage] max_db_size_gb`). 0 = unlimited.
-    pub max_db_size_gb: u64,
 
     /// Chain label (hex chain ID or empty for pre-genesis).
     pub network_name: String,

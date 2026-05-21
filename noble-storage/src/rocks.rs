@@ -39,11 +39,11 @@
 //! - `issuer_index`: pubkey_wire → concatenated notarization tx_ids (N×32B)
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rocksdb::{
-    ColumnFamilyDescriptor, Direction, IteratorMode, MergeOperands, Options, WriteBatch, DB,
+    ColumnFamilyDescriptor, DBPath, Direction, IteratorMode, MergeOperands, Options, WriteBatch, DB,
 };
 
 use noble_codec::NobleCbor;
@@ -78,7 +78,7 @@ const CF_EVIDENCE: &str = "evidence";
 const CF_METADATA_INDEX: &str = "metadata_index";
 
 /// All column family names, for introspection (storage stats).
-const ALL_CF_NAMES: &[&str] = &[
+pub const ALL_CF_NAMES: &[&str] = &[
     CF_BLOCKS, CF_BLOCK_HASHES, CF_TX_INDEX, CF_CHECKSUM_INDEX,
     CF_CHAIN_STATE, CF_VALIDATOR_STATE, CF_UTXO_SET, CF_ADDRESS_UTXOS,
     CF_UNDO_DATA, CF_ADDRESS_HISTORY, CF_BANS, CF_PEER_MEMORY,
@@ -103,6 +103,19 @@ pub struct RocksDbConfig {
     pub bloom_filter_bits: i32,
     /// Enable Zstd compression on the blocks CF. Default: true.
     pub enable_compression: bool,
+    /// Additional `(path, target_bytes)` tiers handed to
+    /// [`rocksdb::Options::set_db_paths`]. Empty means single-volume mode
+    /// (the legacy behaviour). The primary path passed to
+    /// [`RocksDbStorage::open_with_config`] is the **structural home**
+    /// — it holds MANIFEST/CURRENT/OPTIONS/LOG/WAL regardless of
+    /// whether it appears in `db_paths`. **Do NOT include the primary
+    /// path here**; the open function rejects that combination. SSTs
+    /// land in the tiers listed below, in the order given: earlier
+    /// paths receive newer (hotter) data, later paths absorb older
+    /// data. The last entry conventionally has `target_bytes = 0`
+    /// (unlimited spillover) so RocksDB never runs out of placement
+    /// room.
+    pub db_paths: Vec<(PathBuf, u64)>,
 }
 
 impl Default for RocksDbConfig {
@@ -111,8 +124,29 @@ impl Default for RocksDbConfig {
             block_cache_size: 64 * 1024 * 1024,
             bloom_filter_bits: 10,
             enable_compression: true,
+            db_paths: Vec::new(),
         }
     }
+}
+
+/// Per-path runtime usage for a single tier configured via
+/// [`RocksDbConfig::db_paths`]. Produced by
+/// [`RocksDbStorage::path_usage`]. Drives `noble_getStoragePaths` and
+/// the dashboard storage panel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PathUsage {
+    /// Absolute path of the tier.
+    pub path: PathBuf,
+    /// Operator-supplied per-path size hint. `0` means "no cap" (final
+    /// spillover or structural primary).
+    pub target_bytes: u64,
+    /// Sum of `.sst` file sizes in the directory (non-recursive).
+    pub used_bytes: u64,
+    /// Count of `.sst` files in the directory.
+    pub sst_count: u32,
+    /// Sum of non-SST file sizes (MANIFEST, CURRENT, OPTIONS, LOG, WAL).
+    /// Useful for distinguishing structural overhead on the primary path.
+    pub other_files_bytes: u64,
 }
 
 /// RocksDB-backed `StorageEngine` implementation.
@@ -139,6 +173,40 @@ impl RocksDbStorage {
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
+
+        // Multi-volume sharding (audit Fix #1): the primary path passed
+        // here is the structural home (MANIFEST, CURRENT, OPTIONS, LOG,
+        // WAL) by virtue of being handed to `DB::open`. It is NOT
+        // included in `set_db_paths`; doing so would make RocksDB treat
+        // it as a placement tier (earlier-in-vector uncapped paths
+        // absorb every new SST), which defeats tiering. The `db_paths`
+        // list here is operator-supplied tiers ONLY. Empty list →
+        // legacy single-volume mode (everything under the primary).
+        if !config.db_paths.is_empty() {
+            let primary = path.as_ref();
+            // Reject mis-configurations that include the primary in
+            // `db_paths`. Operators who do this are usually expecting
+            // it to "always win" — surface the structural-home rule
+            // instead of silently doing the wrong thing.
+            for (p, _) in &config.db_paths {
+                if p.as_path() == primary {
+                    return Err(StorageError::Database(format!(
+                        "RocksDbConfig.db_paths must NOT include the primary path \
+                         ({:?}); the primary is the structural home (MANIFEST, WAL, \
+                         CURRENT) and SST placement is controlled exclusively by the \
+                         tiers listed in `db_paths`.",
+                        p
+                    )));
+                }
+            }
+            let mut dbpaths = Vec::with_capacity(config.db_paths.len());
+            for (p, target) in &config.db_paths {
+                dbpaths.push(DBPath::new(p, *target).map_err(|e| {
+                    StorageError::Database(format!("DBPath {:?}: {e}", p))
+                })?);
+            }
+            db_opts.set_db_paths(&dbpaths);
+        }
 
         let cfs = vec![
             Self::cf_blocks(config),
@@ -450,6 +518,252 @@ impl RocksDbStorage {
         }
     }
 
+    /// Open with custom config. Multi-path equivalent of
+    /// [`Self::open_with_repair`].
+    ///
+    /// Audit Fix #S8 (0.118): repair is no longer auto-triggered on
+    /// open failure. The pre-open `discover_shards` → `decide` pass
+    /// in `noble-node`'s boot flow is now the only place that
+    /// decides when `DB::Repair` is appropriate (callers that hit a
+    /// `RepairThenOpen` decision explicitly call
+    /// [`Self::repair_multi_path`] before re-opening). Auto-repair
+    /// on arbitrary errors masks permission issues, config typos,
+    /// and disk faults that warrant operator attention instead.
+    ///
+    /// The function signature is kept (callers don't need to
+    /// change) but now simply delegates to [`Self::open_with_config`].
+    pub fn open_with_config_and_repair<P: AsRef<Path> + Clone>(
+        path: P,
+        config: &RocksDbConfig,
+    ) -> Result<Self, StorageError> {
+        Self::open_with_config(path, config)
+    }
+
+    /// Repair a multi-path RocksDB. Wraps [`rocksdb::DB::repair`] with
+    /// `Options::set_db_paths` set to the union of primary + extras so
+    /// RocksDB scans every configured location when rebuilding the MANIFEST.
+    /// Use this when an operator has moved SST files between configured
+    /// directories (planned migration, disk swap, rsync recovery).
+    pub fn repair_multi_path<P: AsRef<Path>>(
+        primary: P,
+        config: &RocksDbConfig,
+    ) -> Result<(), StorageError> {
+        // Audit Fix #1: same structural-home rule as `open_with_config`.
+        // The primary is implicit (`DB::repair` uses it for the
+        // MANIFEST rebuild); `db_paths` is operator tiers only.
+        let mut opts = Options::default();
+        if !config.db_paths.is_empty() {
+            let primary_ref = primary.as_ref();
+            for (p, _) in &config.db_paths {
+                if p.as_path() == primary_ref {
+                    return Err(StorageError::Database(format!(
+                        "RocksDbConfig.db_paths must NOT include the primary path \
+                         ({:?}) during repair either.",
+                        p
+                    )));
+                }
+            }
+            let mut dbpaths = Vec::with_capacity(config.db_paths.len());
+            for (p, target) in &config.db_paths {
+                dbpaths.push(DBPath::new(p, *target).map_err(|e| {
+                    StorageError::Database(format!("DBPath {:?}: {e}", p))
+                })?);
+            }
+            opts.set_db_paths(&dbpaths);
+        }
+        DB::repair(&opts, primary)
+            .map_err(|e| StorageError::Database(format!("multi-path repair failed: {e}")))
+    }
+
+    /// Build per-path catalog snapshots from the currently-open DB.
+    /// Calls [`DB::live_files`] for the in-DB list of SSTs and joins
+    /// it against the actual files in each configured tier to figure
+    /// out which path each `LiveFile` lives in. The output is one
+    /// [`crate::catalog::PathCatalog`] per `(path, _)` entry in
+    /// `configured` (in the same order). Used by
+    /// [`Self::rewrite_catalogs`] (on shutdown and on demand via
+    /// `noble_reconcileStorage`).
+    pub fn build_catalogs(
+        &self,
+        configured: &[(PathBuf, u64)],
+        chain_id: u32,
+        node_pubkey_hex: &str,
+        with_hash: bool,
+    ) -> Result<Vec<crate::catalog::PathCatalog>, StorageError> {
+        let live = self
+            .db
+            .live_files()
+            .map_err(|e| StorageError::Database(format!("live_files: {e}")))?;
+
+        // Build name → path map by walking each configured tier.
+        // Audit Fix #S4: propagate `read_dir` errors. Catalog
+        // generation must NOT silently skip a tier the operator
+        // configured — an incomplete catalog persisted to disk
+        // would mask drift on the next boot.
+        let mut name_to_path: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (path, _) in configured {
+            let entries = std::fs::read_dir(path).map_err(|e| {
+                StorageError::Database(format!(
+                    "build_catalogs: read_dir {path:?}: {e}. Catalog \
+                     generation requires every configured tier to be \
+                     readable."
+                ))
+            })?;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("sst") {
+                    if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                        name_to_path.insert(name.to_string(), path.clone());
+                    }
+                }
+            }
+        }
+
+        // Bucket LiveFile records by the tier they physically live in.
+        let mut by_path: std::collections::HashMap<PathBuf, Vec<crate::catalog::CatalogEntry>> =
+            std::collections::HashMap::new();
+        for lf in live {
+            // `lf.name` returned by rocksdb 0.22 is sometimes a path
+            // (e.g. "/000123.sst") and sometimes a basename, depending
+            // on the file's tier. Normalise to basename so the lookup
+            // joins with our walk above.
+            let basename = std::path::Path::new(&lf.name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&lf.name)
+                .to_string();
+            // Audit Fix #S4: refuse to silently skip a live file
+            // that doesn't map to any configured tier. The catalog
+            // is supposed to enumerate every SST RocksDB knows
+            // about; missing entries here mean we're about to write
+            // an incomplete catalog that won't catch drift later.
+            let hosting = name_to_path.get(&basename).ok_or_else(|| {
+                StorageError::Database(format!(
+                    "build_catalogs: live SST {basename:?} (CF={}) is not \
+                     in any configured tier; the catalog would be \
+                     incomplete. Either the file was moved between tiers \
+                     after the directory scan, or `db_paths` is missing \
+                     the tier that holds this SST.",
+                    lf.column_family_name
+                ))
+            })?.clone();
+            let smallest_key_hex = lf
+                .start_key
+                .as_ref()
+                .map(|b| hex::encode(b))
+                .unwrap_or_default();
+            let largest_key_hex = lf
+                .end_key
+                .as_ref()
+                .map(|b| hex::encode(b))
+                .unwrap_or_default();
+            // Audit Fix #6: optionally hash the SST. Callers pay this
+            // I/O cost (proportional to total SST bytes) only when they
+            // want catalog-side hash data for identity-checked repair
+            // (Fix #4). Shutdown hook + reconcileStorage RPC pass
+            // `with_hash = true`; flush-triggered refreshes (future)
+            // pass `false`.
+            let content_sha256 = if with_hash {
+                let absolute = hosting.join(&basename);
+                // Audit Fix #S5: when the caller asked for hashes
+                // (shutdown hook + reconcileStorage RPC) they want
+                // them for identity-checked repair (Fix #4). A
+                // silent `None` here downgrades future move-repair
+                // to size-only matching — defeats the safety goal.
+                // Propagate the error instead.
+                Some(hash_sst_file(&absolute).map_err(|e| {
+                    StorageError::Database(format!(
+                        "build_catalogs: SST hash failed for {absolute:?}: {e}. \
+                         Cannot generate a hash-bearing catalog with this file \
+                         unreadable; repair safety would be downgraded."
+                    ))
+                })?)
+            } else {
+                None
+            };
+            by_path
+                .entry(hosting)
+                .or_default()
+                .push(crate::catalog::CatalogEntry {
+                    file_name: basename,
+                    column_family: lf.column_family_name,
+                    level: lf.level,
+                    smallest_key_hex,
+                    largest_key_hex,
+                    size_bytes: lf.size as u64,
+                    num_entries: lf.num_entries,
+                    num_deletions: lf.num_deletions,
+                    content_sha256,
+                });
+        }
+
+        // Emit one catalog per configured tier (in input order).
+        let mut catalogs = Vec::with_capacity(configured.len());
+        for (path, _) in configured {
+            let mut cat = crate::catalog::PathCatalog::new(chain_id, node_pubkey_hex);
+            if let Some(entries) = by_path.remove(path) {
+                cat.entries = entries;
+                cat.entries.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+            }
+            catalogs.push(cat);
+        }
+        Ok(catalogs)
+    }
+
+    /// Inherent implementation of catalog rewrite. Exposed to callers
+    /// who hold a concrete `RocksDbStorage` (i.e. the noble-node
+    /// startup path). Generic callers go through the
+    /// [`crate::StorageEngine::rewrite_catalogs`] trait method, which
+    /// the impl block at the bottom of this file forwards here.
+    pub fn do_rewrite_catalogs(
+        &self,
+        configured: &[(PathBuf, u64)],
+        chain_id: u32,
+        node_pubkey_hex: &str,
+        with_hash: bool,
+    ) -> Result<u32, StorageError> {
+        let catalogs =
+            self.build_catalogs(configured, chain_id, node_pubkey_hex, with_hash)?;
+        let mut written = 0u32;
+        for ((path, _), cat) in configured.iter().zip(catalogs.iter()) {
+            crate::catalog::write_catalog(path, cat)?;
+            // Audit Fix #S7: drop the bootstrap marker after the
+            // first successful catalog write at this tier. Future
+            // boots use the marker's presence to distinguish
+            // "first-ever boot of a fresh tier" (catalog legitimately
+            // missing → OK) from "steady-state with missing catalog"
+            // (real fault → Fail).
+            crate::catalog::ensure_bootstrap_marker(path)?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    // path_usage moved to the StorageEngine trait so generic callers
+    // (noble-api's RPC layer) can invoke it via dynamic dispatch.
+    // The trait's default impl IS the previous body of this method;
+    // see noble-storage/src/traits.rs.
+
+    /// Audit Fix #10: force every CF's memtable to flush to disk, with
+    /// `wait=true` so the call blocks until L0 SSTs are physically
+    /// written. Used by placement tests to assert that `db_paths`
+    /// actually distributes SSTs to the configured tiers, not by
+    /// production code (production relies on RocksDB's own flush
+    /// triggers).
+    pub fn force_flush_all(&self) -> Result<(), StorageError> {
+        let mut opts = rocksdb::FlushOptions::default();
+        opts.set_wait(true);
+        for cf_name in ALL_CF_NAMES {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                self.db
+                    .flush_cf_opt(&cf, &opts)
+                    .map_err(|e| StorageError::Database(format!("flush_cf {cf_name}: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Query per-CF size and key count estimates from RocksDB properties.
     fn query_cf_stats(&self) -> Vec<CfStats> {
         ALL_CF_NAMES
@@ -503,6 +817,20 @@ impl RocksDbStorage {
 }
 
 impl StorageEngine for RocksDbStorage {
+    /// Override of the trait default. Delegates to the inherent
+    /// [`Self::do_rewrite_catalogs`] so the RPC layer (which calls
+    /// the trait method through generic `S: StorageEngine`) gets
+    /// the real RocksDB implementation rather than the no-op default.
+    fn rewrite_catalogs(
+        &self,
+        configured: &[(PathBuf, u64)],
+        chain_id: u32,
+        node_pubkey_hex: &str,
+        with_hash: bool,
+    ) -> Result<u32, StorageError> {
+        self.do_rewrite_catalogs(configured, chain_id, node_pubkey_hex, with_hash)
+    }
+
     #[tracing::instrument(skip(self, block, block_hash, tx_ids), fields(task = "storage_commit", height = block.header.height))]
     fn commit_block(
         &self,
@@ -2103,6 +2431,28 @@ impl StorageEngine for RocksDbStorage {
 ///
 /// **Bound (GAP-M10):** Values are capped at `MAX_CHECKSUM_REGISTRATIONS × 32` bytes.
 /// Once the cap is reached, further merge operands are silently dropped.
+/// Stream-hash an SST file's contents to hex SHA-256. Used by
+/// `build_catalogs` when `with_hash=true` (audit Fix #6). Streams in
+/// 64 KiB chunks so memory is constant regardless of SST size.
+fn hash_sst_file(path: &Path) -> Result<String, StorageError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| StorageError::Database(format!("hash_sst_file open {path:?}: {e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| StorageError::Database(format!("hash_sst_file read {path:?}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn checksum_merge_operator(
     _key: &[u8],
     existing: Option<&[u8]>,

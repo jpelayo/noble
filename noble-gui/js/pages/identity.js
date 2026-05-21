@@ -649,6 +649,21 @@ export function init(root, ctx) {
     e.preventDefault();
     statusEl.textContent = 'Saving...';
     statusEl.style.color = 'var(--text-secondary)';
+    // Audit Fix #A2: getHostAddress() returns '' when the operator
+    // selected a host-address mode (Public IP / LAN / DNS) but left
+    // the corresponding input blank. Previously this silently sent
+    // host_address: '' to the RPC. Now we surface a clear inline
+    // error and abort before any RPC fires.
+    const hostAddress = getHostAddress();
+    if (!hostAddress) {
+      const mode = root.querySelector('input[name="host-mode"]:checked').value;
+      const modeLabel = mode === 'ip' ? 'Public IP'
+                      : mode === 'lan' ? 'LAN IP'
+                      : 'DNS hostname';
+      statusEl.textContent = `Error: please fill the ${modeLabel} field before saving.`;
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
     try {
       const composite = NODE_ROLE_COMPOSITE.find(c => c.value === nodeRoleSelect.value);
       await rpc.call('noble_setNodeIdentity', {
@@ -658,7 +673,7 @@ export function init(root, ctx) {
         node_role: composite.role,
         contact_email: root.querySelector('#id-email').value,
         website: root.querySelector('#id-website').value,
-        host_address: getHostAddress(),
+        host_address: hostAddress,
         country_code: root.querySelector('#id-country').value.trim().toUpperCase() || undefined,
         wants_to_validate: composite.validate,
         wants_to_vote: composite.vote,

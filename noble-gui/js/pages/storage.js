@@ -77,6 +77,14 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Storage Tiers Panel (multi-path sharding, Phase 6) -->
+    <div class="panel" id="st-tiers-panel" style="margin-bottom:1rem">
+      <div class="panel-header">Storage Tiers</div>
+      <div class="panel-body" id="st-tiers-body">
+        <div style="color:var(--text-muted);font-size:var(--font-size-sm)">Loading...</div>
+      </div>
+    </div>
+
     <div class="split-layout">
       <div class="panel">
         <div class="panel-header">Storage Info</div>
@@ -485,6 +493,74 @@ export function init(root, ctx) {
     `;
   }
 
+  async function loadStorageTiers() {
+    const tiersBody = root.querySelector('#st-tiers-body');
+    if (!tiersBody) return;
+    try {
+      const sp = await rpc.call('noble_getStoragePaths');
+      if (!sp || !Array.isArray(sp.paths) || sp.paths.length === 0) {
+        tiersBody.innerHTML = `<div style="color:var(--text-muted);font-size:var(--font-size-sm)">No tiers configured (single-volume mode).</div>`;
+        return;
+      }
+      const rows = sp.paths.map(p => {
+        const used = formatBytes(p.used_bytes || 0);
+        const free = formatBytes(p.free_bytes || 0);
+        const target = p.target_bytes === 0
+          ? '<span style="color:var(--text-muted)">unlimited</span>'
+          : formatBytes(p.target_bytes);
+        const ratio = p.target_bytes > 0
+          ? Math.min(100, Math.round((p.used_bytes / p.target_bytes) * 100))
+          : 0;
+        const bar = `<div style="width:120px;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden">
+          <div style="width:${ratio}%;height:100%;background:${ratio > 90 ? 'var(--warning)' : 'var(--accent)'}"></div>
+        </div>`;
+        const role = p.is_primary
+          ? '<span style="font-size:var(--font-size-xs);color:var(--accent);font-weight:600">PRIMARY</span>'
+          : '<span style="font-size:var(--font-size-xs);color:var(--text-muted)">tier</span>';
+        const cat = p.catalog_present
+          ? '<span style="font-size:var(--font-size-xs);color:var(--success)">✓</span>'
+          : '<span style="font-size:var(--font-size-xs);color:var(--text-muted)">—</span>';
+        return `<tr>
+          <td>${role}</td>
+          <td style="font-family:var(--font-mono,monospace);font-size:var(--font-size-xs)">${esc(p.path)}</td>
+          <td style="text-align:right">${used}</td>
+          <td style="text-align:right">${target}</td>
+          <td>${bar}</td>
+          <td style="text-align:right">${free}</td>
+          <td style="text-align:right">${p.sst_count || 0}</td>
+          <td style="text-align:center">${cat}</td>
+        </tr>`;
+      }).join('');
+      tiersBody.innerHTML = `
+        <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:var(--gap-sm)">
+          Reconciliation mode: <strong>${esc(sp.reconcile_mode || 'auto')}</strong>.
+          Multi-path storage spreads SST files across tiers; newer data goes to earlier paths.
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:var(--font-size-sm)">
+          <thead>
+            <tr style="color:var(--text-muted);text-align:left">
+              <th style="padding:4px 8px">Role</th>
+              <th style="padding:4px 8px">Path</th>
+              <th style="padding:4px 8px;text-align:right">Used</th>
+              <th style="padding:4px 8px;text-align:right">Target</th>
+              <th style="padding:4px 8px">Fill</th>
+              <th style="padding:4px 8px;text-align:right">Free</th>
+              <th style="padding:4px 8px;text-align:right">SSTs</th>
+              <th style="padding:4px 8px;text-align:center">Cat.</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    } catch (e) {
+      tiersBody.innerHTML = `<div style="color:var(--error);font-size:var(--font-size-sm)">Could not load tiers: ${esc(e.message || String(e))}</div>`;
+    }
+  }
+  // Minimal escape helper (storage.js doesn't import `esc`).
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
   async function loadStorage() {
     try {
       const [storageInfo, pruningStatus, storageStats] = await Promise.all([
@@ -492,6 +568,9 @@ export function init(root, ctx) {
         rpc.call('noble_getPruningStatus'),
         rpc.call('noble_getStorageStats'),
       ]);
+      // Storage tiers load independently (different RPC; safe to fail
+      // without blocking the rest of the page).
+      loadStorageTiers();
 
       // KPI cards
       stHeight.textContent = formatNumber(storageInfo.chain_height);

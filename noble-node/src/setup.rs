@@ -610,7 +610,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             compression,
             pruning_mode: pruning_mode.clone(),
             keep_blocks,
-            max_db_size_gb: 0,
+            extra_data_dirs: Vec::new(),
+            reconcile_mode: crate::config::ReconcileMode::Auto,
         },
         security: SecurityConfig {
             encryption_mode: encryption_mode.clone(),
@@ -647,8 +648,6 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         },
         logging: LoggingConfig {
             level: defaults.logging.level.clone(),
-            file: defaults.logging.file.clone(),
-            rotation: defaults.logging.rotation.clone(),
         },
         metrics: MetricsConfig {
             prometheus_addr: defaults.metrics.prometheus_addr.clone(),

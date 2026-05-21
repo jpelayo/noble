@@ -1393,6 +1393,29 @@ export function init(root, ctx) {
         }
       }
 
+      // Multi-path sharding (Phase 6, wizard wiring):
+      // state.volumes was being silently dropped here pre-0.117 — the
+      // wizard rendered the form, validated each path via
+      // noble_checkDataDir, displayed them in the summary, then never
+      // sent them anywhere. Fixed: persist via noble_setStoragePaths.
+      // target_gb is omitted (Shape A → auto-detect at boot).
+      const extraVolumes = (state.volumes || [])
+        .map(v => (v.path || '').trim()).filter(Boolean)
+        .map(p => ({ path: p }));
+      if (extraVolumes.length > 0) {
+        try {
+          const resp = await rpc.call('noble_setStoragePaths', { extras: extraVolumes });
+          if (resp && Array.isArray(resp.rejected) && resp.rejected.length) {
+            configErrors.push(
+              'extra volumes rejected: ' +
+              resp.rejected.map(r => `${r.path} (${r.reason})`).join(', ')
+            );
+          }
+        } catch (e) {
+          configErrors.push(`extra volumes: ${e.message || e}`);
+        }
+      }
+
       // Dial seeds (best effort, separate from persistence).
       if (state.seeds) {
         const seedAddrs = state.seeds.split(',').map(s => s.trim()).filter(Boolean);
@@ -1438,6 +1461,27 @@ export function init(root, ctx) {
       if (verifyInfo) {
         if (state.dataDir && verifyInfo.data_dir && verifyInfo.data_dir !== state.dataDir) {
           verifyMismatches.push(`data_dir: expected "${state.dataDir}", on disk "${verifyInfo.data_dir}"`);
+        }
+      }
+      // Sharding verification: re-read the persisted tier list and
+      // ensure every operator-supplied path made the trip. Note: the
+      // primary `data_dir` is included in noble_getStoragePaths
+      // results (is_primary=true) so we filter it out before
+      // comparing against the wizard's `state.volumes`.
+      if (extraVolumes.length > 0) {
+        let sp = null;
+        try { sp = await rpc.call('noble_getStoragePaths', {}); } catch { /* best effort */ }
+        if (sp && Array.isArray(sp.paths)) {
+          const persisted = sp.paths
+            .filter(p => !p.is_primary)
+            .map(p => p.path)
+            .sort();
+          const requested = extraVolumes.map(e => e.path).sort();
+          if (JSON.stringify(persisted) !== JSON.stringify(requested)) {
+            verifyMismatches.push(
+              `extra volumes: requested ${JSON.stringify(requested)}, persisted ${JSON.stringify(persisted)}`
+            );
+          }
         }
       }
       // Check setup_complete via getSetupStatus.

@@ -294,3 +294,67 @@ pub fn resolve_data_dir(cli_fallback: &Path) -> PathBuf {
         cli_fallback.to_path_buf()
     }
 }
+
+/// Bytes currently available on the filesystem hosting `path`. Used by
+/// the sharding startup helper to auto-detect a per-tier `target_bytes`
+/// when the operator left it implicit (Shape A `JustPath` config).
+///
+/// On Unix (Linux, macOS) this calls `statvfs(2)`. The result is the
+/// number of bytes a non-privileged user could write — equivalent to
+/// `df`'s "Avail" column. On unsupported platforms (Windows) it
+/// returns `Err(ErrorKind::Unsupported)`.
+#[cfg(unix)]
+pub fn filesystem_free_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::ffi::CString;
+    let raw_path = path.as_os_str().to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "filesystem_free_bytes: path is not valid UTF-8",
+        )
+    })?;
+    let cpath = CString::new(raw_path).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+    })?;
+    // SAFETY: `statvfs` writes into the zeroed buffer; we pass a valid
+    // C string pointer. The returned code is checked before we use any
+    // of the populated fields.
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut buf) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let bavail = buf.f_bavail as u64;
+    let frsize = buf.f_frsize as u64;
+    Ok(bavail.saturating_mul(frsize))
+}
+
+#[cfg(not(unix))]
+pub fn filesystem_free_bytes(_path: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "filesystem_free_bytes: only implemented for Unix",
+    ))
+}
+
+#[cfg(all(test, unix))]
+mod free_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn free_bytes_on_tempdir_is_positive() {
+        let tmp = std::env::temp_dir();
+        let n = filesystem_free_bytes(&tmp).expect("statvfs ok");
+        // Anything > 0 is enough to confirm the call wired up. A
+        // filesystem that genuinely has zero bytes free would fail
+        // every subsequent test anyway.
+        assert!(n > 0, "expected non-zero free bytes on {:?}, got {n}", tmp);
+    }
+
+    #[test]
+    fn free_bytes_missing_path_errors() {
+        let p = std::path::PathBuf::from("/this/path/does/not/exist/noble-test");
+        let err = filesystem_free_bytes(&p).unwrap_err();
+        // statvfs returns ENOENT here.
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    }
+}

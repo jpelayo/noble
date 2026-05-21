@@ -81,7 +81,9 @@ pub static READ_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "getPollHistory", "getProposalHistory", "getPruningStatus",
         "getReputationScore", "getRewardAddress", "getSeeds",
         "getSetupStatus", "getStorageConfig", "getStorageInfo",
-        "getStorageStats", "getSyncStatus", "getTlsCertInfo",
+        "getStoragePaths", "getStorageStats", "getSyncStatus", "getTlsCertInfo",
+        // Multi-path sharding read methods (Phase 5):
+        "discoverShards", "listShards",
         "getTlsFingerprint", "getTotpStatus", "getTransaction",
         "getTransactionReceipt", "getTransactionStatus",
         "getValidatorKeyInfo", "getValidatorList", "getVoteTallies",
@@ -414,8 +416,9 @@ mod tests {
     /// adding the new name here AND classifying it in `READ_METHODS`,
     /// `LEGACY_PUBLIC_METHODS`, or leaving it out (write-classified).
     ///
-    /// 124 entries as of the Tier 3 hardening PR. If `RpcModule::method_names`
-    /// reports a different count at runtime, that's the signal to update.
+    /// 127 entries as of 0.117 (sharding RPCs added). If
+    /// `RpcModule::method_names` reports a different count at runtime,
+    /// that's the signal to update.
     const ALL_RPC_METHODS: &[&str] = &[
         "addSeed", "addValidator", "backupChain", "banPeer", "castVote",
         "checkChainIntegrity", "checkDataDir", "clearTraceBuffer",
@@ -452,12 +455,15 @@ mod tests {
         "searchDocumentsByMetadata", "setAllowedIps",
         "setBadgeApprovalStrategy", "setBadgeRevocationStrategy",
         "setConfigValue", "setEncryptionMode", "setNodeIdentity",
-        "setRewardAddress", "setStorageConfig", "setTraceFilter",
-        "setValidatorOrder", "setVotingStrategy",
+        "setRewardAddress", "setStorageConfig", "setStoragePaths",
+        "setTraceFilter", "setValidatorOrder", "setVotingStrategy",
         "submitDocumentBatch", "submitTransaction", "unbanPeer",
         "uploadTlsCert", "validateAddress", "verifyDocument",
         "voteBadgeProposal", "votePoll", "walletLock",
         "walletSendTransfer", "walletUnlock",
+        // Multi-path sharding (Phase 5):
+        "discoverShards", "listShards", "reconcileStorage",
+        "getStoragePaths",
     ];
 
     /// Allowlist-policy coverage test. Every method registered with the
@@ -497,11 +503,14 @@ mod tests {
 
         // Sanity check: the size of the manual roster matches expectations.
         // If a new method was registered without updating ALL_RPC_METHODS,
-        // someone will hit a 401 in production. This catches drift at test time.
+        // someone will hit a 401 in production. This catches drift at test
+        // time. Count bumped to 127 in 0.117 (sharding: +5 methods —
+        // getStoragePaths, setStoragePaths, discoverShards, listShards,
+        // reconcileStorage).
         assert_eq!(
             ALL_RPC_METHODS.len(),
-            122,
-            "ALL_RPC_METHODS drifted from the 122 registered RPC methods — \
+            127,
+            "ALL_RPC_METHODS drifted from the 127 registered RPC methods — \
              update the roster and classify any new methods in READ_METHODS \
              (read) or leave them out (write-classified, require TOTP)"
         );
@@ -544,6 +553,10 @@ mod tests {
             "backupChain",      // tarballs operator data to disk
             "checkDataDir",     // writes test file at caller path
             "listDirectory",    // writes test files in every child dir
+            // Multi-path sharding (Phase 5): writes that mutate
+            // operator's storage layout or refresh on-disk catalogs.
+            "setStoragePaths",  // persists noble.toml + restart required
+            "reconcileStorage", // rewrites catalogs across every tier
         ] {
             assert!(
                 !is_read_method(sensitive),

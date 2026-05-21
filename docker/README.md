@@ -295,6 +295,133 @@ volume keeps everything else; or use `reset-chain` to also wipe RocksDB).
 | RocksDB lock error on boot | Brew service also running on the same data dir | `brew services stop noble`; or use a different `NOBLE_DATA_DIR` |
 | `Permission denied` on volume | Host bind-mount with mismatched UID | Container runs as UID 10000; either `chown -R 10000:10000 <host-dir>` or use the named volume default |
 
+## Sharding storage across multiple disks (multi-path)
+
+The node can spread blockchain data across more than one disk. Two
+operator benefits:
+
+1. **Growth.** Add a new disk → add a path → restart. RocksDB starts
+   writing newer data into the earlier tiers; older SSTs gradually
+   migrate down. No resync.
+2. **Resilience.** If you move SST files between configured paths
+   (planned migration, disk swap, rsync recovery), the node detects
+   it at startup and rebuilds the MANIFEST via `DB::Repair`. The
+   Recovery page in the GUI exposes discovery + on-demand catalog
+   refresh + arbitrary-directory inspection.
+
+### `NOBLE_EXTRA_DATA_DIRS` syntax (0.118+)
+
+Each comma-separated entry is either a path (Shape A — auto-detect
+target) or `path:target_gb` (Shape B — explicit cap; `0` means
+unlimited):
+
+| Form | Meaning |
+|---|---|
+| `/var/lib/noble/warm` | Shape A — target = 90% of free bytes |
+| `/var/lib/noble/cold:0` | Shape B — unlimited spillover |
+| `/var/lib/noble/warm:4000` | Shape B — 4 TiB cap |
+
+**The last entry MUST be `:0` (unlimited)** or the node refuses to
+start. A bounded final tier eventually fills, forcing RocksDB to
+violate its placement guarantee. To accept that risk (rare), set
+`NOBLE_ALLOW_BOUNDED_FINAL_TIER=1`.
+
+### Two-tier compose example (SSD + HDD)
+
+```yaml
+services:
+  noble:
+    environment:
+      NOBLE_EXTRA_DATA_DIRS: /var/lib/noble/data-cold:0
+      NOBLE_RECONCILE_MODE: auto
+    volumes:
+      - /mnt/ssd/noble:/var/lib/noble                # primary (data + WAL + MANIFEST)
+      - /mnt/hdd/noble-cold:/var/lib/noble/data-cold # spillover tier
+```
+
+The bind-mount source on the left is each physical disk; the target
+on the right is what the node sees. Make sure each source is owned
+by UID 10000 (`chown -R 10000:10000 /mnt/...`) so the unprivileged
+container user can write into it.
+
+### Three-tier compose example (NVMe + SSD + HDD)
+
+```yaml
+services:
+  noble:
+    environment:
+      NOBLE_EXTRA_DATA_DIRS: /var/lib/noble/data-warm:4000,/var/lib/noble/data-cold:0
+      NOBLE_RECONCILE_MODE: auto
+    volumes:
+      - /mnt/nvme/noble:/var/lib/noble
+      - /mnt/ssd/noble-warm:/var/lib/noble/data-warm
+      - /mnt/hdd/noble-cold:/var/lib/noble/data-cold
+```
+
+### Move-and-recover workflow
+
+Swap one disk for another without resyncing the whole chain:
+
+```sh
+# 1. stop the node
+docker compose stop noble
+
+# 2. rsync the contents from the old mount to the new one
+rsync -aHAX --delete /mnt/hdd-old/noble-cold/ /mnt/hdd-new/noble-cold/
+
+# 3. unmount the old disk, mount the new one at the SAME path
+sudo umount /mnt/hdd-old
+sudo mount /dev/sdX1 /mnt/hdd-new
+# (or update bind-mount source in docker-compose.yml to point at
+#  /mnt/hdd-new/noble-cold)
+
+# 4. start the node
+docker compose up -d
+docker compose logs -f noble | grep '\[storage\]'
+# Expected: "decision: RepairThenOpen" → "running multi-path repair"
+# → "repair complete; opening DB"
+```
+
+If you mounted the new disk at a different path, the GUI's Recovery
+page → "Inspect a directory" can verify the move first
+(`noble_listShards` returns every `.sst` it finds, with optional
+SHA-256 hashes).
+
+### Notes
+
+- Per-path `target_gb` (explicit quotas) is not exposed via env vars
+  — set it by editing `noble.toml` after first boot or by calling
+  `noble_setStoragePaths` with a `target_gb` field per row.
+- Removing a tier requires the operator to first migrate its SSTs
+  elsewhere (rsync) — the node will refuse to start if it lists a
+  tier whose catalog references SSTs that aren't on disk anywhere.
+- `NOBLE_RECONCILE_MODE=verify` makes the node refuse to start on
+  any catalog/disk divergence — paranoid mode for production
+  validators.
+
+### Sharding hardening (0.117.1)
+
+- **Identity-checked repair.** When the node detects an SST listed
+  in one tier's catalog actually living in another, it now matches
+  by size (always) and SHA-256 (when both sides have hashes) before
+  running `DB::Repair`. Boot discovery hashes every `*.sst` on the
+  way in; cost is O(total SST bytes / disk read bandwidth) — seconds
+  for a multi-TB archive node, paid once per restart.
+- **Automatic shutdown catalog rewrite.** `docker compose down`
+  triggers SIGTERM → graceful shutdown → catalog rewrite at every
+  configured tier. Operators no longer need to invoke
+  `noble_reconcileStorage` manually for the normal stop/start cycle.
+- **Structural-home primary path.** The primary `data_dir` is no
+  longer included in the RocksDB `db_paths` tier list — it's the
+  home of MANIFEST/CURRENT/OPTIONS/LOG/WAL only. SST placement is
+  controlled exclusively by `NOBLE_EXTRA_DATA_DIRS`. A misconfig
+  that puts the primary in the extras list is rejected at open
+  time with a clear error message.
+- **Symlink / alias rejection.** `NOBLE_EXTRA_DATA_DIRS` entries are
+  canonicalised at boot. Two paths that resolve to the same
+  physical directory (via symlinks, `..`, or `.`) are rejected so
+  RocksDB never sees one tier as two separate `DBPath` entries.
+
 ## Coexistence with Homebrew install
 
 The brew formula and this Docker image are independent. They install the

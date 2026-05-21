@@ -1315,8 +1315,6 @@ pub struct StorageStatsResponse {
     pub cache_size_bytes: u64,
     pub compression_enabled: bool,
     pub column_families: Vec<CfStatsEntry>,
-    /// Maximum database size in bytes. 0 = unlimited.
-    pub max_db_size_bytes: u64,
 }
 
 /// Response for `noble_getStorageConfig`.
@@ -1327,7 +1325,6 @@ pub struct StorageConfigResponse {
     pub compression: bool,
     pub pruning_mode: String,
     pub keep_blocks: u64,
-    pub max_db_size_gb: u64,
 }
 
 /// Response for `noble_getSetupStatus`.
@@ -1823,6 +1820,122 @@ pub struct ForkResolutionStatusResponse {
     pub tracking_fork: Option<String>,
     pub finalized_floor: u64,
     pub checkpoint_floor: u64,
+}
+
+// ─── Multi-path storage sharding (Phase 5) ──────────────────────────────
+
+/// Input row for `noble_setStoragePaths`. `target_gb = None` ⇒ Shape A
+/// (auto-detect target as 90 % of free bytes at boot). `Some(0)` ⇒
+/// unlimited spillover. `Some(n)` ⇒ explicit `n GiB`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StoragePathInput {
+    pub path: String,
+    pub target_gb: Option<u64>,
+}
+
+/// One tier's runtime status, returned by `noble_getStoragePaths` and
+/// echoed inside reconcile / discovery DTOs.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoragePathInfo {
+    pub path: String,
+    pub target_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub sst_count: u32,
+    pub other_files_bytes: u64,
+    pub catalog_present: bool,
+    pub catalog_updated_at: Option<u64>,
+    pub is_primary: bool,
+}
+
+/// Response of `noble_getStoragePaths`. Order matches the live
+/// `db_paths` list: primary first, then operator-supplied tiers.
+#[derive(Debug, Clone, Serialize)]
+pub struct GetStoragePathsResponse {
+    pub paths: Vec<StoragePathInfo>,
+    pub reconcile_mode: String,
+}
+
+/// One rejected input row from `noble_setStoragePaths`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoragePathRejection {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Response of `noble_setStoragePaths`. `requires_restart` is always
+/// `true` in v1 (RocksDB cannot reconfigure `db_paths` live).
+#[derive(Debug, Clone, Serialize)]
+pub struct SetStoragePathsResponse {
+    pub accepted: Vec<String>,
+    pub rejected: Vec<StoragePathRejection>,
+    pub requires_restart: bool,
+}
+
+/// Single SST descriptor row in `noble_listShards` / `noble_discoverShards`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShardDescriptorDto {
+    pub file_name: String,
+    pub absolute_path: String,
+    pub size_bytes: u64,
+    pub content_sha256: Option<String>,
+}
+
+/// Response of `noble_listShards`. `errors` is per-file rather than
+/// aborting the whole listing — one corrupt `*.sst` shouldn't hide
+/// the rest of the directory.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListShardsResponse {
+    pub path: String,
+    pub descriptors: Vec<ShardDescriptorDto>,
+    pub errors: Vec<String>,
+}
+
+/// Per-path inventory inside `DiscoveryReportDto`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PathInventoryDto {
+    pub path: String,
+    pub catalog_present: bool,
+    pub catalog_chain_id: Option<u32>,
+    pub catalog_updated_at: Option<u64>,
+    pub discovered: Vec<ShardDescriptorDto>,
+    pub missing_from_catalog: Vec<String>,
+    pub extra_vs_catalog: Vec<String>,
+}
+
+/// Per-content-hash duplicate entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateSstDto {
+    pub content_sha256: String,
+    pub paths: Vec<String>,
+}
+
+/// `noble_discoverShards` response: full disk-vs-catalog picture
+/// across all configured tiers.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryReportDto {
+    pub paths: Vec<PathInventoryDto>,
+    pub duplicates: Vec<DuplicateSstDto>,
+    pub strangers: Vec<ShardDescriptorDto>,
+    pub hashes_available: bool,
+    pub decision: String,
+    pub decision_reason: Option<String>,
+    /// Audit Fix #3: filesystem-level errors while walking tiers.
+    /// `(path, error_message)` pairs.
+    pub scan_errors: Vec<(String, String)>,
+    /// Audit Fix #3: catalogs that exist but failed to parse.
+    pub catalog_errors: Vec<(String, String)>,
+}
+
+/// `noble_reconcileStorage` response. Re-runs discovery and rewrites
+/// every per-path catalog with the current `live_files()` view. Does
+/// NOT run `DB::Repair` — that requires a restart (the running DB
+/// holds a process-level lock).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReconcileResponse {
+    pub report: DiscoveryReportDto,
+    pub catalogs_rewritten: u32,
+    pub requires_restart: bool,
 }
 
 #[cfg(test)]

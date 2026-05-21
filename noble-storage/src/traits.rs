@@ -42,6 +42,76 @@ pub struct ChainTip {
 /// updates for a block (block data, indexes, chain state) succeed together,
 /// or none are visible.
 pub trait StorageEngine {
+    /// Rebuild per-path catalog snapshots from the live SST list.
+    ///
+    /// Default implementation is a no-op returning `0` — only the
+    /// RocksDB backend writes catalogs. The `MemoryStorage` mock and
+    /// any other future backend (test fixtures) simply skip catalog
+    /// maintenance.
+    ///
+    /// Called from `noble_reconcileStorage` RPC and from the node's
+    /// graceful shutdown path (audit Fix #2). `configured` is the
+    /// full tier list (primary + extras) — distinct from
+    /// `RocksDbConfig::db_paths`, which excludes the primary.
+    ///
+    /// `with_hash` controls whether each entry's `content_sha256`
+    /// field is populated by hashing the corresponding SST file
+    /// (audit Fix #6). Hashing every SST adds I/O proportional to
+    /// total SST bytes; callers pay it once per clean shutdown and
+    /// once per `reconcileStorage` invocation to keep the catalog
+    /// authoritative for identity-checked repair (audit Fix #4).
+    fn rewrite_catalogs(
+        &self,
+        configured: &[(std::path::PathBuf, u64)],
+        chain_id: u32,
+        node_pubkey_hex: &str,
+        with_hash: bool,
+    ) -> Result<u32, StorageError> {
+        let _ = (configured, chain_id, node_pubkey_hex, with_hash);
+        Ok(0)
+    }
+
+    /// Per-tier disk usage. Returns one `PathUsage` per `(path, target)`
+    /// entry in `configured`. Default impl walks each directory and
+    /// counts `.sst` vs other files; `RocksDbStorage` shares the same
+    /// implementation. This is the engine-agnostic path used by
+    /// `noble_getStoragePaths`.
+    fn path_usage(
+        &self,
+        configured: &[(std::path::PathBuf, u64)],
+    ) -> Vec<crate::rocks::PathUsage> {
+        configured
+            .iter()
+            .map(|(path, target)| {
+                let mut used_bytes = 0u64;
+                let mut sst_count = 0u32;
+                let mut other_files_bytes = 0u64;
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if !p.is_file() {
+                            continue;
+                        }
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        if p.extension().and_then(|s| s.to_str()) == Some("sst") {
+                            used_bytes = used_bytes.saturating_add(size);
+                            sst_count = sst_count.saturating_add(1);
+                        } else {
+                            other_files_bytes = other_files_bytes.saturating_add(size);
+                        }
+                    }
+                }
+                crate::rocks::PathUsage {
+                    path: path.clone(),
+                    target_bytes: *target,
+                    used_bytes,
+                    sst_count,
+                    other_files_bytes,
+                }
+            })
+            .collect()
+    }
+
     /// Atomically commit a block and all its indexes.
     ///
     /// This writes the block to the `blocks` CF, updates the `block_hashes`

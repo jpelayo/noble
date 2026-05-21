@@ -1058,14 +1058,21 @@ export function init(root, ctx) {
     }
   }
 
+  // Audit Fix #A3: remember the persisted value so we can detect
+  // "no change" submissions and skip the RPC. Initialised by
+  // loadMaxPeers() the first time the page is rendered.
+  let maxPeersPersisted = null;
+
   async function loadMaxPeers() {
     try {
       const info = await rpc.call('noble_getNetworkInfo');
       const v = info.max_peers ?? 50;
       maxPeersInput.value = v;
       maxPeersCurrent.textContent = `current: ${v}`;
+      maxPeersPersisted = v;
     } catch {
       maxPeersCurrent.textContent = 'unable to load';
+      maxPeersPersisted = null;
     }
   }
 
@@ -1076,6 +1083,14 @@ export function init(root, ctx) {
       maxPeersMsg.textContent = 'Value must be 2–500';
       return;
     }
+    // Audit Fix #A3: skip the RPC when the value hasn't changed.
+    // Previously clicking Save N times with the same value fired N
+    // identical RPCs. Now: short-circuit with a "no changes" toast.
+    if (maxPeersPersisted !== null && val === maxPeersPersisted) {
+      maxPeersMsg.style.color = 'var(--text-muted)';
+      maxPeersMsg.textContent = 'No changes to save';
+      return;
+    }
     maxPeersSave.disabled = true;
     maxPeersMsg.textContent = '';
     try {
@@ -1083,6 +1098,7 @@ export function init(root, ctx) {
       maxPeersMsg.style.color = 'var(--success)';
       maxPeersMsg.textContent = result.restart_required ? 'Saved — restart to apply' : 'Saved';
       maxPeersCurrent.textContent = `current: ${val}`;
+      maxPeersPersisted = val;
     } catch (e) {
       maxPeersMsg.style.color = 'var(--error)';
       maxPeersMsg.textContent = e.message || 'Save failed';

@@ -23,7 +23,7 @@ const [
   overviewPage, blocksPage, blockDetailPage, transactionsPage,
   txDetailPage, verifyPage, mempoolPage, networkPage,
   consensusPage, governancePage, walletPage, healthPage, identityPage,
-  tracePage, storagePage, settingsPage, setupPage,
+  tracePage, storagePage, settingsPage, setupPage, recoveryPage,
 ] = await Promise.all([
   import(_m('./pages/overview.js')),
   import(_m('./pages/blocks.js')),
@@ -42,6 +42,7 @@ const [
   import(_m('./pages/storage.js')),
   import(_m('./pages/settings.js')),
   import(_m('./pages/setup.js')),
+  import(_m('./pages/recovery.js')),
 ]);
 
 // ── Status change handler ──
@@ -253,6 +254,7 @@ router
   .add('/wallet', walletPage)
   .add('/health', healthPage)
   .add('/storage', storagePage)
+  .add('/recovery', recoveryPage)
   .add('/identity', identityPage)
   .add('/trace', tracePage)
   .add('/settings', settingsPage)

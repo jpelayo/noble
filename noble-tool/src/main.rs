@@ -322,7 +322,7 @@ enum StorageCommand {
     },
     /// Update a storage config value (writes to noble.toml, restart required).
     Set {
-        /// Config key (data_dir, cache_size_mb, compression, pruning_mode, keep_blocks, max_db_size_gb).
+        /// Config key (data_dir, cache_size_mb, compression, pruning_mode, keep_blocks).
         key: String,
         /// New value.
         value: String,
@@ -1488,7 +1488,6 @@ fn cmd_storage(action: StorageCommand) {
                     let total_vol = result.get("total_volume_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
                     let cache = result.get("cache_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
                     let compress = result.get("compression_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let max_db = result.get("max_db_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
 
                     println!("=== Storage Stats ===");
                     println!("{:<20} {}", "Data Directory:", data_dir);
@@ -1497,11 +1496,6 @@ fn cmd_storage(action: StorageCommand) {
                     println!("{:<20} {}", "Disk Total:", format_bytes(total_vol));
                     println!("{:<20} {} MB", "Cache:", cache / (1024 * 1024));
                     println!("{:<20} {}", "Compression:", if compress { "Zstd" } else { "None" });
-                    if max_db > 0 {
-                        println!("{:<20} {} GB", "Max DB Size:", max_db / (1024 * 1024 * 1024));
-                    } else {
-                        println!("{:<20} Unlimited", "Max DB Size:");
-                    }
 
                     // Column families
                     if let Some(cfs) = result.get("column_families").and_then(|v| v.as_array()) {
@@ -1536,7 +1530,6 @@ fn cmd_storage(action: StorageCommand) {
                         let compress = result.get("compression").and_then(|v| v.as_bool()).unwrap_or(false);
                         let pruning = result.get("pruning_mode").and_then(|v| v.as_str()).unwrap_or("N/A");
                         let keep = result.get("keep_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let max_gb = result.get("max_db_size_gb").and_then(|v| v.as_u64()).unwrap_or(0);
 
                         println!("=== Storage Configuration ===");
                         println!("{:<20} {}", "Data Directory:", data_dir);
@@ -1544,7 +1537,6 @@ fn cmd_storage(action: StorageCommand) {
                         println!("{:<20} {}", "Compression:", if compress { "enabled" } else { "disabled" });
                         println!("{:<20} {}", "Pruning Mode:", pruning);
                         println!("{:<20} {}", "Keep Blocks:", if keep == 0 { "all (archive)".to_string() } else { keep.to_string() });
-                        println!("{:<20} {}", "Max DB Size:", if max_gb == 0 { "unlimited".to_string() } else { format!("{max_gb} GB") });
                     }
                 }
                 Err(e) => {
@@ -1554,7 +1546,7 @@ fn cmd_storage(action: StorageCommand) {
             }
         }
         StorageCommand::Set { key, value, rpc_url } => {
-            let valid_keys = ["data_dir", "cache_size_mb", "compression", "pruning_mode", "keep_blocks", "max_db_size_gb"];
+            let valid_keys = ["data_dir", "cache_size_mb", "compression", "pruning_mode", "keep_blocks"];
             if !valid_keys.contains(&key.as_str()) {
                 eprintln!("Error: unknown storage config key '{key}'");
                 eprintln!("Valid keys: {}", valid_keys.join(", "));

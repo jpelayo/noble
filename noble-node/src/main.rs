@@ -18,6 +18,7 @@ mod pidfile;
 pub mod pkcs12;
 mod providers;
 mod setup;
+pub mod startup;
 mod status;
 pub mod trace;
 
@@ -452,8 +453,107 @@ async fn run_with_rocksdb(config: &config::NodeConfig, trace_handle: Arc<TraceHa
             return 1;
         }
     }
-    match noble_storage::RocksDbStorage::open_with_repair(&config.storage.data_dir) {
-        Ok(storage) => match node::Node::init_with_storage(config, storage, encryption_password) {
+
+    // --- Multi-path sharding wiring ---
+    // 1) Validate `[storage]` sharding config (absolute paths, no
+    //    duplicates, no clash with data_dir). Catches operator mistakes
+    //    BEFORE RocksDB ever touches the extra tiers.
+    if let Err(e) = config.validate_storage_paths() {
+        tracing::error!("storage config invalid: {e}");
+        eprintln!("FATAL: storage config invalid: {e}");
+        return 1;
+    }
+    // 2) Resolve the tier list: mkdir each, chmod 0700, compute
+    //    target_bytes (auto from free space for Shape A, explicit for
+    //    Shape B).
+    let extras = match startup::compute_db_paths(&config.storage) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("storage tier resolution failed: {e}");
+            eprintln!("FATAL: storage tier resolution failed: {e}");
+            return 1;
+        }
+    };
+    startup::log_storage_paths(&config.storage.data_dir, &extras);
+
+    // 3) Pre-open discovery + reconciliation (skipped when
+    //    reconcile_mode == Off, or no tiers AND no catalog at primary).
+    let reconcile_mode = config.storage.reconcile_mode;
+    if reconcile_mode != config::ReconcileMode::Off {
+        // Audit Fix #4: discovery must hash discovered SSTs so the
+        // move-detection in `decide()` can verify identity (size +
+        // hash match) rather than just filename. Hashing N SSTs at
+        // boot is O(total bytes / SSD bandwidth) — a few seconds for
+        // a multi-TB archive node, paid once per startup as the cost
+        // of safe RocksDB repair.
+        let report = match noble_storage::discover_shards(
+            &config.storage.data_dir,
+            &extras,
+            None, // chain_id check happens AFTER open; pre-open we don't have it
+            /* with_hash */ true,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("storage discovery failed: {e}");
+                eprintln!("FATAL: storage discovery failed: {e}");
+                return 1;
+            }
+        };
+        startup::log_discovery_summary(&report);
+        let decision = noble_storage::decide(&report);
+        startup::log_decision(&decision);
+        match decision {
+            noble_storage::ReconcileDecision::OpenNormally => {}
+            noble_storage::ReconcileDecision::RepairThenOpen { reason } => {
+                if reconcile_mode == config::ReconcileMode::Verify {
+                    tracing::error!(
+                        "reconcile_mode = \"verify\" and catalog/disk diverged: {reason}"
+                    );
+                    eprintln!(
+                        "FATAL: reconcile_mode = verify and catalog/disk diverged: {reason}"
+                    );
+                    return 1;
+                }
+                tracing::warn!("running multi-path repair: {reason}");
+                let repair_cfg = noble_storage::RocksDbConfig {
+                    db_paths: extras.clone(),
+                    ..Default::default()
+                };
+                if let Err(e) = noble_storage::RocksDbStorage::repair_multi_path(
+                    &config.storage.data_dir,
+                    &repair_cfg,
+                ) {
+                    tracing::error!("multi-path repair failed: {e}");
+                    eprintln!("FATAL: multi-path repair failed: {e}");
+                    return 1;
+                }
+                tracing::info!(task = "shard_discovery", "repair complete; opening DB");
+            }
+            noble_storage::ReconcileDecision::Fail { reason, suggestion } => {
+                eprintln!("FATAL: storage reconciliation failed: {reason}");
+                eprintln!("Suggestion: {suggestion}");
+                return 1;
+            }
+        }
+    } else {
+        tracing::info!(
+            task = "shard_discovery",
+            "reconcile_mode = off — skipping discovery"
+        );
+    }
+
+    // 4) Open the DB with the resolved tiers.
+    let rocks_cfg = noble_storage::RocksDbConfig {
+        block_cache_size: (config.storage.cache_size_mb as usize) * 1024 * 1024,
+        bloom_filter_bits: 10,
+        enable_compression: config.storage.compression,
+        db_paths: extras.clone(),
+    };
+    match noble_storage::RocksDbStorage::open_with_config_and_repair(
+        &config.storage.data_dir,
+        &rocks_cfg,
+    ) {
+        Ok(storage) => match node::Node::init_with_storage(config, storage, encryption_password, extras.clone()) {
             Ok(n) => {
                 tracing::info!("Node initialized — chain height: {}", n.chain_height());
 

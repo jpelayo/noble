@@ -19,7 +19,6 @@ cache_size_mb = 256
 compression = true
 pruning_mode = "archive"
 keep_blocks = 0
-max_db_size_gb = 0
 
 [consensus]
 validator_key_path = ""
@@ -53,8 +52,6 @@ keystore_path = "keystore.noble"
 
 [logging]
 level = "info"
-file = ""
-rotation = "daily"
 
 [metrics]
 prometheus_addr = "127.0.0.1:8787"

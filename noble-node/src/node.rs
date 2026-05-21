@@ -95,12 +95,16 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     pub network_name: String,
     /// Timestamp when the node was started.
     pub start_time: std::time::Instant,
-    /// PKI identity attestation (CMS/PKCS#7 binding), loaded or created at startup.
-    /// TODO: Wire into peer protocol for broadcasting attestation (PKI peer verification).
-    #[allow(dead_code)]
+    /// PKI identity attestation (CMS/PKCS#7 binding), loaded or
+    /// created at startup. Audit Fix #T1 (0.118): broadcast in
+    /// `NodeAnnounce.identity_attestation` so peers can validate the
+    /// node's identity against a CA chain. Peer-side validation
+    /// (against `ca_store`) is deferred to a future release; this
+    /// release wires the broadcast side only.
     pub pki_attestation: Option<noble_core::ExternalAttestation>,
     /// CA trust store for verifying peer PKI attestations.
-    /// TODO: Wire into peer message validation (PKI peer verification).
+    /// Validation hook still pending; see deferred T2 in
+    /// `Project/sharding-fixes.md`.
     #[allow(dead_code)]
     pub ca_store: Option<CaStore>,
     /// Per-installation entropy for at-rest file encryption (`.chain_meta`).
@@ -144,13 +148,22 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Startup events buffered during init (before WebSocket is available).
     /// Emitted to the GUI Protocol Activity panel at the beginning of run().
     pub startup_events: Vec<serde_json::Value>,
+    /// Audit Fix #9: resolved storage tier list as passed to RocksDB
+    /// at boot. Stored here so ApiState reflects what RocksDB is
+    /// actually using (no second `compute_db_paths` call that could
+    /// silently diverge). Empty for legacy single-volume mode.
+    pub extras: Vec<(std::path::PathBuf, u64)>,
+    /// Audit Fix #9: hex pubkey captured once at init for use by the
+    /// shutdown hook (Fix #2) and the reconcileStorage RPC (Fix #5).
+    /// Avoids racing the wallet keystore at every catalog rewrite.
+    pub node_pubkey_hex: String,
 }
 
 impl Node<MemoryStorage> {
     /// Initialize a node with in-memory storage (for testing or `--memory` mode).
     pub fn init_memory(config: &NodeConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = MemoryStorage::new();
-        Self::init_with_storage(config, storage, None)
+        Self::init_with_storage(config, storage, None, Vec::new())
     }
 }
 
@@ -163,6 +176,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         config: &NodeConfig,
         storage: S,
         encryption_password: Option<&str>,
+        extras: Vec<(std::path::PathBuf, u64)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(RwLock::new(storage));
 
@@ -723,6 +737,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }));
         }
 
+        // Audit Fix #9: hex pubkey captured once for shutdown hook
+        // (Fix #2) and the reconcileStorage RPC. Computed before
+        // `announce_keypair` moves into the struct.
+        let node_pubkey_hex = announce_keypair
+            .as_ref()
+            .map(|(_, pk)| hex::encode(pk.to_wire_bytes()))
+            .unwrap_or_default();
         Ok(Self {
             storage,
             mempool,
@@ -738,7 +759,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             pki_attestation,
             ca_store,
             chain_meta,
-            validator_pubkey_hex: announce_keypair.as_ref().map(|(_, pk)| hex::encode(pk.to_wire_bytes())),
+            validator_pubkey_hex: Some(node_pubkey_hex.clone()).filter(|s| !s.is_empty()),
             announce_keypair,
             clock_drift_paused: std::sync::atomic::AtomicBool::new(false),
             validator_list_path: Some(validator_list_path),
@@ -752,6 +773,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_config: config.faucet.clone(),
             engine_reward_address: engine_reward_address_arc,
             startup_events,
+            // Audit Fix #9: snapshot the resolved tier list and the
+            // node pubkey hex once at init. ApiState reads from here
+            // (no recomputation) and the shutdown hook (Fix #2) reuses
+            // the same data instead of racing the wallet keystore.
+            node_pubkey_hex,
+            extras,
         })
     }
 
@@ -1961,6 +1988,17 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_scheme: parking_lot::RwLock::new(validator_scheme_str),
             validator_key_path: parking_lot::RwLock::new(validator_key_path_str),
             data_dir: Some(config.storage.data_dir.clone()),
+            // Audit Fix #9: read from the resolved tier list captured
+            // at init (passed through `init_with_storage`). No
+            // recomputation — eliminates the silent state divergence
+            // where ApiState reported a different tier list than the
+            // one RocksDB was actually using.
+            extra_data_dirs: self.extras.clone(),
+            reconcile_mode: match config.storage.reconcile_mode {
+                crate::config::ReconcileMode::Auto => "auto".to_string(),
+                crate::config::ReconcileMode::Verify => "verify".to_string(),
+                crate::config::ReconcileMode::Off => "off".to_string(),
+            },
             pruning_mode: config.storage.pruning_mode.clone(),
             keep_blocks: config.storage.keep_blocks,
             reward_address: parking_lot::RwLock::new({
@@ -1993,7 +2031,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             announce_trigger: announce_trigger_tx,
             cache_size_mb: config.storage.cache_size_mb,
             compression_enabled: config.storage.compression,
-            max_db_size_gb: config.storage.max_db_size_gb,
             network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "00000000".to_string() } },
             genesis_hash: {
                 let s = self.storage.read();
@@ -2569,6 +2606,42 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // --- Graceful shutdown ---
         tracing::info!(task = "node_shutdown", "Shutting down...");
+
+        // Audit Fix #2: rewrite per-path catalogs so the next boot's
+        // discovery sees an authoritative `.noble-shards.cbor` at
+        // every configured tier. Without this the catalog only ever
+        // existed when an operator manually invoked
+        // `noble_reconcileStorage`. Skipped when no extras are
+        // configured (single-volume mode has nothing to catalogue).
+        if !self.extras.is_empty() {
+            let chain_id = self.get_chain_id();
+            let mut full_tiers: Vec<(std::path::PathBuf, u64)> =
+                Vec::with_capacity(1 + self.extras.len());
+            // Primary first (target=0 is irrelevant here — this list
+            // is only used by `rewrite_catalogs` to attribute SST
+            // files to the path they actually live in; it is NOT
+            // handed to RocksDB's set_db_paths).
+            full_tiers.push((config.storage.data_dir.clone(), 0));
+            for (p, t) in &self.extras {
+                full_tiers.push((p.clone(), *t));
+            }
+            let storage = self.storage.read();
+            match storage.rewrite_catalogs(
+                &full_tiers,
+                chain_id,
+                &self.node_pubkey_hex,
+                /* with_hash */ true,
+            ) {
+                Ok(n) => tracing::info!(
+                    task = "node_shutdown",
+                    "wrote {n} catalog(s) for next boot"
+                ),
+                Err(e) => tracing::warn!(
+                    task = "node_shutdown",
+                    "catalog rewrite failed at shutdown: {e}"
+                ),
+            }
+        }
 
         // Snapshot connected peers for faster reconnection on next startup.
         {
@@ -5247,7 +5320,7 @@ mod tests {
         let storage = Arc::try_unwrap(node1.storage)
             .unwrap_or_else(|_| panic!("storage has multiple owners"))
             .into_inner();
-        let node2 = Node::init_with_storage(&config, storage, None).unwrap();
+        let node2 = Node::init_with_storage(&config, storage, None, Vec::new()).unwrap();
         let height2 = node2.chain_height();
 
         assert_eq!(height1, height2);

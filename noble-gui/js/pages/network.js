@@ -407,14 +407,44 @@ export function init(root, ctx) {
   banModal.addEventListener('click', (e) => { if (e.target === banModal) closeBanModal(); });
 
   // Tab switching
+  // Audit Fix #A4: hiding the Manual Ban tab previously cleared
+  // the three input fields when the operator switched away to
+  // Banned-Peers / Active-Scores. Now we snapshot the form state
+  // before hiding and restore it on switch-back, so a partial
+  // ban-fill survives tab navigation.
+  const banFormState = { peerId: '', reason: null, duration: null };
   const banTabs = root.querySelectorAll('.ban-tab');
+  let activeBanTab = 'banned';
   banTabs.forEach(tab => {
     tab.addEventListener('click', () => {
+      // Snapshot Manual Ban inputs whenever we're navigating AWAY
+      // from that tab.
+      if (activeBanTab === 'manual' && tab.dataset.tab !== 'manual') {
+        const peerEl = root.querySelector('#ban-peer-id');
+        const reasonEl = root.querySelector('#ban-reason');
+        const durEl = root.querySelector('#ban-duration');
+        if (peerEl) banFormState.peerId = peerEl.value;
+        if (reasonEl) banFormState.reason = reasonEl.value;
+        if (durEl) banFormState.duration = durEl.value;
+      }
+
       banTabs.forEach(t => { t.style.background = 'var(--bg-tertiary)'; t.style.color = 'var(--text-primary)'; });
       tab.style.background = 'var(--accent)'; tab.style.color = '#fff';
       root.querySelector('#ban-tab-banned').style.display = tab.dataset.tab === 'banned' ? '' : 'none';
       root.querySelector('#ban-tab-manual').style.display = tab.dataset.tab === 'manual' ? '' : 'none';
       root.querySelector('#ban-tab-scores').style.display = tab.dataset.tab === 'scores' ? '' : 'none';
+
+      // Restore Manual Ban inputs when navigating BACK to that tab.
+      if (tab.dataset.tab === 'manual') {
+        const peerEl = root.querySelector('#ban-peer-id');
+        const reasonEl = root.querySelector('#ban-reason');
+        const durEl = root.querySelector('#ban-duration');
+        if (peerEl && banFormState.peerId) peerEl.value = banFormState.peerId;
+        if (reasonEl && banFormState.reason !== null) reasonEl.value = banFormState.reason;
+        if (durEl && banFormState.duration !== null) durEl.value = banFormState.duration;
+      }
+      activeBanTab = tab.dataset.tab;
+
       if (tab.dataset.tab === 'scores') loadBanScores();
       if (tab.dataset.tab === 'banned') loadBannedPeers();
     });
@@ -481,6 +511,9 @@ export function init(root, ctx) {
         banSubmitMsg.style.color = 'var(--success)';
         banSubmitMsg.textContent = 'Peer banned successfully';
         root.querySelector('#ban-peer-id').value = '';
+        // Audit Fix #A4: also clear the snapshot so the next
+        // tab-switch-back doesn't restore the now-banned peer ID.
+        banFormState.peerId = '';
         loadBannedPeers();
       } else {
         banSubmitMsg.style.color = 'var(--error)';

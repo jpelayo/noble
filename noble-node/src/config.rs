@@ -6,7 +6,7 @@
 //! Deserialized from `noble.toml`. Each section maps to a subsystem.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 
 /// Top-level node configuration.
@@ -90,8 +90,13 @@ pub struct NetworkConfig {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StorageConfig {
+    /// Primary data directory. Holds RocksDB's MANIFEST/CURRENT/OPTIONS,
+    /// the WAL, and the hottest SSTs (unless they spill to one of the
+    /// `extra_data_dirs` tiers).
     pub data_dir: PathBuf,
+    /// Block cache size in MB.
     pub cache_size_mb: u32,
+    /// Enable Zstd compression on the `blocks` column family.
     pub compression: bool,
     /// Pruning mode: "archive" (keep everything), "moderate", or "aggressive".
     #[serde(default = "default_pruning_mode")]
@@ -99,9 +104,71 @@ pub struct StorageConfig {
     /// Number of blocks to keep when pruning. 0 = archive (keep all).
     #[serde(default = "default_keep_blocks")]
     pub keep_blocks: u64,
-    /// Maximum database size in GB. 0 = unlimited.
+    /// Additional storage tiers (multi-path sharding). Each entry may
+    /// be a plain path (`"/mnt/hdd/noble"`, target auto-detected at
+    /// boot) or an explicit `{ path, target_gb }` pair. Empty means
+    /// legacy single-volume mode. See `Project/sharding-plan.md` and
+    /// `noble-storage::RocksDbConfig::db_paths`.
     #[serde(default)]
-    pub max_db_size_gb: u64,
+    pub extra_data_dirs: Vec<ExtraDataDir>,
+    /// Reconciliation behaviour at startup when the catalog diverges
+    /// from disk reality (operator moved SSTs between paths).
+    #[serde(default)]
+    pub reconcile_mode: ReconcileMode,
+}
+
+/// One operator-supplied storage tier. Two TOML shapes accepted (via
+/// `#[serde(untagged)]`): a bare path string (`"/mnt/hdd/noble"`),
+/// where the target size is auto-detected at boot as 90 % of free
+/// bytes, or an explicit table `{ path, target_gb }` where
+/// `target_gb = 0` means "unlimited spillover".
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExtraDataDir {
+    /// Shape A: just a path. Target size = 90 % of free bytes on
+    /// boot, rounded down to GiB.
+    JustPath(PathBuf),
+    /// Shape B: explicit per-path quota in GiB. `target_gb = 0` is
+    /// treated by RocksDB as "no cap" — useful for the final
+    /// spillover tier.
+    WithSize { path: PathBuf, target_gb: u64 },
+}
+
+impl ExtraDataDir {
+    /// Filesystem path of the tier.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::JustPath(p) => p.as_path(),
+            Self::WithSize { path, .. } => path.as_path(),
+        }
+    }
+    /// Explicit target_gb if the operator set one (Shape B), else
+    /// `None` (Shape A, target inferred at boot from free bytes).
+    pub fn explicit_target_gb(&self) -> Option<u64> {
+        match self {
+            Self::JustPath(_) => None,
+            Self::WithSize { target_gb, .. } => Some(*target_gb),
+        }
+    }
+}
+
+/// What the node does on startup when its per-path catalogs do not
+/// match disk reality (SST files were moved between configured
+/// directories).
+///
+/// - `Auto` (default) — run `DB::Repair` to rebuild the MANIFEST,
+///   then open. Safe; slightly slower first boot after a move.
+/// - `Verify` — refuse to start with an operator-facing error
+///   citing the divergence. Operator must resolve manually.
+/// - `Off` — skip the discovery step entirely (fastest boot;
+///   trust catalogs implicitly).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReconcileMode {
+    #[default]
+    Auto,
+    Verify,
+    Off,
 }
 
 fn default_pruning_mode() -> String {
@@ -272,12 +339,17 @@ pub struct WalletConfig {
 }
 
 /// Logging configuration.
+///
+/// Audit Fix #C12: `file` and `rotation` were declared and parsed
+/// from noble.toml but never reached the `tracing` subscriber.
+/// Operators expecting `logging.file = "/var/log/noble.log"` to
+/// enable file logging were silently ignored. Removed in 0.118 —
+/// log capture is the deployment platform's job (Docker, launchd,
+/// systemd all redirect stdout/stderr to their own log stores).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
-    pub file: String,
-    pub rotation: String,
 }
 
 /// Prometheus metrics configuration.
@@ -504,6 +576,77 @@ impl NodeConfig {
         let config: NodeConfig = toml::from_str(&contents)?;
         Ok(config)
     }
+
+    /// Validate the sharding `[storage]` fields. Returns the first
+    /// error encountered (if any) as a string. Callers should treat
+    /// success as binding for the boot path: any failure must abort
+    /// `noble-node` startup so a misconfigured tier doesn't get
+    /// silently ignored.
+    ///
+    /// Rules enforced:
+    ///
+    /// - Every `extra_data_dirs` path is **absolute**. Relative paths
+    ///   are fragile (CWD-dependent) so they're rejected outright.
+    /// - No `extra_data_dirs` entry equals `data_dir`.
+    /// - No `extra_data_dirs` entries duplicate each other (by path).
+    /// - `target_gb` is permitted to be `0` (means "unlimited
+    ///   spillover" in `Options::set_db_paths`), but a sentinel value
+    ///   of e.g. `u64::MAX` is rejected because the per-path target
+    ///   would overflow on the `gb → bytes` conversion.
+    pub fn validate_storage_paths(&self) -> Result<(), String> {
+        let storage = &self.storage;
+        let mut seen: Vec<&Path> = Vec::with_capacity(storage.extra_data_dirs.len());
+        for extra in &storage.extra_data_dirs {
+            let p = extra.path();
+            if !p.is_absolute() {
+                return Err(format!(
+                    "storage.extra_data_dirs: path {:?} is not absolute. \
+                     Multi-tier sharding requires absolute paths so the node behaves \
+                     identically regardless of which directory it is launched from.",
+                    p
+                ));
+            }
+            // Audit Fix #8: reject `..` components at validation time
+            // (before `create_dir_all` runs). `compute_db_paths`
+            // canonicalises later, but catching this here surfaces a
+            // crisp config error rather than letting the operator
+            // discover the issue through `create_dir_all` quirks.
+            if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                return Err(format!(
+                    "storage.extra_data_dirs: path {:?} contains `..`. \
+                     Multi-tier sharding requires canonical absolute paths so \
+                     duplicate-detection sees them like-for-like; rewrite the \
+                     path to its canonical form (no `..`, no `.`).",
+                    p
+                ));
+            }
+            if p == storage.data_dir.as_path() {
+                return Err(format!(
+                    "storage.extra_data_dirs: entry {:?} duplicates the primary `data_dir`. \
+                     The primary path is implicit — don't list it as an extra tier.",
+                    p
+                ));
+            }
+            if seen.contains(&p) {
+                return Err(format!(
+                    "storage.extra_data_dirs: duplicate path {:?}. Each tier must \
+                     appear exactly once.",
+                    p
+                ));
+            }
+            if let Some(gb) = extra.explicit_target_gb() {
+                // gb * 1024^3 must fit in u64.
+                if gb > (u64::MAX / (1024 * 1024 * 1024)) {
+                    return Err(format!(
+                        "storage.extra_data_dirs: target_gb={gb} for {:?} overflows u64 bytes.",
+                        p
+                    ));
+                }
+            }
+            seen.push(p);
+        }
+        Ok(())
+    }
 }
 
 /// Validate a configuration file and print the result.
@@ -569,7 +712,8 @@ impl Default for StorageConfig {
             compression: true,
             pruning_mode: default_pruning_mode(),
             keep_blocks: default_keep_blocks(),
-            max_db_size_gb: 0,
+            extra_data_dirs: Vec::new(),
+            reconcile_mode: ReconcileMode::Auto,
         }
     }
 }
@@ -623,8 +767,6 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
-            file: String::new(),
-            rotation: "daily".to_string(),
         }
     }
 }
@@ -988,4 +1130,126 @@ mod tests {
         }
     }
 
+    // --- Storage sharding (extra_data_dirs / reconcile_mode) ---
+
+    #[test]
+    fn extra_data_dirs_default_empty_and_mode_auto() {
+        let cfg = StorageConfig::default();
+        assert!(cfg.extra_data_dirs.is_empty());
+        assert_eq!(cfg.reconcile_mode, ReconcileMode::Auto);
+    }
+
+    #[test]
+    fn extra_data_dirs_shape_a_parses() {
+        let toml_str = r#"
+            data_dir = "/data/noble"
+            extra_data_dirs = ["/mnt/hdd1/noble", "/mnt/hdd2/noble"]
+        "#;
+        let cfg: StorageConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.extra_data_dirs.len(), 2);
+        assert!(matches!(cfg.extra_data_dirs[0], ExtraDataDir::JustPath(ref p) if p == Path::new("/mnt/hdd1/noble")));
+        assert!(matches!(cfg.extra_data_dirs[1], ExtraDataDir::JustPath(ref p) if p == Path::new("/mnt/hdd2/noble")));
+    }
+
+    #[test]
+    fn extra_data_dirs_shape_b_parses() {
+        let toml_str = r#"
+            data_dir = "/data/noble"
+            [[extra_data_dirs]]
+            path = "/mnt/hdd1/noble"
+            target_gb = 4000
+
+            [[extra_data_dirs]]
+            path = "/mnt/hdd2/noble"
+            target_gb = 0
+        "#;
+        let cfg: StorageConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.extra_data_dirs.len(), 2);
+        match &cfg.extra_data_dirs[0] {
+            ExtraDataDir::WithSize { path, target_gb } => {
+                assert_eq!(path, Path::new("/mnt/hdd1/noble"));
+                assert_eq!(*target_gb, 4000);
+            }
+            other => panic!("expected WithSize, got {other:?}"),
+        }
+        match &cfg.extra_data_dirs[1] {
+            ExtraDataDir::WithSize { path, target_gb } => {
+                assert_eq!(path, Path::new("/mnt/hdd2/noble"));
+                assert_eq!(*target_gb, 0);
+            }
+            other => panic!("expected WithSize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_mode_parses_all_variants() {
+        for (s, want) in &[
+            ("auto", ReconcileMode::Auto),
+            ("verify", ReconcileMode::Verify),
+            ("off", ReconcileMode::Off),
+        ] {
+            let toml_str = format!(
+                r#"data_dir = "/data/noble"
+                   reconcile_mode = "{s}""#
+            );
+            let cfg: StorageConfig = toml::from_str(&toml_str).expect("parse");
+            assert_eq!(cfg.reconcile_mode, *want);
+        }
+    }
+
+    fn cfg_with(extras: Vec<ExtraDataDir>) -> NodeConfig {
+        let mut cfg = NodeConfig::default();
+        cfg.storage.data_dir = PathBuf::from("/data/noble");
+        cfg.storage.extra_data_dirs = extras;
+        cfg
+    }
+
+    #[test]
+    fn validate_rejects_relative_extra() {
+        let cfg = cfg_with(vec![ExtraDataDir::JustPath(PathBuf::from("not/absolute"))]);
+        let err = cfg.validate_storage_paths().unwrap_err();
+        assert!(err.contains("not absolute"), "got {err}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_extras() {
+        let cfg = cfg_with(vec![
+            ExtraDataDir::JustPath(PathBuf::from("/mnt/a")),
+            ExtraDataDir::JustPath(PathBuf::from("/mnt/a")),
+        ]);
+        let err = cfg.validate_storage_paths().unwrap_err();
+        assert!(err.contains("duplicate"), "got {err}");
+    }
+
+    #[test]
+    fn validate_rejects_data_dir_duplicate() {
+        let cfg = cfg_with(vec![ExtraDataDir::JustPath(PathBuf::from("/data/noble"))]);
+        let err = cfg.validate_storage_paths().unwrap_err();
+        assert!(err.contains("duplicates the primary"), "got {err}");
+    }
+
+    #[test]
+    fn validate_accepts_clean_list() {
+        let cfg = cfg_with(vec![
+            ExtraDataDir::JustPath(PathBuf::from("/mnt/a")),
+            ExtraDataDir::WithSize {
+                path: PathBuf::from("/mnt/b"),
+                target_gb: 100,
+            },
+        ]);
+        cfg.validate_storage_paths().expect("clean list accepted");
+    }
+
+    #[test]
+    fn extra_data_dir_accessors() {
+        let a = ExtraDataDir::JustPath(PathBuf::from("/a"));
+        let b = ExtraDataDir::WithSize {
+            path: PathBuf::from("/b"),
+            target_gb: 50,
+        };
+        assert_eq!(a.path(), Path::new("/a"));
+        assert!(a.explicit_target_gb().is_none());
+        assert_eq!(b.path(), Path::new("/b"));
+        assert_eq!(b.explicit_target_gb(), Some(50));
+    }
 }

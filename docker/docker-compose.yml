@@ -63,6 +63,12 @@ services:
       # CSV of CIDRs allowed to reach the RPC/WS/GUI/faucet ports. Empty →
       # 127.0.0.1/32 only (localhost-only, equivalent to brew --localonly).
       NOBLE_ALLOWED_IPS: ${NOBLE_ALLOWED_IPS:-}
+      # Multi-path storage sharding (Phase 7). CSV of additional
+      # directories the node uses as RocksDB tiers. Each must be a
+      # separate bind-mount under `volumes:` below.
+      NOBLE_EXTRA_DATA_DIRS: ${NOBLE_EXTRA_DATA_DIRS:-}
+      # Reconciliation behaviour on startup: auto (default) | verify | off.
+      NOBLE_RECONCILE_MODE: ${NOBLE_RECONCILE_MODE:-auto}
     ports:
       - "8780:8780"    # P2P (libp2p gossipsub)
       - "8783:8783"    # JSON-RPC HTTPS
