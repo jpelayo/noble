@@ -21,6 +21,13 @@
 # For nginx-proxy-manager fronting (TLS off, attach to `proxy` net), use
 # docker-compose.override.yml — see docker/README.md.
 
+# Pin the compose project name so containers carry the label
+# `com.docker.compose.project=noble`. Without this the project name defaults
+# to the directory name ("docker"), which collides with any other stack on
+# the host whose folder is also called "docker" — Compose then prints the
+# whole world as "orphan containers", and Portainer mis-groups the stacks.
+name: noble
+
 services:
   noble:
     build:
