@@ -1,48 +1,83 @@
 # Noble — Docker deployment
 
 A Docker mechanism for the Noble blockchain node, alongside (not replacing)
-the Homebrew install. Targets the **nginx-proxy-manager** (NPM) edge-proxy
-pattern: noble joins a pre-existing external `proxy` network and nginx
-reaches it by service name.
+the Homebrew install. The **default layout mirrors `brew install noble`**:
+noble serves self-signed TLS directly, with an app-level CIDR allowlist
+(`NOBLE_ALLOWED_IPS`). One URL — `https://<server-ip>:8785` — same as brew.
 
-## Quick start
+An optional override (`docker-compose.override.yml.npm`) switches to the
+nginx-proxy-manager fronting layout for public deployments with a real cert.
+
+## Quick start (brew-mirror default)
 
 ```sh
 cd docker
-cp .env.example .env
-$EDITOR .env                                  # set name, reward addr, seed peers
-docker compose up -d --build
+
+# Pick your access pattern (same semantics as brew --with-X flags):
+NOBLE_ALLOWED_IPS=192.168.0.0/16  docker compose up -d --build   # home LAN
+NOBLE_ALLOWED_IPS=100.64.0.0/10   docker compose up -d --build   # Tailscale
+NOBLE_ALLOWED_IPS=10.0.0.0/8      docker compose up -d --build   # corporate
+docker compose up -d --build                                     # localhost only
+
 docker compose logs -f noble                  # watch first-boot config render
 docker compose ps                             # status should become "healthy" in ~30s
+
+open https://<server-ip>:8785                 # complete GUI wizard
 ```
 
-## Topology
+Self-signed cert: accept the browser warning once. Same as brew's flow.
+
+### Mapping to brew flags
+
+| Brew | Docker |
+|---|---|
+| `brew install --HEAD noble --with-192` | `NOBLE_ALLOWED_IPS=192.168.0.0/16` |
+| `brew install --HEAD noble --with-100` | `NOBLE_ALLOWED_IPS=100.64.0.0/10` |
+| `brew install --HEAD noble --with-10`  | `NOBLE_ALLOWED_IPS=10.0.0.0/8`    |
+| `brew install --HEAD noble --with-172` | `NOBLE_ALLOWED_IPS=172.16.0.0/12` |
+| `brew install --HEAD noble --localonly` (default) | (unset → 127.0.0.1/32) |
+
+Multiple CIDRs supported as CSV:
+`NOBLE_ALLOWED_IPS=192.168.0.0/16,100.64.0.0/10`.
+
+## Topology (default)
 
 ```
-Public Internet
-  ├─ 443/tcp   → nginx-proxy-manager (TLS termination, Let's Encrypt)
-  └─ 8780/tcp  → noble (libp2p P2P, direct)
+Public Internet (or LAN / tailnet)
+  ├─ 8780/tcp  → noble (libp2p P2P, direct)
+  ├─ 8783/tcp  → noble JSON-RPC (HTTPS, self-signed)
+  ├─ 8784/tcp  → noble WebSocket (WSS, self-signed)
+  ├─ 8785/tcp  → noble Dashboard GUI (HTTPS, self-signed)
+  └─ 8786/tcp  → noble Faucet HTTPS (when NOBLE_FAUCET_SERVER=true)
 
-Host
-  └─ docker bridge `proxy` (external, shared with nginx)
-       ├─ nginx-proxy-manager
-       └─ noble (8785 = dashboard + /rpc + /ws proxy)
+Access control: noble's app-layer CIDR allowlist (NOBLE_ALLOWED_IPS).
+TLS: noble's own self-signed cert (regenerated on first boot).
 ```
 
-**Only two public ports.** Everything else (RPC 8783, WS 8784, dashboard
-8785, faucet 8786) is reachable only from inside the `proxy` docker network,
-which nginx is already attached to.
+Same as brew — single TLS layer, single allowlist, single URL.
 
-**One nginx upstream is enough**: noble's dashboard at 8785 has built-in
-`/rpc → 8783` and `/ws → 8784` reverse proxies. Point nginx at
-`http://noble:8785` for everything.
+## nginx-proxy-manager fronting (opt-in, for public deployments)
 
-## nginx-proxy-manager setup
+This is the "real cert + public DNS" mode. It replaces noble's self-signed
+TLS with a Let's Encrypt cert terminated by nginx, and removes the
+host-published RPC/WS/GUI/faucet ports (only P2P stays public).
+
+### Activate the override
+
+```sh
+cp docker/docker-compose.override.yml.npm docker/docker-compose.override.yml
+docker compose up -d --build
+```
+
+The override flips `NOBLE_TLS_ENABLED=false`, sets `NOBLE_ALLOWED_IPS` to the
+docker bridge range (172.16/12), drops the four GUI/RPC ports, and joins the
+external `proxy` network.
 
 ### Prerequisites
 
 - nginx-proxy-manager running on the same host, attached to the external
-  network named `proxy`.
+  network named `proxy` (create with `docker network create proxy` if
+  needed).
 - DNS A record `noble.example.com` → server public IP.
 - Host firewall: 443/tcp open (nginx) and 8780/tcp open (P2P).
 

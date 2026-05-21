@@ -1,0 +1,31 @@
+# Optional override for nginx-proxy-manager fronting (README Path B).
+#
+# Activate by renaming/copying to docker-compose.override.yml:
+#   cp docker-compose.override.yml.npm docker-compose.override.yml
+#
+# Effect:
+#   - Drops the host-published RPC/WS/GUI/Faucet ports (only P2P stays public).
+#   - Disables noble's own TLS (nginx terminates).
+#   - Joins the external `proxy` network so nginx can reach noble by name.
+#   - Sets allowed_ips to the docker bridge range (172.16/12) so noble accepts
+#     from nginx's container IP.
+#
+# Prerequisite: an external docker network named `proxy` must already exist
+# (typically created by nginx-proxy-manager). If not:
+#   docker network create proxy
+
+services:
+  noble:
+    environment:
+      NOBLE_TLS_ENABLED: "false"
+      NOBLE_ALLOWED_IPS: "172.16.0.0/12"
+    ports: !reset
+      - "8780:8780"
+    networks:
+      - default
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: proxy

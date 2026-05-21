@@ -8,13 +8,18 @@
 #
 # All env vars are optional — copy .env.example to .env if you need any of them.
 #
-# Networks:
-#   default   created by this compose (noble_default), only used internally
-#   proxy     pre-existing external network shared with the edge proxy
-#             (nginx-proxy-manager / openresty). Attaching noble here lets
-#             the proxy reach it by service name `noble:8785` — that single
-#             upstream covers everything because the dashboard proxies
-#             /rpc → 8783 and /ws → 8784 internally.
+# Default layout mirrors the Homebrew install: noble serves self-signed TLS
+# directly, with an app-level CIDR allowlist (NOBLE_ALLOWED_IPS). Operator
+# opens https://<server-ip>:8785.
+#
+# Examples:
+#   NOBLE_ALLOWED_IPS=192.168.0.0/16  docker compose up -d --build  # home LAN
+#   NOBLE_ALLOWED_IPS=100.64.0.0/10   docker compose up -d --build  # Tailscale
+#   NOBLE_ALLOWED_IPS=10.0.0.0/8      docker compose up -d --build  # corp LAN
+#   docker compose up -d --build                                    # localhost only
+#
+# For nginx-proxy-manager fronting (TLS off, attach to `proxy` net), use
+# docker-compose.override.yml — see docker/README.md.
 
 services:
   noble:
@@ -43,31 +48,25 @@ services:
       NOBLE_COMPRESSION: ${NOBLE_COMPRESSION:-true}
       NOBLE_VOTING_STRATEGY: ${NOBLE_VOTING_STRATEGY:-weighted_probability}
       NOBLE_MIN_FEE_RATE: ${NOBLE_MIN_FEE_RATE:-1}
-      NOBLE_TLS_ENABLED: ${NOBLE_TLS_ENABLED:-false}
+      NOBLE_TLS_ENABLED: ${NOBLE_TLS_ENABLED:-true}
       NOBLE_TOTP_ENABLED: ${NOBLE_TOTP_ENABLED:-false}
       NOBLE_ENCRYPTION_MODE: ${NOBLE_ENCRYPTION_MODE:-automatic}
       NOBLE_FAUCET_DISCOVERY: ${NOBLE_FAUCET_DISCOVERY:-true}
       NOBLE_FAUCET_SERVER: ${NOBLE_FAUCET_SERVER:-false}
+      # CSV of CIDRs allowed to reach the RPC/WS/GUI/faucet ports. Empty →
+      # 127.0.0.1/32 only (localhost-only, equivalent to brew --localonly).
+      NOBLE_ALLOWED_IPS: ${NOBLE_ALLOWED_IPS:-}
     ports:
-      # ONLY P2P is host-published in the default (Mode A) layout.
-      # libp2p gossipsub needs direct TCP from other validators; the
-      # nginx HTTP module can't proxy it. (Mode B: remove this line
-      # and add an NPM Streams entry that forwards 8780 → noble:8780.
-      # Trade-off documented in docker/README.md.)
-      - "8780:8780"
+      - "8780:8780"    # P2P (libp2p gossipsub)
+      - "8783:8783"    # JSON-RPC HTTPS
+      - "8784:8784"    # WebSocket WSS
+      - "8785:8785"    # Dashboard GUI HTTPS
+      - "8786:8786"    # Faucet HTTPS (active when NOBLE_FAUCET_SERVER=true)
     volumes:
       - noble-data:/var/lib/noble
-    networks:
-      - default
-      - proxy
 
 volumes:
   noble-data:
     # Pinned name so the volume survives compose-project renames
     # (the project name defaults to the directory name).
     name: noble-data
-
-networks:
-  proxy:
-    external: true
-    name: proxy

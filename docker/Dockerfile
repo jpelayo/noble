@@ -49,13 +49,18 @@ WORKDIR /var/lib/noble
 # Documentation only; compose decides what crosses to the host.
 EXPOSE 8780 8783 8784 8785 8786
 
-# Healthcheck hits the no-auth noble_getSetupStatus JSON-RPC over plain HTTP.
-# Requires NOBLE_TLS_ENABLED=false (the default). If TLS is flipped on, the
-# healthcheck must be overridden in compose to use https + -k.
+# Healthcheck hits the no-auth noble_getSetupStatus JSON-RPC. Default uses
+# HTTPS + -k since NOBLE_TLS_ENABLED defaults to true (mirroring the brew
+# install). If you disable TLS (nginx-fronting override), the same probe
+# still works against http://127.0.0.1:8783 because curl -k follows either.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
-  CMD curl -fsS -X POST http://127.0.0.1:8783/ \
-        -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"noble_getSetupStatus","id":1}' \
-        | grep -q '"setup_complete":true' || exit 1
+  CMD sh -c '\
+    curl -fskS -X POST https://127.0.0.1:8783/ \
+         -H "Content-Type: application/json" \
+         -d "{\"jsonrpc\":\"2.0\",\"method\":\"noble_getSetupStatus\",\"id\":1}" \
+      || curl -fsS  -X POST http://127.0.0.1:8783/ \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"method\":\"noble_getSetupStatus\",\"id\":1}" \
+    ' | grep -q '"setup_complete":true' || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/noble-entrypoint"]
