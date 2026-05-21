@@ -72,7 +72,7 @@ if [ ! -f "$NOBLE_CONFIG" ]; then
 # (noble-tool reset-chain does NOT delete noble.toml — it preserves config).
 
 [node]
-role = "${NOBLE_ROLE:-Observer}"
+role = "${NOBLE_ROLE:-observer}"
 
 [identity]
 node_name = "${NOBLE_NODE_NAME:-noble-docker}"
