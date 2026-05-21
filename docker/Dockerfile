@@ -3,7 +3,11 @@
 # just the binaries, dashboard static files, and a non-root user.
 
 # ── Builder stage ────────────────────────────────────────────────────────────
-FROM rust:1.83-slim-bookworm AS builder
+# `rust:1-slim-bookworm` floats to the latest stable 1.x. Crate compatibility
+# (e.g. time 0.3.47 requiring edition2024 → Rust ≥1.85) shifts forward over
+# time; reproducibility for our own code comes from Cargo.lock, not the
+# toolchain pin.
+FROM rust:1-slim-bookworm AS builder
 
 # librocksdb-sys: cmake + libclang for bindgen
 # openssl-sys:    libssl-dev + pkg-config
