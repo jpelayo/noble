@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
     environment:
       NOBLE_DATA_DIR: /var/lib/noble
-      NOBLE_ROLE: ${NOBLE_ROLE:-Observer}
+      NOBLE_ROLE: ${NOBLE_ROLE:-observer}
       NOBLE_NODE_NAME: ${NOBLE_NODE_NAME:-noble-docker}
       NOBLE_ORG_TYPE: ${NOBLE_ORG_TYPE:-Individual}
       NOBLE_ORG_NAME: ${NOBLE_ORG_NAME:-}
