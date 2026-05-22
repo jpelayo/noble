@@ -1089,6 +1089,45 @@ textarea.caret-hidden {
   color: var(--text-muted);
 }
 
+/* Fixed bottom band that hosts Save Draft + Previous / Next on every
+   step of a page-level wizard (document registration). Keeps the nav
+   buttons in the same place regardless of step content length. */
+.wizard-bottom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.12);
+}
+.wizard-bottom-bar-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--gap) var(--gap-xl);
+  padding-bottom: calc(var(--gap-lg) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  box-sizing: border-box;
+}
+.wizard-bottom-bar-draft {
+  text-align: center;
+}
+.wizard-bottom-bar .wizard-nav {
+  /* The bar provides its own top border + padding — remove the
+     standalone styling that was used when the nav sat inline. */
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+/* Page padding-bottom so the last bit of content isn't hidden
+   behind the fixed band. Applied only when the bar is present. */
+.has-wizard-bottom-bar {
+  padding-bottom: 180px;
+}
+
 /* ── Slide-to-Confirm Button ── */
 .slide-confirm {
   position: relative;
