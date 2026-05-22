@@ -169,9 +169,9 @@ cache_size_mb = ${NOBLE_CACHE_MB:-256}
 compression = ${NOBLE_COMPRESSION:-true}
 pruning_mode = "${NOBLE_PRUNING_MODE:-archive}"
 keep_blocks = ${NOBLE_KEEP_BLOCKS:-0}
-# Multi-path sharding tiers (Phase 7). Each entry can be a path
-# string (Shape A — target auto-detected at boot) or a `{ path,
-# target_gb }` table (Shape B — explicit per-tier quota).
+# Multi-path sharding tiers (Phase 7). Each entry can be either a
+# path string (Shape A, target auto-detected) or a TOML inline
+# table of the form { path = "...", target_gb = N } (Shape B).
 extra_data_dirs = ${EXTRA_DIRS_TOML}
 # Reconciliation behaviour: "auto" (default) | "verify" | "off".
 reconcile_mode = "${NOBLE_RECONCILE_MODE:-auto}"
