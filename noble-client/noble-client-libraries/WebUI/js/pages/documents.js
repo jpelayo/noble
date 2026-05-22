@@ -303,18 +303,28 @@ export function init(root, ctx) {
             case 6: renderStepSubmit(content); break;
         }
 
-        // Bottom navigation (except submit step)
+        // Bottom navigation (except submit step) \u2014 fixed band at the
+        // bottom of the viewport so Previous / Next sit in the same
+        // place on every step regardless of content length.
         if (step < 6) {
-            // Save Draft row
+            root.classList.add('has-wizard-bottom-bar');
+
+            const bar = document.createElement('div');
+            bar.className = 'wizard-bottom-bar';
+
+            const inner = document.createElement('div');
+            inner.className = 'wizard-bottom-bar-inner';
+
+            // Save Draft (only when there's something to save)
             if (files.length > 0) {
                 const draftRow = document.createElement('div');
-                draftRow.style.cssText = 'margin-top:var(--gap);text-align:center;';
+                draftRow.className = 'wizard-bottom-bar-draft';
                 const draftBtn = document.createElement('button');
                 draftBtn.className = 'btn btn-secondary btn-sm';
                 draftBtn.textContent = 'Save Draft';
                 draftBtn.addEventListener('click', () => saveDraft('Saved manually'));
                 draftRow.appendChild(draftBtn);
-                root.appendChild(draftRow);
+                inner.appendChild(draftRow);
             }
 
             const nav = document.createElement('div');
@@ -343,7 +353,11 @@ export function init(root, ctx) {
             nextBtn.addEventListener('click', () => { step++; autoSaveDraft(); render(); });
             nav.appendChild(nextBtn);
 
-            root.appendChild(nav);
+            inner.appendChild(nav);
+            bar.appendChild(inner);
+            root.appendChild(bar);
+        } else {
+            root.classList.remove('has-wizard-bottom-bar');
         }
     }
 
