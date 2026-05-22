@@ -5,6 +5,7 @@ import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { formatAmount } from '../components/amount-text.js';
 import { emptyState } from '../components/empty-state.js';
+import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
 import { esc, formatBytes } from '../utils.js';
 
 const STEP_NAMES = ['Files', 'Metadata', 'Version', 'Locking', 'Fee', 'Review', 'Submit'];
@@ -52,7 +53,8 @@ export function init(root, ctx) {
     let wantsLocking = false;
     let lockingPassword = '';
     let lockingPasswordConfirm = '';
-    let feeLevel = 'recommended';
+    let feeChoice = 'network';
+    let customRate = null;
     let feeData = null;
     let feeError = null;
     let results = [];
@@ -90,7 +92,7 @@ export function init(root, ctx) {
             files, hashes, previousChecksum, isNewVersion, versionMode, versionFile,
             wantsMetadata, metadata, perFileMetadata,
             metadataTab, selectedFilePath, batchUUID, selectedSigningKeyId,
-            wantsLocking, feeLevel, step
+            wantsLocking, feeChoice, customRate, step
         }));
     }
 
@@ -111,7 +113,11 @@ export function init(root, ctx) {
         wantsLocking = d.wantsLocking || false;
         lockingPassword = '';
         lockingPasswordConfirm = '';
-        feeLevel = d.feeLevel || 'recommended';
+        // Forward-compat: prefer new feeChoice/customRate; fall back to legacy
+        // feeLevel ∈ {min, recommended, high} by coercing to 'network' (the new
+        // default for the "I just want it to land" case).
+        feeChoice = d.feeChoice || (d.feeLevel ? 'network' : 'network');
+        customRate = d.customRate ?? null;
         step = Math.min(d.step ?? 0, 4); // cap to Fee step — fees must be re-evaluated on resume
         feeData = null;     // re-fetched on Fee step render
         results = [];
@@ -170,7 +176,8 @@ export function init(root, ctx) {
         wantsLocking = false;
         lockingPassword = '';
         lockingPasswordConfirm = '';
-        feeLevel = 'recommended';
+        feeChoice = 'network';
+        customRate = null;
         feeData = null;
         results = [];
         editingDraftId = null;
@@ -353,7 +360,7 @@ export function init(root, ctx) {
             if (!wantsLocking) return true;
             return lockingPassword.length >= 8 && lockingPassword === lockingPasswordConfirm;
         }
-        if (step === 4) return feeData !== null;
+        if (step === 4) return feeSelectionValid();
         if (step === 5) {
             // Block if any protected field has value but no password
             const allMeta = [...metadata, ...Object.values(perFileMetadata).flat()];
@@ -1775,29 +1782,14 @@ export function init(root, ctx) {
             return;
         }
 
-        const options = document.createElement('div');
-        options.className = 'fee-options';
-
-        const levels = [
-            { key: 'min', label: 'Minimum', value: feeData.minFee },
-            { key: 'recommended', label: 'Recommended', value: feeData.recommendedFee },
-            { key: 'high', label: 'High Priority', value: feeData.highPriorityFee },
-        ];
-
-        for (const l of levels) {
-            const opt = document.createElement('div');
-            opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
-            opt.innerHTML = `
-                <div class="fee-label">${l.label}</div>
-                <div class="fee-amount">\u25C6 ${formatAmount(l.value)}</div>
-            `;
-            opt.addEventListener('click', () => {
-                feeLevel = l.key;
-                render();
-            });
-            options.appendChild(opt);
+        const pickerHost = document.createElement('div');
+        container.appendChild(pickerHost);
+        function onPickerChange(choice, rate) {
+            feeChoice = choice;
+            customRate = rate;
+            render();
         }
-        container.appendChild(options);
+        renderFeePicker(pickerHost, feeData, feeChoice, customRate, onPickerChange);
 
         // Total
         const fee = getSelectedFee();
@@ -1863,18 +1855,6 @@ export function init(root, ctx) {
     async function loadFees() {
         try {
             const f = await Bridge.call('noble_api', 'estimateFee');
-            // Network-aware fee rates: always meet the highest known validator minimum.
-            const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
-            const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
-            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
-            const localLow = f.lowFeeRate || f.low_fee_rate || 1;
-            const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
-            const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-            const minRate = Math.max(localLow, netMin, localMin);
-            const recRate = Math.max(localRec, netMedian, netMin, localMin);
-            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
-
-            // Estimate real tx size using the C library (not hardcoded × 800)
             let txSize = 400; // fallback
             try {
                 const validMeta = metadata.filter(m => m.key && m.value);
@@ -1886,19 +1866,7 @@ export function init(root, ctx) {
                 });
                 if (sizeResult && sizeResult.size) txSize = sizeResult.size;
             } catch { /* use fallback */ }
-
-            // +2% safety margin to avoid mempool rejection from size variance
-            const margin = Math.ceil(txSize * 0.02);
-            const effectiveSize = txSize + margin;
-
-            feeData = {
-                minFee: minRate * effectiveSize,
-                recommendedFee: recRate * effectiveSize,
-                highPriorityFee: highRate * effectiveSize,
-                minFeeRate: minRate,
-                recommendedFeeRate: recRate,
-                highPriorityFeeRate: highRate,
-            };
+            feeData = buildFeeData(f, txSize);
             if (alive) render();
         } catch (err) {
             // Cannot estimate fees — do NOT proceed with hardcoded rates.
@@ -1916,17 +1884,17 @@ export function init(root, ctx) {
     }
 
     function getSelectedFee() {
-        if (!feeData) return 2000;
-        if (feeLevel === 'min') return feeData.minFee;
-        if (feeLevel === 'high') return feeData.highPriorityFee;
-        return feeData.recommendedFee;
+        return getSelectedTotal(feeChoice, feeData, customRate);
     }
 
     function getSelectedFeeRate() {
-        if (!feeData) return 2;
-        if (feeLevel === 'min') return feeData.minFeeRate;
-        if (feeLevel === 'high') return feeData.highPriorityFeeRate;
-        return feeData.recommendedFeeRate;
+        return getSelectedRate(feeChoice, feeData, customRate);
+    }
+
+    function feeSelectionValid() {
+        if (!feeData) return false;
+        if (feeChoice !== 'custom') return true;
+        return validateCustomRate(customRate, feeData).valid;
     }
 
     // ── Step 5: Review ──

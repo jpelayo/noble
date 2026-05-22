@@ -6,6 +6,7 @@
 import { Bridge } from '../bridge.js';
 import { formatAmount } from '../components/amount-text.js';
 import { openModal, openWizardModal, closeModal, createSlideConfirm } from '../components/modal.js';
+import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
 import { esc } from '../utils.js';
 
 export function init(root, ctx) {
@@ -50,7 +51,11 @@ export function init(root, ctx) {
                 Bridge.call('noble_api', 'estimateFee').catch(() => ({ recommended: 1 }))
             ]);
             utxos = utxoResp.utxos || [];
-            feeRate = feeResp.networkMinFeeRate || feeResp.network_min_fee_rate || feeResp.recommendedFeeRate || feeResp.recommended || 1;
+            // Background "fee rate display" — use the same shared logic as the
+            // modal pickers (network median + buffer) so the displayed rate
+            // matches what a Split/Join operation would default to.
+            const sample = buildFeeData(feeResp, 250);
+            feeRate = sample.networkRate;
         } catch (e) { console.error('[UTXO] loadData failed:', e); utxos = []; }
         selected.clear();
         render();
@@ -214,23 +219,19 @@ export function init(root, ctx) {
 
     // ── Split modal (single screen: summary + fee + slider → inline result) ──
     function openSplitWizard(sourceUtxo, splitCount) {
-        let feeLevel = 'recommended';
+        let feeChoice = 'network';
+        let customRate = null;
         let feeData = null;
         const n = splitCount;
         const perOutput = minUtxoValue();
         const totalOut = n * perOutput;
 
-        function getSelectedFee() {
-            if (!feeData) return 0;
-            if (feeLevel === 'min') return feeData.minFee;
-            if (feeLevel === 'high') return feeData.highPriorityFee;
-            return feeData.recommendedFee;
-        }
-        function getSelectedFeeRate() {
-            if (!feeData) return 2;
-            if (feeLevel === 'min') return feeData.minFeeRate;
-            if (feeLevel === 'high') return feeData.highPriorityFeeRate;
-            return feeData.recommendedFeeRate;
+        function getSelectedFee()     { return getSelectedTotal(feeChoice, feeData, customRate); }
+        function getSelectedFeeRate() { return getSelectedRate(feeChoice, feeData, customRate); }
+        function feeValid() {
+            if (!feeData) return false;
+            if (feeChoice !== 'custom') return true;
+            return validateCustomRate(customRate, feeData).valid;
         }
 
         const body = document.createElement('div');
@@ -268,45 +269,32 @@ export function init(root, ctx) {
         }
 
         function renderFeeOptions() {
-            feeContainer.innerHTML = '';
-            const options = document.createElement('div');
-            options.className = 'fee-options';
-            for (const l of [
-                { key: 'min', label: 'Minimum', value: feeData.minFee },
-                { key: 'recommended', label: 'Recommended', value: feeData.recommendedFee },
-                { key: 'high', label: 'High Priority', value: feeData.highPriorityFee },
-            ]) {
-                const opt = document.createElement('div');
-                opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
-                opt.innerHTML = '<div class="fee-label">' + l.label + '</div><div class="fee-amount">\u25c6 ' + formatAmount(l.value) + '</div>';
-                opt.addEventListener('click', () => { feeLevel = l.key; renderFeeOptions(); updateOutput(); });
-                options.appendChild(opt);
-            }
-            feeContainer.appendChild(options);
+            renderFeePicker(feeContainer, feeData, feeChoice, customRate, (choice, rate) => {
+                feeChoice = choice;
+                customRate = rate;
+                renderFeeOptions();
+                updateOutput();
+                refreshSlider();
+            });
             updateOutput();
-            if (!actionDiv.querySelector('.slide-confirm')) {
+            refreshSlider();
+        }
+        function refreshSlider() {
+            const existing = actionDiv.querySelector('.slide-confirm');
+            const valid = feeValid();
+            if (!existing && valid) {
                 actionDiv.innerHTML = '';
                 actionDiv.appendChild(createSlideConfirm('Slide to Split', doSplit));
+            } else if (existing) {
+                existing.style.opacity = valid ? '1' : '0.4';
+                existing.style.pointerEvents = valid ? '' : 'none';
             }
         }
 
         // Fetch fees
         Bridge.call('noble_api', 'estimateFee').then(f => {
-            const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
-            const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
-            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
-            const localLow = f.lowFeeRate || f.low_fee_rate || 1;
-            const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
-            const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-            const minRate = Math.max(localLow, netMin, localMin);
-            const recRate = Math.max(localRec, netMedian, netMin, localMin);
-            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
             const txSize = 150 + (n * 40) + 60;
-            const eff = txSize + Math.ceil(txSize * 0.02);
-            feeData = {
-                minFee: minRate * eff, recommendedFee: recRate * eff, highPriorityFee: highRate * eff,
-                minFeeRate: minRate, recommendedFeeRate: recRate, highPriorityFeeRate: highRate,
-            };
+            feeData = buildFeeData(f, txSize);
             renderFeeOptions();
         }).catch(err => {
             feeContainer.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">Fee error: ' + esc(err?.message || 'unknown') + '</div>';
@@ -353,22 +341,18 @@ export function init(root, ctx) {
 
     // ── Join modal (single screen: summary + fee + confirm → inline result) ──
     function openJoinWizard(sourceUtxos) {
-        let feeLevel = 'recommended';
+        let feeChoice = 'network';
+        let customRate = null;
         let feeData = null;
         const count = sourceUtxos.length;
         const totalIn = sourceUtxos.reduce((s, u) => s + u.value, 0);
 
-        function getSelectedFee() {
-            if (!feeData) return 0;
-            if (feeLevel === 'min') return feeData.minFee;
-            if (feeLevel === 'high') return feeData.highPriorityFee;
-            return feeData.recommendedFee;
-        }
-        function getSelectedFeeRate() {
-            if (!feeData) return 2;
-            if (feeLevel === 'min') return feeData.minFeeRate;
-            if (feeLevel === 'high') return feeData.highPriorityFeeRate;
-            return feeData.recommendedFeeRate;
+        function getSelectedFee()     { return getSelectedTotal(feeChoice, feeData, customRate); }
+        function getSelectedFeeRate() { return getSelectedRate(feeChoice, feeData, customRate); }
+        function feeValid() {
+            if (!feeData) return false;
+            if (feeChoice !== 'custom') return true;
+            return validateCustomRate(customRate, feeData).valid;
         }
 
         const body = document.createElement('div');
@@ -408,47 +392,33 @@ export function init(root, ctx) {
         }
 
         function renderFeeOptions() {
-            feeContainer.innerHTML = '';
-            const options = document.createElement('div');
-            options.className = 'fee-options';
-            for (const l of [
-                { key: 'min', label: 'Minimum', value: feeData.minFee },
-                { key: 'recommended', label: 'Recommended', value: feeData.recommendedFee },
-                { key: 'high', label: 'High Priority', value: feeData.highPriorityFee },
-            ]) {
-                const opt = document.createElement('div');
-                opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
-                opt.innerHTML = '<div class="fee-label">' + l.label + '</div><div class="fee-amount">\u25c6 ' + formatAmount(l.value) + '</div>';
-                opt.addEventListener('click', () => { feeLevel = l.key; renderFeeOptions(); updateOutput(); });
-                options.appendChild(opt);
-            }
-            feeContainer.appendChild(options);
+            renderFeePicker(feeContainer, feeData, feeChoice, customRate, (choice, rate) => {
+                feeChoice = choice;
+                customRate = rate;
+                renderFeeOptions();
+                updateOutput();
+                refreshSlider();
+            });
             updateOutput();
-            // Install slider once fees are loaded
-            if (!actionDiv.querySelector('.slide-confirm')) {
+            refreshSlider();
+        }
+        function refreshSlider() {
+            const existing = actionDiv.querySelector('.slide-confirm');
+            const valid = feeValid();
+            if (!existing && valid) {
                 actionDiv.innerHTML = '';
                 const slider = createSlideConfirm('Slide to Join', doJoin);
                 actionDiv.appendChild(slider);
+            } else if (existing) {
+                existing.style.opacity = valid ? '1' : '0.4';
+                existing.style.pointerEvents = valid ? '' : 'none';
             }
         }
 
         // Fetch fees
         Bridge.call('noble_api', 'estimateFee').then(f => {
-            const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
-            const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
-            const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
-            const localLow = f.lowFeeRate || f.low_fee_rate || 1;
-            const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
-            const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-            const minRate = Math.max(localLow, netMin, localMin);
-            const recRate = Math.max(localRec, netMedian, netMin, localMin);
-            const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
             const txSize = (count * 150) + 40 + 60;
-            const eff = txSize + Math.ceil(txSize * 0.02);
-            feeData = {
-                minFee: minRate * eff, recommendedFee: recRate * eff, highPriorityFee: highRate * eff,
-                minFeeRate: minRate, recommendedFeeRate: recRate, highPriorityFeeRate: highRate,
-            };
+            feeData = buildFeeData(f, txSize);
             renderFeeOptions();
         }).catch(err => {
             feeContainer.innerHTML = '<div style="color:var(--error);font-size:var(--font-size-sm)">Fee error: ' + esc(err?.message || 'unknown') + '</div>';

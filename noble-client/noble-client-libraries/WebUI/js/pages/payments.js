@@ -8,6 +8,7 @@ import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
 import { renderQR } from '../components/qr-code.js';
+import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
 import { esc, timeAgo, truncate, initials, showCopyFeedback } from '../utils.js';
 import { TX_TYPES, txDisplayAmount, formatTxType, txStatusBadge } from '../tx-display.js';
 
@@ -324,7 +325,8 @@ export function init(root, ctx) {
         let recipient = (typeof prefillRecipient === 'string') ? prefillRecipient : '';
         let recipientValid = false;
         let amount = '';
-        let feeLevel = 'recommended';
+        let feeChoice = 'network';
+        let customRate = null;
         let feeData = null;
         let submitResult = null;
         let submitError = null;
@@ -334,7 +336,7 @@ export function init(root, ctx) {
             steps: [
                 { label: 'Recipient', render: renderRecipientStep, canAdvance: () => recipientValid, onNext: null },
                 { label: 'Amount', render: renderAmountStep, canAdvance: () => isValidAmount(), onNext: null },
-                { label: 'Fee', render: renderFeeStep, canAdvance: () => feeData !== null, onNext: null },
+                { label: 'Fee', render: renderFeeStep, canAdvance: feeSelectionValid, onNext: null },
                 { label: 'Review', render: renderReviewStep, canAdvance: () => true, submitLabel: 'Slide to Send', slideConfirm: true, onNext: submitTransaction },
                 { label: 'Result', render: renderResultStep, canAdvance: () => true, submitLabel: 'Close', hideBack: true },
             ],
@@ -444,7 +446,9 @@ export function init(root, ctx) {
             maxBtn.textContent = 'Max';
             maxBtn.addEventListener('click', () => {
                 if (balanceData) {
-                    const fee = feeData ? feeData.recommendedFee : 2000;
+                    // Reserve the currently-selected fee from the wallet balance.
+                    // Before fee data has loaded, fall back to a small reservation.
+                    const fee = feeData ? getSelectedTotal(feeChoice, feeData, customRate) : 2000;
                     const maxAtomic = Math.max(0, (balanceData.available || 0) - fee);
                     amount = formatAmount(maxAtomic);
                     input.value = amount;
@@ -499,17 +503,6 @@ export function init(root, ctx) {
                 loading.style.color = 'var(--text-muted)';
                 el.appendChild(loading);
                 Bridge.call('noble_api', 'estimateFee').then(async (f) => {
-                    // Network-aware fee rates: always meet the highest known validator minimum.
-                    const netMin = f.networkMinFeeRate || f.network_min_fee_rate || 1;
-                    const netMedian = f.networkMedianFeeRate || f.network_median_fee_rate || 1;
-                    const localMin = f.localMinFeeRate || f.local_min_fee_rate || 1;
-                    const localLow = f.lowFeeRate || f.low_fee_rate || 1;
-                    const localRec = f.recommendedFeeRate || f.recommended_fee_rate || 2;
-                    const localHigh = f.highPriorityFeeRate || f.high_priority_fee_rate || 5;
-                    const minRate = Math.max(localLow, netMin, localMin);
-                    const recRate = Math.max(localRec, netMedian, netMin, localMin);
-                    const highRate = Math.max(localHigh, netMedian * 2, netMin, localMin);
-
                     // Estimate real tx size using the C library
                     let txSize = 450; // fallback for transfers
                     try {
@@ -519,19 +512,7 @@ export function init(root, ctx) {
                         });
                         if (sizeResult && sizeResult.size) txSize = sizeResult.size;
                     } catch { /* use fallback */ }
-
-                    // +2% safety margin
-                    const margin = Math.ceil(txSize * 0.02);
-                    const effectiveSize = txSize + margin;
-
-                    feeData = {
-                        minFee: minRate * effectiveSize,
-                        recommendedFee: recRate * effectiveSize,
-                        highPriorityFee: highRate * effectiveSize,
-                        minFeeRate: minRate,
-                        recommendedFeeRate: recRate,
-                        highPriorityFeeRate: highRate,
-                    };
+                    feeData = buildFeeData(f, txSize);
                     wizard.renderStep();
                 }).catch((err) => {
                     // Cannot estimate fees — do NOT proceed with hardcoded rates.
@@ -544,31 +525,30 @@ export function init(root, ctx) {
                 return;
             }
 
-            const options = document.createElement('div');
-            options.className = 'fee-options';
-            const levels = [
-                { key: 'min', label: 'Minimum', value: feeData.minFee },
-                { key: 'recommended', label: 'Recommended', value: feeData.recommendedFee },
-                { key: 'high', label: 'High Priority', value: feeData.highPriorityFee },
-            ];
-            for (const l of levels) {
-                const opt = document.createElement('div');
-                opt.className = 'fee-option' + (feeLevel === l.key ? ' selected' : '');
-                opt.innerHTML = `<div class="fee-label">${l.label}</div><div class="fee-amount">\u25C6 ${formatAmount(l.value)}</div>`;
-                opt.addEventListener('click', () => { feeLevel = l.key; wizard.renderStep(); });
-                options.appendChild(opt);
-            }
-            el.appendChild(options);
+            const pickerHost = document.createElement('div');
+            el.appendChild(pickerHost);
 
-            // Total debit
-            const fee = getSelectedFee();
-            const amountAtomic = parseAmount(amount);
-            const total = amountAtomic + fee;
             const totalDiv = document.createElement('div');
             totalDiv.style.cssText = 'margin-top:var(--gap);text-align:center';
-            totalDiv.innerHTML = `<div style="font-size:var(--font-size-sm);color:var(--text-muted)">Total Debit</div>
-                <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">\u25C6 ${formatAmount(total)}</div>`;
             el.appendChild(totalDiv);
+
+            function refreshTotalDebit() {
+                const fee = getSelectedFee();
+                const amountAtomic = parseAmount(amount);
+                const total = amountAtomic + fee;
+                totalDiv.innerHTML = `<div style="font-size:var(--font-size-sm);color:var(--text-muted)">Total Debit</div>
+                    <div class="mono" style="font-size:var(--font-size-lg);font-weight:600">\u25C6 ${formatAmount(total)}</div>`;
+            }
+
+            function onPickerChange(choice, rate) {
+                feeChoice = choice;
+                customRate = rate;
+                renderFeePicker(pickerHost, feeData, feeChoice, customRate, onPickerChange);
+                refreshTotalDebit();
+                wizard.updateNav();
+            }
+            renderFeePicker(pickerHost, feeData, feeChoice, customRate, onPickerChange);
+            refreshTotalDebit();
         }
 
         function renderReviewStep(el) {
@@ -674,17 +654,17 @@ export function init(root, ctx) {
         }
 
         function getSelectedFee() {
-            if (!feeData) return 2000;
-            if (feeLevel === 'min') return feeData.minFee;
-            if (feeLevel === 'high') return feeData.highPriorityFee;
-            return feeData.recommendedFee;
+            return getSelectedTotal(feeChoice, feeData, customRate);
         }
 
         function getSelectedFeeRate() {
-            if (!feeData) return 2;
-            if (feeLevel === 'min') return feeData.minFeeRate || 1;
-            if (feeLevel === 'high') return feeData.highPriorityFeeRate || 5;
-            return feeData.recommendedFeeRate || 2;
+            return getSelectedRate(feeChoice, feeData, customRate);
+        }
+
+        function feeSelectionValid() {
+            if (!feeData) return false;
+            if (feeChoice !== 'custom') return true;
+            return validateCustomRate(customRate, feeData).valid;
         }
 
         function isValidAmount() {

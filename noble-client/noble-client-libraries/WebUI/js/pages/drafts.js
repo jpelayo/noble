@@ -45,7 +45,7 @@ export function init(root, ctx) {
                 fileCount: 0,
                 reason: null,
                 createdAt: Date.now() / 1000,
-                state: { files: [], hashes: {}, previousChecksum: '', isNewVersion: false, versionMode: 'checksum', wantsMetadata: false, metadata: [], feeLevel: 'recommended', step: 0 }
+                state: { files: [], hashes: {}, previousChecksum: '', isNewVersion: false, versionMode: 'checksum', wantsMetadata: false, metadata: [], feeChoice: 'network', customRate: null, step: 0 }
             };
             try { await Bridge.call('noble_app', 'saveDraft', { draft }); } catch {}
             await loadDrafts();
