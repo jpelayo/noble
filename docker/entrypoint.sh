@@ -12,7 +12,25 @@ set -eu
 
 NOBLE_DATA_DIR="${NOBLE_DATA_DIR:-/var/lib/noble}"
 NOBLE_CONFIG="${NOBLE_DATA_DIR}/noble.toml"
-mkdir -p "$NOBLE_DATA_DIR"
+
+# Root bootstrap. Docker auto-creates the bind-mount source on the host
+# if it doesn't exist — owned by root. We run as root for one instant,
+# chown the data dir to UID 10000, then re-exec ourselves as the noble
+# user. From here on the script is effectively `USER noble`. No manual
+# `mkdir`/`chown` step required on the host.
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p "$NOBLE_DATA_DIR"
+    chown -R 10000:10000 "$NOBLE_DATA_DIR"
+    exec gosu 10000:10000 "$0" "$@"
+fi
+
+# Defensive — should never trigger after the root bootstrap above.
+if [ ! -w "$NOBLE_DATA_DIR" ]; then
+    echo "[entrypoint] ERROR: $NOBLE_DATA_DIR is not writable by UID $(id -u)." >&2
+    echo "[entrypoint] If you bind-mounted a pre-existing dir with different ownership," >&2
+    echo "[entrypoint] run on the host:  sudo chown -R 10000:10000 <host-path>" >&2
+    exit 1
+fi
 
 # ── One-shot subcommands ─────────────────────────────────────────────────────
 # Invoked via:  docker compose run --rm noble <subcommand>

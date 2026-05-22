@@ -6,7 +6,8 @@
 # Verify codec: docker compose run --rm noble verify
 # Shell:        docker compose run --rm noble shell
 #
-# All env vars are optional — copy .env.example to .env if you need any of them.
+# All env vars are optional. Set them inline on the `docker compose up`
+# command line — there is no .env file in this layout.
 #
 # Default layout mirrors the Homebrew install: noble serves self-signed TLS
 # directly, with an app-level CIDR allowlist (NOBLE_ALLOWED_IPS). Operator
@@ -75,11 +76,18 @@ services:
       - "8784:8784"    # WebSocket WSS
       - "8785:8785"    # Dashboard GUI HTTPS
       - "8786:8786"    # Faucet HTTPS (active when NOBLE_FAUCET_SERVER=true)
+    # Data lives in a HOST bind-mount at /opt/noble (override with
+    # NOBLE_HOST_DATA_DIR=/some/other/path). Docker auto-creates the host
+    # directory on first `up`, and the entrypoint chowns it to UID 10000
+    # before dropping privileges — no manual prep on the host.
+    #
+    # Survives `docker compose down -v`, container rebuilds, and repo
+    # re-clones. Anything short of a host disk failure.
+    #
+    # Daily key backup (recommended — chain resyncs from peers, keys do not):
+    #   sudo crontab -e
+    #     15 3 * * * tar czf /var/backups/noble-keys-$(date +\%Y\%m\%d).tar.gz \
+    #       -C /opt/noble keystore.noble .chain_meta identity.json 2>/dev/null \
+    #       && find /var/backups -name 'noble-keys-*.tar.gz' -mtime +30 -delete
     volumes:
-      - noble-data:/var/lib/noble
-
-volumes:
-  noble-data:
-    # Pinned name so the volume survives compose-project renames
-    # (the project name defaults to the directory name).
-    name: noble-data
+      - ${NOBLE_HOST_DATA_DIR:-/opt/noble}:/var/lib/noble

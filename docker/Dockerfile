@@ -35,9 +35,10 @@ FROM debian:bookworm-slim AS runtime
 
 # tini  : PID 1 with proper SIGTERM forwarding (clean RocksDB shutdown)
 # curl  : healthcheck probe
+# gosu  : drop privileges from root → noble in the entrypoint
 # libssl3 + ca-certificates: TLS for outbound calls (Let's Encrypt, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libssl3 tini curl \
+      ca-certificates libssl3 tini curl gosu \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 10000 noble \
  && useradd  --system --uid 10000 --gid noble \
@@ -55,7 +56,10 @@ COPY --from=builder /src/noble-gui                   /usr/local/noble-gui
 COPY docker/entrypoint.sh                            /usr/local/bin/noble-entrypoint
 RUN chmod +x /usr/local/bin/noble-entrypoint
 
-USER noble
+# NOTE: no `USER noble` here. The container starts as root so the
+# entrypoint can chown the bind-mounted data dir on first boot (Docker
+# auto-creates missing bind sources owned by root). The entrypoint then
+# `gosu`-drops to UID 10000 before exec'ing noble-node.
 WORKDIR /var/lib/noble
 
 # Documentation only; compose decides what crosses to the host.
