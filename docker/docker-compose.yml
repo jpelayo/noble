@@ -70,12 +70,22 @@ services:
       NOBLE_EXTRA_DATA_DIRS: ${NOBLE_EXTRA_DATA_DIRS:-}
       # Reconciliation behaviour on startup: auto (default) | verify | off.
       NOBLE_RECONCILE_MODE: ${NOBLE_RECONCILE_MODE:-auto}
-    ports:
-      - "8780:8780"    # P2P (libp2p gossipsub)
-      - "8783:8783"    # JSON-RPC HTTPS
-      - "8784:8784"    # WebSocket WSS
-      - "8785:8785"    # Dashboard GUI HTTPS
-      - "8786:8786"    # Faucet HTTPS (active when NOBLE_FAUCET_SERVER=true)
+    # Host networking — the container shares the host's network stack and
+    # binds 8780/8783/8784/8785/8786 directly on the host's interfaces.
+    #
+    # WHY NOT published `ports:`? On a host running Tailscale, a published
+    # port goes through Docker's DNAT, which turns inbound tailnet traffic
+    # into *forwarded* traffic. Tailscale's `ts-postrouting` MASQUERADE then
+    # rewrites the source to the docker bridge gateway (172.x), so the node
+    # sees every client as 172.x and the NOBLE_ALLOWED_IPS CIDR filter never
+    # matches the real 100.x tailnet address. (Triggered whenever tailscaled
+    # restarts/auto-updates — see tailscale/tailscale#10205.) Host networking
+    # bypasses DNAT entirely: the node sees the real client IP, so the
+    # allowlist works and survives Tailscale restarts.
+    #
+    # Linux-only (fine for server deploys). On macOS/Windows Docker Desktop,
+    # revert to a `ports:` block.
+    network_mode: host
     # Data lives in a HOST bind-mount at /opt/noble (override with
     # NOBLE_HOST_DATA_DIR=/some/other/path). Docker auto-creates the host
     # directory on first `up`, and the entrypoint chowns it to UID 10000
