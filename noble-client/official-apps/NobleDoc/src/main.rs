@@ -289,7 +289,14 @@ async fn dispatch_bridge_action(
             app::handle_app_action(action, params, state, proxy, callback_id, tokio_handle).await
         }
 
-        "noble_storage" => storage::handle_storage_action(action, params),
+        "noble_storage" => {
+            // ensureMyCard seeds the My Card contact with the wallet address.
+            let wallet_address = {
+                let st = state.lock().unwrap();
+                st.wallet_address.clone()
+            };
+            storage::handle_storage_action(action, params, &wallet_address)
+        }
 
         _ => Err(errors::ne_message(&format!("Unknown bridge handler: {handler}"), errors::NE_UNKNOWN_HANDLER)),
     }

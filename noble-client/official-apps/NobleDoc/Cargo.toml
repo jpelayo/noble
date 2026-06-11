@@ -2,7 +2,7 @@
 
 [package]
 name = "noble-doc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Noble Document Client for Linux (WRY + WebKitGTK)"
 authors = ["InfiniteContext <blockchain@infinitecontext.com>"]
@@ -32,6 +32,12 @@ hmac = "0.12"
 sha2_digest = { package = "digest", version = "0.10" }
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 noble-tx-core = { path = "../../noble-client-libraries/noble-tx-core" }
+# CMS per-field metadata signing (signMetadataField / verifyMetadataField).
+noble-cms-core = { path = "../../noble-client-libraries/noble-cms-core" }
+# SHA-1 for X.509 SubjectKeyIdentifier derivation (generateSigningKey).
+sha1 = "0.10"
+# OS CSPRNG for signing-key generation.
+getrandom = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

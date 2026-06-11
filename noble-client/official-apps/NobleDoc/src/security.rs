@@ -19,6 +19,16 @@ pub const KEY_PRIVATE_KEY: &str = "nobledoc.wallet.privatekey";
 pub const KEY_MNEMONIC: &str = "nobledoc.wallet.mnemonic";
 pub const KEY_NODE_URL: &str = "nobledoc.settings.nodeurl";
 
+/// Keyring key for a CMS signing private key (per-key UUID).
+pub fn signing_key_credential(key_id: &str) -> String {
+    format!("nobledoc.signing-key.{key_id}")
+}
+
+/// Keyring key for a CMS signing certificate (per-key UUID).
+pub fn signing_cert_credential(key_id: &str) -> String {
+    format!("nobledoc.signing-cert.{key_id}")
+}
+
 /// Store a value in the OS credential store.
 pub fn store_credential(key: &str, value: &[u8]) -> Result<(), String> {
     let entry = keyring::Entry::new(SERVICE_NAME, key)
@@ -78,6 +88,88 @@ pub fn handle_security_action(action: &str, params: &Value) -> Result<Value, Str
             // Security: never send the raw key to JS. Only report availability.
             let available = has_credential(KEY_PRIVATE_KEY);
             Ok(serde_json::json!({ "available": available }))
+        }
+
+        "getMyCard" => {
+            let contacts = crate::storage::load_contacts();
+            match contacts.iter().find(|c| c.is_my_card) {
+                Some(my_card) => Ok(crate::storage::contact_to_bridge_json(my_card)),
+                None => Ok(serde_json::json!({ "signingKeys": [] })),
+            }
+        }
+
+        "generateSigningKey" => {
+            // Generate a secp256k1 keypair from the OS CSPRNG. Mirrors the
+            // Mac client (SecRandomCopyBytes + derivePublicKey + SHA-1 SKI).
+            let mut priv_bytes = [0u8; 32];
+            let mut attempts = 0;
+            let pub_bytes = loop {
+                getrandom::getrandom(&mut priv_bytes)
+                    .map_err(|e| format!("Failed to generate random key: {e}"))?;
+                match crate::crypto::compressed_public_key(&priv_bytes) {
+                    Ok(p) => break p,
+                    // Astronomically unlikely (scalar out of range); retry.
+                    Err(_) if attempts < 4 => attempts += 1,
+                    Err(e) => return Err(format!("Failed to derive public key: {e}")),
+                }
+            };
+            let compressed_hex = hex::encode(&pub_bytes);
+            // X.509 SubjectKeyIdentifier convention: SHA-1 of the public key.
+            let ski_hex = {
+                use sha1::{Digest as Sha1Digest, Sha1};
+                let mut h = Sha1::new();
+                h.update(&pub_bytes);
+                hex::encode(h.finalize())
+            };
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let entry = crate::models::SigningKeyEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: "Noble Key".to_string(),
+                algorithm: "secp256k1".to_string(),
+                public_key_hex: compressed_hex,
+                has_private_key: true,
+                certificate_subject: None,
+                certificate_der: None,
+                subject_key_identifier: Some(ski_hex),
+                imported_at: now,
+            };
+
+            store_credential(&signing_key_credential(&entry.id), &priv_bytes)?;
+
+            let mut contacts = crate::storage::load_contacts();
+            if let Some(my_card) = contacts.iter_mut().find(|c| c.is_my_card) {
+                my_card.signing_keys.push(entry.clone());
+                crate::storage::save_contacts(&contacts)?;
+            }
+
+            Ok(entry.to_bridge_json())
+        }
+
+        "removeSigningKey" => {
+            let key_id = params
+                .get("keyId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: keyId")?;
+
+            // Key material deletion must succeed (prevent key leak on a
+            // card that no longer lists the key). Cert cleanup is
+            // best-effort — the key is the critical secret.
+            delete_credential(&signing_key_credential(key_id))?;
+            if let Err(e) = delete_credential(&signing_cert_credential(key_id)) {
+                eprintln!("[security] warning: cert cleanup failed (key removed): {e}");
+            }
+
+            let mut contacts = crate::storage::load_contacts();
+            for c in contacts.iter_mut() {
+                c.signing_keys.retain(|sk| sk.id != key_id);
+            }
+            crate::storage::save_contacts(&contacts)?;
+
+            Ok(serde_json::json!({ "ok": true }))
         }
 
         _ => Err(format!("Unknown action: {action}")),

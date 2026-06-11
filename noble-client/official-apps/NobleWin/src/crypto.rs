@@ -370,7 +370,7 @@ pub fn handle_crypto_action(
         }
 
         "estimateTxSize" => {
-            let mut estimate_json = serde_json::json!({
+            let estimate_json = serde_json::json!({
                 "tx_type": params.get("tx_type").and_then(|v| v.as_str()).unwrap_or("notarization"),
                 "checksum": params.get("checksum").and_then(|v| v.as_str()).unwrap_or(&"00".repeat(32)),
                 "metadata": params.get("metadata").cloned().unwrap_or(serde_json::json!([])),
@@ -389,8 +389,134 @@ pub fn handle_crypto_action(
             Ok(result)
         }
 
+        "signMetadataField" => {
+            // CMS detached signature over a metadata field value, using a
+            // per-key signing identity (NOT the wallet key). Mirrors the
+            // Mac client: key + certificate both required.
+            let key_id = params
+                .get("keyId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: keyId")?;
+            let field_value = params
+                .get("fieldValue")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: fieldValue")?;
+
+            // Algorithm comes from the My Card signing-key entry.
+            let contacts = crate::storage::load_contacts();
+            let key_entry = contacts
+                .iter()
+                .find(|c| c.is_my_card)
+                .and_then(|c| c.signing_keys.iter().find(|sk| sk.id == key_id))
+                .ok_or("Signing key not found")?;
+
+            let priv_bytes =
+                crate::security::load_credential(&crate::security::signing_key_credential(key_id))?
+                    .ok_or("Private key not found in keyring")?;
+            let cert_bytes =
+                crate::security::load_credential(&crate::security::signing_cert_credential(key_id))?
+                    .ok_or("Certificate not found in keyring")?;
+
+            let cms_params = serde_json::json!({
+                "private_key_hex": hex::encode(&priv_bytes),
+                "certificate_der_b64": base64_encode(&cert_bytes),
+                "field_value": field_value,
+                "algorithm": key_entry.algorithm,
+            });
+            let result = noble_cms_core::cms::sign_cms(&cms_params.to_string())
+                .map_err(|e| format!("CMS signing failed: {e}"))?;
+            Ok(serde_json::json!({
+                "signatureHex": result.cms_hex,
+                "size": result.size,
+            }))
+        }
+
+        "verifyMetadataField" => {
+            let sig_hex = params
+                .get("signatureHex")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: signatureHex")?;
+            let field_value = params
+                .get("fieldValue")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: fieldValue")?;
+
+            // Step 1: parse the CMS to extract the signer SKI (no cert yet).
+            let parse_params = serde_json::json!({
+                "cms_hex": sig_hex,
+                "field_value": field_value,
+            });
+            let parsed = noble_cms_core::cms::verify_cms(&parse_params.to_string())
+                .map_err(|e| format!("CMS parse failed: {e}"))?;
+            let signer_ski = parsed.signer_ski_hex;
+            let algorithm = parsed.algorithm;
+
+            // Step 2: find the signer's certificate by SKI across contacts.
+            let contacts = crate::storage::load_contacts();
+            let mut cert_b64: Option<String> = None;
+            let mut signer_name: Option<String> = None;
+            'outer: for contact in &contacts {
+                for sk in &contact.signing_keys {
+                    if sk.subject_key_identifier.as_deref() == Some(signer_ski.as_str()) {
+                        cert_b64 = sk.certificate_der.clone();
+                        let key_label = if sk.label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", sk.label)
+                        };
+                        signer_name = Some(format!("{}{}", contact.display_name(), key_label));
+                        break 'outer;
+                    }
+                }
+            }
+
+            // Step 3: verify the signature if we have the certificate.
+            let (valid, error) = match &cert_b64 {
+                Some(cert) => {
+                    let verify_params = serde_json::json!({
+                        "cms_hex": sig_hex,
+                        "field_value": field_value,
+                        "certificate_der_b64": cert,
+                    });
+                    match noble_cms_core::cms::verify_cms(&verify_params.to_string()) {
+                        Ok(v) => (v.valid, v.error),
+                        Err(e) => (false, Some(e)),
+                    }
+                }
+                None => {
+                    let prefix: String = signer_ski.chars().take(12).collect();
+                    (false, Some(format!("no certificate found for signer (SKI: {prefix}...)")))
+                }
+            };
+
+            Ok(serde_json::json!({
+                "valid": valid,
+                "signerSKI": signer_ski,
+                "signerName": signer_name,
+                "hasCertificate": cert_b64.is_some(),
+                "algorithm": algorithm,
+                "error": error,
+            }))
+        }
+
         _ => Err(format!("Unknown action: {action}")),
     }
+}
+
+/// Minimal base64 encoder (standard alphabet, padded) — avoids adding a
+/// dependency for one call site.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 
@@ -411,6 +537,7 @@ pub fn parse_chain_id(s: &str) -> u32 {
 }
 
 /// Extract metadata with ECIES encryption for encrypted fields.
+/// Returns JSON array of {key, value} objects ready for the C library.
 fn parse_metadata_with_ecies(params: &Value, _private_key: &[u8]) -> Result<Vec<serde_json::Value>, String> {
     let entries = params.get("metadata").and_then(|v| v.as_array());
     let Some(entries) = entries else { return Ok(vec![]); };

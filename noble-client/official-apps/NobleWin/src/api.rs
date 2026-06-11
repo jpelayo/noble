@@ -267,6 +267,75 @@ pub async fn handle_api_action(
             Ok(result)
         }
 
+        "getWalletSnapshot" => {
+            // Atomic snapshot: balance + transactions under one chain_height.
+            // Eliminates the race where getBalance and getWalletTransactions
+            // observe different chain tips when called in parallel.
+            if wallet_address.is_empty() {
+                return Err("walletAddress not set".to_string());
+            }
+            let result = client
+                .call_rpc("noble_getWalletSnapshot", json!({ "address": wallet_address }))
+                .await?;
+
+            let txs: Vec<Value> = result
+                .get("transactions")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|e| {
+                            let mut d = json!({
+                                "txId": e.get("tx_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "tx_type": e.get("tx_type").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "direction": e.get("direction").and_then(|v| v.as_str()).unwrap_or(""),
+                                "amount": e.get("amount").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "confirmations": e.get("confirmations").and_then(|v| v.as_u64()).unwrap_or(0),
+                                "status": e.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                                "timestamp": e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0),
+                            });
+                            if let Some(tl) = e.get("type_label").and_then(|v| v.as_str()) {
+                                d["type_label"] = json!(tl);
+                                d["type"] = json!(tl);
+                            }
+                            for (src, dst) in [
+                                ("transfer_value", "transfer_value"),
+                                ("fee", "fee"),
+                                ("total_output", "total_output"),
+                                ("block_height", "blockHeight"),
+                            ] {
+                                if let Some(v) = e.get(src).and_then(|v| v.as_u64()) {
+                                    d[dst] = json!(v);
+                                }
+                            }
+                            for (src, dst) in [
+                                ("recipient", "recipient"),
+                                ("signer", "signer"),
+                                ("checksum", "checksum"),
+                            ] {
+                                if let Some(v) = e.get(src).and_then(|v| v.as_str()) {
+                                    d[dst] = json!(v);
+                                }
+                            }
+                            if let Some(hel) = e.get("has_encrypted_locator").and_then(|v| v.as_bool()) {
+                                d["has_encrypted_locator"] = json!(hel);
+                            }
+                            d
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            Ok(json!({
+                "chain_height": result.get("chain_height").and_then(|v| v.as_u64()).unwrap_or(0),
+                "balance": result.get("balance").and_then(|v| v.as_u64()).unwrap_or(0),
+                "available": result.get("available").and_then(|v| v.as_u64()).unwrap_or(0),
+                "pending": result.get("pending").and_then(|v| v.as_u64()).unwrap_or(0),
+                "immature_count": result.get("immature_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                "immature_value": result.get("immature_value").and_then(|v| v.as_u64()).unwrap_or(0),
+                "transactions": txs,
+            }))
+        }
+
         "estimateFee" => {
             let result = client
                 .call_rpc("noble_estimateFee", json!([]))
@@ -298,6 +367,46 @@ pub async fn handle_api_action(
                 .call_rpc("noble_lookupChecksum", json!([checksum]))
                 .await?;
             Ok(result)
+        }
+
+        "getDocumentsByIssuer" => {
+            // Accept both `issuer` (MCP registry) and `publicKey` (legacy WebUI).
+            let issuer = params
+                .get("issuer")
+                .or_else(|| params.get("publicKey"))
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: issuer")?;
+            let result = client
+                .call_rpc("noble_getDocumentsByIssuer", json!([issuer]))
+                .await?;
+            let docs = reshape_document_records(&result, false);
+            let count = result
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(docs.len() as u64);
+            Ok(json!({ "documents": docs, "count": count }))
+        }
+
+        "searchDocumentsByMetadata" => {
+            let key = params
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: key")?;
+            let value = params
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: value")?;
+            let result = client
+                .call_rpc("noble_searchDocumentsByMetadata", json!([key, value]))
+                .await?;
+            // Same response shape as getDocumentsByIssuer; tx_id duplicated
+            // under both key spellings (Swift client parity).
+            let docs = reshape_document_records(&result, true);
+            let count = result
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(docs.len() as u64);
+            Ok(json!({ "documents": docs, "count": count }))
         }
 
         "getDocumentVersions" => {
@@ -603,4 +712,38 @@ fn enrich_transaction(tx: &Value, wallet_address: &str, tip_height: u64) -> Valu
     }
 
     dict
+}
+
+/// Reshape node document records (`noble_getDocumentsByIssuer` /
+/// `noble_searchDocumentsByMetadata`) into the bridge contract the WebUI
+/// consumes. `dup_tx_id` additionally exposes the id under `tx_id`
+/// (search results are read under both spellings; Swift client parity).
+fn reshape_document_records(result: &Value, dup_tx_id: bool) -> Vec<Value> {
+    result
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|r| {
+                    let mut d = json!({});
+                    if let Some(v) = r.get("block_height").and_then(|v| v.as_u64()) {
+                        d["blockHeight"] = json!(v);
+                    }
+                    if let Some(v) = r.get("tx_id").and_then(|v| v.as_str()) {
+                        d["txId"] = json!(v);
+                        if dup_tx_id {
+                            d["tx_id"] = json!(v);
+                        }
+                    }
+                    if let Some(v) = r.get("timestamp").and_then(|v| v.as_u64()) {
+                        d["timestamp"] = json!(v);
+                    }
+                    if let Some(v) = r.get("tx_type").and_then(|v| v.as_str()) {
+                        d["txType"] = json!(v);
+                    }
+                    d
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

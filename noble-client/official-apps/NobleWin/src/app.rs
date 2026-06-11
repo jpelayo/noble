@@ -361,8 +361,9 @@ pub async fn handle_app_action(
             Ok(json!({ "files": file_list }))
         }
 
-        "shareText" => {
-            // Windows: fallback to clipboard copy (no native share sheet)
+        // `share` is the canonical WebUI action; `shareText` is the legacy
+        // alias. Desktop has no native share sheet — both copy to clipboard.
+        "share" | "shareText" => {
             let text = params
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -376,6 +377,29 @@ pub async fn handle_app_action(
                 }
                 Err(e) => Err(format!("Clipboard unavailable: {e}")),
             }
+        }
+
+        "reportBridgeTimeout" => {
+            // The WebUI's slow-load watchdog detected a stalled bridge call.
+            // Mirror the Mac client: weight it as 2 poll failures; after the
+            // same ≥5 threshold the connection indicator flips off.
+            let should_disconnect = {
+                let mut st = state.lock().expect("app state lock poisoned");
+                st.poll_failure_count += 2;
+                let trigger = st.poll_failure_count >= 5 && st.is_connected;
+                if trigger {
+                    st.is_connected = false;
+                }
+                trigger
+            };
+            if should_disconnect {
+                if let Err(e) = proxy.send_event(UserEvent::PollTick(json!({
+                    "isConnected": false,
+                }))) {
+                    eprintln!("event send failed: {e:?}");
+                }
+            }
+            Ok(json!({ "ok": true }))
         }
 
         "saveFileDialog" => {

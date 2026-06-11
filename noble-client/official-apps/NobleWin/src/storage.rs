@@ -201,6 +201,8 @@ impl ContactBuilder {
             is_favorite: false,
             created_at: now,
             updated_at: now,
+            is_my_card: false,
+            signing_keys: Vec::new(),
         }
     }
 }
@@ -209,8 +211,39 @@ impl ContactBuilder {
 // Bridge Handler: noble_storage
 // ============================================================================
 
+/// Contact → bridge-response dict. Matches the Mac client's contactToDict:
+/// includes the computed displayName and isMyCard; signingKeys present only
+/// when non-empty; certificateDER never crosses to JS.
+pub fn contact_to_bridge_json(c: &Contact) -> Value {
+    let mut dict = serde_json::json!({
+        "id": c.id,
+        "firstName": c.first_name,
+        "lastName": c.last_name,
+        "company": c.company,
+        "email": c.email,
+        "noblePubkey": c.noble_pubkey,
+        "bitcoinKey": c.bitcoin_key,
+        "notes": c.notes,
+        "isFavorite": c.is_favorite,
+        "isMyCard": c.is_my_card,
+        "displayName": c.display_name(),
+        "createdAt": c.created_at,
+        "updatedAt": c.updated_at,
+    });
+    if !c.signing_keys.is_empty() {
+        dict["signingKeys"] = Value::Array(
+            c.signing_keys.iter().map(|sk| sk.to_bridge_json()).collect(),
+        );
+    }
+    dict
+}
+
 /// Handle `noble_storage` bridge actions.
-pub fn handle_storage_action(action: &str, params: &Value) -> Result<Value, String> {
+pub fn handle_storage_action(
+    action: &str,
+    params: &Value,
+    wallet_address: &str,
+) -> Result<Value, String> {
     match action {
         "getContacts" => {
             let mut contacts = load_contacts();
@@ -225,27 +258,40 @@ pub fn handle_storage_action(action: &str, params: &Value) -> Result<Value, Stri
                     })
             });
 
-            let contact_dicts: Vec<Value> = contacts
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "id": c.id,
-                        "firstName": c.first_name,
-                        "lastName": c.last_name,
-                        "company": c.company,
-                        "email": c.email,
-                        "noblePubkey": c.noble_pubkey,
-                        "bitcoinKey": c.bitcoin_key,
-                        "notes": c.notes,
-                        "isFavorite": c.is_favorite,
-                        "displayName": c.display_name(),
-                        "createdAt": c.created_at,
-                        "updatedAt": c.updated_at,
-                    })
-                })
-                .collect();
+            let contact_dicts: Vec<Value> =
+                contacts.iter().map(contact_to_bridge_json).collect();
 
             Ok(serde_json::json!({ "contacts": contact_dicts }))
+        }
+
+        "ensureMyCard" => {
+            let mut contacts = load_contacts();
+            if contacts.iter().any(|c| c.is_my_card) {
+                return Ok(serde_json::json!({ "ok": true, "existed": true }));
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let my_card = Contact {
+                id: uuid::Uuid::new_v4().to_string(),
+                first_name: "My".to_string(),
+                last_name: "Card".to_string(),
+                company: String::new(),
+                email: String::new(),
+                noble_pubkey: wallet_address.to_string(),
+                bitcoin_key: String::new(),
+                notes: String::new(),
+                is_favorite: false,
+                created_at: now,
+                updated_at: now,
+                is_my_card: true,
+                signing_keys: Vec::new(),
+            };
+            let id = my_card.id.clone();
+            contacts.insert(0, my_card);
+            save_contacts(&contacts)?;
+            Ok(serde_json::json!({ "ok": true, "existed": false, "id": id }))
         }
 
         "saveContact" => {
@@ -274,6 +320,10 @@ pub fn handle_storage_action(action: &str, params: &Value) -> Result<Value, Stri
                 .ok_or("Missing parameter: id")?;
 
             let mut contacts = load_contacts();
+            // My Card is undeletable (Swift client parity).
+            if contacts.iter().any(|c| c.id == id && c.is_my_card) {
+                return Err("Cannot delete My Card".to_string());
+            }
             contacts.retain(|c| c.id != id);
             save_contacts(&contacts)?;
 
@@ -304,25 +354,8 @@ pub fn handle_storage_action(action: &str, params: &Value) -> Result<Value, Stri
                 .ok_or("Missing parameter: vcf")?;
 
             let parsed = vcf_to_contacts(vcf_string);
-            let contact_dicts: Vec<Value> = parsed
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "id": c.id,
-                        "firstName": c.first_name,
-                        "lastName": c.last_name,
-                        "company": c.company,
-                        "email": c.email,
-                        "noblePubkey": c.noble_pubkey,
-                        "bitcoinKey": c.bitcoin_key,
-                        "notes": c.notes,
-                        "isFavorite": c.is_favorite,
-                        "displayName": c.display_name(),
-                        "createdAt": c.created_at,
-                        "updatedAt": c.updated_at,
-                    })
-                })
-                .collect();
+            let contact_dicts: Vec<Value> =
+                parsed.iter().map(contact_to_bridge_json).collect();
 
             Ok(serde_json::json!({
                 "contacts": contact_dicts,
