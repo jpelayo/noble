@@ -6,7 +6,7 @@
 
 use noble_core::{
     EncryptedLocator, ExternalAttestation, LocatorRecipient, MetadataEntry, NobleAddress,
-    OutPoint, Transaction, TxIn, TxOut,
+    OutPoint, Transaction, TxIn, TxOut, DUST_THRESHOLD,
     PROTOCOL_VERSION, TX_TYPE_NOTARIZATION, TX_TYPE_TRANSFER,
 };
 use noble_crypto::ecies::{encrypt_for_recipient, EciesRecipient};
@@ -116,7 +116,9 @@ impl TransactionBuilder {
             .collect();
 
         let change = total_input - fee;
-        let outputs = if change > 0 {
+        // Sub-dust change folds into the fee (Bitcoin behaviour) — never emit a
+        // UTXO-bloating dust output.
+        let outputs = if change >= DUST_THRESHOLD {
             vec![TxOut { value: change, address: change_address.clone() }]
         } else {
             vec![]
@@ -200,7 +202,8 @@ impl TransactionBuilder {
 
         let change = total_input - amount - fee;
         let mut outputs = vec![TxOut { value: amount, address: recipient }];
-        if change > 0 {
+        // Sub-dust change folds into the fee (Bitcoin behaviour).
+        if change >= DUST_THRESHOLD {
             outputs.push(TxOut { value: change, address: change_address.clone() });
         }
 
@@ -301,7 +304,9 @@ impl TransactionBuilder {
         }
         let inputs: Vec<TxIn> = utxos.iter().map(|u| TxIn { prev_output: u.outpoint.clone() }).collect();
         let change = total_input - fee;
-        let outputs = if change > 0 {
+        // Sub-dust change folds into the fee (Bitcoin behaviour) — never emit a
+        // UTXO-bloating dust output.
+        let outputs = if change >= DUST_THRESHOLD {
             vec![TxOut { value: change, address: change_address.clone() }]
         } else {
             vec![]
@@ -422,7 +427,10 @@ mod tests {
     fn build_notarization_valid() {
         let (ks, pk) = setup_keystore();
         let checksum = Hash256::from_bytes([0xAB; 32]);
-        let (utxos, addr) = make_test_utxos(&pk, 100_000);
+        // Use a UTXO whose change (input - fee) stays ABOVE the dust threshold
+        // so the change output is emitted (sub-dust change folds into the fee —
+        // see `notarization_sub_dust_change_folds_into_fee`).
+        let (utxos, addr) = make_test_utxos(&pk, 1_000_000);
         let tx = TransactionBuilder::build_notarization(
             &ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id(), &utxos, &addr,
         ).unwrap();
@@ -431,12 +439,40 @@ mod tests {
         assert_eq!(tx.tx_type, TX_TYPE_NOTARIZATION);
         assert_eq!(tx.checksum, checksum);
         assert_eq!(tx.inputs.len(), 1);
-        // Change output: 100_000 - MIN_TX_FEE
+        // Change output: 1_000_000 - MIN_TX_FEE (well above the 500_000 dust floor).
         assert_eq!(tx.outputs.len(), 1);
-        assert_eq!(tx.outputs[0].value, 100_000 - MIN_TX_FEE);
+        assert_eq!(tx.outputs[0].value, 1_000_000 - MIN_TX_FEE);
 
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         assert!(pk.verify(&msg, &tx.issuer_sig).is_ok());
+    }
+
+    #[test]
+    fn notarization_sub_dust_change_folds_into_fee() {
+        // Input only slightly above the fee → change < DUST_THRESHOLD → no change
+        // output is emitted; the sub-dust remainder becomes extra fee.
+        let (ks, pk) = setup_keystore();
+        let checksum = Hash256::from_bytes([0xCD; 32]);
+        // change = (MIN_TX_FEE + 1000) - MIN_TX_FEE = 1000  (≪ 500_000 dust).
+        let (utxos, addr) = make_test_utxos(&pk, MIN_TX_FEE + 1_000);
+        let tx = TransactionBuilder::build_notarization(
+            &ks, &pk, checksum, MIN_TX_FEE, vec![], test_chain_id(), &utxos, &addr,
+        ).unwrap();
+        assert_eq!(tx.outputs.len(), 0, "sub-dust change must fold into the fee");
+    }
+
+    #[test]
+    fn transfer_above_dust_change_kept() {
+        let (ks, sender_pk) = setup_keystore();
+        let (_, recipient_bytes) = noble_crypto::secp256k1::generate_keypair();
+        let recipient_addr = NobleAddress::Noble(NoblePublicKey::Secp256k1(recipient_bytes));
+        let (utxos, change_addr) = make_test_utxos(&sender_pk, 100_000_000);
+        // change = 100_000_000 - 1_000_000 - MIN_TX_FEE ≫ dust → kept.
+        let tx = TransactionBuilder::build_transfer(
+            &ks, &sender_pk, recipient_addr, 1_000_000, MIN_TX_FEE,
+            None, test_chain_id(), &utxos, &change_addr,
+        ).unwrap();
+        assert_eq!(tx.outputs.len(), 2, "above-dust change must be kept");
     }
 
     #[test]

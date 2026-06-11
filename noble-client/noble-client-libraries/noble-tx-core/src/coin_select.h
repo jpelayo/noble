@@ -35,4 +35,17 @@ int coin_select(
     noble_selection_t *result
 );
 
+// Effective-value variant: each UTXO contributes (value - fee_per_input) toward
+// `target` (which excludes per-input cost); UTXOs worth ≤ fee_per_input are
+// skipped as uneconomic. `result->change` already nets the per-input cost
+// (= total - count*fee_per_input - target). With fee_per_input == 0 this is
+// identical to coin_select(). Returns 0 on success, -1 if insufficient funds.
+int coin_select_ev(
+    const noble_utxo_t *utxos,
+    size_t utxo_count,
+    uint64_t target,
+    uint64_t fee_per_input,
+    noble_selection_t *result
+);
+
 #endif // NOBLE_COIN_SELECT_H

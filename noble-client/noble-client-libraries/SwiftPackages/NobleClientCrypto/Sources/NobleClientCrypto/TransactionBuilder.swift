@@ -222,10 +222,15 @@ public enum CoinSelector {
     /// Minimum value below which a change output is not worth creating.
     public static let dustThreshold: UInt64 = 500_000
 
-    /// Select UTXOs to cover `target` (amount + fee).
+    /// Select UTXOs to cover `target` (amount + fixed fee, EXCLUDING per-input
+    /// cost). When `feePerInput > 0`, selection uses effective value
+    /// (`value − feePerInput`) so it never adds an input that costs more in fee
+    /// than it contributes; pass 0 (the default) for the legacy raw-value
+    /// behaviour.
     public static func select(
         from available: [UtxoOutpoint],
-        target: UInt64
+        target: UInt64,
+        feePerInput: UInt64 = 0
     ) throws -> [UtxoOutpoint] {
         let utxoArr = available.map { u in
             [
@@ -235,10 +240,13 @@ public enum CoinSelector {
             ] as [String: Any]
         }
 
-        let params: [String: Any] = [
+        var params: [String: Any] = [
             "utxos": utxoArr,
             "target": target,
         ]
+        if feePerInput > 0 {
+            params["fee_per_input"] = feePerInput
+        }
 
         let jsonData = try JSONSerialization.data(withJSONObject: params)
         guard let jsonStr = String(data: jsonData, encoding: .utf8) else {

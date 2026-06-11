@@ -640,6 +640,90 @@ mod tests {
         assert_eq!(v["total"].as_u64().unwrap(), 60_000_000);
     }
 
+    // --- Stage 3b: effective-value selection + truncation policy ---
+
+    /// Build a JSON utxos array: `(value, vout)` pairs sharing one txid.
+    fn utxos_json(items: &[(u64, u32)]) -> String {
+        let txid = hex::encode([0xAB; 32]);
+        let body: Vec<String> = items
+            .iter()
+            .map(|(v, vout)| format!(r#"{{"txid":"{txid}","vout":{vout},"value":{v}}}"#))
+            .collect();
+        format!("[{}]", body.join(","))
+    }
+
+    #[test]
+    fn coin_select_ev_zero_fee_matches_legacy() {
+        // fee_per_input = 0 (and absent) must give byte-identical selection.
+        let utxos = utxos_json(&[(30_000_000, 0), (30_000_000, 1)]);
+        let legacy = parse_result(&select_utxos(&format!(
+            r#"{{"utxos":{utxos},"target":50000000}}"#
+        )).unwrap());
+        let ev0 = parse_result(&select_utxos(&format!(
+            r#"{{"utxos":{utxos},"target":50000000,"fee_per_input":0}}"#
+        )).unwrap());
+        assert_eq!(legacy["total"], ev0["total"]);
+        assert_eq!(legacy["change"], ev0["change"]);
+        assert_eq!(
+            legacy["selected"].as_array().unwrap().len(),
+            ev0["selected"].as_array().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn ev_skips_uneconomic_input() {
+        // A tiny UTXO worth ≤ fee_per_input must never be selected.
+        let utxos = utxos_json(&[(100_000_000, 0), (100, 1)]); // big + dust-tiny
+        let v = parse_result(&select_utxos(&format!(
+            r#"{{"utxos":{utxos},"target":50000000,"fee_per_input":1000}}"#
+        )).unwrap());
+        let selected = v["selected"].as_array().unwrap();
+        assert!(
+            selected.iter().all(|s| s["value"].as_u64().unwrap() != 100),
+            "uneconomic 100-groat UTXO must not be selected: {v}"
+        );
+    }
+
+    #[test]
+    fn ev_change_nets_per_input_cost() {
+        // Single 100M UTXO, target 50M, fee_per_input 1000 →
+        // change = total − count*fpi − target = 100M − 1000 − 50M = 49_999_000.
+        let utxos = utxos_json(&[(100_000_000, 0)]);
+        let v = parse_result(&select_utxos(&format!(
+            r#"{{"utxos":{utxos},"target":50000000,"fee_per_input":1000}}"#
+        )).unwrap());
+        assert_eq!(v["total"].as_u64().unwrap(), 100_000_000);
+        assert_eq!(v["change"].as_u64().unwrap(), 49_999_000);
+    }
+
+    #[test]
+    fn select_utxos_over_max_keeps_largest() {
+        // 513 UTXOs: 512 dust (value 1) FIRST, one 100M LAST. Array-order
+        // truncation would keep the 512 dust and fail; keep-largest keeps the
+        // 100M and succeeds.
+        let mut items: Vec<(u64, u32)> = (0..512).map(|i| (1u64, i as u32)).collect();
+        items.push((100_000_000, 512));
+        let utxos = utxos_json(&items);
+        let result = select_utxos(&format!(r#"{{"utxos":{utxos},"target":50000000}}"#)).unwrap();
+        let v = parse_result(&result);
+        assert!(v.get("error").is_none(), "keep-largest must succeed: {v}");
+        assert_eq!(v["total"].as_u64().unwrap(), 100_000_000);
+    }
+
+    #[test]
+    fn select_utxos_over_max_errors_when_truncation_hides_funds() {
+        // 600 UTXOs of 1M each (total 600M). Top-512 = 512M < target 550M, but
+        // the full set could cover → a distinct "too many utxos" error, NOT a
+        // misleading "insufficient funds".
+        let items: Vec<(u64, u32)> = (0..600).map(|i| (1_000_000u64, i as u32)).collect();
+        let utxos = utxos_json(&items);
+        let result = select_utxos(&format!(r#"{{"utxos":{utxos},"target":550000000}}"#)).unwrap();
+        assert!(
+            result.contains("too many utxos"),
+            "truncation that hides funds must report consolidation, got: {result}"
+        );
+    }
+
     #[test]
     fn coin_select_all_needed() {
         let utxos: Vec<String> = (0..4).map(|i| {

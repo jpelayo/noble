@@ -3649,11 +3649,24 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             continue;
                         }
                     };
-                    let tx_ids: Vec<_> = block
+                    // Fail-closed: a tx_id computation error must NOT silently
+                    // shorten this vector — it drives both storage indexing and
+                    // mempool cleanup below. Abort the commit instead.
+                    let tx_ids: Vec<_> = match block
                         .transactions
                         .iter()
-                        .filter_map(|tx| tx.compute_tx_id(self.get_chain_id()).ok())
-                        .collect();
+                        .map(|tx| tx.compute_tx_id(self.get_chain_id()))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            tracing::error!(
+                                task = "block_commit",
+                                "Failed to compute tx_id: {e}"
+                            );
+                            continue;
+                        }
+                    };
 
                     // Save pre-commit tip so we can revert the consensus engine
                     // if storage commit fails. The engine already advanced its
@@ -3754,12 +3767,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         tracing::debug!(task = "block_commit", "UpdateTipHeight dropped: {e}");
                     }
 
-                    // Remove committed txs from mempool
+                    // Remove committed txs from mempool — plus any conflicting
+                    // tx that spends an outpoint this block just consumed
+                    // (removeForBlock + removeConflicts). `tx_ids` were computed
+                    // above under the block's chain_id; pass them, don't recompute.
                     {
                         let mut mempool = self.mempool.lock();
-                        for tx_id in &tx_ids {
-                            mempool.remove(tx_id);
-                        }
+                        mempool.remove_for_block(&block.transactions, &tx_ids);
                     }
 
                     tracing::info!(
@@ -4368,6 +4382,22 @@ impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoVa
         let s = self.storage.read();
         match s.get_utxo(outpoint) {
             Ok(Some(entry)) => Some(entry.value),
+            _ => None,
+        }
+    }
+
+    /// Value only if the UTXO is mature at `at_height` (all outputs require
+    /// `COINBASE_MATURITY` confirmations before they're spendable into a block).
+    /// Returns `None` for an immature output so the proposer never selects a tx
+    /// that would fail `ImmatureUtxo` at commit.
+    fn utxo_spendable_value(
+        &self,
+        outpoint: &noble_core::OutPoint,
+        at_height: u64,
+    ) -> Option<u64> {
+        let s = self.storage.read();
+        match s.get_utxo(outpoint) {
+            Ok(Some(entry)) if entry.is_mature(at_height) => Some(entry.value),
             _ => None,
         }
     }

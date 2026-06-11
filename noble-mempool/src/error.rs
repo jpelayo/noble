@@ -58,6 +58,18 @@ pub enum MempoolError {
     #[error("step 6.5: debit resolution failed: {0}")]
     ValidationFailed(String),
 
+    /// Unconfirmed ancestor/descendant chain would exceed the configured
+    /// limit (DoS bound on chain depth/width — Bitcoin's limitancestorcount /
+    /// limitdescendantcount).
+    #[error("chain too long: {kind} chain would exceed limit {limit}")]
+    ChainTooLong { kind: &'static str, limit: usize },
+
+    /// Eviction (make_room): the incoming tx's fee rate does not exceed the
+    /// cheapest resident it would have to displace, so it is refused rather
+    /// than evicting a higher-fee transaction.
+    #[error("fee too low to evict: incoming {incoming} groat/byte does not exceed resident floor {resident}")]
+    FeeTooLowToEvict { incoming: u64, resident: u64 },
+
     /// Internal error (codec, crypto, etc.).
     #[error("internal: {0}")]
     Internal(String),

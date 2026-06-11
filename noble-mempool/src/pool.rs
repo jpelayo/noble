@@ -37,6 +37,16 @@ pub const DEFAULT_MAX_SIZE_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 pub const DEFAULT_MAX_COUNT: usize = 10_000;
 pub const DEFAULT_EXPIRY_SECS: u64 = 72 * 3600; // 72 hours
 pub const DEFAULT_MAX_PER_SENDER: usize = 64;
+/// Max txs in an unconfirmed ancestor chain INCLUDING the candidate
+/// (Bitcoin's `-limitancestorcount`, default 25). Bounds proposal/template CPU.
+pub const DEFAULT_MAX_ANCESTORS: usize = 25;
+/// Max txs in an unconfirmed descendant set of any tx INCLUDING that tx
+/// (Bitcoin's `-limitdescendantcount`, default 25).
+pub const DEFAULT_MAX_DESCENDANTS: usize = 25;
+/// Rolling min-fee: increment added above an evicted feerate (groat/byte).
+pub const ROLLING_FEE_INCREMENT: u64 = 1;
+/// Rolling min-fee: halflife of the decay back toward MIN_RELAY_FEE_RATE.
+pub const ROLLING_FEE_HALFLIFE_SECS: u64 = 12 * 3600;
 
 /// Configuration for the mempool.
 #[derive(Debug, Clone)]
@@ -53,6 +63,10 @@ pub struct MempoolConfig {
     pub chain_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Maximum transactions per sender in the mempool.
     pub max_per_sender: usize,
+    /// Max unconfirmed ancestor chain length (incl. candidate).
+    pub max_ancestors: usize,
+    /// Max unconfirmed descendant set size of any tx (incl. that tx).
+    pub max_descendants: usize,
 }
 
 impl Default for MempoolConfig {
@@ -64,6 +78,8 @@ impl Default for MempoolConfig {
             sig_cache_size: crate::sigcache::DEFAULT_SIG_CACHE_SIZE,
             chain_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
+            max_ancestors: DEFAULT_MAX_ANCESTORS,
+            max_descendants: DEFAULT_MAX_DESCENDANTS,
         }
     }
 }
@@ -157,8 +173,10 @@ pub struct Mempool {
     by_timestamp: BTreeMap<u64, HashSet<Hash256>>,
     /// Sender index: pubkey wire bytes → set of tx_ids (for pending debit calc).
     by_sender: HashMap<Vec<u8>, HashSet<Hash256>>,
-    /// UTXO double-spend prevention: outpoints consumed by in-mempool transactions.
-    spent_by_mempool: HashSet<OutPoint>,
+    /// UTXO double-spend prevention: outpoint → the in-mempool tx spending it
+    /// (Bitcoin's `mapNextTx`). The reverse index lets `remove_for_block`
+    /// find conflicting txs in O(1) when a block consumes an outpoint.
+    spent_by_mempool: HashMap<OutPoint, Hash256>,
     /// Outputs created by mempool transactions — spendable as inputs by other mempool txs.
     /// Mirrors Bitcoin's unconfirmed transaction chaining (CPFP).
     mempool_outputs: HashMap<OutPoint, (u64, Vec<u8>)>, // (value, address_wire)
@@ -170,6 +188,12 @@ pub struct Mempool {
     sig_cache: SigCache,
     /// Current total serialized size of all transactions.
     total_size_bytes: usize,
+    /// Rolling dynamic min-fee floor (groat/byte), raised when txs are evicted
+    /// under size pressure and decayed back toward MIN_RELAY_FEE_RATE over time.
+    /// Mirrors Bitcoin's mempool `GetMinFee`.
+    rolling_min_fee_rate: u64,
+    /// Unix-seconds timestamp of the last rolling-fee update (for decay).
+    rolling_updated_at: u64,
 }
 
 impl Mempool {
@@ -183,12 +207,14 @@ impl Mempool {
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
             by_sender: HashMap::new(),
-            spent_by_mempool: HashSet::new(),
+            spent_by_mempool: HashMap::new(),
             mempool_outputs: HashMap::new(),
             output_creator: HashMap::new(),
             depends_on: HashMap::new(),
             sig_cache,
             total_size_bytes: 0,
+            rolling_min_fee_rate: noble_core::MIN_RELAY_FEE_RATE,
+            rolling_updated_at: 0,
         }
     }
 
@@ -256,14 +282,14 @@ impl Mempool {
     /// These are change outputs from pending transactions — spendable by subsequent txs.
     pub fn outputs_for_address(&self, addr_wire: &[u8]) -> Vec<(OutPoint, u64)> {
         self.mempool_outputs.iter()
-            .filter(|(op, (_, wire))| wire == addr_wire && !self.spent_by_mempool.contains(op))
+            .filter(|(op, (_, wire))| wire == addr_wire && !self.spent_by_mempool.contains_key(op))
             .map(|(op, (value, _))| (op.clone(), *value))
             .collect()
     }
 
     /// Whether an outpoint is already consumed by an in-mempool transaction.
     pub fn is_outpoint_spent(&self, outpoint: &OutPoint) -> bool {
-        self.spent_by_mempool.contains(outpoint)
+        self.spent_by_mempool.contains_key(outpoint)
     }
 
     /// Pending debits for a specific address.
@@ -385,9 +411,16 @@ impl Mempool {
         // Collect all entries sorted by fee rate desc (default priority)
         let all_by_fee: Vec<&MempoolEntry> = self.iter_by_fee_rate_desc().collect();
 
-        // Repeatedly scan: emit entries whose parents are all emitted (or have no parents)
+        // Repeatedly scan: emit entries whose parents are all emitted (or have no parents).
+        // Bounded by max_ancestors+1 passes: a topo layer is emitted each pass,
+        // and chain depth is capped at the ancestor limit, so this also breaks
+        // on no-progress (defensive against an unexpected cycle).
+        let max_passes = self.config.max_ancestors + 1;
         let mut remaining: Vec<&MempoolEntry> = all_by_fee;
-        loop {
+        for _ in 0..max_passes {
+            if remaining.is_empty() {
+                break;
+            }
             let before = result.len();
             let mut still_blocked = Vec::new();
             for entry in remaining {
@@ -561,7 +594,7 @@ impl Mempool {
             }
 
             // Check for in-mempool double-spend
-            if self.spent_by_mempool.contains(outpoint) {
+            if self.spent_by_mempool.contains_key(outpoint) {
                 return Err(MempoolError::StructuralValidation(
                     "Double spend detected. One of the inputs in this transaction is already \
                     being used by another pending transaction in the mempool.".into(),
@@ -607,6 +640,11 @@ impl Mempool {
             }
         }
 
+        // Chain limits (DoS): bound the unconfirmed ancestor/descendant graph
+        // this tx would join (Bitcoin's limitancestorcount/limitdescendantcount).
+        // `parent_deps` (this tx's direct in-mempool parents) is now final.
+        self.check_chain_limits(&parent_deps)?;
+
         // Compute implicit fee: sum(inputs) - sum(outputs)
         let output_value_sum = tx.total_output_value();
         let fee = input_value_sum.checked_sub(output_value_sum).ok_or_else(|| {
@@ -631,15 +669,23 @@ impl Mempool {
 
         tracing::trace!("mempool step 7: fee rate check");
         let fee_rate = if size_bytes > 0 { fee / size_bytes as u64 } else { 0 };
-        if fee_rate < noble_core::MIN_RELAY_FEE_RATE {
+        // Effective floor = max(protocol floor, rolling dynamic floor). The
+        // rolling floor only exceeds the protocol floor while the pool is
+        // shedding load under size pressure, decaying back over time — so under
+        // normal load this is exactly MIN_RELAY_FEE_RATE.
+        let effective_floor = self.current_min_fee_rate(current_time);
+        if fee_rate < effective_floor {
             return Err(MempoolError::FeeTooLow {
                 fee,
-                min_fee: noble_core::MIN_RELAY_FEE_RATE * size_bytes as u64,
+                min_fee: effective_floor * size_bytes as u64,
             });
         }
 
-        // Pre-step 8: Evict if needed to make room
-        self.evict_if_needed(size_bytes);
+        // Pre-step 8: Make room (admission-aware eviction). Refuses rather than
+        // evict a higher-fee resident for this lower-fee newcomer, rejects an
+        // oversize tx outright, and raises the rolling floor from everything it
+        // sheds (incl. cascade descendants).
+        self.make_room(size_bytes, fee_rate, current_time)?;
 
         // Step 8: Accept into mempool
         tracing::trace!("mempool step 8: accept into mempool");
@@ -662,8 +708,23 @@ impl Mempool {
     }
 
     /// Remove a transaction from the mempool (e.g., after confirmation).
+    /// Cascade-evicts any tx that depends on it. Returns the primary entry.
     pub fn remove(&mut self, tx_id: &Hash256) -> Option<MempoolEntry> {
-        let entry = self.by_id.remove(tx_id)?;
+        let mut removed = Vec::new();
+        self.remove_collecting(tx_id, &mut removed);
+        // The primary tx is pushed first; descendants follow.
+        removed.into_iter().next()
+    }
+
+    /// Like `remove`, but appends every removed entry — the primary AND all
+    /// cascade-evicted descendants — to `out`. Lets callers (eviction) see the
+    /// full removed set, e.g. to raise the rolling fee floor from descendants
+    /// that the plain `remove` would otherwise hide.
+    fn remove_collecting(&mut self, tx_id: &Hash256, out: &mut Vec<MempoolEntry>) {
+        let entry = match self.by_id.remove(tx_id) {
+            Some(e) => e,
+            None => return,
+        };
 
         // Remove from fee-rate index
         if let Some(set) = self.by_fee_rate.get_mut(&entry.fee_rate) {
@@ -715,19 +776,29 @@ impl Mempool {
         // Remove dependency record
         self.depends_on.remove(tx_id);
 
-        // Cascade-evict any tx that depends on this one
-        let dependents: Vec<Hash256> = self.depends_on.iter()
+        self.total_size_bytes -= entry.size_bytes;
+        self.sig_cache.remove(tx_id);
+        out.push(entry); // record the primary before cascading
+
+        // Cascade-evict any tx that depends on this one.
+        //
+        // NOTE (maturity=finality property): when a parent confirms and is
+        // removed via `remove_for_block`, this cascade evicts its in-mempool
+        // children too. Because ALL outputs require COINBASE_MATURITY
+        // confirmations before they can be spent INTO a block, such a child
+        // cannot re-enter the mempool until the (now on-chain) parent output
+        // matures — so a CPFP / fast change re-spend is unavailable for
+        // COINBASE_MATURITY blocks after the parent confirms. Intentional.
+        let dependents: Vec<Hash256> = self
+            .depends_on
+            .iter()
             .filter(|(_, parents)| parents.contains(tx_id))
             .map(|(child, _)| *child)
             .collect();
         for child_id in dependents {
             tracing::debug!(task = "mempool", "cascade-evicting dependent tx {:?}", child_id);
-            self.remove(&child_id);
+            self.remove_collecting(&child_id, out);
         }
-
-        self.total_size_bytes -= entry.size_bytes;
-        self.sig_cache.remove(tx_id);
-        Some(entry)
     }
 
     /// Remove all expired transactions (received_at + expiry_secs < current_time).
@@ -752,6 +823,40 @@ impl Mempool {
     pub fn remove_confirmed(&mut self, tx_ids: &[Hash256]) {
         for tx_id in tx_ids {
             self.remove(tx_id);
+        }
+    }
+
+    /// Remove the confirmed txs **and** every *conflicting* mempool tx that
+    /// spends an outpoint a confirmed tx just consumed on-chain. Mirrors
+    /// Bitcoin Core's `removeForBlock` + `removeConflicts`.
+    ///
+    /// `confirmed_tx_ids` are the block's tx_ids precomputed by the caller
+    /// under the block's chain_id — they are NOT recomputed here, because the
+    /// node's chain_id may already have advanced after commit.
+    ///
+    /// Without this, a tx that spends an outpoint a block consumed (e.g. a
+    /// different proposer's block included a conflicting tx) would linger in
+    /// the mempool referencing a now-spent UTXO — mis-priced in fee accounting
+    /// and re-selected into proposal after proposal.
+    pub fn remove_for_block(&mut self, block_txs: &[Transaction], confirmed_tx_ids: &[Hash256]) {
+        // 1. Conflicts: any mempool tx spending an input a block tx consumed is
+        //    now permanently invalid. Dedup — the same spender can be found via
+        //    multiple inputs; cascade removal is idempotent but we avoid the
+        //    repeated walks.
+        let mut conflicts: HashSet<Hash256> = HashSet::new();
+        for tx in block_txs {
+            for input in &tx.inputs {
+                if let Some(&holder) = self.spent_by_mempool.get(&input.prev_output) {
+                    conflicts.insert(holder);
+                }
+            }
+        }
+        for id in conflicts {
+            self.remove(&id); // cascade-evicts descendants
+        }
+        // 2. The confirmed txs themselves (idempotent if already gone via step 1).
+        for id in confirmed_tx_ids {
+            self.remove(id);
         }
     }
 
@@ -787,9 +892,9 @@ impl Mempool {
             self.by_sender.entry(sender_wire).or_default().insert(tx_id);
         }
 
-        // Mark input outpoints as spent by mempool
+        // Mark input outpoints as spent by mempool (outpoint → spender tx_id)
         for input in &entry.tx.inputs {
-            self.spent_by_mempool.insert(input.prev_output.clone());
+            self.spent_by_mempool.insert(input.prev_output.clone(), tx_id);
         }
 
         // Register this tx's outputs as spendable mempool outputs
@@ -829,34 +934,171 @@ impl Mempool {
             })
     }
 
-    fn evict_if_needed(&mut self, incoming_size: usize) {
-        // Evict lowest-fee transactions until we have room
-        while (self.by_id.len() >= self.config.max_count
-            || self.total_size_bytes + incoming_size > self.config.max_size_bytes)
-            && !self.by_id.is_empty()
-        {
-            // Find the lowest fee bucket
-            let lowest_fee = match self.by_fee_rate.keys().next().copied() {
-                Some(f) => f,
-                None => break,
-            };
-
-            // Pick one tx_id from the lowest fee bucket
-            let tx_id = match self
-                .by_fee_rate
-                .get(&lowest_fee)
-                .and_then(|s| s.iter().next().copied())
-            {
-                Some(id) => id,
-                None => break,
-            };
-
-            tracing::trace!(
-                "mempool eviction: removing lowest-fee tx (fee={})",
-                lowest_fee
-            );
-            self.remove(&tx_id);
+    /// Distinct transitive in-mempool ancestor closure of a tx whose direct
+    /// parents are `parents` (does not include the candidate itself).
+    fn ancestor_closure(&self, parents: &HashSet<Hash256>) -> HashSet<Hash256> {
+        let mut closure: HashSet<Hash256> = HashSet::new();
+        let mut stack: Vec<Hash256> = parents.iter().copied().collect();
+        while let Some(id) = stack.pop() {
+            if closure.insert(id) {
+                if let Some(grandparents) = self.depends_on.get(&id) {
+                    for &g in grandparents {
+                        if !closure.contains(&g) {
+                            stack.push(g);
+                        }
+                    }
+                }
+            }
         }
+        closure
+    }
+
+    /// Count of distinct transitive descendants of `a` currently in the
+    /// mempool (NOT counting `a`). A descendant is any tx that transitively
+    /// depends on `a` via the `depends_on` graph.
+    fn descendant_count(&self, a: &Hash256) -> usize {
+        let mut descendants: HashSet<Hash256> = HashSet::new();
+        let mut frontier: Vec<Hash256> = vec![*a];
+        while let Some(node) = frontier.pop() {
+            for (child, parents) in &self.depends_on {
+                if parents.contains(&node) && descendants.insert(*child) {
+                    frontier.push(*child);
+                }
+            }
+        }
+        descendants.len()
+    }
+
+    /// Enforce ancestor/descendant chain limits for an incoming tx with the
+    /// given direct in-mempool parents. Counts are candidate-inclusive
+    /// (Bitcoin convention): candidate + ancestors ≤ max_ancestors, and for
+    /// every ancestor `a`, `a` + its existing descendants + the candidate ≤
+    /// max_descendants.
+    fn check_chain_limits(&self, parent_deps: &HashSet<Hash256>) -> Result<(), MempoolError> {
+        if parent_deps.is_empty() {
+            return Ok(()); // no in-mempool ancestors → trivially within limits
+        }
+        let closure = self.ancestor_closure(parent_deps);
+        if closure.len() + 1 > self.config.max_ancestors {
+            return Err(MempoolError::ChainTooLong {
+                kind: "ancestor",
+                limit: self.config.max_ancestors,
+            });
+        }
+        for a in &closure {
+            // a (1) + existing descendants D(a) + the new candidate (1).
+            if self.descendant_count(a) + 2 > self.config.max_descendants {
+                return Err(MempoolError::ChainTooLong {
+                    kind: "descendant",
+                    limit: self.config.max_descendants,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// True if a tx of `incoming_size` bytes fits without exceeding either cap.
+    fn has_room(&self, incoming_size: usize) -> bool {
+        self.by_id.len() < self.config.max_count
+            && self.total_size_bytes + incoming_size <= self.config.max_size_bytes
+    }
+
+    /// The effective minimum fee rate right now: `max(MIN_RELAY_FEE_RATE,
+    /// decayed rolling floor)`. The rolling floor halves its excess over the
+    /// protocol floor every `ROLLING_FEE_HALFLIFE_SECS`. Pure read.
+    fn current_min_fee_rate(&self, now: u64) -> u64 {
+        let floor = noble_core::MIN_RELAY_FEE_RATE;
+        if self.rolling_min_fee_rate <= floor {
+            return floor;
+        }
+        let elapsed = now.saturating_sub(self.rolling_updated_at);
+        let halvings = elapsed / ROLLING_FEE_HALFLIFE_SECS;
+        if halvings >= 64 {
+            return floor; // fully decayed (guard against u64 shift overflow)
+        }
+        let excess = self.rolling_min_fee_rate - floor;
+        floor + (excess >> halvings)
+    }
+
+    /// Raise the rolling floor to at least `target`, first decaying the stored
+    /// value to `now` so repeated bumps don't compound a stale-high floor.
+    fn bump_rolling_fee(&mut self, target: u64, now: u64) {
+        let decayed = self.current_min_fee_rate(now);
+        self.rolling_min_fee_rate = decayed.max(target);
+        self.rolling_updated_at = now;
+    }
+
+    /// Admission-aware eviction: free room for an incoming tx of `incoming_size`
+    /// bytes paying `incoming_fee_rate`. Returns all entries evicted (incl.
+    /// cascade descendants).
+    ///
+    /// Guarantees (Bitcoin-parity):
+    /// - Rejects a tx larger than the whole pool budget outright (R5).
+    /// - Never evicts a resident whose fee rate is ≥ the incoming rate to make
+    ///   room for it (R3): feasibility is decided read-only over the strictly
+    ///   cheaper txs BEFORE anything is removed, so admission never mutates the
+    ///   pool and then fails.
+    /// - Raises the rolling fee floor from the highest evicted fee rate (R4),
+    ///   including cascade-evicted descendants.
+    fn make_room(
+        &mut self,
+        incoming_size: usize,
+        incoming_fee_rate: u64,
+        now: u64,
+    ) -> Result<Vec<MempoolEntry>, MempoolError> {
+        if incoming_size > self.config.max_size_bytes {
+            return Err(MempoolError::TxTooLarge {
+                size: incoming_size,
+                max: self.config.max_size_bytes,
+            });
+        }
+        if self.has_room(incoming_size) {
+            return Ok(Vec::new());
+        }
+
+        // Feasibility (read-only): can we get under both caps by evicting ONLY
+        // txs strictly cheaper than the incoming? Count their own sizes/counts;
+        // cascade only frees more, so this is a conservative lower bound.
+        let cheaper: Vec<&MempoolEntry> = self
+            .by_fee_rate
+            .range(..incoming_fee_rate)
+            .flat_map(|(_, ids)| ids.iter())
+            .filter_map(|id| self.by_id.get(id))
+            .collect();
+        let freeable_bytes: usize = cheaper.iter().map(|e| e.size_bytes).sum();
+        let freeable_count = cheaper.len();
+        let need_bytes = (self.total_size_bytes + incoming_size)
+            .saturating_sub(self.config.max_size_bytes);
+        let need_count = (self.by_id.len() + 1).saturating_sub(self.config.max_count);
+        if freeable_bytes < need_bytes || freeable_count < need_count {
+            let cheapest = self.by_fee_rate.keys().next().copied().unwrap_or(0);
+            return Err(MempoolError::FeeTooLowToEvict {
+                incoming: incoming_fee_rate,
+                resident: cheapest,
+            });
+        }
+
+        // Feasible — evict cheapest-first until there's room. Feasibility
+        // guarantees we stay strictly below `incoming_fee_rate`.
+        let mut removed = Vec::new();
+        while !self.has_room(incoming_size) {
+            let lowest = match self.by_fee_rate.keys().next().copied() {
+                Some(f) if f < incoming_fee_rate => f,
+                _ => break, // unreachable given feasibility; defensive
+            };
+            let victim = self
+                .by_fee_rate
+                .get(&lowest)
+                .and_then(|s| s.iter().next().copied());
+            let Some(id) = victim else { break };
+            self.remove_collecting(&id, &mut removed);
+        }
+
+        // R4: raise the rolling floor from the highest evicted fee rate.
+        if let Some(max_evicted) = removed.iter().map(|e| e.fee_rate).max() {
+            self.bump_rolling_fee(max_evicted + ROLLING_FEE_INCREMENT, now);
+        }
+        Ok(removed)
     }
 }
 
@@ -930,6 +1172,8 @@ mod tests {
             sig_cache_size: 100,
             chain_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(test_chain_id())),
             max_per_sender: DEFAULT_MAX_PER_SENDER,
+            max_ancestors: DEFAULT_MAX_ANCESTORS,
+            max_descendants: DEFAULT_MAX_DESCENDANTS,
         }
     }
 
@@ -1804,5 +2048,325 @@ mod tests {
             matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("coinbase")),
             "coinbase tx should be rejected, got: {result:?}"
         );
+    }
+
+    // --- Stage 1a: remove_for_block (conflict removal) ---
+
+    /// Lookup returning a mature on-chain UTXO for any registered outpoint.
+    struct MapUtxoLookup(std::collections::HashMap<OutPoint, u64>);
+    impl UtxoLookup for MapUtxoLookup {
+        fn get_utxo(&self, op: &OutPoint) -> Option<(u64, bool, u64)> {
+            // (value, is_coinbase=false, creation_height=0) → mature at any height ≥ 3.
+            self.0.get(op).map(|&v| (v, false, 0))
+        }
+    }
+
+    /// A confirmed block tx (spending `op`) that was NOT in this node's mempool
+    /// — e.g. it arrived in another proposer's block.
+    fn block_tx_spending(op: OutPoint) -> Transaction {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        make_signed_transfer_with_outpoint(&sk, &pk, &recip, op, 400_000, 599_000)
+    }
+
+    #[test]
+    fn remove_for_block_drops_conflicting_tx() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), 1_000_000)].into_iter().collect());
+
+        // B (in our mempool) spends X.
+        let b = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x.clone(), 500_000, 499_000);
+        pool.admit(&b, 1_700_000_000, &NoChainLookup, &lookup, 10).unwrap();
+        let b_id = b.compute_tx_id(test_chain_id()).unwrap();
+        assert!(pool.get(&b_id).is_some());
+
+        // A different tx A (from a committed block) also spends X.
+        let a = block_tx_spending(x.clone());
+        let a_id = a.compute_tx_id(test_chain_id()).unwrap();
+        pool.remove_for_block(&[a], &[a_id]);
+
+        assert!(pool.get(&b_id).is_none(), "conflicting tx B must be evicted");
+        assert!(!pool.is_outpoint_spent(&x), "X must no longer be marked spent");
+    }
+
+    #[test]
+    fn remove_for_block_removes_confirmed_and_dependents() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), 1_000_000)].into_iter().collect());
+
+        // Parent P spends on-chain X; its change (vout 1) goes back to the sender.
+        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x, 500_000, 499_000);
+        pool.admit(&p, 1_700_000_000, &NoChainLookup, &lookup, 10).unwrap();
+        let p_id = p.compute_tx_id(test_chain_id()).unwrap();
+
+        // Child C spends P's change output (a mempool output — CPFP chaining).
+        let p_change = OutPoint { txid: p_id, vout: 1 };
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, 200_000, 298_000);
+        pool.admit(&c, 1_700_000_000, &NoChainLookup, &lookup, 10).unwrap();
+        let c_id = c.compute_tx_id(test_chain_id()).unwrap();
+        assert!(pool.get(&c_id).is_some());
+
+        // P confirms → P removed and its dependent C cascade-evicted.
+        pool.remove_for_block(&[p], &[p_id]);
+        assert!(pool.get(&p_id).is_none(), "confirmed P removed");
+        assert!(pool.get(&c_id).is_none(), "dependent C cascade-evicted");
+    }
+
+    #[test]
+    fn remove_for_block_dedups_repeated_conflict() {
+        // A single mempool tx B spends two outpoints X and Y; a confirmed block
+        // tx A spends both. B is discovered twice — dedup must remove it once,
+        // without panic.
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+
+        let x = unique_outpoint();
+        let y = unique_outpoint();
+        let lookup = MapUtxoLookup(
+            [(x.clone(), 600_000), (y.clone(), 600_000)].into_iter().collect(),
+        );
+
+        // Build a 2-input B inline (the single-input helper can't express this).
+        let build_two_in = |inputs: Vec<OutPoint>, amount: u64, change: u64| {
+            let mut tx = Transaction {
+                version: PROTOCOL_VERSION,
+                tx_type: noble_core::TX_TYPE_TRANSFER,
+                inputs: inputs.into_iter().map(|prev_output| TxIn { prev_output }).collect(),
+                outputs: vec![
+                    TxOut { value: amount, address: NobleAddress::Noble(NoblePublicKey::Secp256k1(recip.to_vec())) },
+                    TxOut { value: change, address: NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.to_vec())) },
+                ],
+                checksum: Hash256::ZERO,
+                timestamp: 1_700_000_000,
+                issuer_sig: SignatureEnvelope { scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![] },
+                additional_sigs: vec![],
+                metadata: vec![],
+                encrypted_locator: None,
+                external_attestations: vec![],
+                gateway_address: None,
+                contract_data: None,
+                expires_at: None,
+            };
+            let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+            tx.issuer_sig = priv_key.sign(&msg).unwrap();
+            tx
+        };
+
+        let b = build_two_in(vec![x.clone(), y.clone()], 600_000, 599_000); // fee = 1_200_000 - 1_199_000 = 1000
+        pool.admit(&b, 1_700_000_000, &NoChainLookup, &lookup, 10).unwrap();
+        let b_id = b.compute_tx_id(test_chain_id()).unwrap();
+
+        // Confirmed block tx A also spends both X and Y.
+        let a = build_two_in(vec![x, y], 700_000, 499_000);
+        let a_id = a.compute_tx_id(test_chain_id()).unwrap();
+        pool.remove_for_block(&[a], &[a_id]); // must not panic on the double-discovery
+
+        assert!(pool.get(&b_id).is_none(), "B removed once, cleanly");
+        assert!(pool.is_empty());
+    }
+
+    // --- Stage 2a: ancestor/descendant chain limits ---
+
+    #[test]
+    fn ancestor_limit_accepts_25_rejects_26() {
+        let mut pool = Mempool::new(test_config()); // max_ancestors = 25
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+
+        // On-chain seed UTXO.
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), 100_000_000)].into_iter().collect());
+
+        // Build a linear chain: each tx spends the previous tx's change output
+        // (vout 1, paid back to `pk`). tx0 spends the on-chain seed.
+        let mut prev_op = x;
+        let mut prev_val: u64 = 100_000_000;
+        // 25 txs = candidate(25th) + 24 ancestors → all accepted.
+        for i in 0..25u64 {
+            let change = prev_val - 2_000; // amount 1000 + fee 1000
+            let tx = make_signed_transfer_with_outpoint(&sk, &pk, &recip, prev_op.clone(), 1_000, change);
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &lookup, 10)
+                .unwrap_or_else(|e| panic!("chain tx {i} must admit: {e:?}"));
+            let id = tx.compute_tx_id(test_chain_id()).unwrap();
+            prev_op = OutPoint { txid: id, vout: 1 }; // the change output
+            prev_val = change;
+        }
+
+        // The 26th (candidate + 25 ancestors) must be rejected.
+        let change = prev_val - 2_000;
+        let tx26 = make_signed_transfer_with_outpoint(&sk, &pk, &recip, prev_op, 1_000, change);
+        let res = pool.admit(&tx26, 1_700_000_000, &NoChainLookup, &lookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::ChainTooLong { kind: "ancestor", .. })),
+            "26-deep chain must be rejected as ancestor-too-long, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn descendant_limit_accepts_24_children_rejects_25th() {
+        let mut pool = Mempool::new(test_config()); // max_descendants = 25
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+
+        // Parent P spends an on-chain UTXO and fans out into 25 self-owned outputs.
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), 100_000_000)].into_iter().collect());
+        let self_addr = NobleAddress::Noble(NoblePublicKey::Secp256k1(pk.to_vec()));
+        let mut p = Transaction {
+            version: PROTOCOL_VERSION,
+            tx_type: noble_core::TX_TYPE_TRANSFER,
+            inputs: vec![TxIn { prev_output: x }],
+            outputs: (0..25).map(|_| TxOut { value: 1_000_000, address: self_addr.clone() }).collect(),
+            checksum: Hash256::ZERO,
+            timestamp: 1_700_000_000,
+            issuer_sig: SignatureEnvelope { scheme_id: SCHEME_SECP256K1, public_key: pk.to_vec(), signature: vec![] },
+            additional_sigs: vec![],
+            metadata: vec![],
+            encrypted_locator: None,
+            external_attestations: vec![],
+            gateway_address: None,
+            contract_data: None,
+            expires_at: None,
+        };
+        // fee = 100_000_000 - 25*1_000_000 = 75_000_000 ≫ floor.
+        let msg = p.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        p.issuer_sig = priv_key.sign(&msg).unwrap();
+        pool.admit(&p, 1_700_000_000, &NoChainLookup, &lookup, 10).unwrap();
+        let p_id = p.compute_tx_id(test_chain_id()).unwrap();
+
+        // 24 children, each spending one of P's outputs → P + 24 + candidate would
+        // be 25 on the 24th, which is the max; all 24 accepted.
+        for vout in 0..24u32 {
+            let op = OutPoint { txid: p_id, vout };
+            let child = make_signed_transfer_with_outpoint(&sk, &pk, &recip, op, 1_000, 998_000);
+            pool.admit(&child, 1_700_000_000, &NoChainLookup, &lookup, 10)
+                .unwrap_or_else(|e| panic!("child {vout} must admit: {e:?}"));
+        }
+
+        // The 25th child pushes P's descendant set (P + 24 + candidate = 26) over 25.
+        let op = OutPoint { txid: p_id, vout: 24 };
+        let child25 = make_signed_transfer_with_outpoint(&sk, &pk, &recip, op, 1_000, 998_000);
+        let res = pool.admit(&child25, 1_700_000_000, &NoChainLookup, &lookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::ChainTooLong { kind: "descendant", .. })),
+            "25th child must be rejected as descendant-too-long, got {res:?}"
+        );
+    }
+
+    // --- Stage 2b: admission-aware make_room + rolling min-fee floor ---
+
+    fn tiny_config(max_count: usize, max_size_bytes: usize) -> MempoolConfig {
+        let mut c = test_config();
+        c.max_count = max_count;
+        c.max_size_bytes = max_size_bytes;
+        c
+    }
+
+    /// A transfer spending a fresh outpoint of value `NO_UTXO_LOOKUP_VALUE`,
+    /// paying `NO_UTXO_LOOKUP_VALUE - fee` to a recipient → implicit fee = `fee`.
+    /// Used with `NoUtxoLookup` (resolves every input to NO_UTXO_LOOKUP_VALUE).
+    fn tx_with_fee(fee: u64) -> Transaction {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let amount = NO_UTXO_LOOKUP_VALUE - fee;
+        make_signed_transfer_with_outpoint(&sk, &pk, &recip, unique_outpoint(), amount, 0)
+    }
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn make_room_refuses_lower_fee_incoming() {
+        // Pool (cap 2) full of HIGH-fee txs; a LOW-fee incoming can't displace
+        // them and is refused — the pool is left untouched.
+        let mut pool = Mempool::new(tiny_config(2, 10 * 1024 * 1024));
+        for _ in 0..2 {
+            pool.admit(&tx_with_fee(20_000), NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        }
+        assert_eq!(pool.len(), 2);
+        let res = pool.admit(&tx_with_fee(500), NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::FeeTooLowToEvict { .. })),
+            "low-fee incoming must be refused, got {res:?}"
+        );
+        assert_eq!(pool.len(), 2, "pool must be untouched on refusal");
+    }
+
+    #[test]
+    fn make_room_evicts_for_higher_fee_incoming() {
+        let mut pool = Mempool::new(tiny_config(2, 10 * 1024 * 1024));
+        for _ in 0..2 {
+            pool.admit(&tx_with_fee(500), NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        }
+        // High-fee incoming out-bids the cheap residents → admitted, one evicted.
+        pool.admit(&tx_with_fee(20_000), NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        assert_eq!(pool.len(), 2, "stayed at capacity (one low-fee evicted)");
+    }
+
+    #[test]
+    fn make_room_rejects_oversize_tx() {
+        // Pool budget smaller than a single tx → reject outright, pool untouched.
+        let mut pool = Mempool::new(tiny_config(100, 100)); // 100-byte budget
+        let res = pool.admit(&tx_with_fee(500), NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::TxTooLarge { .. })),
+            "tx larger than the pool budget must be rejected, got {res:?}"
+        );
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn rolling_fee_rises_from_cascade_descendant() {
+        // A low-fee parent with a HIGH-fee child: evicting the parent cascades
+        // the child, and the rolling floor must reflect the child's higher rate
+        // (review #4) — observable as a subsequent mid-fee tx being rejected.
+        let mut pool = Mempool::new(tiny_config(2, 10 * 1024 * 1024));
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+
+        // Parent P (low fee 500 → rate ~1) spends an on-chain UTXO, with change
+        // to SELF (vout 1) so the child can spend it.
+        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, unique_outpoint(), 1_000, NO_UTXO_LOOKUP_VALUE - 1_500);
+        pool.admit(&p, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        let p_id = p.compute_tx_id(test_chain_id()).unwrap();
+        // Child C (HIGH fee 20_000 → rate ~57) spends P's change (vout 1).
+        let p_change = OutPoint { txid: p_id, vout: 1 };
+        let c_in = NO_UTXO_LOOKUP_VALUE - 1_500; // value of P's change output
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, c_in - 20_000, 0); // fee 20_000
+        pool.admit(&c, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        assert_eq!(pool.len(), 2);
+
+        // Admit D (fee 30_000) → evicts P (cheapest) + cascade C; floor rises to
+        // ~ child_rate + 1 (the child's high rate, not the parent's low one).
+        pool.admit(&tx_with_fee(30_000), NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+
+        // A mid-fee tx (rate between parent's ~1 and child's ~100) must now be
+        // rejected by the raised floor.
+        let mid = tx_with_fee(2_000); // rate ~10
+        let res = pool.admit(&mid, NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::FeeTooLow { .. })),
+            "rolling floor (raised by the cascade-evicted child) must reject a mid-fee tx, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_fee_noop_under_normal_load() {
+        // No size pressure → the floor stays at MIN_RELAY_FEE_RATE, so even a
+        // rate-1 tx is admitted (regression anchor: no congestion pricing idle).
+        let mut pool = Mempool::new(test_config());
+        // ~250-byte tx, fee 300 → rate ~1.
+        let res = pool.admit(&tx_with_fee(500), NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(res.is_ok(), "min-rate tx must admit under normal load, got {res:?}");
     }
 }

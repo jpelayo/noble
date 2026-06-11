@@ -32,6 +32,14 @@
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+// Whether a change output is worth emitting. Sub-dust change is dropped into
+// the fee (Bitcoin behaviour) rather than creating a UTXO that costs more to
+// spend than it holds. DUST_THRESHOLD comes from coin_select.h (500_000 groats).
+// Used at every change-emission site (probe AND final) so size estimates match.
+static int change_is_emittable(uint64_t change) {
+    return change >= DUST_THRESHOLD;
+}
+
 static int parse_utxos_into_inputs(
     const json_value_t *utxos_arr,
     noble_tx_t *tx,
@@ -398,7 +406,7 @@ inputs_ready:
                 prelim_change = 0;
             }
         }
-        if (prelim_change > 0) {
+        if (change_is_emittable(prelim_change)) {
             tx.outputs[tx.output_count].address = change_addr;
             tx.outputs[tx.output_count].value = prelim_change;
             tx.output_count++;
@@ -455,7 +463,7 @@ inputs_ready:
     }
 
     // Add change output if non-zero
-    if (change > 0) {
+    if (change_is_emittable(change)) {
         tx.outputs[tx.output_count].address = change_addr;
         tx.outputs[tx.output_count].value = change;
         tx.output_count++;
@@ -566,7 +574,7 @@ char *noble_sign_transfer(const char *params_json) {
     if (fee_rate > 0) {
         // Pass 1: build with fee=0 to measure exact tx size.
         uint64_t change0 = input_total - amount;
-        if (change0 > 0) {
+        if (change_is_emittable(change0)) {
             tx.outputs[1].address = change_addr;
             tx.outputs[1].value = change0;
             tx.output_count = 2;
@@ -592,7 +600,7 @@ char *noble_sign_transfer(const char *params_json) {
     }
     uint64_t change = input_total - amount - actual_fee;
     tx.outputs[0].value = amount;
-    if (change > 0) {
+    if (change_is_emittable(change)) {
         tx.outputs[1].address = change_addr;
         tx.outputs[1].value = change;
         tx.output_count = 2;
@@ -719,7 +727,7 @@ char *noble_sign_split_transfer(const char *params_json) {
 
     if (fee_rate > 0) {
         uint64_t change0 = input_total > output_total ? input_total - output_total : 0;
-        if (change0 > 0) {
+        if (change_is_emittable(change0)) {
             tx.outputs[tx.output_count].address = change_addr;
             tx.outputs[tx.output_count].value = change0;
             tx.output_count++;
@@ -741,7 +749,7 @@ char *noble_sign_split_transfer(const char *params_json) {
         return json_emit_error("insufficient funds for outputs + fee");
     }
     uint64_t change = input_total - output_total - actual_fee;
-    if (change > 0) {
+    if (change_is_emittable(change)) {
         tx.outputs[tx.output_count].address = change_addr;
         tx.outputs[tx.output_count].value = change;
         tx.output_count++;
@@ -862,7 +870,7 @@ char *noble_sign_notarization(const char *params_json) {
     if (fee_rate > 0) {
         // Pass 1: build with fee=0 to measure exact tx size.
         uint64_t change0 = input_total;
-        if (change0 > 0) {
+        if (change_is_emittable(change0)) {
             tx.outputs[0].address = change_addr;
             tx.outputs[0].value = change0;
             tx.output_count = 1;
@@ -885,7 +893,7 @@ char *noble_sign_notarization(const char *params_json) {
 
     // Output: change only (notarizations have no explicit recipient output).
     uint64_t change = input_total - actual_fee;
-    if (change > 0) {
+    if (change_is_emittable(change)) {
         tx.outputs[0].address = change_addr;
         tx.outputs[0].value = change;
         tx.output_count = 1;
@@ -924,6 +932,13 @@ char *noble_sign_notarization(const char *params_json) {
 
 // ── noble_select_utxos ──────────────────────────────────────────────────
 
+// Compare two UTXOs by value, descending (for keep-largest truncation).
+static int cmp_utxo_value_desc(const void *a, const void *b) {
+    uint64_t va = ((const noble_utxo_t *)a)->value;
+    uint64_t vb = ((const noble_utxo_t *)b)->value;
+    return (vb > va) - (vb < va);
+}
+
 char *noble_select_utxos(const char *params_json) {
     json_value_t *params = json_parse(params_json);
     if (!params) return json_emit_error("invalid JSON");
@@ -936,22 +951,55 @@ char *noble_select_utxos(const char *params_json) {
         return json_emit_error("missing utxos or target");
     }
 
-    size_t n = utxos_arr->array.count;
-    if (n > MAX_UTXOS) n = MAX_UTXOS;
+    // Optional per-input fee (effective-value selection). Absent → 0, which
+    // makes coin_select_ev behave exactly like the legacy coin_select.
+    uint64_t fee_per_input = json_get_uint(params, "fee_per_input");
 
-    noble_utxo_t utxos[MAX_UTXOS];
-    for (size_t i = 0; i < n; i++) {
+    // Parse ALL UTXOs into a heap buffer (bounded by the input array size),
+    // not just the first MAX_UTXOS in array order — silent tail-truncation can
+    // hide spendable funds and mis-report "insufficient funds".
+    size_t total_count = utxos_arr->array.count;
+    noble_utxo_t *all = (noble_utxo_t *)malloc(sizeof(noble_utxo_t) * (total_count ? total_count : 1));
+    if (!all) { json_free(params); return json_emit_error("out of memory"); }
+    uint64_t grand_total = 0;
+    int grand_overflow = 0;
+    for (size_t i = 0; i < total_count; i++) {
         const json_value_t *u = &utxos_arr->array.items[i];
         const char *txid = json_get_string(u, "txid");
-        if (txid) { strncpy(utxos[i].txid, txid, 64); utxos[i].txid[64] = '\0'; }
-        else utxos[i].txid[0] = '\0';
-        utxos[i].vout = json_get_uint32(u, "vout");
-        utxos[i].value = json_get_uint(u, "value");
+        if (txid) { strncpy(all[i].txid, txid, 64); all[i].txid[64] = '\0'; }
+        else all[i].txid[0] = '\0';
+        all[i].vout = json_get_uint32(u, "vout");
+        all[i].value = json_get_uint(u, "value");
+        if (grand_total > UINT64_MAX - all[i].value) grand_overflow = 1;
+        else grand_total += all[i].value;
     }
 
+    // R12: keep the top MAX_UTXOS by value (largest first) when over the cap,
+    // rather than dropping the array-order tail.
+    int truncated = total_count > MAX_UTXOS;
+    if (truncated) {
+        qsort(all, total_count, sizeof(noble_utxo_t), cmp_utxo_value_desc);
+    }
+    size_t n = total_count < MAX_UTXOS ? total_count : MAX_UTXOS;
+    noble_utxo_t utxos[MAX_UTXOS];
+    if (n > 0) memcpy(utxos, all, sizeof(noble_utxo_t) * n);
+    free(all);
+
     noble_selection_t sel;
-    if (coin_select(utxos, n, target, &sel) != 0) {
+    if (coin_select_ev(utxos, n, target, fee_per_input, &sel) != 0) {
         json_free(params);
+        // Distinguish "the cap hid funds" from a genuine shortfall: if the FULL
+        // set's effective value would have covered the target, the truncation —
+        // not insufficient funds — is the cause.
+        if (truncated && !grand_overflow) {
+            uint64_t per_input_cost = (total_count > 0 && fee_per_input > UINT64_MAX / total_count)
+                ? UINT64_MAX
+                : fee_per_input * total_count;
+            uint64_t full_ev = grand_total > per_input_cost ? grand_total - per_input_cost : 0;
+            if (full_ev >= target) {
+                return json_emit_error("too many utxos (max 512); consolidate before spending");
+            }
+        }
         return json_emit_error("insufficient funds");
     }
 
@@ -1221,7 +1269,7 @@ static char *sign_metadata_tx(
 
         if (fee_rate > 0) {
             uint64_t change0 = input_total;
-            if (change0 > 0) {
+            if (change_is_emittable(change0)) {
                 tx.outputs[0].address = change_addr;
                 tx.outputs[0].value = change0;
                 tx.output_count = 1;
@@ -1242,7 +1290,7 @@ static char *sign_metadata_tx(
         }
 
         uint64_t change_val = input_total - actual_fee;
-        if (change_val > 0) {
+        if (change_is_emittable(change_val)) {
             tx.outputs[0].address = change_addr;
             tx.outputs[0].value = change_val;
             tx.output_count = 1;
@@ -1737,7 +1785,7 @@ char *noble_sign_locked(const char *params_json) {
 
     // Output: change
     uint64_t locked_change = input_total - actual_fee;
-    if (locked_change > 0) {
+    if (change_is_emittable(locked_change)) {
         tx.outputs[0].address = change_addr;
         tx.outputs[0].value = locked_change;
         tx.output_count = 1;
@@ -1879,7 +1927,7 @@ char *noble_sign_unlocking(const char *params_json) {
 
     // Output: change
     uint64_t unlock_change = input_total - actual_fee;
-    if (unlock_change > 0) {
+    if (change_is_emittable(unlock_change)) {
         tx.outputs[0].address = change_addr;
         tx.outputs[0].value = unlock_change;
         tx.output_count = 1;
