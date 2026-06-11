@@ -2334,26 +2334,39 @@ mod tests {
         let (sk, pk) = secp256k1::generate_keypair();
         let (_, recip) = secp256k1::generate_keypair();
 
-        // Parent P (low fee 500 → rate ~1) spends an on-chain UTXO, with change
-        // to SELF (vout 1) so the child can spend it.
-        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, unique_outpoint(), 1_000, NO_UTXO_LOOKUP_VALUE - 1_500);
-        pool.admit(&p, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        // MapUtxoLookup resolves ONLY the explicit seed outpoints (x for P, y for
+        // D, z for mid). Crucially it returns None for P's change output, so the
+        // child resolves via mempool_outputs and records its dependency on P —
+        // NoUtxoLookup would resolve everything as on-chain and hide that edge.
+        let v = NO_UTXO_LOOKUP_VALUE;
+        let x = unique_outpoint();
+        let y = unique_outpoint();
+        let z = unique_outpoint();
+        let lookup = MapUtxoLookup(
+            [(x.clone(), v), (y.clone(), v), (z.clone(), v)].into_iter().collect(),
+        );
+
+        // Parent P (low fee 500 → rate ~1) spends seed x, change to SELF (vout 1).
+        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x, 1_000, v - 1_500);
+        pool.admit(&p, NOW, &NoChainLookup, &lookup, 10).unwrap();
         let p_id = p.compute_tx_id(test_chain_id()).unwrap();
-        // Child C (HIGH fee 20_000 → rate ~57) spends P's change (vout 1).
+        // Child C (HIGH fee 20_000 → rate ~57) spends P's change (vout 1) — a
+        // mempool output (not in the lookup) → C depends on P.
         let p_change = OutPoint { txid: p_id, vout: 1 };
-        let c_in = NO_UTXO_LOOKUP_VALUE - 1_500; // value of P's change output
-        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, c_in - 20_000, 0); // fee 20_000
-        pool.admit(&c, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        let c_in = v - 1_500;
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, c_in - 20_000, 0);
+        pool.admit(&c, NOW, &NoChainLookup, &lookup, 10).unwrap();
         assert_eq!(pool.len(), 2);
 
-        // Admit D (fee 30_000) → evicts P (cheapest) + cascade C; floor rises to
-        // ~ child_rate + 1 (the child's high rate, not the parent's low one).
-        pool.admit(&tx_with_fee(30_000), NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        // Admit D (fee 30_000, spends seed y) → evicts P (cheapest) + cascades C;
+        // floor rises to child_rate + 1 (the child's high rate, not P's low one).
+        let d = make_signed_transfer_with_outpoint(&sk, &pk, &recip, y, v - 30_000, 0);
+        pool.admit(&d, NOW, &NoChainLookup, &lookup, 10).unwrap();
 
-        // A mid-fee tx (rate between parent's ~1 and child's ~100) must now be
-        // rejected by the raised floor.
-        let mid = tx_with_fee(2_000); // rate ~10
-        let res = pool.admit(&mid, NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        // A mid-fee tx (rate ~5, spends seed z) must now be rejected by the
+        // raised rolling floor at the fee check.
+        let mid = make_signed_transfer_with_outpoint(&sk, &pk, &recip, z, v - 2_000, 0);
+        let res = pool.admit(&mid, NOW, &NoChainLookup, &lookup, 10);
         assert!(
             matches!(res, Err(MempoolError::FeeTooLow { .. })),
             "rolling floor (raised by the cascade-evicted child) must reject a mid-fee tx, got {res:?}"
