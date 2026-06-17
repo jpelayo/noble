@@ -183,6 +183,11 @@ pub trait NodeApi {
         value: String,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
+    /// Get the current rotating-log configuration (live size cap + whether file
+    /// logging is active). Used by the GUI's Log Rotation settings panel.
+    #[method(name = "getLoggingConfig")]
+    async fn get_logging_config(&self) -> Result<LoggingConfigResponse, ErrorObjectOwned>;
+
     // ── Legacy faucet RPCs removed in open-node hardening PR ──
     // `getFaucetSecret` and `storeFaucetSecret` are deleted. The faucet binary
     // now reads chain_meta + passphrase + admin token directly from the node's
@@ -1098,6 +1103,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("faucet", "ip_cooldown_secs"),
             ("faucet", "address_cooldown_secs"),
             ("consensus", "min_fee_rate"),
+            ("logging", "max_size_bytes"),
         ];
 
         if !allowed.iter().any(|(s, k)| *s == section && *k == key) {
@@ -1105,6 +1111,28 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 "config key '{section}.{key}' is not in the allowed whitelist"
             ))
             .into());
+        }
+
+        // Validate the logging cap before persisting (don't write a footgun
+        // value). Minimum 1 MiB; 0/disable is a config-file/restart decision,
+        // not a live GUI action.
+        const MIN_LOG_MAX_SIZE_BYTES: u64 = 1_048_576;
+        if section == "logging" && key == "max_size_bytes" {
+            match value.parse::<u64>() {
+                Ok(v) if v >= MIN_LOG_MAX_SIZE_BYTES => {}
+                Ok(v) => {
+                    return Err(ApiError::InvalidParam(format!(
+                        "logging.max_size_bytes must be >= {MIN_LOG_MAX_SIZE_BYTES} bytes (1 MiB); got {v}"
+                    ))
+                    .into());
+                }
+                Err(_) => {
+                    return Err(ApiError::InvalidParam(format!(
+                        "logging.max_size_bytes must be a positive integer; got '{value}'"
+                    ))
+                    .into());
+                }
+            }
         }
 
         let set_fn = self.set_config_value.as_ref().ok_or_else(|| {
@@ -1132,6 +1160,17 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 }
             }
         }
+        if section == "logging" && key == "max_size_bytes" {
+            // Hot-reload the live cap (takes effect on the next rotation check)
+            // when file logging is active. If it was disabled at startup, the
+            // persisted value applies on restart.
+            if let Ok(v) = value.parse::<u64>() {
+                if let Some(ref th) = self.trace_handle {
+                    th.set_log_max_size(v);
+                    tracing::info!(task = "config", "Log max size hot-reloaded: {v} bytes");
+                }
+            }
+        }
         if section == "rewards" && key == "reward_address" {
             // Hot-reload: update engine reward address + gateway key + display string.
             match parse_address(&value) {
@@ -1155,6 +1194,18 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         Ok(SetConfigValueResponse {
             success: true,
             restart_required,
+        })
+    }
+
+    async fn get_logging_config(&self) -> Result<LoggingConfigResponse, ErrorObjectOwned> {
+        let max_size_bytes = self
+            .trace_handle
+            .as_ref()
+            .map(|h| h.log_max_size())
+            .unwrap_or(0);
+        Ok(LoggingConfigResponse {
+            max_size_bytes,
+            file_enabled: max_size_bytes > 0,
         })
     }
 

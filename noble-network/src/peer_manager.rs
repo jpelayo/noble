@@ -189,7 +189,17 @@ pub struct PeerState {
     pub clock_offset_ms: Option<i64>,
     /// Timestamp of the last `update_chain_tip()` call (for stale-peer detection).
     pub last_chain_tip_at: Instant,
+    /// Consecutive libp2p ping failures (reset to 0 on any ping success). Used
+    /// to reap a connection whose transport is up but unresponsive — the peer
+    /// is dialable yet not processing streams. See `MAX_PING_FAILURES`.
+    pub consecutive_ping_failures: u32,
 }
+
+/// Consecutive ping failures (interval ~30s) before a connection is reaped as
+/// dead. 4 ≈ 2 minutes of silence — well past transient loss, well under the
+/// idle-connection timeout — so a mute-but-connected peer is dropped (and then
+/// redialed) fast rather than lingering. See `transport::IDLE_CONNECTION_TIMEOUT_SECS`.
+pub const MAX_PING_FAILURES: u32 = 4;
 
 /// Maximum length of a software version string in a NodeAnnounce.
 const MAX_SOFTWARE_VERSION_LEN: usize = 32;
@@ -359,6 +369,7 @@ impl PeerManager {
                 misbehavior_categories: Vec::new(),
                 clock_offset_ms: None,
                 last_chain_tip_at: now,
+                consecutive_ping_failures: 0,
             },
         );
         tracing::info!(task = "peer_connect", peer_id = %peer_id, "peer connected");
@@ -622,6 +633,25 @@ impl PeerManager {
     pub fn update_latency(&mut self, peer_id: &PeerId, latency: Duration) {
         if let Some(state) = self.peers.get_mut(peer_id) {
             state.latency = Some(latency);
+        }
+    }
+
+    /// Record a ping failure for a peer; returns the new consecutive-failure
+    /// count (0 if the peer is untracked). Caller reaps the connection once the
+    /// count reaches [`MAX_PING_FAILURES`].
+    pub fn record_ping_failure(&mut self, peer_id: &PeerId) -> u32 {
+        if let Some(state) = self.peers.get_mut(peer_id) {
+            state.consecutive_ping_failures = state.consecutive_ping_failures.saturating_add(1);
+            state.consecutive_ping_failures
+        } else {
+            0
+        }
+    }
+
+    /// Reset a peer's consecutive ping-failure counter (called on ping success).
+    pub fn reset_ping_failure(&mut self, peer_id: &PeerId) {
+        if let Some(state) = self.peers.get_mut(peer_id) {
+            state.consecutive_ping_failures = 0;
         }
     }
 

@@ -22,9 +22,12 @@ use crate::config::NetworkConfig;
 use crate::diversity;
 use crate::error::NetworkError;
 use crate::messages::{
-    GossipMessage, NetworkCommand, NetworkEvent, SyncRequest, SyncResponse, TxRequest, TxResponse,
+    GossipMessage, NetworkCommand, NetworkEvent, ReqProtocol, SyncRequest, SyncResponse, TxRequest,
+    TxResponse,
 };
-use crate::peer_manager::{BanCategory, BanReason, Direction, MisbehaviorOutcome, PeerManager};
+use crate::peer_manager::{
+    BanCategory, BanReason, Direction, MisbehaviorOutcome, PeerManager, MAX_PING_FAILURES,
+};
 use crate::rate_limiter::TxRateLimiter;
 use crate::seen_cache::SeenCache;
 use crate::topics;
@@ -1675,6 +1678,96 @@ async fn handle_swarm_event(
             }
         }
 
+        // --- Request-response FAILURES (Layer 1: no silent failures) ---
+        // Without these arms a failed outbound request fell through the global
+        // `_ => {}` below: the pending-request entry and its in-flight reservation
+        // leaked, AND the node never learned the request failed — so the healing
+        // FSM blindly waited its full 60s manifest timeout before retrying the
+        // same dead peer. Handling the failure here frees the in-flight slot for
+        // immediate re-request and surfaces a `SyncRequestFailed` event so the
+        // node can rebuild a wedged channel within the 10s request timeout.
+        SwarmEvent::Behaviour(NobleBehaviourEvent::SyncRpc(
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            },
+        )) => {
+            // Drop the tracking entry and free every in-flight block reservation
+            // it held so those heights can be re-requested immediately.
+            if let Some(pos) = pending_block_requests
+                .iter()
+                .position(|(rid, _)| *rid == request_id)
+            {
+                if let Some((_, hashes)) = pending_block_requests.remove(pos) {
+                    for h in &hashes {
+                        in_flight_blocks.remove(h);
+                    }
+                }
+            }
+            let reason = format!("{error}");
+            tracing::warn!(
+                task = "sync",
+                %peer,
+                %request_id,
+                "sync request-response failed: {reason}"
+            );
+            if let Err(e) = event_tx.try_send(NetworkEvent::SyncRequestFailed {
+                peer_id: peer.to_bytes().to_vec(),
+                protocol: ReqProtocol::Sync,
+                reason,
+            }) {
+                tracing::debug!(task = "network", "event channel full: SyncRequestFailed dropped: {e}");
+            }
+        }
+
+        SwarmEvent::Behaviour(NobleBehaviourEvent::TxRpc(
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            },
+        )) => {
+            if let Some(pos) = pending_tx_requests
+                .iter()
+                .position(|(rid, _)| *rid == request_id)
+            {
+                if let Some((_, tx_id)) = pending_tx_requests.remove(pos) {
+                    in_flight_txs.remove(&tx_id);
+                }
+            }
+            let reason = format!("{error}");
+            tracing::warn!(
+                task = "tx_relay",
+                %peer,
+                %request_id,
+                "tx request-response failed: {reason}"
+            );
+            if let Err(e) = event_tx.try_send(NetworkEvent::SyncRequestFailed {
+                peer_id: peer.to_bytes().to_vec(),
+                protocol: ReqProtocol::Tx,
+                reason,
+            }) {
+                tracing::debug!(task = "network", "event channel full: SyncRequestFailed dropped: {e}");
+            }
+        }
+
+        // Inbound failures: a peer's request to us could not be answered (channel
+        // closed mid-flight, unsupported, timeout). Nothing to clean on our side,
+        // but never silent — log so degraded peers are diagnosable.
+        SwarmEvent::Behaviour(NobleBehaviourEvent::SyncRpc(
+            request_response::Event::InboundFailure { peer, error, .. },
+        )) => {
+            tracing::debug!(task = "sync", %peer, "inbound sync request failed: {error}");
+        }
+        SwarmEvent::Behaviour(NobleBehaviourEvent::TxRpc(
+            request_response::Event::InboundFailure { peer, error, .. },
+        )) => {
+            tracing::debug!(task = "tx_relay", %peer, "inbound tx request failed: {error}");
+        }
+
         SwarmEvent::Behaviour(NobleBehaviourEvent::Ping(ping::Event {
             peer,
             result: Ok(rtt),
@@ -1694,12 +1787,31 @@ async fn handle_swarm_event(
             result: Err(ref e),
             ..
         })) => {
+            // Layer 3: libp2p ping does NOT close connections on failure, so a
+            // peer whose TCP socket is up but is no longer processing streams
+            // (the "connected but mute" state behind the sync wedge) would
+            // otherwise linger until the idle timeout. Count consecutive
+            // failures and reap the connection once it crosses the threshold;
+            // the reconnect loop then redials with a fresh yamux session.
+            let failures = peer_manager.record_ping_failure(&peer);
             tracing::debug!(
                 task = "ping",
                 %peer,
                 error = %e,
+                failures,
                 "ping failed — connection may be degraded"
             );
+            if failures >= MAX_PING_FAILURES {
+                tracing::warn!(
+                    task = "ping",
+                    %peer,
+                    failures,
+                    "peer unresponsive to {failures} consecutive pings — disconnecting to force a fresh connection",
+                );
+                disconnect_reasons
+                    .insert(peer, format!("unresponsive: {failures} consecutive ping failures"));
+                let _ = swarm.disconnect_peer_id(peer);
+            }
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::Identify(identify::Event::Received {
@@ -2275,6 +2387,8 @@ fn handle_tx_rpc_request(
 /// Handle a ping event by updating peer latency.
 fn handle_ping_event(peer_manager: &mut PeerManager, peer: &PeerId, rtt: Duration) {
     peer_manager.update_latency(peer, rtt);
+    // A successful ping clears the consecutive-failure streak (liveness restored).
+    peer_manager.reset_ping_failure(peer);
 }
 
 /// Handle a Kademlia event (logging only).

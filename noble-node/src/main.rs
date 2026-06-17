@@ -12,6 +12,7 @@ pub mod healing;
 mod tls_cert;
 #[allow(unused)]
 mod lock_order;
+mod log_rotate;
 pub mod metrics;
 mod node;
 mod pidfile;
@@ -352,10 +353,28 @@ async fn run_node(config_path: &str, use_memory: bool, pid_file: &str, _daemon: 
     };
 
     // Initialize tracing from config (replaces tracing_subscriber::fmt()).
+    // Resolve the rotating-log path: explicit `[logging] file_path` (absolute or
+    // relative to data_dir), else `<data_dir>/noble-node.log`. The writer
+    // creates the dir lazily, so this is safe even before data_dir exists.
+    let log_file_path = if !config.logging.file_enabled || config.logging.max_size_bytes == 0 {
+        None
+    } else if config.logging.file_path.is_empty() {
+        Some(config.storage.data_dir.join("noble-node.log"))
+    } else {
+        let p = std::path::PathBuf::from(&config.logging.file_path);
+        Some(if p.is_absolute() {
+            p
+        } else {
+            config.storage.data_dir.join(p)
+        })
+    };
     let trace_config = trace::TraceConfig {
         buffer_capacity: config.trace.buffer_capacity,
         initial_filter: config.trace.initial_filter.clone(),
         stderr_enabled: config.trace.stderr_enabled,
+        log_file_path,
+        log_max_size_bytes: config.logging.max_size_bytes,
+        log_max_files: config.logging.max_files,
     };
     let trace_handle = trace::init_tracing(&trace_config);
 

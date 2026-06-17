@@ -648,6 +648,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         },
         logging: LoggingConfig {
             level: defaults.logging.level.clone(),
+            ..LoggingConfig::default()
         },
         metrics: MetricsConfig {
             prometheus_addr: defaults.metrics.prometheus_addr.clone(),

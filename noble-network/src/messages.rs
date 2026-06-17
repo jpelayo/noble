@@ -397,6 +397,27 @@ pub enum NetworkEvent {
         peer_id: Vec<u8>,
         entries: Vec<(u64, Option<[u8; 32]>)>,
     },
+    /// An outbound request-response request to a peer failed (timeout,
+    /// connection reset, or dial error). Emitted so the node reacts within the
+    /// request timeout instead of waiting on a higher-level timeout (e.g. the
+    /// 60s manifest wait in the healing FSM) — this is what lets a wedged
+    /// request/response channel be detected and rebuilt in seconds.
+    SyncRequestFailed {
+        peer_id: Vec<u8>,
+        /// Which request-response protocol the failure occurred on.
+        protocol: ReqProtocol,
+        /// Human-readable failure reason (for logging/observability).
+        reason: String,
+    },
+}
+
+/// Classifies which request-response protocol an outbound failure occurred on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReqProtocol {
+    /// `/noble/sync/1.0.0` — chain status, sync manifest, and block fetches.
+    Sync,
+    /// `/noble/tx/1.0.0` — transaction fetches.
+    Tx,
 }
 
 #[cfg(test)]

@@ -133,11 +133,22 @@ pub struct TraceHandle {
     default_filter: String,
     /// Shared session state (expiry + current filter) accessible from timer tasks.
     session: Arc<TraceSessionState>,
+    /// Live maximum total size (bytes) for the rotating log file set. Shared
+    /// with the rotating writer in `noble-node` so the GUI/RPC can change the
+    /// cap without a restart (the writer reads it on each rotation check).
+    /// `0` = file logging disabled / not configured.
+    log_max_size: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TraceHandle {
-    /// Create a new trace handle with a filter-reload callback.
-    pub fn new(buffer: TraceBuffer, default_filter: String, set_filter_fn: SetFilterFn) -> Self {
+    /// Create a new trace handle with a filter-reload callback and a shared
+    /// live log-size cap (the same `Arc` the rotating writer reads).
+    pub fn new(
+        buffer: TraceBuffer,
+        default_filter: String,
+        set_filter_fn: SetFilterFn,
+        log_max_size: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         let current = default_filter.clone();
         Self {
             buffer,
@@ -148,7 +159,22 @@ impl TraceHandle {
                 expiry: std::sync::atomic::AtomicU64::new(0),
                 current_filter: parking_lot::RwLock::new(current),
             }),
+            log_max_size,
         }
+    }
+
+    /// Current maximum total log size in bytes (0 = file logging disabled).
+    pub fn log_max_size(&self) -> u64 {
+        self.log_max_size.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Update the maximum total log size (bytes) at runtime. Takes effect on the
+    /// next rotation check; `0` is rejected to avoid silently disabling logging.
+    /// Returns the value that was stored.
+    pub fn set_log_max_size(&self, bytes: u64) -> u64 {
+        self.log_max_size
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+        bytes
     }
 
     /// Change the tracing filter at runtime.

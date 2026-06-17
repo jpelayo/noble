@@ -45,7 +45,7 @@ pub use config::{
     P2P_PORT_PRIMARY, RPC_HTTP_PORT, WS_PORT,
 };
 pub use error::NetworkError;
-pub use messages::{BannedPeerEntry, NetworkCommand, NetworkEvent};
+pub use messages::{BannedPeerEntry, NetworkCommand, NetworkEvent, ReqProtocol};
 pub use peer_manager::{BanCategory, BanEntry, BanReason, Direction, MisbehaviorOutcome, PeerManager};
 pub use service::{start_network, NetworkHandle};
 pub use sync_manager::{SyncAction, SyncManager, SyncState};

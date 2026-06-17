@@ -1477,6 +1477,16 @@ pub struct SetConfigValueResponse {
     pub restart_required: bool,
 }
 
+/// Response for `noble_getLoggingConfig`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoggingConfigResponse {
+    /// Live maximum total size (bytes) across all rotating log files.
+    pub max_size_bytes: u64,
+    /// Whether rotating file logging is currently active (cap > 0). When false,
+    /// changing the size requires a restart to (re)enable file logging.
+    pub file_enabled: bool,
+}
+
 /// Response for `noble_checkDataDir`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckDataDirResponse {

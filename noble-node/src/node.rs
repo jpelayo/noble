@@ -24,7 +24,7 @@ use noble_consensus::{
 };
 use noble_crypto::Hash256;
 use noble_mempool::{UtxoLookup, ChainLookup, Mempool};
-use noble_network::{NetworkCommand, NetworkEvent};
+use noble_network::{NetworkCommand, NetworkEvent, ReqProtocol};
 use noble_storage::{IntegrityReport, MemoryStorage, StorageEngine};
 use noble_wallet::{KeyStore, WalletState};
 
@@ -1006,20 +1006,6 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let mut dialed = 0u32;
         let mut seen = std::collections::HashSet::<String>::new();
 
-        // Dial a multiaddr string, deduplicating.
-        let mut try_dial = |maddr_str: &str, cmd: &mpsc::Sender<NetworkCommand>| {
-            if !seen.insert(maddr_str.to_string()) {
-                return;
-            }
-            if let Ok(maddr) = maddr_str.parse::<noble_network::Multiaddr>() {
-                if let Err(e) = cmd.try_send(NetworkCommand::DialPeer(maddr, None)) {
-                    tracing::debug!(task = "redial", addr = %maddr_str, "dial command send failed: {e}");
-                } else {
-                    dialed += 1;
-                }
-            }
-        };
-
         // For bare IPs, try all 3 P2P ports (8780, 8781, 8782) so we reach
         // peers that fell back to alternate ports on restart.
         // Bare hostnames use /dns4/ (single port — DNS implies managed infra).
@@ -1037,14 +1023,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         };
 
-        // 1. Seed peers from config
-        for addr_str in &self.seed_addrs {
-            for maddr_str in expand_addr(addr_str) {
-                try_dial(&maddr_str, cmd);
-            }
-        }
-
-        // 2. Stored peer records with known addresses
+        // Our own identity + known addresses (computed before any dialing).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1058,6 +1037,52 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             .as_ref()
             .map(|(_, pk)| pk.to_wire_bytes());
 
+        // Self-dial guard (Layer 5): pre-seed `seen` with our own known
+        // multiaddrs so no source (seeds, peer records, validator registry) can
+        // make us dial ourselves. libp2p already refuses to connect to our own
+        // peer_id, but attempting it wastes a dial slot and spams the log with
+        // "Dialing <self> … no addresses for peer". Done *before* `try_dial`
+        // mutably borrows `seen`.
+        if let Some(ref self_wire) = self_pk_wire {
+            if let Some(rec) = all_records.iter().find(|r| r.identity_key == *self_wire) {
+                let mut self_addrs: Vec<String> = Vec::new();
+                if let Some(a) = rec.last_addr.clone() {
+                    self_addrs.push(a);
+                }
+                if let Some(a) = rec.last_announce.as_ref().and_then(|a| a.host_address.clone()) {
+                    self_addrs.push(a);
+                }
+                for a in self_addrs {
+                    for m in expand_addr(&a) {
+                        seen.insert(m);
+                    }
+                }
+            }
+        }
+
+        // Dial a multiaddr string, deduplicating (self addrs were pre-inserted
+        // into `seen` above, so they're skipped here).
+        let mut try_dial = |maddr_str: &str, cmd: &mpsc::Sender<NetworkCommand>| {
+            if !seen.insert(maddr_str.to_string()) {
+                return;
+            }
+            if let Ok(maddr) = maddr_str.parse::<noble_network::Multiaddr>() {
+                if let Err(e) = cmd.try_send(NetworkCommand::DialPeer(maddr, None)) {
+                    tracing::debug!(task = "redial", addr = %maddr_str, "dial command send failed: {e}");
+                } else {
+                    dialed += 1;
+                }
+            }
+        };
+
+        // 1. Seed peers from config
+        for addr_str in &self.seed_addrs {
+            for maddr_str in expand_addr(addr_str) {
+                try_dial(&maddr_str, cmd);
+            }
+        }
+
+        // 2. Stored peer records with known addresses
         for rec in &all_records {
             // Skip SELF
             if let Some(ref self_wire) = self_pk_wire {
@@ -3575,6 +3600,22 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .unwrap_or_default()
                     .as_secs();
                 self.healing.on_manifest_received(peer_id, entries, now);
+            }
+            NetworkEvent::SyncRequestFailed { peer_id, protocol, reason } => {
+                // Layer 4 fast path: only sync-protocol failures drive sync
+                // escalation (a tx-fetch failure must not disconnect a sync peer).
+                if matches!(protocol, ReqProtocol::Sync) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    tracing::debug!(
+                        task = "sync",
+                        peer = %hex::encode(peer_id),
+                        "sync request failed ({reason}) — routing to healing",
+                    );
+                    self.healing.on_sync_request_failed(peer_id, now);
+                }
             }
             _ => {
                 // Emit protocol activity for VoteReceived before routing to engine

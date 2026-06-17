@@ -28,7 +28,7 @@ pub use state::{ApiState, NetworkStats, NodeIdentityData, resolve_node_name};
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Number of registered RPC methods (excluding subscriptions).
-pub const API_METHOD_COUNT: u32 = 67;
+pub const API_METHOD_COUNT: u32 = 68;
 
 #[cfg(test)]
 mod tests {
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn api_method_count_is_reasonable() {
-        // We have 60 RPC methods registered; guard against accidental reset.
-        assert!(API_METHOD_COUNT >= 67, "expected at least 67 RPC methods");
+        // Guard against accidental reset.
+        assert!(API_METHOD_COUNT >= 68, "expected at least 68 RPC methods");
     }
 }

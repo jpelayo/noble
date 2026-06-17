@@ -173,6 +173,7 @@ mod tests {
             misbehavior_categories: Vec::new(),
             clock_offset_ms: None,
             last_chain_tip_at: now,
+            consecutive_ping_failures: 0,
         }
     }
 

@@ -129,6 +129,20 @@ class Noble < Formula
 
         [wallet]
         keystore_path = "#{var}/noble/keystore"
+
+        # In-process size-based rotating logs (node-owned, hard-capped). The
+        # node writes the real log here; launchd only captures pre-init stderr
+        # to a separate tiny startup file (see the service block), so nothing
+        # grows unbounded. Adjust max_size_bytes live from the GUI Settings.
+        [logging]
+        file_enabled = true
+        file_path = "#{var}/log/noble-node.log"
+        max_size_bytes = 1073741824
+
+        # Disable stderr fan-out for the background service so launchd's capture
+        # file stays tiny — the rotating file above is the canonical log.
+        [trace]
+        stderr_enabled = false
       TOML
 
       if cidrs.any?
@@ -175,8 +189,13 @@ class Noble < Formula
     run [opt_bin/"noble-node", "run", etc/"noble/noble.toml",
          "--pid-file", var/"noble/noble.pid"]
     working_dir var/"noble"
-    log_path var/"log/noble-node.log"
-    error_log_path var/"log/noble-node.log"
+    # The node owns var/log/noble-node.log as a size-capped rotating log. launchd
+    # only captures pre-tracing-init output (a few lines per boot) to a separate
+    # startup file, so neither file grows unbounded.
+    # NOTE for upgrades: an existing etc/noble/noble.toml is NOT regenerated — add
+    # `[trace]\nstderr_enabled = false` to it so launchd's startup file stays tiny.
+    log_path var/"log/noble-startup.log"
+    error_log_path var/"log/noble-startup.log"
     keep_alive true
   end
 

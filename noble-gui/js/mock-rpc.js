@@ -1817,12 +1817,18 @@ export class MockRpcClient {
           ['storage', 'data_dir'], ['storage', 'cache_size_mb'], ['storage', 'compression'],
           ['storage', 'pruning_mode'], ['storage', 'keep_blocks'],
           ['security', 'encryption_mode'],
+          ['logging', 'max_size_bytes'],
         ];
         if (!whitelist.some(([s, k]) => s === section && k === key)) {
           throw { code: -32602, message: `Config key not whitelisted: ${section}.${key}` };
         }
-        return { success: true, restart_required: true };
+        // logging.max_size_bytes hot-reloads (no restart needed).
+        const restart = !(section === 'logging' && key === 'max_size_bytes');
+        return { success: true, restart_required: restart };
       }
+
+      case 'noble_getLoggingConfig':
+        return { max_size_bytes: 1073741824, file_enabled: true };
 
       case 'noble_getTotpStatus':
         return { enabled: false, scope: 'all' };

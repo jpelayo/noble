@@ -82,6 +82,18 @@ const SYNC_MANIFEST_TIMEOUT_SECS: u64 = 60;
 const SYNC_MAX_BLOCK_RETRIES: u8 = 5;
 /// Minimum interval between advance_sync actions (seconds).
 const SYNC_RETRY_SECS: u64 = 10;
+/// Consecutive failed sync requests to the same peer (fast request-response
+/// failures + 60s manifest timeouts) before its connection is force-dropped and
+/// redialed. 2 keeps a wedged channel from lingering — with the ≤10s fast-fail
+/// signal the rebuild happens in ~20s — while tolerating a single transient blip.
+const SYNC_PEER_MAX_FAILURES: u32 = 2;
+/// Backstop: if we remain behind a known-ahead peer with NO tip progress for
+/// this long, the per-peer recovery (Layers 1-4) has somehow failed. Fire a
+/// CRITICAL alarm and force a full re-sync. This must never trigger if the
+/// other layers work — it exists so a wedge can never persist *silently* (the
+/// 26-day failure mode). Re-fires (and retries recovery) once per window while
+/// stuck; cleared on any progress.
+const SYNC_STALL_ALARM_SECS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // Sync Import Identity
@@ -335,6 +347,17 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     sync_start_height: u64,
     /// Consecutive post-sync verification failures (for ancestor depth escalation).
     sync_verify_retries: u8,
+    /// Consecutive failed sync requests to the active sync peer — counts both
+    /// fast request-response failures (`on_sync_request_failed`) and 60s manifest
+    /// timeouts. Once it reaches [`SYNC_PEER_MAX_FAILURES`] the peer's connection
+    /// is force-dropped (and then redialed) to rebuild a wedged channel rather
+    /// than retrying the same dead one forever. Reset to 0 on any sync progress.
+    sync_failure_streak: u32,
+    /// Tip height observed when the current "behind a peer" episode began
+    /// (stall watchdog, Layer 6). Reset on progress / catch-up.
+    stall_watch_height: u64,
+    /// Unix secs when the current stall episode began (0 = not watching).
+    stall_watch_since: u64,
 
     // ── Cross-chain state ──
     /// Blockchains discovered via NodeAnnounce. Shared with ApiState.
@@ -405,6 +428,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_import_kind: SyncImportKind::CatchUp,
             sync_start_height: 0,
             sync_verify_retries: 0,
+            sync_failure_streak: 0,
+            stall_watch_height: 0,
+            stall_watch_since: 0,
             discovered_blockchains,
             discovered_blockchains_path,
             announce_cache: parking_lot::Mutex::new(HashMap::new()),
@@ -921,6 +947,8 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Reset sync state to Idle and update atomics.
     fn reset_sync_idle(&mut self) {
         self.sync_state = SyncState::Idle;
+        // A clean idle reset (typically sync-complete) clears the failure streak.
+        self.sync_failure_streak = 0;
         self.sync_atomics_from_state();
         // If we were Syncing, transition back to Idle.
         // Don't change phase if we're Resolving/Adopting (those manage their own transitions).
@@ -1096,6 +1124,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
 
         let our_height = self.consensus.read().chain_tip().0;
 
+        // Layer 6 backstop: must never fire if Layers 1-4 work, but guarantees a
+        // wedge can never persist silently (the 26-day failure mode).
+        self.check_sync_stall(our_height, now);
+
         match &self.sync_state {
             SyncState::Idle => {
                 // Check if any peer is ahead.
@@ -1168,43 +1200,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 if now.saturating_sub(*requested_at) >= SYNC_MANIFEST_TIMEOUT_SECS {
                     tracing::warn!(
                         task = "sync",
-                        "manifest request timed out after {}s — trying different peer",
+                        peer = %hex::encode(peer),
+                        "manifest request timed out after {}s",
                         SYNC_MANIFEST_TIMEOUT_SECS,
                     );
                     let old_peer = peer.clone();
                     let target = *target;
-                    self.sync_state = SyncState::Idle;
-                    // Try to find a different peer.
-                    let (new_peer, new_height) = self.find_best_sync_peer_excluding(our_height, &old_peer);
-                    if let Some(np) = new_peer {
-                        let start = our_height + 1;
-                        let count = (new_height - our_height).min(MANIFEST_WINDOW as u64) as u16;
-                        self.send_network(NetworkCommand::RequestSyncManifest {
-                            peer_id: np.clone(),
-                            start_height: start,
-                            count,
-                        });
-                        self.sync_state = SyncState::AwaitingManifest {
-                            peer: np,
-                            target: new_height,
-                            requested_at: now,
-                        };
-                    } else {
-                        // No other peer available — retry same peer.
-                        let start = our_height + 1;
-                        let count = (target - our_height).min(MANIFEST_WINDOW as u64) as u16;
-                        self.send_network(NetworkCommand::RequestSyncManifest {
-                            peer_id: old_peer.clone(),
-                            start_height: start,
-                            count,
-                        });
-                        self.sync_state = SyncState::AwaitingManifest {
-                            peer: old_peer,
-                            target,
-                            requested_at: now,
-                        };
-                    }
-                    self.sync_atomics_from_state();
+                    // Layer 4: escalate. Prefer a different peer; if this is the
+                    // only one and it keeps failing, force-drop + redial it
+                    // rather than retrying the same dead channel forever.
+                    self.escalate_sync_failure(old_peer, target, our_height, now);
                 }
             }
             SyncState::Fetching { peer, manifest, cursor, target } => {
@@ -1391,6 +1396,132 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
     }
 
+    /// Layer 1→4 fast path: an outbound sync request to a peer failed at the
+    /// transport level (timeout / connection reset / dial error), surfaced by
+    /// the network service. If it's the peer we're actively syncing from, react
+    /// **now** — within the ~10s request timeout — instead of waiting out the
+    /// 60s manifest timeout. Routes through the same escalation as the timeout
+    /// path so a wedged channel is rebuilt in ~20s rather than retried forever.
+    pub fn on_sync_request_failed(&mut self, peer_id: &[u8], now: u64) {
+        let (active_peer, target) = match &self.sync_state {
+            SyncState::AwaitingManifest { peer, target, .. }
+            | SyncState::Fetching { peer, target, .. } => (peer.clone(), *target),
+            SyncState::Idle => return,
+        };
+        if active_peer != peer_id {
+            // Failure for some other (non-sync) request — not our concern here.
+            return;
+        }
+        let our_height = self.consensus.read().chain_tip().0;
+        tracing::warn!(
+            task = "sync",
+            peer = %hex::encode(&active_peer),
+            "sync request to active peer failed — reacting immediately (not waiting for the 60s manifest timeout)",
+        );
+        self.escalate_sync_failure(active_peer, target, our_height, now);
+    }
+
+    /// Shared escalation for a failed sync attempt against `failed_peer` (a fast
+    /// request-response failure or a 60s manifest timeout). Increments the
+    /// failure streak; once it reaches [`SYNC_PEER_MAX_FAILURES`] the peer's
+    /// connection is force-dropped (the node's reconnect loop then redials it
+    /// with a fresh yamux session, and the next tick re-requests cleanly) rather
+    /// than retrying the same wedged channel forever. Below the threshold it
+    /// re-targets a different peer if one exists, else retries the same one.
+    fn escalate_sync_failure(&mut self, failed_peer: Vec<u8>, target: u64, our_height: u64, now: u64) {
+        self.sync_state = SyncState::Idle;
+        self.sync_failure_streak = self.sync_failure_streak.saturating_add(1);
+        let streak = self.sync_failure_streak;
+
+        if streak >= SYNC_PEER_MAX_FAILURES {
+            // Channel to this peer is wedged (connected but not answering).
+            // Drop it; reconnect + the next advance_sync tick rebuild cleanly.
+            tracing::warn!(
+                task = "sync",
+                peer = %hex::encode(&failed_peer),
+                streak,
+                "sync peer unresponsive after {streak} consecutive attempts — dropping connection to force a fresh one",
+            );
+            self.send_network(NetworkCommand::DisconnectPeer(failed_peer));
+            self.sync_failure_streak = 0;
+            self.broadcast_event(serde_json::json!({
+                "event": "sync_peer_reset",
+                "reason": "unresponsive_sync_channel",
+            }));
+            self.sync_atomics_from_state();
+            return;
+        }
+
+        // Below threshold: prefer a different peer, else retry the same one fast.
+        let (alt, alt_height) = self.find_best_sync_peer_excluding(our_height, &failed_peer);
+        let (peer, peer_height) = match alt {
+            Some(p) => (p, alt_height),
+            None => (failed_peer, target),
+        };
+        let start = our_height + 1;
+        let count = (peer_height.saturating_sub(our_height)).min(MANIFEST_WINDOW as u64) as u16;
+        self.send_network(NetworkCommand::RequestSyncManifest {
+            peer_id: peer.clone(),
+            start_height: start,
+            count,
+        });
+        self.sync_state = SyncState::AwaitingManifest {
+            peer,
+            target: peer_height,
+            requested_at: now,
+        };
+        self.sync_atomics_from_state();
+    }
+
+    /// Layer 6 stall watchdog (backstop). If we stay behind a known-ahead peer
+    /// with NO tip progress for [`SYNC_STALL_ALARM_SECS`], the per-peer recovery
+    /// (Layers 1-4) has failed to converge. Fire a CRITICAL alarm (log + GUI
+    /// alignment feed) and force a full re-sync. Re-arms once per window while
+    /// stuck; any tip progress (or catching up) clears it. This should never
+    /// trigger — its job is to make sure a wedge is never *silent*.
+    fn check_sync_stall(&mut self, our_height: u64, now: u64) {
+        let (_, best_height) = self.find_best_sync_peer(our_height);
+
+        // Not behind any peer → nothing to watch; clear the episode.
+        if best_height <= our_height {
+            self.stall_watch_height = our_height;
+            self.stall_watch_since = now;
+            return;
+        }
+
+        // First observation of being-behind, or the tip advanced since we
+        // started watching → (re)start the timer. Progress is healthy.
+        if self.stall_watch_since == 0 || our_height > self.stall_watch_height {
+            self.stall_watch_height = our_height;
+            self.stall_watch_since = now;
+            return;
+        }
+
+        let stalled = now.saturating_sub(self.stall_watch_since);
+        if stalled >= SYNC_STALL_ALARM_SECS {
+            tracing::error!(
+                task = "sync",
+                our_height,
+                target = best_height,
+                stalled_secs = stalled,
+                "SYNC STALLED: {stalled}s behind peers (at {our_height}, target {best_height}) with no progress — forcing recovery. The per-peer self-healing should have prevented this; please report.",
+            );
+            self.broadcast_event(serde_json::json!({
+                "event": "sync_stall_alarm",
+                "severity": "critical",
+                "height": our_height,
+                "target": best_height,
+                "stalled_secs": stalled,
+            }));
+            // Force recovery: refresh every peer's status and reset the sync FSM
+            // so the rest of this tick re-picks a peer and re-requests cleanly.
+            self.send_network(NetworkCommand::RequestSync);
+            self.reset_sync_idle();
+            // Re-arm: rate-limit re-fire to once per window while still stuck.
+            self.stall_watch_since = now;
+        }
+    }
+
     /// Handle manifest received from a peer.
     pub fn on_manifest_received(
         &mut self,
@@ -1408,6 +1539,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                 return;
             }
         };
+        // A manifest arrived → the request/response channel to this peer works.
+        // Clear the failure streak so transient blips don't accrue toward a drop.
+        self.sync_failure_streak = 0;
 
         // Filter out entries with no hash (peer doesn't have those blocks).
         let manifest: Vec<ManifestEntry> = entries
@@ -2790,6 +2924,79 @@ mod tests {
             ForkResolutionStrategy::LongestMostLegitimate,
             3,
         )
+    }
+
+    fn wire_io(h: &mut HealingManager<MemoryStorage>) -> mpsc::Receiver<NetworkCommand> {
+        let (net_tx, net_rx) = mpsc::channel::<NetworkCommand>(32);
+        let (nb_tx, _nb_rx) = broadcast::channel(32);
+        let (cp_tx, _cp_rx) = broadcast::channel(32);
+        h.set_io_channels(net_tx, nb_tx, cp_tx, None);
+        net_rx
+    }
+
+    /// A4: consecutive sync-request failures to the only peer escalate to a
+    /// forced disconnect (which the node's reconnect loop turns into a fresh
+    /// session) instead of retrying the same wedged channel forever.
+    #[test]
+    fn sync_failures_escalate_to_disconnect() {
+        let mut h = make_healing_manager();
+        let mut net_rx = wire_io(&mut h);
+        let peer = vec![1u8, 2, 3];
+        h.sync_state = SyncState::AwaitingManifest {
+            peer: peer.clone(),
+            target: 100,
+            requested_at: 0,
+        };
+
+        // Failure 1: below threshold → retry same peer, streak = 1, no disconnect.
+        h.on_sync_request_failed(&peer, 10);
+        assert_eq!(h.sync_failure_streak, 1);
+
+        // Failure 2: streak reaches SYNC_PEER_MAX_FAILURES → disconnect + reset.
+        h.on_sync_request_failed(&peer, 20);
+        assert_eq!(h.sync_failure_streak, 0, "streak resets after forcing a reconnect");
+
+        let mut saw_disconnect = false;
+        while let Ok(cmd) = net_rx.try_recv() {
+            if let NetworkCommand::DisconnectPeer(p) = cmd {
+                if p == peer {
+                    saw_disconnect = true;
+                }
+            }
+        }
+        assert!(
+            saw_disconnect,
+            "a wedged sync peer must be disconnected to force a fresh connection"
+        );
+    }
+
+    /// A4 regression: a failure for a peer we are NOT syncing from is ignored
+    /// (no escalation, no disconnect).
+    #[test]
+    fn sync_failure_for_other_peer_is_ignored() {
+        let mut h = make_healing_manager();
+        let _net_rx = wire_io(&mut h);
+        h.sync_state = SyncState::AwaitingManifest {
+            peer: vec![1, 2, 3],
+            target: 100,
+            requested_at: 0,
+        };
+        h.on_sync_request_failed(&[9, 9, 9], 10);
+        assert_eq!(h.sync_failure_streak, 0, "unrelated peer must not bump the streak");
+    }
+
+    /// A6 regression: the stall watchdog must NOT fire (no forced recovery) when
+    /// we are not behind any peer — empty peer_info means no peer ahead.
+    #[test]
+    fn stall_watchdog_silent_when_not_behind() {
+        let mut h = make_healing_manager();
+        let mut net_rx = wire_io(&mut h);
+        h.check_sync_stall(0, 1_000_000);
+        h.check_sync_stall(0, 1_000_000 + SYNC_STALL_ALARM_SECS + 10);
+        assert!(
+            net_rx.try_recv().is_err(),
+            "no recovery action when not behind a peer"
+        );
     }
 
     #[test]

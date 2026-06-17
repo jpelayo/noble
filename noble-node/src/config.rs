@@ -340,16 +340,43 @@ pub struct WalletConfig {
 
 /// Logging configuration.
 ///
-/// Audit Fix #C12: `file` and `rotation` were declared and parsed
-/// from noble.toml but never reached the `tracing` subscriber.
-/// Operators expecting `logging.file = "/var/log/noble.log"` to
-/// enable file logging were silently ignored. Removed in 0.118 —
-/// log capture is the deployment platform's job (Docker, launchd,
-/// systemd all redirect stdout/stderr to their own log stores).
+/// 0.121: in-process **size-based rotating** file logging (re)introduced — this
+/// time it actually reaches the `tracing` subscriber (see `trace::init_tracing`
+/// + `log_rotate::RotatingWriter`). The total on-disk footprint is hard-capped
+/// at `max_size_bytes` (default 1 GiB), adjustable live from the admin GUI.
+/// Platform stdout/stderr redirect (Docker/launchd/systemd) still works for
+/// pre-init output; file logging is the bounded, node-owned store.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
+    /// Enable in-process rotating file logging. Default: true.
+    #[serde(default = "default_log_file_enabled")]
+    pub file_enabled: bool,
+    /// Log file path. Empty = `<data_dir>/noble-node.log`. May be absolute or
+    /// relative to the data dir.
+    #[serde(default)]
+    pub file_path: String,
+    /// Maximum **total** size in bytes across all rotating log files (active +
+    /// rotated). Default: 1 GiB. The GUI exposes this in MB.
+    #[serde(default = "default_log_max_size_bytes")]
+    pub max_size_bytes: u64,
+    /// Number of log files to keep (active + rotated). Default: 5. Each file is
+    /// capped at `max_size_bytes / max_files`.
+    #[serde(default = "default_log_max_files")]
+    pub max_files: usize,
+}
+
+/// Default total log-size cap: 1 GiB. MUST match the GUI placeholder and the
+/// `LoggingConfig::default()` value (ghost-default consistency).
+pub fn default_log_max_size_bytes() -> u64 {
+    1_073_741_824
+}
+fn default_log_file_enabled() -> bool {
+    true
+}
+fn default_log_max_files() -> usize {
+    5
 }
 
 /// Prometheus metrics configuration.
@@ -767,6 +794,10 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
+            file_enabled: default_log_file_enabled(),
+            file_path: String::new(),
+            max_size_bytes: default_log_max_size_bytes(),
+            max_files: default_log_max_files(),
         }
     }
 }

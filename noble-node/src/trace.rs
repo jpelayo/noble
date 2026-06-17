@@ -8,11 +8,15 @@
 //! `noble-node` (subscriber setup) and `noble-api` (RPC methods) can access them.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use noble_api::trace_types::{TraceBuffer, TraceHandle, TraceRecord};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+
+use crate::log_rotate::RotatingWriter;
 
 /// A `tracing_subscriber::Layer` that captures events into a `TraceBuffer`.
 pub struct RamBufferLayer {
@@ -141,6 +145,14 @@ pub struct TraceConfig {
     pub initial_filter: String,
     /// Whether to also output to stderr.
     pub stderr_enabled: bool,
+    /// Resolved absolute path for the rotating log file (e.g.
+    /// `<data_dir>/noble-node.log`). `None` disables file logging.
+    pub log_file_path: Option<PathBuf>,
+    /// Maximum total size (bytes) across all rotating log files. `0` also
+    /// disables file logging.
+    pub log_max_size_bytes: u64,
+    /// Number of log files to keep (active + rotated).
+    pub log_max_files: usize,
 }
 
 impl Default for TraceConfig {
@@ -149,6 +161,9 @@ impl Default for TraceConfig {
             buffer_capacity: 50_000,
             initial_filter: "info".to_string(),
             stderr_enabled: true,
+            log_file_path: None,
+            log_max_size_bytes: 1_073_741_824,
+            log_max_files: 5,
         }
     }
 }
@@ -178,24 +193,43 @@ pub fn init_tracing(config: &TraceConfig) -> Arc<TraceHandle> {
                 .map_err(|e| format!("reload filter: {e}"))
         });
 
-    if config.stderr_enabled {
-        let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
-        tracing_subscriber::registry()
-            .with(filter_layer)
-            .with(buffer_layer)
-            .with(fmt_layer)
-            .init();
+    // Live, shared log-size cap. The rotating writer reads it on every rotation
+    // check; the GUI/RPC update it via `TraceHandle::set_log_max_size`. `0` (or
+    // file logging disabled) makes the writer a no-op sink.
+    let file_enabled = config.log_file_path.is_some() && config.log_max_size_bytes > 0;
+    let log_max_size = Arc::new(AtomicU64::new(if file_enabled {
+        config.log_max_size_bytes
     } else {
-        tracing_subscriber::registry()
-            .with(filter_layer)
-            .with(buffer_layer)
-            .init();
-    }
+        0
+    }));
+
+    // Optional layers compose cleanly as `Option<Layer>` (None = no-op), so we
+    // avoid a 2×2 stderr/file branch explosion.
+    let stderr_layer = if config.stderr_enabled {
+        Some(tracing_subscriber::fmt::layer().with_target(true))
+    } else {
+        None
+    };
+    let file_layer = config.log_file_path.as_ref().filter(|_| file_enabled).map(|path| {
+        let writer = RotatingWriter::new(path.clone(), config.log_max_files, log_max_size.clone());
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+    });
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(buffer_layer)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
 
     Arc::new(TraceHandle::new(
         buffer,
         config.initial_filter.clone(),
         set_filter_fn,
+        log_max_size,
     ))
 }
 

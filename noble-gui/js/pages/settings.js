@@ -154,6 +154,24 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <!-- Log Rotation -->
+    <div class="panel">
+      <div class="panel-header">Log Rotation</div>
+      <div class="panel-body">
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+          Maximum total size of the node's rotating log files. When the cap is reached the oldest log is dropped, so disk usage never exceeds this value. Applies live; full effect at the next rotation.
+        </p>
+        <div style="display:flex;gap:var(--gap-sm);align-items:center">
+          <input id="s-log-size-input" type="number" min="1" step="1" placeholder="1024"
+            style="width:140px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:var(--font-size-sm)">
+          <span style="font-size:var(--font-size-sm);color:var(--text-muted)">MB</span>
+          <button id="s-log-size-save" class="btn-sm" style="padding:6px 14px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Save</button>
+          <span id="s-log-size-current" style="font-size:var(--font-size-xs);color:var(--text-muted)"></span>
+        </div>
+        <span id="s-log-size-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);display:block;margin-top:var(--gap-xs)"></span>
+      </div>
+    </div>
+
     <!-- Faucet -->
     <div class="panel">
       <div class="panel-header">
@@ -2052,6 +2070,46 @@ export function init(root, ctx) {
       feeRateMsg.textContent = e.message || 'Failed to save';
     } finally {
       feeRateSave.disabled = false;
+    }
+  });
+
+  // ── Log rotation max size (MB in the UI, bytes on the wire) ──
+  const MB = 1024 * 1024;
+  const logSizeInput = root.querySelector('#s-log-size-input');
+  const logSizeSave = root.querySelector('#s-log-size-save');
+  const logSizeMsg = root.querySelector('#s-log-size-msg');
+  const logSizeCurrent = root.querySelector('#s-log-size-current');
+  // Load current cap.
+  rpc.call('noble_getLoggingConfig').then(cfg => {
+    if (cfg && cfg.max_size_bytes != null && cfg.max_size_bytes > 0) {
+      const mb = Math.round(cfg.max_size_bytes / MB);
+      logSizeInput.value = mb;
+      logSizeCurrent.textContent = `current: ${mb} MB`;
+    } else if (cfg && cfg.file_enabled === false) {
+      logSizeCurrent.textContent = 'file logging disabled (set in noble.toml)';
+    }
+  }).catch(() => {});
+  logSizeSave.addEventListener('click', async () => {
+    const mb = parseInt(logSizeInput.value.trim(), 10);
+    if (!Number.isFinite(mb) || mb < 1) {
+      logSizeMsg.style.color = 'var(--error)';
+      logSizeMsg.textContent = 'Size must be at least 1 MB';
+      return;
+    }
+    const bytes = mb * MB;
+    logSizeSave.disabled = true;
+    logSizeMsg.style.color = 'var(--text-muted)';
+    logSizeMsg.textContent = 'Saving...';
+    try {
+      await rpc.call('noble_setConfigValue', { section: 'logging', key: 'max_size_bytes', value: String(bytes) });
+      logSizeMsg.style.color = 'var(--success)';
+      logSizeMsg.textContent = 'Saved. Applies live; full effect at the next rotation.';
+      logSizeCurrent.textContent = `current: ${mb} MB`;
+    } catch (e) {
+      logSizeMsg.style.color = 'var(--error)';
+      logSizeMsg.textContent = e.message || 'Failed to save';
+    } finally {
+      logSizeSave.disabled = false;
     }
   });
 
