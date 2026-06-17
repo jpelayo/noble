@@ -122,6 +122,10 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
+  /* Reserve the two-line height so switching between 1-line and 2-line content
+     (or the badge changing) never reflows the layout below it. */
+  min-height: 36px;
   gap: 2px;
 }
 

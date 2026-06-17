@@ -360,16 +360,41 @@ const ALIGNMENT_SEVERITY = {
   Syncing: 'syncing', Aligned: 'zero', Diverged: 'medium',
 };
 
+// How long a calmer state (leaving Syncing, going Isolated) must persist before
+// the badge follows it. Absorbs per-tick backend flapping.
+const ALIGN_HOLD_MS = 6000;
+
+const _align = {
+  shown: null,     // state currently painted
+  cand: null,      // pending lower-urgency candidate
+  candSince: 0,
+  target: 0,       // monotonic sync target (sticky highest_known)
+  last: null,      // last raw args, so the hold timer can re-commit
+  timer: null,
+};
+
+const _alignUrgent = (s) => s === 'Syncing' || s === 'Diverged';
+
+// Map raw (state, height, highest) to the state we should DISPLAY, with heights
+// as the source of truth. Mutates _align.target (monotonic).
+function _alignAuthoritative(st, height, highest) {
+  height = +height || 0;
+  highest = +highest || 0;
+  if (highest > _align.target) _align.target = highest; // never let a 0-blip drop the target
+  const target = Math.max(highest, _align.target);
+
+  if (height > 0 && target > height) return 'Syncing';  // behind -> always Syncing
+  if (st === 'Syncing') return height > 0 ? 'Aligned' : 'Bootstrapping';
+  return st || (height > 0 ? 'Aligned' : 'Isolated');
+}
+
 async function updateForkStatus() {
-  const bar = document.getElementById('fork-status-bar');
-  if (!bar) return;
-  try {
-    const sync = await rpc.call('noble_getSyncStatus').catch(() => null);
-    if (!sync) { bar.style.display = 'none'; return; }
-    renderAlignment(sync.state, sync.current_height, sync.highest_known, sync.progress, null);
-  } catch (e) {
-    bar.style.display = 'none';
-  }
+  if (!document.getElementById('fork-status-bar')) return;
+  // Never collapse the bar on a transient RPC miss - that's a layout jump.
+  // Keep the last painted state; only the first-ever load leaves it hidden.
+  const sync = await rpc.call('noble_getSyncStatus').catch(() => null);
+  if (!sync) return;
+  renderAlignment(sync.state, sync.current_height, sync.highest_known, sync.progress, null);
 }
 
 function onAlignmentChanged(data) {
@@ -379,28 +404,60 @@ function onAlignmentChanged(data) {
 function renderAlignment(st, height, highestKnown, progress, cyclesRemaining) {
   const bar = document.getElementById('fork-status-bar');
   if (!bar) return;
+  _align.last = { st, height, highestKnown, progress, cyclesRemaining };
+
+  const want = _alignAuthoritative(st, height, highestKnown);
+  const now = Date.now();
+
+  if (_align.shown === null || want === _align.shown) {
+    _align.shown = want;
+    _align.cand = null;
+  } else if (_alignUrgent(want) && !_alignUrgent(_align.shown)) {
+    _align.shown = want;            // escalate into Syncing/Diverged immediately
+    _align.cand = null;
+  } else {
+    // calmer state (Syncing->Aligned, anything->Isolated, ...): require it to hold.
+    if (_align.cand !== want) { _align.cand = want; _align.candSince = now; }
+    if (now - _align.candSince >= ALIGN_HOLD_MS) {
+      _align.shown = want;
+      _align.cand = null;
+      if (want !== 'Syncing') _align.target = +highestKnown || 0; // reset sticky target once settled
+    } else {
+      // Re-commit after the hold elapses even if no further event arrives.
+      clearTimeout(_align.timer);
+      _align.timer = setTimeout(() => {
+        const a = _align.last;
+        if (a) renderAlignment(a.st, a.height, a.highestKnown, a.progress, a.cyclesRemaining);
+      }, ALIGN_HOLD_MS - (now - _align.candSince) + 50);
+    }
+  }
+
+  paintAlignment(bar, _align.shown, height, highestKnown, cyclesRemaining);
+}
+
+function paintAlignment(bar, st, height, highestKnown, cyclesRemaining) {
   const label = document.getElementById('fork-status-label');
   const detail = document.getElementById('fork-status-detail');
-
   bar.dataset.severity = ALIGNMENT_SEVERITY[st] || 'zero';
 
   if (st === 'Syncing') {
-    const pct = progress > 0 ? (progress * 100).toFixed(1) + '%' : '';
+    const h = +height || 0;
+    const tgt = Math.max(+highestKnown || 0, _align.target, h);
     label.innerHTML = '<span class="fork-sync-spinner"></span>Syncing';
-    detail.textContent = pct
-      ? `block ${height} / ${highestKnown} (${pct})`
+    detail.textContent = tgt > h
+      ? `block ${formatNumber(h)} / ${formatNumber(tgt)} (${(h / tgt * 100).toFixed(1)}%)`
       : 'catching up';
   } else if (st === 'Diverged' && cyclesRemaining != null) {
     label.textContent = 'Diverged';
     detail.textContent = `${cyclesRemaining} cycle(s) to resolution`;
   } else if (st === 'Isolated' && height > 0) {
     label.textContent = 'Isolated';
-    detail.textContent = `height ${height} \u00b7 no peers`;
+    detail.textContent = `height ${formatNumber(height)} \u00b7 no peers`;
   } else {
     label.textContent = st;
-    detail.textContent = height > 0 ? `height ${height}` : '';
+    detail.textContent = height > 0 ? `height ${formatNumber(height)}` : '';
   }
-  bar.style.display = '';
+  bar.style.display = '';   // reveal once; CSS min-height reserves the row from here on
 }
 
 // ── Fetch initial data ──
