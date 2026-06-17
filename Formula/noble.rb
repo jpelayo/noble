@@ -15,7 +15,7 @@
 #   brew install --HEAD jpelayo/noble/noble
 
 class Noble < Formula
-  desc "NOBLE blockchain node — Proof of Reputation consensus protocol"
+  desc "Proof-of-Reputation blockchain node, tools, and dashboard"
   homepage "https://github.com/jpelayo/noble"
   license "Apache-2.0"
   head "https://github.com/jpelayo/noble.git", branch: "main"
@@ -25,14 +25,13 @@ class Noble < Formula
   #   brew install --HEAD noble --with-10    # allow 10.0.0.0/8
   #   brew install --HEAD noble --with-172   # allow 172.16.0.0/12
   #   brew install --HEAD noble --with-100   # allow 100.64.0.0/10 (Tailscale)
-  #   brew install --HEAD noble --localonly  # force localhost only (default)
-  # Alternatively: NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install ...
+  # Localhost-only is the default (no flag). Alternatively:
+  #   NOBLE_ALLOWED_IPS=192.168.0.0/16 brew install ...   (use "localonly" to force localhost)
 
   option "with-192", "Allow remote access from 192.168.0.0/16 (home LAN)"
   option "with-10",  "Allow remote access from 10.0.0.0/8 (corporate LAN)"
   option "with-172", "Allow remote access from 172.16.0.0/12 (Docker/private)"
   option "with-100", "Allow remote access from 100.64.0.0/10 (Tailscale)"
-  option "localonly", "Force localhost-only mode (default)"
 
   depends_on "cmake" => :build      # librocksdb-sys C++ compilation
   depends_on "pkg-config" => :build # system library detection on Linux
@@ -46,28 +45,25 @@ class Noble < Formula
   def install
     # openssl-sys needs the brew openssl prefix; pkg-config alone is unreliable on Linux.
     ENV["OPENSSL_DIR"] = Formula["openssl@3"].opt_prefix
+    # Share one target dir across the three installs so workspace dependencies
+    # compile once, not three times (the bins live in separate workspace crates,
+    # so each needs its own `cargo install`).
+    ENV["CARGO_TARGET_DIR"] = buildpath/"target"
 
-    # Build all three binaries in release mode.
-    system "cargo", "build", "--release",
-           "--bin", "noble-node",
-           "--bin", "noble-tool",
-           "--bin", "noble-faucet"
-
-    bin.install "target/release/noble-node"
-    bin.install "target/release/noble-tool"
-    bin.install "target/release/noble-faucet"
+    system "cargo", "install", *std_cargo_args(path: "noble-node")
+    system "cargo", "install", *std_cargo_args(path: "noble-tool")
+    system "cargo", "install", *std_cargo_args(path: "noble-faucet")
 
     # Dashboard GUI static files.
     # gui_server.rs detect_gui_dir() searches <binary_dir>/../noble-gui/ first,
     # which resolves through the Homebrew symlink to the Cellar prefix.
-    # Remove stale GUI dir from previous installs so files are always fresh.
-    rm_rf prefix/"noble-gui"
+    # Remove stale GUI dir from a same-revision reinstall so files are fresh.
+    rm_r prefix/"noble-gui" if (prefix/"noble-gui").exist?
     (prefix/"noble-gui").install Dir["noble-gui/*"]
 
-    # Shell completions (bash, zsh, fish) — remove stale files first.
-    rm_f bash_completion/"noble-node"
-    rm_f zsh_completion/"_noble-node"
-    rm_f fish_completion/"noble-node.fish"
+    # Shell completions (bash, zsh, fish) — clear any stale files first.
+    [bash_completion/"noble-node", zsh_completion/"_noble-node",
+     fish_completion/"noble-node.fish"].each { |f| rm f if f.exist? }
     generate_completions_from_executable(bin/"noble-node", "completions")
 
     # No sample config file needed — the node auto-generates noble.toml
@@ -93,13 +89,19 @@ class Noble < Formula
     cidrs << "172.16.0.0/12"  if build.with?("172")
     cidrs << "100.64.0.0/10"  if build.with?("100")
 
-    # Env var fallback (for CI / scripted installs).
-    if cidrs.empty? && !build.include?("localonly")
+    # Env var fallback (for CI / scripted installs). Set NOBLE_ALLOWED_IPS to
+    # "localonly" to force localhost even when other CIDRs would apply.
+    if cidrs.empty?
       allowed = ENV["NOBLE_ALLOWED_IPS"].to_s.strip
       if !allowed.empty? && allowed != "localonly"
         require "ipaddr"
         entries = allowed.split(",").map(&:strip).reject(&:empty?)
-        bad = entries.reject { |e| IPAddr.new(e) rescue false }
+        bad = entries.reject do |e|
+          IPAddr.new(e)
+          true
+        rescue
+          false
+        end
         unless bad.empty?
           opoo "Invalid NOBLE_ALLOWED_IPS entries ignored: #{bad.join(", ")}"
           entries -= bad
@@ -145,12 +147,11 @@ class Noble < Formula
         stderr_enabled = false
       TOML
 
+      puts
       if cidrs.any?
-        puts
         puts "  Remote access enabled for: #{cidrs.join(", ")}"
         puts "  After starting, the dashboard will be at: https://<this-host>:8785"
       else
-        puts
         puts "  Localhost-only mode: Dashboard and RPC are accessible on this machine only."
         puts "  To allow remote access later, edit: #{etc}/noble/noble.toml"
         puts "    allowed_ips = [\"192.168.0.0/16\"]"
@@ -159,25 +160,30 @@ class Noble < Formula
 
     # Warn if Noble ports are already occupied by a non-Noble process.
     blocked = []
-    {8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket", 8785 => "Dashboard GUI", 8786 => "Faucet"}.each do |port, label|
+    ports = {
+      8780 => "P2P", 8783 => "JSON-RPC HTTP", 8784 => "WebSocket",
+      8785 => "Dashboard GUI", 8786 => "Faucet"
+    }
+    ports.each do |port, label|
       pid = `lsof -ti :#{port} -sTCP:LISTEN 2>/dev/null`.strip
-      unless pid.empty?
-        proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
-        next if proc_name =~ /noble-node|noble-faucet/
-        blocked << {port: port, label: label, pid: pid, proc: proc_name}
-      end
+      next if pid.empty?
+
+      proc_name = `ps -o comm= -p #{pid} 2>/dev/null`.strip
+      next if proc_name.match?(/noble-node|noble-faucet/)
+
+      blocked << { port: port, label: label, pid: pid, proc: proc_name }
     end
     unless blocked.empty?
       puts
-      puts "  " + "!" * 60
+      puts "  " + ("!" * 60)
       puts "  !!  WARNING — Ports may be in use                   !!"
-      puts "  " + "!" * 60
+      puts "  " + ("!" * 60)
       blocked.each do |b|
         puts "  !!  Port #{b[:port]} (#{b[:label]}): PID #{b[:pid]} (#{b[:proc]})"
       end
       puts "  !!"
       puts "  !!  Fix:  #{blocked.map { |b| "kill #{b[:pid]}" }.join(" && ")}"
-      puts "  " + "!" * 60
+      puts "  " + ("!" * 60)
       puts
     end
   end
@@ -243,10 +249,10 @@ class Noble < Formula
     system bin/"noble-tool", "genesis",
            "--network", "regtest",
            "--output", testpath/"test-genesis.cbor"
-    assert_predicate testpath/"test-genesis.cbor", :exist?
+    assert_path_exists testpath/"test-genesis.cbor"
     assert (testpath/"test-genesis.cbor").size.positive?
 
     # Verify GUI static files are installed.
-    assert_predicate prefix/"noble-gui/index.html", :exist?
+    assert_path_exists prefix/"noble-gui/index.html"
   end
 end
