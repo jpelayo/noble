@@ -74,6 +74,15 @@ fn gossip_test_config() -> NetworkConfig {
         enable_kademlia: false,
         gossipsub_heartbeat_interval_secs: 1,
         max_outbound_per_subnet: 10,
+        // Run the test nodes on the same non-zero chain the fixtures sign/key txs
+        // with (`test_chain_id()`). Without this the nodes defaulted to
+        // chain_id=0, so `PublishTransaction` announced `compute_tx_id(0)` while
+        // the test keyed the tx provider by `compute_tx_id(test_chain_id())` — a
+        // different id — so the server couldn't find the tx and the tx-relay
+        // round-trip (`gossip_tx_relay_end_to_end`) timed out. Announce/vote/block
+        // tests are chain-id-insensitive (their announces use chain_id=0, which
+        // the cross-chain filter skips), so this is safe for them.
+        chain_id: test_chain_id(),
         ..NetworkConfig::local_test()
     }
 }
