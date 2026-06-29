@@ -8,6 +8,7 @@ pub mod ca_store;
 mod config;
 pub mod faucet_probe;
 mod gui_server;
+mod gui_session;
 pub mod healing;
 mod tls_cert;
 #[allow(unused)]

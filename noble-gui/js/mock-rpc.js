@@ -1833,6 +1833,9 @@ export class MockRpcClient {
       case 'noble_getTotpStatus':
         return { enabled: false, scope: 'all' };
 
+      case 'noble_getGuiLockStatus':
+        return { enabled: false, totp_available: false };
+
       case 'noble_enableTotp':
         return {
           secret_base32: 'JBSWY3DPEHPK3PXP',

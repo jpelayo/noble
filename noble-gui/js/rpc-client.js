@@ -84,6 +84,14 @@ export class RpcClient {
         signal: controller.signal,
       });
 
+      // GUI admin lock: a 401 means the dashboard session is missing/expired.
+      // Signal the app to redirect to the login wall.
+      if (res.status === 401) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('noble-session-expired'));
+        }
+        throw new RpcError(-32004, 'gui session required');
+      }
       if (!res.ok) throw new RpcError(-32000, `HTTP ${res.status}`);
 
       const json = await res.json();
@@ -119,6 +127,12 @@ export class RpcClient {
         signal: controller.signal,
       });
 
+      if (res.status === 401) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('noble-session-expired'));
+        }
+        throw new RpcError(-32004, 'gui session required');
+      }
       if (!res.ok) throw new RpcError(-32000, `HTTP ${res.status}`);
       const results = await res.json();
       return results.map(r => r.error ? new RpcError(r.error.code, r.error.message) : r.result);

@@ -28,8 +28,8 @@
 //! The proxy uses a `NoCertVerifier` for its outbound TLS connections to the
 //! RPC and WS servers.  This is safe: the connections never leave localhost.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::ConnectInfo;
@@ -43,6 +43,11 @@ use axum::extract::ws::{Message as AxumWsMsg, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use noble_api::gatekeeper::{GATEKEEPER_HEADER, GATEKEEPER_VALUE};
 use noble_api::ip_filter::IpFilter;
+use noble_api::middleware::GUI_PROXY_AUTH_HEADER;
+use noble_api::peer_addr::PeerAddrLayer;
+use tower::Layer as _;
+
+use crate::gui_session::{self, GuiLockState};
 
 // ── NoCertVerifier ─────────────────────────────────────────────────────────
 
@@ -135,6 +140,14 @@ async fn proxy_to_rpc(
 
     if let Some(auth) = headers.get(http::header::AUTHORIZATION) {
         req_builder = req_builder.header(http::header::AUTHORIZATION, auth.clone());
+    }
+
+    // GUI admin-lock bridge: forward the per-boot proxy secret the session gate
+    // set on authenticated requests so the RPC server accepts them under any
+    // totp_scope. The gate strips any client-supplied copy, so this only carries
+    // the gate's value.
+    if let Some(gui_auth) = headers.get(GUI_PROXY_AUTH_HEADER) {
+        req_builder = req_builder.header(GUI_PROXY_AUTH_HEADER, gui_auth.clone());
     }
 
     // Inject gatekeeper header so the RPC server accepts proxied requests.
@@ -236,11 +249,20 @@ async fn proxy_to_rpc(
 /// TOTP middleware can validate it.
 async fn ws_proxy_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: http::HeaderMap,
     ws: axum::extract::WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<WsProxyState>,
 ) -> axum::response::Response {
     let auth_token = params.get("token").cloned();
-    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state, auth_token))
+    // GUI admin-lock bridge: the session gate (which already validated this
+    // upgrade) sets the per-boot proxy secret; forward it to the backend WS so it
+    // is accepted under any totp_scope. Browser-supplied values are stripped by
+    // the gate, so only the gate's value reaches here.
+    let gui_proxy_auth = headers
+        .get(GUI_PROXY_AUTH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state, auth_token, gui_proxy_auth))
 }
 
 #[derive(Clone)]
@@ -249,7 +271,12 @@ struct WsProxyState {
     tls_connector: Option<tokio_rustls::TlsConnector>,
 }
 
-async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState, auth_token: Option<String>) {
+async fn ws_proxy_bridge(
+    browser_ws: WebSocket,
+    state: WsProxyState,
+    auth_token: Option<String>,
+    gui_proxy_auth: Option<String>,
+) {
     use tokio_tungstenite::tungstenite::Message as TungMsg;
 
     let url = if state.tls_connector.is_some() {
@@ -333,6 +360,11 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState, auth_token:
         if let Some(ref token) = auth_token {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
+        // GUI admin-lock bridge secret (set by the session gate after validating
+        // the session) so the backend WS accepts the proxied upgrade under any scope.
+        if let Some(ref secret) = gui_proxy_auth {
+            builder = builder.header(GUI_PROXY_AUTH_HEADER, secret.clone());
+        }
         builder.body(())
             .expect("ws request must build")
     };
@@ -388,19 +420,22 @@ async fn ws_proxy_bridge(browser_ws: WebSocket, state: WsProxyState, auth_token:
 /// When `tls_config` is `Some`, a custom tokio-rustls accept loop is used in
 /// place of `axum::serve`.  IP filtering is applied at the TCP accept level so
 /// blocked peers never complete a TLS handshake.
-pub async fn start_gui_server(
-    addr: SocketAddr,
+/// Build the GUI server's Axum router: static dashboard, `/rpc` + `/ws` reverse
+/// proxies, the `/gui/login` + `/gui/logout` endpoints, the CSP layer, and the
+/// admin-lock session gate (outermost). Extracted from [`start_gui_server`] so
+/// the gate's route coverage can be exercised with `oneshot` without binding a
+/// socket (see the tests at the bottom of this file).
+#[allow(clippy::too_many_arguments)]
+fn build_gui_app(
+    gui_lock_state: GuiLockState,
     gui_dir: PathBuf,
-    ip_filter: Option<IpFilter>,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
+    tls_enabled: bool,
     rpc_origins: Arc<parking_lot::RwLock<Vec<String>>>,
     rpc_port: u16,
     ws_port: u16,
     setup_mode: bool,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Router {
     let serve_dir = ServeDir::new(&gui_dir);
-
-    let proto = if tls_config.is_some() { "https" } else { "http" };
 
     // Root route: serve index.html with injected NOBLE_RPC_PORT script tag.
     let gui_dir_clone = gui_dir.clone();
@@ -452,7 +487,7 @@ pub async fn start_gui_server(
     // The browser sends requests to /rpc (port 8785, already trusted) and the
     // proxy opens a loopback connection to the RPC port internally.
     let proxy_port = rpc_port;
-    let proxy_tls = if tls_config.is_some() {
+    let proxy_tls = if tls_enabled {
         Some(build_client_tls_connector())
     } else {
         None
@@ -468,17 +503,31 @@ pub async fn start_gui_server(
     // on ws_port (8784).  Same-origin connection avoids self-signed cert rejection.
     let ws_proxy_state = WsProxyState {
         ws_port,
-        tls_connector: if tls_config.is_some() {
+        tls_connector: if tls_enabled {
             Some(build_client_tls_connector())
         } else {
             None
         },
     };
 
+    // GUI admin-lock login/logout endpoints (always reachable without a session).
+    let login_lock = gui_lock_state.clone();
+    let login_handler = axum::routing::post(move |req: axum::extract::Request| {
+        let lock = login_lock.clone();
+        async move { handle_gui_login(lock, req).await }
+    });
+    let logout_lock = gui_lock_state.clone();
+    let logout_handler = axum::routing::post(move |req: axum::extract::Request| {
+        let lock = logout_lock.clone();
+        async move { handle_gui_logout(lock, req).await }
+    });
+
     let mut app = Router::new()
         .route("/", root_handler)
         .route("/rpc", rpc_proxy_handler)
         .route("/ws", axum::routing::get(ws_proxy_handler).with_state(ws_proxy_state))
+        .route("/gui/login", login_handler)
+        .route("/gui/logout", logout_handler)
         .fallback_service(serve_dir);
 
     // Dynamic CSP middleware — reads rpc_origins on every request so that
@@ -572,6 +621,49 @@ pub async fn start_gui_server(
         }
     }));
 
+    // ── GUI admin-lock session gate ──────────────────────────────────────────
+    // Added last → outermost layer → runs FIRST on each request, before CSP.
+    // Gates every request (pages, /rpc, /ws) behind a TOTP session when enabled.
+    let gate_lock = gui_lock_state.clone();
+    let gate_gui_dir = gui_dir.clone();
+    app = app.layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let lock = gate_lock.clone();
+            let dir = gate_gui_dir.clone();
+            async move { gui_lock_gate(lock, dir, req, next).await }
+        },
+    ));
+
+    app
+}
+
+/// Start the GUI HTTP(S) server: build the router via [`build_gui_app`], then
+/// bind and serve it (custom tokio-rustls accept loop for TLS, or `axum::serve`
+/// for plain HTTP). IP filtering is applied at the TCP accept level so blocked
+/// peers never complete a TLS handshake.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_gui_server(
+    addr: SocketAddr,
+    gui_dir: PathBuf,
+    ip_filter: Option<IpFilter>,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    rpc_origins: Arc<parking_lot::RwLock<Vec<String>>>,
+    rpc_port: u16,
+    ws_port: u16,
+    setup_mode: bool,
+    gui_lock_state: GuiLockState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let proto = if tls_config.is_some() { "https" } else { "http" };
+    let mut app = build_gui_app(
+        gui_lock_state,
+        gui_dir,
+        tls_config.is_some(),
+        rpc_origins,
+        rpc_port,
+        ws_port,
+        setup_mode,
+    );
+
     // ── TLS path: custom tokio-rustls accept loop ────────────────────────────
     if let Some(tls_cfg) = tls_config {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -631,7 +723,12 @@ pub async fn start_gui_server(
                         }
                     };
                     let io = hyper_util::rt::TokioIo::new(tls);
-                    let svc = hyper_util::service::TowerToHyperService::new(app_c);
+                    // Inject the peer address (the plain-HTTP path gets it from
+                    // `into_make_service_with_connect_info`; this custom TLS loop
+                    // must add it so the GUI-login limiter can key by client IP).
+                    let svc = hyper_util::service::TowerToHyperService::new(
+                        PeerAddrLayer::new(peer_addr).layer(app_c),
+                    );
                     hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                         .serve_connection_with_upgrades(io, svc)
                         .await
@@ -693,6 +790,307 @@ async fn ip_filter_middleware(
     next.run(req).await.into_response()
 }
 
+// ── GUI admin lock: session gate + login/logout handlers ────────────────────
+
+/// Extract the client IP from request extensions. The plain-HTTP path injects
+/// `ConnectInfo<SocketAddr>`; the TLS accept loop injects a raw `SocketAddr` via
+/// [`PeerAddrLayer`]. Falls back to `0.0.0.0` (a shared limiter bucket) if neither
+/// is present.
+fn client_ip(req: &axum::extract::Request) -> IpAddr {
+    if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return addr.ip();
+    }
+    if let Some(addr) = req.extensions().get::<SocketAddr>() {
+        return addr.ip();
+    }
+    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+}
+
+/// JSON-RPC 401 returned for an unauthenticated `/rpc` call while the lock is on.
+fn unauthorized_rpc_response() -> axum::response::Response {
+    let body = r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"gui session required"},"id":null}"#;
+    axum::response::Response::builder()
+        .status(http::StatusCode::UNAUTHORIZED)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_default()
+}
+
+/// Build an HTML response with hard security headers for the gate's
+/// directly-served pages (login / recovery). These bypass the inner CSP
+/// middleware, so the headers are set here explicitly: `frame-ancestors 'none'`
+/// + `X-Frame-Options: DENY` block clickjacking, `form-action 'self'` +
+/// `base-uri 'none'` lock the form down, and `no-store` prevents caching the
+/// most sensitive pages.
+fn secure_html_response(html: String) -> axum::response::Response {
+    const CSP: &str = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; \
+                       form-action 'self'; script-src 'self' 'unsafe-inline'; \
+                       style-src 'self' 'unsafe-inline'; img-src 'self' data:";
+    axum::response::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .header("content-security-policy", CSP)
+        .header("x-frame-options", "DENY")
+        .body(axum::body::Body::from(html))
+        .unwrap_or_default()
+}
+
+/// Serve the login page. Prefers `gui_dir/login.html`; falls back to a minimal
+/// inline page so the wall works even if the asset isn't deployed.
+async fn serve_login_page(gui_dir: &Path) -> axum::response::Response {
+    let html = match tokio::fs::read_to_string(gui_dir.join("login.html")).await {
+        Ok(h) => h,
+        Err(_) => FALLBACK_LOGIN_HTML.to_string(),
+    };
+    secure_html_response(html)
+}
+
+/// Recovery page shown to REMOTE clients when the lock is enabled but TOTP is
+/// unavailable. Never reveals dashboard content; tells the operator to recover
+/// from localhost or the CLI.
+async fn serve_recovery_page() -> axum::response::Response {
+    secure_html_response(RECOVERY_HTML.to_string())
+}
+
+/// The GUI admin-lock session gate. Runs on every request; when the lock is
+/// enabled it requires a valid session cookie for everything except the login
+/// surface, and vouches authenticated requests to the loopback RPC/WS.
+async fn gui_lock_gate(
+    lock: GuiLockState,
+    gui_dir: PathBuf,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Always strip any client-supplied proxy-trust header: it must never reach
+    // the loopback RPC unless WE re-add it after validating a session.
+    req.headers_mut().remove(GUI_PROXY_AUTH_HEADER);
+
+    if !lock.is_enabled() {
+        return next.run(req).await;
+    }
+
+    let path = req.uri().path().to_string();
+    // The login surface is always reachable without a session.
+    if path == "/login.html" || path == "/gui/login" || path == "/gui/logout" {
+        return next.run(req).await;
+    }
+
+    // Recovery mode: the lock is on but no TOTP validator is available, so nobody
+    // can sign in. Fail CLOSED — never serve the dashboard remotely. Let loopback
+    // through for on-host recovery (localhost / CLI); show a recovery page to
+    // remote clients. (At boot the in-memory session store is empty, so there are
+    // no valid sessions to honour here anyway.)
+    if lock.totp_slot.read().is_none() {
+        if client_ip(&req).is_loopback() {
+            return next.run(req).await;
+        }
+        if path == "/rpc" || path == "/ws" {
+            return (
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "GUI admin lock: TOTP is unavailable — recover from localhost or the CLI",
+            )
+                .into_response();
+        }
+        return serve_recovery_page().await;
+    }
+
+    let authed = req
+        .headers()
+        .get(http::header::COOKIE)
+        .and_then(|c| c.to_str().ok())
+        .and_then(gui_session::parse_session_cookie)
+        .map(|tok| lock.store.validate(tok))
+        .unwrap_or(false);
+
+    if authed {
+        // Vouch for the request to the loopback RPC/WS so they accept it under
+        // any totp_scope.
+        if let Ok(val) = http::HeaderValue::from_str(&lock.proxy_secret) {
+            req.headers_mut().insert(
+                http::HeaderName::from_static(GUI_PROXY_AUTH_HEADER),
+                val,
+            );
+        }
+        return next.run(req).await;
+    }
+
+    // Unauthenticated.
+    if path == "/rpc" {
+        return unauthorized_rpc_response();
+    }
+    if path == "/ws" {
+        return (http::StatusCode::UNAUTHORIZED, "gui session required").into_response();
+    }
+    serve_login_page(&gui_dir).await
+}
+
+/// `POST /gui/login` — validate a TOTP code and mint a session cookie.
+async fn handle_gui_login(
+    lock: GuiLockState,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    // CSRF defense: require the custom Gatekeeper header (a cross-site form POST
+    // cannot set custom headers without a CORS preflight we don't grant).
+    let has_gatekeeper = req
+        .headers()
+        .get(GATEKEEPER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == GATEKEEPER_VALUE)
+        .unwrap_or(false);
+    if !has_gatekeeper {
+        return (http::StatusCode::FORBIDDEN, "missing gatekeeper header").into_response();
+    }
+
+    let ip = client_ip(&req);
+    if let Some(retry) = lock.limiter.locked_for(ip) {
+        return axum::response::Response::builder()
+            .status(http::StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", retry.to_string())
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(format!(
+                r#"{{"ok":false,"error":"too many attempts","retry_after":{retry}}}"#
+            )))
+            .unwrap_or_default();
+    }
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return (http::StatusCode::BAD_REQUEST, "invalid body").into_response(),
+    };
+    let code_hash = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("code_hash")
+                .and_then(|c| c.as_str())
+                .map(String::from)
+        });
+    let code_hash = match code_hash {
+        Some(h) => h,
+        None => return (http::StatusCode::BAD_REQUEST, "missing code_hash").into_response(),
+    };
+
+    match lock.validate_totp(&code_hash) {
+        Ok(true) => {
+            lock.limiter.record_success(ip);
+            let token = lock.store.create();
+            let cookie = gui_session::set_cookie_value(&token, lock.secure_cookie);
+            tracing::info!(task = "gui_auth", "GUI admin session established");
+            axum::response::Response::builder()
+                .status(http::StatusCode::OK)
+                .header(http::header::SET_COOKIE, cookie)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(r#"{"ok":true}"#))
+                .unwrap_or_default()
+        }
+        Ok(false) => {
+            lock.limiter.record_failure(ip);
+            tracing::warn!(task = "gui_auth", ip = %ip, "GUI login rejected: invalid code");
+            axum::response::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(r#"{"ok":false,"error":"invalid code"}"#))
+                .unwrap_or_default()
+        }
+        Err(()) => {
+            tracing::error!(
+                task = "gui_auth",
+                "GUI lock is enabled but no TOTP validator is available"
+            );
+            axum::response::Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"ok":false,"error":"totp not available"}"#,
+                ))
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// `POST /gui/logout` — revoke the caller's session and clear the cookie.
+async fn handle_gui_logout(
+    lock: GuiLockState,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    // Same CSRF posture as login: require the custom Gatekeeper header.
+    let has_gatekeeper = req
+        .headers()
+        .get(GATEKEEPER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == GATEKEEPER_VALUE)
+        .unwrap_or(false);
+    if !has_gatekeeper {
+        return (http::StatusCode::FORBIDDEN, "missing gatekeeper header").into_response();
+    }
+
+    if let Some(tok) = req
+        .headers()
+        .get(http::header::COOKIE)
+        .and_then(|c| c.to_str().ok())
+        .and_then(gui_session::parse_session_cookie)
+    {
+        lock.store.remove(tok);
+    }
+    axum::response::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(
+            http::header::SET_COOKIE,
+            gui_session::clear_cookie_value(lock.secure_cookie),
+        )
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(r#"{"ok":true}"#))
+        .unwrap_or_default()
+}
+
+/// Minimal fallback login page used only if `gui_dir/login.html` is missing.
+const FALLBACK_LOGIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NOBLE — Sign in</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#1a1d27;border:1px solid #2a2f3a;border-radius:10px;padding:2rem;width:320px;text-align:center}
+h1{font-size:1.1rem;margin:0 0 .25rem}p{color:#9aa3b2;font-size:.85rem;margin:0 0 1rem}
+input{width:100%;box-sizing:border-box;padding:.6rem;font-size:1.3rem;letter-spacing:.3em;text-align:center;border:1px solid #2a2f3a;border-radius:6px;background:#11141c;color:#e6e6e6;margin-bottom:1rem}
+button{width:100%;padding:.6rem;border:0;border-radius:6px;background:#3b5bdb;color:#fff;font-size:.95rem;cursor:pointer}
+.err{color:#ff6b6b;font-size:.8rem;min-height:1em;margin-top:.5rem}
+</style></head><body>
+<div class="card">
+<h1>Administrator sign-in</h1>
+<p>Enter your 6-digit TOTP code to access the dashboard.</p>
+<input id="c" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code" autofocus>
+<button id="b">Unlock</button>
+<div class="err" id="e"></div>
+</div>
+<script>
+const c=document.getElementById('c'),b=document.getElementById('b'),e=document.getElementById('e');
+async function sha256hex(s){const d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return Array.from(new Uint8Array(d)).map(x=>x.toString(16).padStart(2,'0')).join('');}
+async function go(){const code=c.value.trim();if(!/^\d{6}$/.test(code)){e.textContent='Enter a 6-digit code.';return;}b.disabled=true;e.textContent='';
+try{const r=await fetch('/gui/login',{method:'POST',headers:{'Content-Type':'application/json','Gatekeeper':'noble'},body:JSON.stringify({code_hash:await sha256hex(code)})});
+if(r.ok){location.href='/';return;}if(r.status===429){const j=await r.json().catch(()=>({}));e.textContent='Too many attempts. Wait '+(j.retry_after||30)+'s.';}else{e.textContent='Invalid code. Try again.';c.value='';}}catch(_){e.textContent='Network error.';}b.disabled=false;}
+b.onclick=go;c.addEventListener('keydown',ev=>{if(ev.key==='Enter')go();});
+</script></body></html>"#;
+
+/// Recovery page served to REMOTE clients when the lock is enabled but TOTP is
+/// unavailable. Self-contained; reveals no dashboard content.
+const RECOVERY_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>NOBLE — Dashboard locked</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:1rem}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:2rem;max-width:440px;text-align:center}
+h1{font-size:1.1rem;margin:0 0 .75rem}p{color:#94a3b8;font-size:.88rem;line-height:1.55;margin:0 0 .75rem}
+code{background:#0f172a;padding:1px 6px;border-radius:4px;color:#e2e8f0}
+</style></head><body>
+<div class="card">
+<h1>Dashboard locked — TOTP unavailable</h1>
+<p>The administrator lock is enabled, but this node could not load its TOTP
+secret, so no one can sign in remotely.</p>
+<p>Recover from the host machine: open <code>http://localhost:8785</code> on the
+node itself, or repair the TOTP configuration with the <code>noble-tool</code>
+CLI, then restart the node.</p>
+</div></body></html>"#;
+
 /// Auto-detect the GUI directory relative to the current executable.
 ///
 /// Looks for `noble-gui/` in the following locations:
@@ -735,5 +1133,161 @@ mod tests {
         // binary path, so this exercises the fallback logic.
         // We just verify it doesn't panic.
         let _ = detect_gui_dir();
+    }
+
+    // ── Route-topology tests for the admin-lock gate ────────────────────────
+    // These freeze "the whole GUI is gated" so a future stray route, misplaced
+    // layer, or static-fallback change can't silently reopen the dashboard.
+
+    use axum::body::Body;
+    use noble_api::auth::TotpValidator;
+    use std::sync::atomic::AtomicBool;
+    use tower::ServiceExt as _; // oneshot
+
+    /// Temp `gui_dir` with marker files so we can tell login vs dashboard apart.
+    fn temp_gui_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(
+            p.join("index.html"),
+            "<html><head></head><body>DASHBOARD_MARKER</body></html>",
+        )
+        .unwrap();
+        std::fs::write(p.join("login.html"), "<html><body>LOGIN_PAGE_MARKER</body></html>").unwrap();
+        std::fs::create_dir_all(p.join("js")).unwrap();
+        std::fs::write(p.join("js").join("app.js"), "/*APP_JS_MARKER*/").unwrap();
+        std::fs::create_dir_all(p.join("css")).unwrap();
+        std::fs::write(p.join("css").join("style.css"), "/*CSS_MARKER*/").unwrap();
+        std::fs::create_dir_all(p.join("assets")).unwrap();
+        std::fs::write(p.join("assets").join("x"), "ASSET_MARKER").unwrap();
+        dir
+    }
+
+    fn make_state(enabled: bool, with_validator: bool) -> GuiLockState {
+        let slot: noble_api::state::SharedTotpSlot = if with_validator {
+            let (v, _) = TotpValidator::generate().unwrap();
+            Arc::new(parking_lot::RwLock::new(Some(Arc::new(parking_lot::RwLock::new(v)))))
+        } else {
+            Arc::new(parking_lot::RwLock::new(None))
+        };
+        GuiLockState::new(
+            Arc::new(AtomicBool::new(enabled)),
+            slot,
+            false, // secure_cookie
+            Arc::new("test-proxy-secret".to_string()),
+        )
+    }
+
+    fn app_for(state: GuiLockState, dir: &Path) -> Router {
+        build_gui_app(
+            state,
+            dir.to_path_buf(),
+            false, // tls_enabled
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            8783,
+            8784,
+            false, // setup_mode
+        )
+    }
+
+    async fn body_of(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn get(uri: &str) -> http::Request<Body> {
+        http::Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn locked_gui_gates_all_dashboard_paths() {
+        let dir = temp_gui_dir();
+        let state = make_state(true, true);
+
+        // Every dashboard/static path, unauthenticated → login page, never dashboard.
+        for path in ["/", "/index.html", "/js/app.js", "/css/style.css", "/assets/x", "/anything"] {
+            let resp = app_for(state.clone(), dir.path()).oneshot(get(path)).await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "{path}");
+            let body = body_of(resp).await;
+            assert!(body.contains("LOGIN_PAGE_MARKER"), "{path} should serve login, got: {body}");
+            assert!(
+                !body.contains("DASHBOARD_MARKER") && !body.contains("APP_JS_MARKER")
+                    && !body.contains("ASSET_MARKER") && !body.contains("CSS_MARKER"),
+                "{path} leaked dashboard content"
+            );
+        }
+
+        // /rpc and /ws unauthenticated → 401 (never proxied).
+        let resp = app_for(state.clone(), dir.path())
+            .oneshot(http::Request::builder().method("POST").uri("/rpc").body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED, "/rpc");
+        let resp = app_for(state.clone(), dir.path()).oneshot(get("/ws")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED, "/ws");
+
+        // Login surface stays reachable without a session.
+        let resp = app_for(state.clone(), dir.path()).oneshot(get("/login.html")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert!(body_of(resp).await.contains("LOGIN_PAGE_MARKER"));
+
+        // POST /gui/login reaches the handler (not gated): no Gatekeeper → 403.
+        let resp = app_for(state.clone(), dir.path())
+            .oneshot(http::Request::builder().method("POST").uri("/gui/login").body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "/gui/login must reach the handler");
+    }
+
+    #[tokio::test]
+    async fn authenticated_cookie_reaches_dashboard() {
+        let dir = temp_gui_dir();
+        let state = make_state(true, true);
+        let token = state.store.create();
+        let cookie = format!("{}={}", gui_session::SESSION_COOKIE, token);
+
+        let req = |uri: &str| {
+            http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(http::header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resp = app_for(state.clone(), dir.path()).oneshot(req("/js/app.js")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert!(body_of(resp).await.contains("APP_JS_MARKER"));
+
+        let resp = app_for(state.clone(), dir.path()).oneshot(req("/")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert!(body_of(resp).await.contains("DASHBOARD_MARKER"));
+    }
+
+    #[tokio::test]
+    async fn disabled_lock_is_transparent() {
+        let dir = temp_gui_dir();
+        let state = make_state(false, true);
+        let resp = app_for(state, dir.path()).oneshot(get("/")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert!(body_of(resp).await.contains("DASHBOARD_MARKER"));
+    }
+
+    #[tokio::test]
+    async fn no_validator_serves_recovery_not_dashboard() {
+        // Lock on but no TOTP validator: remote (non-loopback in oneshot, which
+        // has no ConnectInfo → UNSPECIFIED) must get the recovery page, not the UI.
+        let dir = temp_gui_dir();
+        let state = make_state(true, false);
+        let resp = app_for(state.clone(), dir.path()).oneshot(get("/")).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let body = body_of(resp).await;
+        assert!(body.contains("Dashboard locked"), "expected recovery page, got: {body}");
+        assert!(!body.contains("DASHBOARD_MARKER"));
+        // /rpc → 503 in recovery mode.
+        let resp = app_for(state, dir.path())
+            .oneshot(http::Request::builder().method("POST").uri("/rpc").body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::SERVICE_UNAVAILABLE);
     }
 }

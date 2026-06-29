@@ -1423,6 +1423,17 @@ pub struct TotpStatusResponse {
     pub scope: String,
 }
 
+/// Response for `noble_getGuiLockStatus`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GuiLockStatusResponse {
+    /// Whether the GUI admin lock (dashboard session login wall) is enabled.
+    pub enabled: bool,
+    /// Whether a live TOTP validator exists — the lock can only be enabled when
+    /// this is true. The Settings UI disables the toggle and shows "Enable TOTP
+    /// first" when this is false.
+    pub totp_available: bool,
+}
+
 /// Response for `noble_setRewardAddress`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetRewardAddressResponse {

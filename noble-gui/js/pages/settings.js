@@ -76,6 +76,21 @@ export function init(root, ctx) {
           <div id="s-totp-rotate-result" style="display:none;padding:var(--gap-sm);background:var(--bg-tertiary);border-radius:var(--radius-sm);font-size:var(--font-size-xs)"></div>
           <div id="s-totp-rotate-error" style="color:var(--error);font-size:var(--font-size-xs);display:none"></div>
         </div>
+        <!-- GUI Admin Lock -->
+        <div id="s-gui-lock-section" style="margin-top:var(--gap);border-top:1px solid var(--border);padding-top:var(--gap)">
+          <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 var(--gap-sm)">Dashboard Admin Lock</p>
+          <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0 0 var(--gap-sm)">
+            Require a TOTP sign-in before the dashboard loads — recommended when the
+            dashboard is reachable over your network. Requires TOTP to be enabled.
+            You'll be prompted for a code on the next page load.
+          </p>
+          <label style="display:flex;align-items:center;gap:var(--gap-sm);cursor:pointer">
+            <input id="s-gui-lock-toggle" type="checkbox" style="width:16px;height:16px;cursor:pointer">
+            <span id="s-gui-lock-label" style="font-size:var(--font-size-sm)">Disabled</span>
+          </label>
+          <div id="s-gui-lock-msg" style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:var(--gap-sm)"></div>
+          <button id="s-gui-lock-logout" class="btn-sm" style="display:none;margin-top:var(--gap-sm);padding:6px 14px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-sm)">Lock now &amp; sign out</button>
+        </div>
       </div>
     </div>
 
@@ -494,6 +509,11 @@ export function init(root, ctx) {
   const totpRotateBtn = root.querySelector('#s-totp-rotate-btn');
   const totpRotateResult = root.querySelector('#s-totp-rotate-result');
   const totpRotateError = root.querySelector('#s-totp-rotate-error');
+  // GUI admin lock refs
+  const guiLockToggle = root.querySelector('#s-gui-lock-toggle');
+  const guiLockLabel = root.querySelector('#s-gui-lock-label');
+  const guiLockMsg = root.querySelector('#s-gui-lock-msg');
+  const guiLockLogout = root.querySelector('#s-gui-lock-logout');
   // Validator key refs
   const vkeyBadge = root.querySelector('#s-vkey-badge');
   const vkeyDetails = root.querySelector('#s-vkey-details');
@@ -1667,6 +1687,13 @@ export function init(root, ctx) {
               totpStatus.textContent = 'Enabled';
               totpStatus.style.color = 'var(--success)';
               authMode.textContent = 'TOTP (scope: all)';
+              // TOTP is now live — the dashboard admin lock can be enabled
+              // without reloading.
+              if (guiLockToggle) {
+                guiLockToggle.disabled = false;
+                guiLockMsg.style.color = 'var(--text-muted)';
+                guiLockMsg.textContent = 'TOTP enabled — you can now enable the dashboard admin lock.';
+              }
             } catch (e) {
               msg.textContent = e.message || 'Failed';
               msg.style.color = 'var(--error)';
@@ -1679,6 +1706,56 @@ export function init(root, ctx) {
         totpStatus.textContent = hasAuth ? 'Active' : 'Not configured';
         authMode.textContent = hasAuth ? 'TOTP' : 'None';
         if (hasAuth) totpRotateSection.style.display = 'block';
+      }
+
+      // GUI admin lock status + toggle wiring
+      try {
+        const guiLock = await rpc.call('noble_getGuiLockStatus');
+        guiLockToggle.checked = guiLock.enabled;
+        guiLockToggle.disabled = !guiLock.totp_available;
+        guiLockLabel.textContent = guiLock.enabled ? 'Enabled' : 'Disabled';
+        guiLockMsg.style.color = 'var(--text-muted)';
+        guiLockMsg.textContent = guiLock.totp_available
+          ? (guiLock.enabled ? 'A TOTP code is required to open the dashboard.' : '')
+          : 'Enable TOTP above first to use the admin lock.';
+        guiLockLogout.style.display = guiLock.enabled ? 'inline-block' : 'none';
+
+        guiLockToggle.onchange = async () => {
+          const want = guiLockToggle.checked;
+          guiLockToggle.disabled = true;
+          guiLockMsg.style.color = 'var(--text-muted)';
+          guiLockMsg.textContent = 'Saving…';
+          try {
+            await rpc.call('noble_setConfigValue', { section: 'api', key: 'gui_lock_enabled', value: want ? 'true' : 'false' });
+            if (want) {
+              // The gate is now active — move this browser into the login flow
+              // immediately rather than leaving the loaded admin UI on screen.
+              guiLockMsg.style.color = 'var(--success)';
+              guiLockMsg.textContent = 'Enabled — redirecting to sign in…';
+              location.href = '/login.html';
+              return;
+            }
+            guiLockLabel.textContent = 'Disabled';
+            guiLockLogout.style.display = 'none';
+            guiLockMsg.style.color = 'var(--success)';
+            guiLockMsg.textContent = 'Disabled.';
+          } catch (e) {
+            guiLockToggle.checked = !want; // revert
+            guiLockMsg.style.color = 'var(--error)';
+            guiLockMsg.textContent = e.message || 'Failed to save.';
+          } finally {
+            guiLockToggle.disabled = false;
+          }
+        };
+
+        guiLockLogout.onclick = async () => {
+          try { await fetch('/gui/logout', { method: 'POST', headers: { 'Gatekeeper': 'noble' } }); } catch (_) {}
+          location.href = '/login.html';
+        };
+      } catch (_) {
+        // getGuiLockStatus unavailable (older node) — hide the section.
+        const sec = root.querySelector('#s-gui-lock-section');
+        if (sec) sec.style.display = 'none';
       }
 
       // Ports with inline P2P edit

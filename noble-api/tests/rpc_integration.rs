@@ -101,6 +101,9 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         totp_validator: None, // auth disabled in tests
         totp_scope: noble_api::middleware::TotpScope::All,
         totp_secret_path: None,
+        totp_slot: std::sync::Arc::new(parking_lot::RwLock::new(None)),
+        gui_lock_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        gui_proxy_secret: std::sync::Arc::new(String::new()),
         rpc_port: 8783,
         ws_port: 8784,
         p2p_port: 8780,

@@ -95,6 +95,14 @@ if (!wsUrl) {
 const ws = new WsManager(wsUrl, { onStatusChange });
 console.info(`[app] RPC: ${rpcUrl}, WS: ${wsUrl}`);
 
+// ── GUI admin lock: redirect to the login wall when the session is gone ──
+// rpc-client.js / ws-manager.js dispatch this when the server returns 401.
+window.addEventListener('noble-session-expired', () => {
+  if (!location.pathname.endsWith('/login.html')) {
+    location.href = '/login.html';
+  }
+});
+
 // ── Version footer — populated from window.NOBLE_VERSION injected by the server ──
 const versionEl = document.getElementById('noble-version-footer');
 if (versionEl && window.NOBLE_VERSION) versionEl.textContent = 'v' + window.NOBLE_VERSION;

@@ -159,6 +159,11 @@ pub trait NodeApi {
     #[method(name = "getTotpStatus")]
     async fn get_totp_status(&self) -> Result<TotpStatusResponse, ErrorObjectOwned>;
 
+    /// Get the current GUI admin-lock status (and whether TOTP is available so
+    /// the Settings UI can gate the toggle).
+    #[method(name = "getGuiLockStatus")]
+    async fn get_gui_lock_status(&self) -> Result<GuiLockStatusResponse, ErrorObjectOwned>;
+
     /// Set the reward address for gateway fee splits.
     ///
     /// Accepts Bitcoin addresses (bc1q..., 1..., bc1p...) or hex-encoded NOBLE public keys.
@@ -420,10 +425,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         &self,
         current_code_hash: String,
     ) -> Result<RotateTotpResponse, ErrorObjectOwned> {
-        // Ensure TOTP is enabled.
+        // Ensure TOTP is enabled. Read the live slot (reflects a runtime enable
+        // that the legacy `totp_validator` field does not); swapping its inner
+        // Arc updates both the RPC AuthLayer and the GUI lock.
         let validator_arc = self
-            .totp_validator
-            .as_ref()
+            .totp_slot
+            .read()
+            .clone()
             .ok_or_else(|| ApiError::InvalidParam("TOTP auth is not enabled".into()))?;
 
         // Verify the current code.
@@ -966,8 +974,9 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     }
 
     async fn enable_totp(&self) -> Result<EnableTotpResponse, ErrorObjectOwned> {
-        // Reject if TOTP is already enabled.
-        if self.totp_validator.is_some() {
+        // Reject if TOTP is already enabled (check the live slot, which reflects
+        // a runtime enable that the legacy `totp_validator` field does not).
+        if self.totp_slot.read().is_some() {
             return Err(
                 ApiError::InvalidParam("TOTP is already enabled. Use rotateTotpSecret to change the secret.".into())
                     .into(),
@@ -990,9 +999,19 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
     }
 
     async fn get_totp_status(&self) -> Result<TotpStatusResponse, ErrorObjectOwned> {
-        let enabled = self.totp_validator.is_some();
+        // Read the live slot so a runtime enable/rotate is reflected immediately.
+        let enabled = self.totp_slot.read().is_some();
         let scope = format!("{}", self.totp_scope);
         Ok(TotpStatusResponse { enabled, scope })
+    }
+
+    async fn get_gui_lock_status(&self) -> Result<GuiLockStatusResponse, ErrorObjectOwned> {
+        Ok(GuiLockStatusResponse {
+            enabled: self
+                .gui_lock_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            totp_available: self.totp_slot.read().is_some(),
+        })
     }
 
     async fn set_reward_address(
@@ -1085,6 +1104,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("api", "gui_port"),
             ("api", "allowed_ips"),
             ("api", "tls_san"),
+            ("api", "gui_lock_enabled"),
             ("storage", "data_dir"),
             ("storage", "cache_size_mb"),
             ("storage", "compression"),
@@ -1135,12 +1155,29 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             }
         }
 
+        // The GUI admin lock can only be enabled when TOTP is available — it is
+        // the lock's authentication mechanism. Block the footgun of locking the
+        // dashboard with no way to sign in.
+        if section == "api" && key == "gui_lock_enabled" && value == "true" && self.totp_slot.read().is_none() {
+            return Err(ApiError::InvalidParam(
+                "enable TOTP before enabling the GUI admin lock".into(),
+            )
+            .into());
+        }
+
         let set_fn = self.set_config_value.as_ref().ok_or_else(|| {
             ApiError::InvalidParam("config update callback not configured".into())
         })?;
 
         let restart_required = set_fn(&section, &key, &value)
             .map_err(|e| ApiError::Internal(format!("update config: {e}")))?;
+
+        // Hot-reload the GUI admin lock (the same Arc is shared into the GUI
+        // server, so toggling takes effect on the next request — no restart).
+        if section == "api" && key == "gui_lock_enabled" {
+            self.gui_lock_enabled
+                .store(value == "true", std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Update in-memory state for fields that support hot-reload.
         if section == "network" && key == "max_peers" {

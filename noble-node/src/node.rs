@@ -1544,6 +1544,33 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             init_totp_validator(config, &self.chain_meta)
                 .map_err(|e| NodeError::Config(e.to_string()))?;
 
+        // Live, swappable TOTP validator handle shared with the GUI server and
+        // the RPC AuthLayer so runtime enable/rotate take effect without restart.
+        let totp_slot: noble_api::state::SharedTotpSlot =
+            Arc::new(parking_lot::RwLock::new(totp_validator.clone()));
+        // GUI admin-lock state: enabled flag (hot-reloadable) + per-boot
+        // proxy-trust secret shared with the RPC AuthLayer.
+        // Fail CLOSED: if the lock is enabled but TOTP is unavailable, the GUI
+        // server's gate serves a recovery page to remote clients and only lets
+        // loopback through (on-host recovery) — it never exposes the dashboard.
+        let gui_lock_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.api.gui_lock_enabled,
+        ));
+        if config.api.gui_lock_enabled && totp_validator.is_none() {
+            tracing::warn!(
+                task = "gui_lock",
+                "GUI admin lock is enabled but TOTP is unavailable — the dashboard \
+                 will stay locked (remote sees a recovery page; recover from \
+                 localhost or the CLI, then ensure TOTP loads)."
+            );
+        }
+        let gui_proxy_secret = {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut b);
+            Arc::new(hex::encode(b))
+        };
+
         // --- Build broadcast channels for WebSocket subscriptions ---
         // Keep one receiver alive per channel so messages are buffered (not lost)
         // until the first WS subscriber connects.
@@ -1769,6 +1796,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 None // already enabled
             } else {
                 let config_path_totp = config_path.clone();
+                let totp_slot_enable = totp_slot.clone();
                 Some(Arc::new(move || {
                     let (validator, base32) = noble_api::auth::TotpValidator::generate()
                         .map_err(|e| format!("generate TOTP: {e}"))?;
@@ -1811,6 +1839,11 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     }
 
                     let uri = validator.otpauth_uri("NOBLE Node");
+                    // Install the validator into the live slot so TOTP takes
+                    // effect immediately (the RPC AuthLayer and the GUI lock both
+                    // read the slot) — no restart required.
+                    *totp_slot_enable.write() =
+                        Some(Arc::new(parking_lot::RwLock::new(validator)));
                     tracing::info!(task = "totp", "TOTP secret generated and saved to {}", secret_path.display());
                     Ok((base32, uri))
                 }))
@@ -1976,6 +2009,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             totp_validator,
             totp_scope: noble_api::middleware::TotpScope::from_config(&config.api.totp_scope),
             totp_secret_path,
+            totp_slot: totp_slot.clone(),
+            gui_lock_enabled: gui_lock_enabled.clone(),
+            gui_proxy_secret: gui_proxy_secret.clone(),
             rpc_port,
             ws_port,
             p2p_port,
@@ -2144,6 +2180,33 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             let gui_filter = ip_filter.clone();
             let gui_tls = tls_config.clone();
             let gui_rpc_origins = rpc_origins.clone();
+            // Mark the session cookie `Secure` when the node serves TLS OR the
+            // operator forces it (e.g. behind a TLS-terminating reverse proxy).
+            let gui_secure_cookie = gui_tls.is_some() || config.api.gui_force_secure_cookie;
+            // Warn loudly if the admin lock is on, the node is plaintext, the
+            // cookie isn't forced Secure, and the dashboard is remote-exposed —
+            // the session cookie (the admin credential) would travel in cleartext.
+            if config.api.gui_lock_enabled
+                && gui_tls.is_none()
+                && !config.api.gui_force_secure_cookie
+                && !config.api.allowed_ips.is_empty()
+            {
+                tracing::warn!(
+                    task = "gui_lock",
+                    "GUI admin lock is enabled on a remote-reachable, plaintext GUI: \
+                     the session cookie will be sent WITHOUT the Secure flag in \
+                     cleartext. Enable TLS, or set api.gui_force_secure_cookie = true \
+                     if a TLS-terminating proxy (e.g. nginx) fronts this node."
+                );
+            }
+            // GUI admin-lock state — built once so sessions survive GUI-server
+            // restarts within this node run (the store is in-memory).
+            let gui_lock_state = crate::gui_session::GuiLockState::new(
+                gui_lock_enabled.clone(),
+                totp_slot.clone(),
+                gui_secure_cookie,
+                gui_proxy_secret.clone(),
+            );
             tokio::spawn(async move {
                 // Bombproof restart loop: if the GUI server panics or returns an
                 // error, wait with exponential backoff and restart.  The dashboard
@@ -2154,6 +2217,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let tls_c = gui_tls.clone();
                     let origins_c = gui_rpc_origins.clone();
                     let path_c = gui_path.clone();
+                    let lock_c = gui_lock_state.clone();
 
                     // Catch both errors AND panics.
                     let result = std::panic::AssertUnwindSafe(
@@ -2166,6 +2230,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             rpc_port,
                             ws_port,
                             setup_mode,
+                            lock_c,
                         ),
                     );
                     match futures_util::FutureExt::catch_unwind(result).await {

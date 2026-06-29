@@ -283,6 +283,18 @@ pub struct ApiConfig {
     /// If empty and totp_enabled is true, a secret is auto-generated and written here.
     #[serde(default)]
     pub totp_secret_file: String,
+    /// Enable the GUI admin lock: a TOTP-based session login wall in front of the
+    /// dashboard (port 8785). When true, no dashboard page or proxied RPC/WS call
+    /// is served until an admin signs in with a valid TOTP code. Requires TOTP to
+    /// be enabled. Hot-reloadable via `setConfigValue`.
+    #[serde(default)]
+    pub gui_lock_enabled: bool,
+    /// Force the `Secure` attribute on the GUI admin-lock session cookie even when
+    /// the node itself serves plain HTTP. Set this when a TLS-terminating reverse
+    /// proxy (e.g. nginx) fronts the node so the browser↔proxy leg is HTTPS — it
+    /// keeps the session cookie HTTPS-only without the node holding the cert.
+    #[serde(default)]
+    pub gui_force_secure_cookie: bool,
     /// Dashboard GUI HTTP server bind address.
     #[serde(default = "default_gui_addr")]
     pub gui_addr: String,
@@ -769,6 +781,8 @@ impl Default for ApiConfig {
             max_connections: 100,
             rate_limit: 30,
             totp_enabled: false,
+            gui_lock_enabled: false,
+            gui_force_secure_cookie: false,
             totp_scope: default_totp_scope(),
             totp_secret_file: String::new(),
             gui_addr: default_gui_addr(),

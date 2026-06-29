@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>NOBLE — Administrator sign-in</title>
+  <!--
+    Self-contained login wall for the GUI admin lock. It must NOT import any
+    other dashboard asset (CSS/JS), because the session gate serves only this
+    page (and /gui/login, /gui/logout) before a session exists. Everything is
+    inlined so the page renders standalone.
+  -->
+  <style>
+    :root {
+      --bg: #0f172a; --card: #1e293b; --border: #334155;
+      --text: #e2e8f0; --muted: #94a3b8; --accent: #3b82f6;
+      --accent-hover: #2563eb; --error: #ef4444; --ok: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0; padding: 1rem;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 2rem; width: 100%; max-width: 340px;
+      text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+    }
+    .logo {
+      width: 44px; height: 44px; border-radius: 10px; margin: 0 auto 1rem;
+      background: var(--accent); display: flex; align-items: center;
+      justify-content: center; font-weight: 700; font-size: 1.3rem; color: #fff;
+    }
+    h1 { font-size: 1.15rem; margin: 0 0 0.35rem; }
+    p.sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 1.25rem; }
+    input {
+      width: 100%; padding: 0.7rem; font-size: 1.5rem; letter-spacing: 0.35em;
+      text-align: center; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg); color: var(--text); margin-bottom: 1rem;
+      font-variant-numeric: tabular-nums;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    button {
+      width: 100%; padding: 0.7rem; border: 0; border-radius: 8px;
+      background: var(--accent); color: #fff; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .msg { font-size: 0.82rem; min-height: 1.2em; margin-top: 0.75rem; }
+    .msg.error { color: var(--error); }
+    .msg.ok { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">N</div>
+    <h1>Administrator sign-in</h1>
+    <p class="sub">Enter your 6-digit authenticator code to access the NOBLE dashboard.</p>
+    <input id="code" type="text" inputmode="numeric" maxlength="6" pattern="[0-9]{6}"
+           placeholder="000000" autocomplete="one-time-code" autofocus aria-label="TOTP code">
+    <button id="submit" type="button">Unlock dashboard</button>
+    <div id="msg" class="msg" role="status" aria-live="polite"></div>
+  </div>
+  <script>
+    const code = document.getElementById('code');
+    const submit = document.getElementById('submit');
+    const msg = document.getElementById('msg');
+
+    async function sha256Hex(s) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function setMsg(text, cls) { msg.textContent = text; msg.className = 'msg' + (cls ? ' ' + cls : ''); }
+
+    async function unlock() {
+      const value = code.value.trim();
+      if (!/^\d{6}$/.test(value)) { setMsg('Please enter a 6-digit code.', 'error'); return; }
+      submit.disabled = true; setMsg('Verifying…');
+      try {
+        const resp = await fetch('/gui/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Gatekeeper': 'noble' },
+          body: JSON.stringify({ code_hash: await sha256Hex(value) }),
+        });
+        if (resp.ok) { setMsg('Unlocked. Loading…', 'ok'); location.href = '/'; return; }
+        if (resp.status === 429) {
+          const j = await resp.json().catch(() => ({}));
+          setMsg('Too many attempts. Wait ' + (j.retry_after || 30) + 's and try again.', 'error');
+        } else if (resp.status === 503) {
+          setMsg('TOTP is not available on this node. Contact the operator.', 'error');
+        } else {
+          setMsg('Invalid code. Please try again.', 'error');
+          code.value = ''; code.focus();
+        }
+      } catch (_) {
+        setMsg('Network error. Please try again.', 'error');
+      }
+      submit.disabled = false;
+    }
+
+    submit.addEventListener('click', unlock);
+    code.addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+  </script>
+</body>
+</html>

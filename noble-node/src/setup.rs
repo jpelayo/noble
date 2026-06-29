@@ -635,6 +635,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             totp_enabled,
             totp_scope: defaults.api.totp_scope.clone(),
             totp_secret_file,
+            gui_lock_enabled: defaults.api.gui_lock_enabled,
+            gui_force_secure_cookie: defaults.api.gui_force_secure_cookie,
             gui_addr: defaults.api.gui_addr.clone(),
             gui_dir: defaults.api.gui_dir.clone(),
             allowed_ips: allowed_ips.clone(),

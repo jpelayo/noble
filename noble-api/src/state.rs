@@ -116,6 +116,15 @@ pub struct PeerInfoEntry {
 /// `WalletKeystore(0) < WalletState(1) < Storage(2) < ValidatorRegistry(3) < Consensus(4) < Mempool(5) < NetworkStats(6) < PeerInfo(7) < TotpValidator(8) < MaxNetworkVersion(9) < TlsCertInfo(10)`
 ///
 /// When acquiring multiple locks, always acquire lower-ordered locks first.
+///
+/// A live, swappable handle to the TOTP validator, shared between `ApiState` and
+/// the decoupled GUI server. The inner `Option` lets `enableTotp` install a
+/// validator at runtime (the legacy `totp_validator` field stays `None` until
+/// restart), so the GUI admin lock can validate codes against the current secret
+/// without a restart. Both layers hold a clone of the SAME outer `Arc`.
+pub type SharedTotpSlot =
+    Arc<RwLock<Option<Arc<RwLock<crate::auth::TotpValidator>>>>>;
+
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Block/transaction persistence. **Lock order: 2 (Storage).**
     pub storage: Arc<RwLock<S>>,
@@ -147,6 +156,19 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub totp_scope: crate::middleware::TotpScope,
     /// Path to the TOTP secret file (for rotation persistence). None = not configured.
     pub totp_secret_path: Option<std::path::PathBuf>,
+    /// Live, swappable TOTP validator handle shared with the GUI server so the
+    /// GUI admin lock validates against the current secret across runtime
+    /// enable/rotate. **Lock order: 8 (TotpValidator).**
+    pub totp_slot: SharedTotpSlot,
+    /// Whether the GUI admin lock (session login wall on the dashboard) is
+    /// enabled. Hot-reloadable via `setConfigValue`; the same `Arc` is shared
+    /// into the GUI server so toggling takes effect without a restart.
+    pub gui_lock_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-boot GUI admin-lock proxy-trust secret (see
+    /// `crate::middleware::GUI_PROXY_AUTH_HEADER`). Shared with the GUI server,
+    /// which attaches it to proxied requests it has already session-authenticated
+    /// so the loopback RPC accepts them under any `totp_scope`.
+    pub gui_proxy_secret: Arc<String>,
     /// Configured RPC port (for getNodeInfo response).
     pub rpc_port: u16,
     /// Configured WebSocket port (for getNodeInfo response).

@@ -6,7 +6,7 @@
 //! When a [`TotpValidator`] is configured, incoming HTTP requests must
 //! include an `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
 //! Invalid or missing credentials receive a JSON-RPC error response with
-//! code `-32012 AUTH_REQUIRED`.
+//! code `-32004 AUTH_REQUIRED`.
 //!
 //! Supports three scopes via [`TotpScope`]:
 //! - `All`: every request requires authentication (default).
@@ -45,6 +45,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
+use subtle::ConstantTimeEq;
 use tower::{Layer, Service};
 use tracing::Instrument;
 
@@ -84,6 +85,7 @@ pub static READ_METHODS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "getStoragePaths", "getStorageStats", "getSyncStatus", "getTlsCertInfo",
         // Multi-path sharding read methods (Phase 5):
         "discoverShards", "listShards",
+        "getGuiLockStatus",
         "getTlsFingerprint", "getTotpStatus", "getTransaction",
         "getTransactionReceipt", "getTransactionStatus",
         "getValidatorKeyInfo", "getValidatorList", "getVoteTallies",
@@ -175,11 +177,23 @@ pub fn is_read_method(method: &str) -> bool {
     READ_METHODS.contains(name) || LEGACY_PUBLIC_METHODS.contains(name)
 }
 
+/// HTTP header carrying the GUI admin-lock proxy-trust secret. When the GUI
+/// server has validated an admin session, its reverse proxy attaches this header
+/// (value = the per-boot secret) so the loopback RPC accepts the request without
+/// per-request TOTP — which the GUI session has already superseded. The secret is
+/// random per boot and known only in-process, so an external/on-host client
+/// cannot forge it, and the GUI proxy builds a fresh outbound request (it never
+/// copies an inbound copy through). See `gui_session.rs` / `gui_server.rs`.
+pub const GUI_PROXY_AUTH_HEADER: &str = "x-noble-gui-auth";
+
 /// Tower [`Layer`] that produces [`AuthService`] instances.
 #[derive(Clone)]
 pub struct AuthLayer {
-    validator: Option<Arc<RwLock<TotpValidator>>>,
+    /// Live, swappable TOTP validator handle (survives runtime enable/rotate).
+    totp_slot: crate::state::SharedTotpSlot,
     scope: TotpScope,
+    /// Per-boot GUI proxy-trust secret (see [`GUI_PROXY_AUTH_HEADER`]).
+    gui_proxy_secret: Arc<String>,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
 }
@@ -187,14 +201,17 @@ pub struct AuthLayer {
 impl AuthLayer {
     /// Create a new auth layer.
     ///
-    /// Pass `None` for `validator` to disable TOTP authentication.
+    /// The validator is read live from `totp_slot`; a `None` slot value disables
+    /// TOTP authentication. `gui_proxy_secret` is the GUI admin-lock bridge secret.
     pub fn new(
-        validator: Option<Arc<RwLock<TotpValidator>>>,
+        totp_slot: crate::state::SharedTotpSlot,
         scope: TotpScope,
+        gui_proxy_secret: Arc<String>,
     ) -> Self {
         Self {
-            validator,
+            totp_slot,
             scope,
+            gui_proxy_secret,
             next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -206,8 +223,9 @@ impl<S> Layer<S> for AuthLayer {
     fn layer(&self, inner: S) -> Self::Service {
         AuthService {
             inner,
-            validator: self.validator.clone(),
+            totp_slot: self.totp_slot.clone(),
             scope: self.scope,
+            gui_proxy_secret: self.gui_proxy_secret.clone(),
             next_request_id: self.next_request_id.clone(),
         }
     }
@@ -218,8 +236,9 @@ impl<S> Layer<S> for AuthLayer {
 #[derive(Clone)]
 pub struct AuthService<S> {
     inner: S,
-    validator: Option<Arc<RwLock<TotpValidator>>>,
+    totp_slot: crate::state::SharedTotpSlot,
     scope: TotpScope,
+    gui_proxy_secret: Arc<String>,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
 }
@@ -252,8 +271,11 @@ where
         let mut inner = self.inner.clone();
         std::mem::swap(&mut self.inner, &mut inner);
 
-        let validator = self.validator.clone();
+        // Read the validator live from the shared slot so runtime enable/rotate
+        // take effect without a restart.
+        let validator = self.totp_slot.read().clone();
         let scope = self.scope;
+        let gui_proxy_secret = self.gui_proxy_secret.clone();
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
         Box::pin(async move {
@@ -281,6 +303,26 @@ where
                 let new_req = Request::from_parts(parts, Full::new(body_bytes));
                 let resp = inner.call(new_req).instrument(rpc_span).await?;
                 return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+            }
+
+            // --- GUI admin-lock proxy bridge: a request bearing the per-boot
+            // secret was vouched for by the in-process GUI reverse proxy AFTER
+            // it validated an admin session, so it is authenticated and bypasses
+            // per-request TOTP. The secret is high-entropy and never exposed to
+            // clients; the proxy builds a fresh outbound request and only sets
+            // this header when authenticated, so it cannot be forged. ---
+            if let Some(hdr) = parts.headers.get(GUI_PROXY_AUTH_HEADER) {
+                let provided = hdr.as_bytes();
+                let expected = gui_proxy_secret.as_bytes();
+                if !expected.is_empty()
+                    && provided.len() == expected.len()
+                    && bool::from(provided.ct_eq(expected))
+                {
+                    tracing::debug!(task = "rpc_auth", "authenticated via GUI session proxy bridge");
+                    let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                    let resp = inner.call(new_req).instrument(rpc_span).await?;
+                    return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+                }
             }
 
             // --- No validator: pass through without auth. ---
@@ -405,6 +447,15 @@ fn auth_error_response() -> Response<Full<Bytes>> {
 mod tests {
     use super::*;
 
+    /// Build a `SharedTotpSlot` from an optional validator for tests.
+    fn test_slot(validator: Option<TotpValidator>) -> crate::state::SharedTotpSlot {
+        Arc::new(RwLock::new(validator.map(|v| Arc::new(RwLock::new(v)))))
+    }
+    /// Empty GUI proxy secret = bridge disabled (the default for TOTP tests).
+    fn no_gui_secret() -> Arc<String> {
+        Arc::new(String::new())
+    }
+
     #[test]
     fn auth_error_response_has_correct_status() {
         let resp = auth_error_response();
@@ -435,7 +486,8 @@ mod tests {
         "getDocumentsByIssuer", "getDocumentVersions",
         "getEncryptionStatus", "getEvidence", "getEvidenceList",
         "getFaucetAdminToken", "getFinalityStatus",
-        "getForkResolutionStatus", "getGatewayInfo", "getLatestBlock",
+        "getForkResolutionStatus", "getGatewayInfo", "getGuiLockStatus",
+        "getLatestBlock",
         "getMempoolInfo", "getMyBadgeStatus", "getNetworkInfo",
         "getNodeIdentity", "getNodeInfo", "getPeerInfo", "getPeerMemory",
         "getPollHistory", "getProposalHistory", "getPruningStatus",
@@ -509,8 +561,8 @@ mod tests {
         // reconcileStorage).
         assert_eq!(
             ALL_RPC_METHODS.len(),
-            127,
-            "ALL_RPC_METHODS drifted from the 127 registered RPC methods — \
+            128,
+            "ALL_RPC_METHODS drifted from the 128 registered RPC methods — \
              update the roster and classify any new methods in READ_METHODS \
              (read) or leave them out (write-classified, require TOTP)"
         );
@@ -606,14 +658,14 @@ mod tests {
 
     #[test]
     fn auth_layer_none_creates_passthrough() {
-        let layer = AuthLayer::new(None, TotpScope::All);
+        let layer = AuthLayer::new(test_slot(None), TotpScope::All, no_gui_secret());
         let _service = layer.layer(DummyService);
     }
 
     #[test]
     fn auth_layer_some_creates_checking_service() {
         let (validator, _) = TotpValidator::generate().unwrap();
-        let layer = AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::All);
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, no_gui_secret());
         let _service = layer.layer(DummyService);
     }
 
@@ -672,7 +724,7 @@ mod tests {
     fn auth_layer_write_only_scope_propagates() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let layer =
-            AuthLayer::new(Some(Arc::new(RwLock::new(validator))), TotpScope::WriteOnly);
+            AuthLayer::new(test_slot(Some(validator)), TotpScope::WriteOnly, no_gui_secret());
         let service = layer.layer(DummyService);
         assert_eq!(service.scope, TotpScope::WriteOnly);
     }
@@ -683,8 +735,9 @@ mod tests {
     async fn ws_upgrade_rejected_without_query_token() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let layer = AuthLayer::new(
-            Some(Arc::new(RwLock::new(validator))),
+            test_slot(Some(validator)),
             TotpScope::All,
+            no_gui_secret(),
         );
         let mut service = layer.layer(DummyService);
 
@@ -704,8 +757,9 @@ mod tests {
     async fn ws_upgrade_rejected_with_invalid_query_token() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let layer = AuthLayer::new(
-            Some(Arc::new(RwLock::new(validator))),
+            test_slot(Some(validator)),
             TotpScope::All,
+            no_gui_secret(),
         );
         let mut service = layer.layer(DummyService);
 
@@ -737,8 +791,9 @@ mod tests {
         let hash = crate::auth::hash_code(&code);
 
         let layer = AuthLayer::new(
-            Some(Arc::new(RwLock::new(validator))),
+            test_slot(Some(validator)),
             TotpScope::All,
+            no_gui_secret(),
         );
         let mut service = layer.layer(DummyService);
 
@@ -752,6 +807,51 @@ mod tests {
 
         let resp = service.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gui_proxy_bridge_secret_bypasses_totp_under_scope_all() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let secret = Arc::new("per-boot-secret-abc123".to_string());
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret.clone());
+        let mut service = layer.layer(DummyService);
+
+        // No Authorization header — only the in-process proxy-trust secret.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(GUI_PROXY_AUTH_HEADER, secret.as_str())
+            .body(Full::from(Bytes::from_static(b"{\"method\":\"noble_getBlockCount\"}")))
+            .unwrap();
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a request bearing the per-boot proxy secret must bypass TOTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn gui_proxy_bridge_forged_secret_is_rejected() {
+        let (validator, _) = TotpValidator::generate().unwrap();
+        let secret = Arc::new("per-boot-secret-abc123".to_string());
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret);
+        let mut service = layer.layer(DummyService);
+
+        // A client-supplied (forged) marker that does NOT equal the per-boot
+        // secret must NOT bypass auth — it falls through to TOTP and is rejected.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(GUI_PROXY_AUTH_HEADER, "not-the-secret")
+            .body(Full::from(Bytes::from_static(b"{\"method\":\"noble_getBlockCount\"}")))
+            .unwrap();
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a forged proxy secret must not bypass auth"
+        );
     }
 
     /// Minimal no-op service for layer construction tests.

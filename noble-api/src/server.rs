@@ -107,7 +107,11 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
     module: RpcModule<()>,
     mode: ServerMode,
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
-    let auth_layer = AuthLayer::new(state.totp_validator.clone(), state.totp_scope);
+    let auth_layer = AuthLayer::new(
+        state.totp_slot.clone(),
+        state.totp_scope,
+        state.gui_proxy_secret.clone(),
+    );
 
     // AUD3-D2: always layer IpFilter. Fail CLOSED when no list is configured —
     // fall back to localhost-only (IpFilter::new(&[]) allows loopback only), not
