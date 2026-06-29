@@ -18,11 +18,20 @@ struct Bucket {
     last_refill: Instant,
 }
 
+/// Hard cap on the number of tracked peers. In practice the map is already
+/// bounded by the connection limit — only connected gossip sources get a bucket
+/// and `remove_peer` runs on disconnect — so this is belt-and-suspenders against
+/// a missed removal or a future change, mirroring the API limiter's `max_tracked`.
+const MAX_TRACKED_PEERS: usize = 4096;
+
 /// Rate limiter tracking per-peer transaction relay budgets.
 pub struct TxRateLimiter {
     buckets: HashMap<PeerId, Bucket>,
     capacity: f64,
     rate: f64,
+    /// Upper bound on `buckets`; the least-recently-active entry is evicted when
+    /// a new peer would exceed it.
+    max_tracked: usize,
 }
 
 impl TxRateLimiter {
@@ -35,6 +44,7 @@ impl TxRateLimiter {
             buckets: HashMap::new(),
             capacity: capacity as f64,
             rate: rate as f64,
+            max_tracked: MAX_TRACKED_PEERS,
         }
     }
 
@@ -43,6 +53,11 @@ impl TxRateLimiter {
     /// Returns `true` if the relay is allowed, `false` if rate-limited.
     pub fn try_consume(&mut self, peer_id: &PeerId) -> bool {
         let now = Instant::now();
+        // Bound the map at all times: when a NEW peer would exceed the cap,
+        // evict the least-recently-active bucket first.
+        if self.buckets.len() >= self.max_tracked && !self.buckets.contains_key(peer_id) {
+            self.evict_oldest();
+        }
         let capacity = self.capacity;
         let rate = self.rate;
 
@@ -73,6 +88,18 @@ impl TxRateLimiter {
     pub fn cleanup(&mut self, max_idle: std::time::Duration) {
         self.buckets
             .retain(|_, bucket| bucket.last_refill.elapsed() < max_idle);
+    }
+
+    /// Evict the least-recently-active bucket (enforces `max_tracked`).
+    fn evict_oldest(&mut self) {
+        if let Some(oldest) = self
+            .buckets
+            .iter()
+            .min_by_key(|(_, b)| b.last_refill)
+            .map(|(p, _)| *p)
+        {
+            self.buckets.remove(&oldest);
+        }
     }
 
     /// Number of tracked peers.
@@ -138,6 +165,16 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         rl.cleanup(Duration::from_millis(10));
         assert_eq!(rl.peer_count(), 0);
+    }
+
+    #[test]
+    fn evicts_oldest_when_over_max_tracked() {
+        let mut rl = TxRateLimiter::new(10, 10);
+        rl.max_tracked = 2;
+        rl.try_consume(&PeerId::random());
+        rl.try_consume(&PeerId::random());
+        rl.try_consume(&PeerId::random()); // 3rd new peer → evict oldest first
+        assert!(rl.peer_count() <= 2, "map must stay bounded by max_tracked");
     }
 
     #[test]

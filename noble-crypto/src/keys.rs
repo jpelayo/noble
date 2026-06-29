@@ -170,14 +170,16 @@ impl NoblePrivateKey {
     pub fn public_key(&self) -> NoblePublicKey {
         match self {
             Self::Secp256k1(sk) | Self::ValidatorSecp256k1(sk) => {
-                let signing_key = k256::ecdsa::SigningKey::from_slice(sk).unwrap();
+                let signing_key = k256::ecdsa::SigningKey::from_slice(sk)
+                    .expect("secp256k1 secret invalid — keys are validated at creation (OsRng/BIP-32) and GCM-authenticated in the keystore");
                 let vk = signing_key.verifying_key();
                 NoblePublicKey::Secp256k1(vk.to_sec1_bytes().to_vec())
             }
             Self::P2pIdentity(raw) | Self::TlsKey(raw) | Self::TotpSecret(raw) | Self::FaucetPassphrase(raw) => {
                 // Synthetic: SHA-256 of raw bytes → secp256k1 pubkey, used as keystore filename only.
                 let hash = crate::sha256(raw);
-                let sk = k256::ecdsa::SigningKey::from_slice(&hash.0).unwrap();
+                let sk = k256::ecdsa::SigningKey::from_slice(&hash.0)
+                    .expect("SHA-256 output is a valid secp256k1 scalar (synthetic keystore-filename key)");
                 NoblePublicKey::Secp256k1(sk.verifying_key().to_sec1_bytes().to_vec())
             }
         }

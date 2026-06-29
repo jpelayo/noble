@@ -193,18 +193,26 @@ where
             .get::<std::net::SocketAddr>()
             .map(|addr| addr.ip());
 
-        // If we can determine the client IP and it's not allowed, reject.
-        if let Some(ip) = client_ip {
-            if !self.filter.is_allowed(ip) {
-                tracing::warn!(task = "ip_filter", ip = %ip, "access denied");
-                return Box::pin(async move {
-                    let resp = access_denied_response();
-                    Ok(resp.map(|b| {
-                        b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
-                            .boxed_unsync()
-                    }))
-                });
+        // Fail CLOSED: reject if the IP is not allowed OR cannot be determined.
+        // The peer SocketAddr is injected by PeerAddrLayer for every (TLS)
+        // connection, so a missing IP means a misconfigured path, not a request
+        // to wave through.
+        let denied = match client_ip {
+            Some(ip) => !self.filter.is_allowed(ip),
+            None => true,
+        };
+        if denied {
+            match client_ip {
+                Some(ip) => tracing::warn!(task = "ip_filter", ip = %ip, "access denied"),
+                None => tracing::warn!(task = "ip_filter", "access denied: client IP undeterminable (fail-closed)"),
             }
+            return Box::pin(async move {
+                let resp = access_denied_response();
+                Ok(resp.map(|b| {
+                    b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
+                        .boxed_unsync()
+                }))
+            });
         }
 
         // Allowed — forward to inner service.

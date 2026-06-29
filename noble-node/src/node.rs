@@ -5969,10 +5969,11 @@ mod tests {
         engine.set_voting_enabled(true);
 
         // Simulate: advance through a full cycle.
-        // First tick initializes epoch AND requests mempool txs if in Proposal phase.
+        // First tick initializes epoch AND requests mempool txs once we are at
+        // least VOTE_CAST_DELAY (30s) into the Proposal phase.
         let epoch = 1_773_600_000u64;
         let cycle_dur = 960u64;
-        let actions = engine.step(CycleEvent::Tick { now: epoch + 1 });
+        let actions = engine.step(CycleEvent::Tick { now: epoch + 31 });
         let has_mempool_req = actions.iter().any(|a| matches!(a, CycleIo::RequestMempoolTransactions { .. }));
         assert!(has_mempool_req, "engine should request mempool txs on first tick in Proposal phase");
 

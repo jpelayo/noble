@@ -387,10 +387,10 @@ async fn estimate_fee() {
         .await
         .unwrap();
 
-    // Fee estimates should be positive numbers: min_fee <= recommended_fee <= high_priority_fee
-    let min_fee = resp["min_fee"].as_u64().unwrap();
-    let recommended = resp["recommended_fee"].as_u64().unwrap();
-    let high_priority = resp["high_priority_fee"].as_u64().unwrap();
+    // Fee estimates are rate-based (groats/byte): low <= recommended <= high.
+    let min_fee = resp["low_fee_rate"].as_u64().unwrap();
+    let recommended = resp["recommended_fee_rate"].as_u64().unwrap();
+    let high_priority = resp["high_priority_fee_rate"].as_u64().unwrap();
     assert!(min_fee > 0);
     assert!(min_fee <= recommended);
     assert!(recommended <= high_priority);
@@ -544,8 +544,11 @@ async fn get_sync_status_shape() {
         .await
         .unwrap();
 
-    assert_eq!(resp["synced"], true);
+    // A lone genesis-only node with no peers is `Isolated` under the centralized
+    // AlignmentSnapshot model (default), so `synced` is false — not `Aligned`.
+    assert_eq!(resp["synced"], false);
     assert_eq!(resp["current_height"], 0);
+    assert_eq!(resp["state"], "Isolated");
     assert!(resp["highest_known"].is_number());
     assert!(resp["progress"].is_number());
     assert!(resp["state"].is_string());
@@ -613,7 +616,10 @@ async fn get_address_history_shape() {
     let (url, _handle) = start_test_server(state).await;
     let client = WsClientBuilder::default().build(&url).await.unwrap();
 
-    let mut wire = vec![0x01u8];
+    // Valid secp256k1 wire address (scheme 0x02 + 33-byte compressed key).
+    // The legacy Ed25519 scheme 0x01 is no longer accepted by parse_address.
+    let mut wire = vec![0x02u8]; // SCHEME_SECP256K1
+    wire.push(0x02); // even-y compressed prefix
     wire.extend_from_slice(&[0xAB; 32]);
     let addr = hex::encode(&wire);
 
@@ -766,7 +772,9 @@ async fn get_transaction_receipt_confirmed() {
         .await
         .unwrap();
 
-    assert_eq!(resp["status"], "confirmed");
+    // Status vocabulary is pending/admitted/maturing/complete. A tx with 1
+    // confirmation (<= COINBASE_MATURITY=3) is "maturing", not "complete".
+    assert_eq!(resp["status"], "maturing");
     assert_eq!(resp["block_height"], 1);
     assert_eq!(resp["block_hash"].as_str().unwrap(), block_hash);
     assert_eq!(resp["tx_index"], 0);

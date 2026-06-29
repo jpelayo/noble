@@ -24,14 +24,23 @@ pub fn from_cbor<T: de::DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError>
     Ok(value)
 }
 
+/// Maximum CBOR nesting depth. This deserializer parses untrusted input (gossip
+/// messages, sync bodies); without a bound, a deeply-nested blob — or an unknown
+/// field skipped via `IgnoredAny` → `deserialize_any` → seq/map — recurses until
+/// the stack overflows and the process aborts. 128 is far deeper than any
+/// legitimate Noble wire type. Enforced in `deserialize_seq`/`deserialize_map`,
+/// the only two recursion points (all nesting funnels through them).
+const MAX_CBOR_DEPTH: u32 = 128;
+
 struct CborDeserializer<'de> {
     input: &'de [u8],
     pos: usize,
+    depth: u32,
 }
 
 impl<'de> CborDeserializer<'de> {
     fn new(input: &'de [u8]) -> Self {
-        Self { input, pos: 0 }
+        Self { input, pos: 0, depth: 0 }
     }
 
     fn peek(&self) -> Result<u8, CodecError> {
@@ -293,8 +302,15 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, CodecError> {
         let (major, len) = self.read_header()?;
         if major == 4 {
-            // CBOR array — standard sequence of elements.
-            visitor.visit_seq(SeqAccess { de: self, remaining: len as usize })
+            // CBOR array — standard sequence of elements. Bound recursion depth
+            // (reborrow `&mut *self` so we can decrement after visit_seq returns).
+            self.depth += 1;
+            if self.depth > MAX_CBOR_DEPTH {
+                return Err(CodecError::Deserialization("max CBOR nesting depth exceeded".into()));
+            }
+            let r = visitor.visit_seq(SeqAccess { de: &mut *self, remaining: len as usize });
+            self.depth -= 1;
+            r
         } else if major == 2 {
             // CBOR byte string — accept as a sequence of u8.
             // This allows Vec<u8> and [u8; N] to deserialize from byte strings
@@ -321,7 +337,15 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut CborDeserializer<'de> {
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, CodecError> {
         let (major, len) = self.read_header()?;
         if major != 5 { return Err(CodecError::Deserialization(format!("expected map, got major {major}"))); }
-        visitor.visit_map(MapAccess { de: self, remaining: len as usize })
+        // Bound recursion depth — maps nest via struct/enum fields and via
+        // IgnoredAny when skipping unknown keys. Reborrow so we decrement after.
+        self.depth += 1;
+        if self.depth > MAX_CBOR_DEPTH {
+            return Err(CodecError::Deserialization("max CBOR nesting depth exceeded".into()));
+        }
+        let r = visitor.visit_map(MapAccess { de: &mut *self, remaining: len as usize });
+        self.depth -= 1;
+        r
     }
 
     fn deserialize_struct<V: Visitor<'de>>(
@@ -476,5 +500,35 @@ impl<'a, 'de> de::VariantAccess<'de> for VariantAccess<'a, 'de> {
 impl de::Error for CodecError {
     fn custom<T: std::fmt::Display>(msg: T) -> Self {
         CodecError::Deserialization(msg.to_string())
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    #[test]
+    fn deeply_nested_cbor_is_rejected() {
+        // N (> MAX_CBOR_DEPTH) nested 1-element CBOR arrays (0x81) then uint 0
+        // (0x00). Deserializing as IgnoredAny drives deserialize_any -> seq
+        // recursion — exactly the unknown-field-skip attack path. With the depth
+        // guard this returns an error instead of recursing toward a stack abort.
+        let n = MAX_CBOR_DEPTH as usize + 50;
+        let mut blob = vec![0x81u8; n];
+        blob.push(0x00);
+        let r = from_cbor::<serde::de::IgnoredAny>(&blob);
+        assert!(r.is_err(), "deeply nested CBOR must be rejected, not overflow");
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(msg.contains("depth"), "expected a depth error, got: {msg}");
+    }
+
+    #[test]
+    fn normal_nesting_still_decodes() {
+        // Legitimate, modestly-nested data (well under MAX) round-trips — the
+        // guard does not reject normal structures.
+        let v: Vec<Vec<u8>> = vec![vec![1, 2, 3], vec![4, 5]];
+        let bytes = crate::cbor_ser::to_cbor(&v).unwrap();
+        let decoded: Vec<Vec<u8>> = from_cbor(&bytes).unwrap();
+        assert_eq!(decoded, v);
     }
 }

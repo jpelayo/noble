@@ -764,6 +764,23 @@ impl RocksDbStorage {
         Ok(())
     }
 
+    /// Force a full compaction of every column family.
+    ///
+    /// Compaction is what actually re-places SST files across the configured
+    /// `db_paths` tiers: flush output (L0) always lands in the primary path
+    /// until compaction moves older data to later tiers per their size targets.
+    /// Operators can call this to rebalance tiers; it also lets storage tests
+    /// deterministically exercise tier spillover instead of relying on the
+    /// background compaction that a small dataset never triggers on its own.
+    pub fn compact_all(&self) {
+        for cf_name in ALL_CF_NAMES {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                self.db
+                    .compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+            }
+        }
+    }
+
     /// Query per-CF size and key count estimates from RocksDB properties.
     fn query_cf_stats(&self) -> Vec<CfStats> {
         ALL_CF_NAMES

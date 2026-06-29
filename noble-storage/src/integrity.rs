@@ -271,7 +271,9 @@ mod tests {
         let store = MemoryStorage::new();
         // Scan range with no blocks
         let report = verify_chain_integrity(&store, test_chain_id(), 0, 0);
-        assert!(!report.is_clean()); // height 0 doesn't exist
+        // Height 0 having no block is expected (Noble chains start at height 1),
+        // so scanning an empty [0,0] range yields a clean report.
+        assert!(report.is_clean());
     }
 
     #[test]

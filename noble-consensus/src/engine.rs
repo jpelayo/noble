@@ -2612,6 +2612,13 @@ mod tests {
         );
         engine.set_validator_snapshot(snap);
         engine.set_peer_count(peers);
+        // These unit tests inject VoteReceived/CycleBoundary events directly,
+        // without a prior Tick — so the first-tick initializer (which seeds
+        // tracked_cycle in production) never runs. Seed cycle 0 here so the
+        // engine matches the cycle-0 votes/boundaries the tests use and is in
+        // bootstrap mode (cycle < BOOTSTRAP_MODE_CYCLES), where votes are not
+        // badge-gated. Tests that need another cycle set tracked_cycle after.
+        engine.tracked_cycle = 0;
         engine
     }
 
@@ -2776,9 +2783,9 @@ mod tests {
         let (vp, vpub) = make_validator();
         let mut engine = make_engine(None, &[vpub.clone()], 5);
         engine.tracked_phase = CyclePhase::Proposal;
-        // Pin clock to 280s into the Proposal phase → 20s until Voting (< tolerance).
+        // Pin clock to 220s into the 240s Proposal phase → 20s until Voting (< tolerance).
         let g = noble_core::GENESIS_TIMESTAMP;
-        engine.clock_anchor = (std::time::Instant::now(), g + 280);
+        engine.clock_anchor = (std::time::Instant::now(), g + 220);
 
         let candidate = Hash256::from_bytes([0x42; 32]);
         let vote = PorVote::sign(0, candidate, &vp, vpub.clone()).unwrap();

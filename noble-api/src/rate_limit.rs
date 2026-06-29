@@ -194,18 +194,25 @@ where
             .get::<std::net::SocketAddr>()
             .map(|addr| addr.ip());
 
-        // Check rate limit if we can determine the IP.
-        if let Some(ip) = client_ip {
-            if !limiter.try_acquire(ip) {
-                tracing::warn!(task = "rate_limit", ip = %ip, "rate limited");
-                return Box::pin(async move {
-                    let resp = rate_limited_response();
-                    Ok(resp.map(|b| {
-                        b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
-                            .boxed_unsync()
-                    }))
-                });
+        // Fail CLOSED: rate-limit, and reject when the IP can't be determined.
+        // (The IP filter already blocks the no-IP case earlier in the normal
+        // stack; this keeps the limiter correct if used standalone or reordered.)
+        let acquired = match client_ip {
+            Some(ip) => limiter.try_acquire(ip),
+            None => false,
+        };
+        if !acquired {
+            match client_ip {
+                Some(ip) => tracing::warn!(task = "rate_limit", ip = %ip, "rate limited"),
+                None => tracing::warn!(task = "rate_limit", "rejected: client IP undeterminable (fail-closed)"),
             }
+            return Box::pin(async move {
+                let resp = rate_limited_response();
+                Ok(resp.map(|b| {
+                    b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
+                        .boxed_unsync()
+                }))
+            });
         }
 
         // Allowed — forward to inner service.

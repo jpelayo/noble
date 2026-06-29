@@ -187,8 +187,13 @@ impl StorageEngine for MemoryStorage {
                         ))
                     })?;
 
-                    // Check UTXO maturity (ALL outputs need COINBASE_MATURITY confirmations)
-                    if !utxo.is_mature(height) {
+                    // Check UTXO maturity (ALL outputs need COINBASE_MATURITY
+                    // confirmations) — except outputs created earlier in THIS same
+                    // block (intra-block UTXO chaining / CPFP). This mirrors the
+                    // RocksDB backend's `from_same_block` skip so both StorageEngine
+                    // impls accept the same blocks. Same-block outputs are the only
+                    // UTXOs carrying `height == height`.
+                    if utxo.height != height && !utxo.is_mature(height) {
                         return Err(StorageError::Database(format!(
                             "UTXO not mature: created at {}, current {}, need {}",
                             utxo.height,

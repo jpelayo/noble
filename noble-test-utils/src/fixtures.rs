@@ -345,7 +345,8 @@ mod tests {
     #[test]
     fn test_keypair_generates_valid_keys() {
         let kp = TestKeypair::generate();
-        assert_eq!(kp.pk_bytes.len(), 32);
+        // secp256k1-everywhere: compressed public key is 33 bytes, secret is 32.
+        assert_eq!(kp.pk_bytes.len(), 33);
         assert_eq!(kp.sk_bytes.len(), 32);
     }
 

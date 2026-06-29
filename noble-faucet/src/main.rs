@@ -831,7 +831,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["noble-faucet", "--faucet-address", "abcd1234"]).unwrap();
         assert_eq!(cli.listen, "0.0.0.0:8786");
-        assert_eq!(cli.rpc_url, "http://127.0.0.1:8783");
+        assert_eq!(cli.rpc_url, "https://127.0.0.1:8783");
         assert_eq!(cli.faucet_address, Some("abcd1234".to_string()));
         assert_eq!(cli.drip_amount, 100_000_000);
         assert!(cli.totp_code.is_none());

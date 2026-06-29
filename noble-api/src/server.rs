@@ -109,8 +109,15 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
 ) -> Result<jsonrpsee::server::ServerHandle, ApiError> {
     let auth_layer = AuthLayer::new(state.totp_validator.clone(), state.totp_scope);
 
-    // AUD3-D2: Always layer IpFilter — use allow_all() fallback when no list configured.
-    let ip_filter = state.ip_filter.clone().unwrap_or_else(IpFilter::allow_all);
+    // AUD3-D2: always layer IpFilter. Fail CLOSED when no list is configured —
+    // fall back to localhost-only (IpFilter::new(&[]) allows loopback only), not
+    // allow_all() (0.0.0.0/0). The server is bound to 127.0.0.1 in this case so
+    // behaviour is unchanged today, but a future bind-logic change can no longer
+    // silently expose the API.
+    let ip_filter = state
+        .ip_filter
+        .clone()
+        .unwrap_or_else(|| IpFilter::new(&[]).expect("empty IP filter (localhost-only) cannot fail"));
     let ip_filter_layer = IpFilterLayer::new(ip_filter);
 
     // AUD3-D3: Always layer RateLimiter — pass-through when None.

@@ -1897,8 +1897,10 @@ mod tests {
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        // Type-driven validation: a key-rotation handler `requires_outputs()`, so
+        // empty outputs are rejected by the generic recipient check.
         assert!(
-            matches!(result, Err(ValidationError::KeyRotationMissingNewKey)),
+            matches!(result, Err(ValidationError::TransferMissingRecipient)),
             "key rotation without outputs must be rejected: {result:?}"
         );
     }
@@ -2187,8 +2189,10 @@ mod tests {
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
         let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
+        // Type-driven validation: a transfer handler `requires_zero_checksum()`, so a
+        // non-zero checksum is rejected via the generalized NonDocumentWithChecksum.
         assert!(
-            matches!(result, Err(ValidationError::TransferWithNonZeroChecksum)),
+            matches!(result, Err(ValidationError::NonDocumentWithChecksum(_))),
             "transfer with non-zero checksum must be rejected: {result:?}"
         );
     }

@@ -1194,7 +1194,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&tx_id));
@@ -1208,7 +1208,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         assert_eq!(pool.len(), 1);
 
@@ -1231,9 +1231,9 @@ mod tests {
         let (sk, pk) = secp256k1::generate_keypair();
         let tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
 
-        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(matches!(result, Err(MempoolError::Duplicate(_))));
     }
 
@@ -1458,7 +1458,9 @@ mod tests {
         tx.issuer_sig.signature = vec![0u8; 64]; // Corrupt signature
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
+        // Signature failures surface through the shared stateless validator, which
+        // admit() funnels into StructuralValidation (SignatureInvalid is unused here).
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
     #[test]
@@ -1473,7 +1475,9 @@ mod tests {
         });
 
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
+        // Signature failures surface through the shared stateless validator, which
+        // admit() funnels into StructuralValidation (SignatureInvalid is unused here).
+        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
     }
 
     // --- Step 7: Fee check ---
@@ -1522,7 +1526,7 @@ mod tests {
         }
         let utxo = ExactUtxoLookup { outpoint, value: input_value };
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxo, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &utxo, 10);
         assert!(matches!(result, Err(MempoolError::FeeTooLow { .. })));
     }
 
@@ -1537,10 +1541,10 @@ mod tests {
         let tx2 = make_signed_tx(&sk, &pk, b"other_doc", TEST_FEE);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         let _id2 = pool
-            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         let checksum = sha256(b"same_doc");
@@ -1560,11 +1564,11 @@ mod tests {
         let tx_mid = make_signed_tx(&sk, &pk, b"mid", TEST_FEE * 5);
         let tx_high = make_signed_tx(&sk, &pk, b"high", TEST_FEE * 10);
 
-        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx_low, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx_mid, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx_high, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         let fees: Vec<u64> = pool.iter_by_fee_rate_desc().map(|e| e.fee).collect();
@@ -1586,15 +1590,15 @@ mod tests {
         let tx4 = make_signed_tx(&sk, &pk, b"doc4", TEST_FEE * 4);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        pool.admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         // tx4 triggers eviction of tx1 (lowest fee)
-        pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         assert_eq!(pool.len(), 3);
         assert!(!pool.contains(&id1), "lowest fee tx should be evicted");
@@ -1612,18 +1616,21 @@ mod tests {
         let tx1 = make_signed_tx(&sk, &pk, b"old", TEST_FEE);
         let tx2 = make_signed_tx(&sk, &pk, b"new", TEST_FEE);
 
+        // Admit near the tx timestamp (1_700_000_000) so the T4 skew check
+        // (±3600s in RealTime context) passes; relative receipt times drive expiry.
+        let base: u64 = 1_700_000_000;
         let id1 = pool
-            .admit(&tx1, 1_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx1, base, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         let id2 = pool
-            .admit(&tx2, 5_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx2, base + 3000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         assert_eq!(pool.len(), 2);
 
-        // Expire at time 4601 (cutoff = 4601 - 3600 = 1001)
-        // tx1 received at 1000 <= 1001 → expired
-        // tx2 received at 5000 > 1001 → kept
-        let expired = pool.expire(4601);
+        // Expire at base+3601 (cutoff = base+3601 - 3600 = base+1)
+        // tx1 received at base <= base+1 → expired
+        // tx2 received at base+3000 > base+1 → kept
+        let expired = pool.expire(base + 3601);
         assert_eq!(expired, 1);
         assert!(!pool.contains(&id1));
         assert!(pool.contains(&id2));
@@ -1638,7 +1645,7 @@ mod tests {
         let tx = make_signed_tx(&sk, &pk, b"cached", TEST_FEE);
 
         let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         // Verify the sig cache has the tx_id
@@ -1662,13 +1669,13 @@ mod tests {
         let tx3 = make_signed_tx(&sk, &pk, b"c3", TEST_FEE);
 
         let id1 = pool
-            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         let id2 = pool
-            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
         let id3 = pool
-            .admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            .admit(&tx3, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         pool.remove_confirmed(&[id1, id3]);
@@ -1755,7 +1762,7 @@ mod tests {
         let (sk, pk) = secp256k1::generate_keypair();
 
         let tx = make_signed_tx(&sk, &pk, b"utxo_ok", TEST_FEE);
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
 
@@ -1774,9 +1781,9 @@ mod tests {
             &sk, &pk, &recip, shared_outpoint, 400_000, 599_000,
         );
 
-        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
-        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(
             matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("Double spend")),
             "double spend should be rejected, got {:?}",
@@ -1794,7 +1801,7 @@ mod tests {
         let tx1 = make_signed_transfer_with_outpoint(
             &sk, &pk, &recip, shared_outpoint.clone(), 500_000, 499_000,
         );
-        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        let id1 = pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         // Remove it
@@ -1804,7 +1811,7 @@ mod tests {
         let tx2 = make_signed_transfer_with_outpoint(
             &sk, &pk, &recip, shared_outpoint, 400_000, 599_000,
         );
-        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(
             result.is_ok(),
             "after remove, outpoint should be spendable again, got {:?}",
@@ -1824,13 +1831,13 @@ mod tests {
         // Admit 3 txs (at the limit)
         for i in 0..3 {
             let tx = make_signed_tx(&sk, &pk, format!("rate{i}").as_bytes(), TEST_FEE);
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
                 .unwrap();
         }
 
         // 4th should be rejected
         let tx4 = make_signed_tx(&sk, &pk, b"rate3", TEST_FEE);
-        let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx4, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(
             matches!(
                 result,
@@ -1851,14 +1858,14 @@ mod tests {
         // Sender 1: 2 txs (at limit)
         for i in 0..2 {
             let tx = make_signed_tx(&sk1, &pk1, format!("s1_{i}").as_bytes(), TEST_FEE);
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
                 .unwrap();
         }
 
         // Sender 2 should still be able to submit
         let tx = make_signed_tx(&sk2, &pk2, b"s2_0", TEST_FEE);
         assert!(
-            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+            pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
                 .is_ok(),
             "different sender should not be rate-limited"
         );
@@ -1878,11 +1885,11 @@ mod tests {
         let (sk, pk) = secp256k1::generate_keypair();
 
         let tx1 = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
-        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx1, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         let tx2 = make_signed_tx(&sk, &pk, b"doc2", TEST_FEE * 3);
-        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0)
+        pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
             .unwrap();
 
         let (min_r, max_r, avg_r) = pool.fee_stats();
@@ -1996,7 +2003,7 @@ mod tests {
             Some("2"),
             Some(&prev_hex),
         );
-        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &chain, &NoUtxoLookup, 10);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
@@ -2006,7 +2013,7 @@ mod tests {
         let (sk, pk) = secp256k1::generate_keypair();
         // Normal notarization without any version metadata
         let tx = make_signed_tx(&sk, &pk, b"normal_doc", TEST_FEE);
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
