@@ -113,7 +113,12 @@ class MockBridge {
                 walletAddress: addr,
                 chainId: '4E4F424C',
                 blockHeight: 1234,
-                selectedSection: 'home'
+                selectedSection: 'home',
+                // 'desktop' is in the WRY platform set, so browser dev renders
+                // the WRY-only UI (persistent nav, reveal phrase, p12 password
+                // modal). Override via localStorage 'noble.mockPlatform' to
+                // preview the Mac/iOS chrome-less layout.
+                platform: localStorage.getItem('noble.mockPlatform') || 'desktop'
             };
             if (action === 'navigateTo') return { ok: true };
             if (action === 'copyToClipboard') return { ok: true };
@@ -140,6 +145,15 @@ class MockBridge {
             if (action === 'saveSecuritySettings') return { ok: true };
             if (action === 'testConnection') return { ok: true };
             if (action === 'disconnectNode') return { ok: true };
+            // Wallet provisioning (WRY first-run flow; browser-dev mocks)
+            if (action === 'createWallet') return {
+                ok: true,
+                address: addr,
+                mnemonic: ['abandon', 'ability', 'able', 'about', 'above', 'absent',
+                           'absorb', 'abstract', 'absurd', 'abuse', 'access', 'accident'],
+            };
+            if (action === 'importWallet') return { ok: true, address: addr };
+            if (action === 'exportWallet') return { ok: true, mnemonic: 'abandon ability able about above absent absorb abstract absurd abuse access accident' };
         }
 
         if (handler === 'noble_api') {
@@ -225,6 +239,25 @@ class MockBridge {
                 hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
             };
             if (action === 'loadPrivateKey') return { available: true };
+            if (action === 'importPKCS12') return {
+                id: 'mock-p12-' + Math.random().toString(16).slice(2, 10),
+                label: 'Mock Certificate',
+                algorithm: 'p256',
+                publicKeyHex: addr,
+                hasPrivateKey: true,
+                certificateSubject: 'CN=Mock Signer,O=Noble',
+                subjectKeyIdentifier: 'ab'.repeat(20),
+                importedAt: Date.now() / 1000
+            };
+            if (action === 'generateSigningKey') return {
+                id: 'mock-gen-' + Math.random().toString(16).slice(2, 10),
+                label: 'Noble Key',
+                algorithm: 'secp256k1',
+                publicKeyHex: addr,
+                hasPrivateKey: true,
+                subjectKeyIdentifier: 'cd'.repeat(20),
+                importedAt: Date.now() / 1000
+            };
         }
 
         if (handler === 'noble_storage') {

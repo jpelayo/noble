@@ -4,7 +4,20 @@ import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { renderQR } from '../components/qr-code.js';
-import { esc, escAttr } from '../utils.js';
+import { openModal } from '../components/modal.js';
+import { promptP12Password } from '../components/p12-password.js';
+import { esc, escAttr, isWryPlatform } from '../utils.js';
+
+/** Human label for where private keys live, per platform. */
+function walletStorageLabel(platform) {
+    switch (platform) {
+        case 'macos':   return 'macOS Keychain';
+        case 'ios':     return 'iOS Keychain';
+        case 'linux':   return 'Secret Service keyring';
+        case 'windows': return 'Windows Credential Manager';
+        default:        return 'OS keyring';
+    }
+}
 
 export function init(root, ctx) {
     let alive = true;
@@ -15,6 +28,9 @@ export function init(root, ctx) {
     let syncStatus = {};
     let cycleStatus = {};
     let networkInfo = {};
+    // Wallet fields as of the last render — lets refresh() detect late-arriving
+    // wallet state (see refresh()).
+    let lastRenderedWalletKey = null;
 
     loadSettings();
 
@@ -44,6 +60,7 @@ export function init(root, ctx) {
 
     function render() {
         if (!alive) return;
+        lastRenderedWalletKey = renderedWalletKey();
         root.innerHTML = '';
         root.classList.add('page-content');
 
@@ -56,7 +73,10 @@ export function init(root, ctx) {
                 <button id="settings-close" class="btn btn-secondary" style="padding:6px 14px;font-size:var(--font-size-sm);flex-shrink:0">Done</button>
             </div>`;
         header.querySelector('#settings-close').addEventListener('click', () => {
-            window.history.back();
+            // The router keeps no browser history stack, so history.back() is a
+            // no-op that strands the user (fatal on WRY, which has no native
+            // chrome to escape with). Use the app router's own back instead.
+            window.App.navigateBack();
         });
         root.appendChild(header);
 
@@ -67,7 +87,10 @@ export function init(root, ctx) {
         renderBlockchainSection();
         renderSecuritySection();
         renderBackupSection();
-        if (state.platform !== 'ios') renderDeveloperApiSection();
+        // Developer API (embedded RPC/MCP servers) exists only in the Mac shell.
+        // WRY (linux/windows/desktop) and iOS have no server, so the panel would
+        // be a dead toggle there — show it only on macOS.
+        if (state.platform === 'macos') renderDeveloperApiSection();
         renderAboutSection();
     }
 
@@ -244,8 +267,11 @@ export function init(root, ctx) {
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Storage</span>
-                    <span>\u{1F512} Stored in macOS Keychain</span>
+                    <span>\u{1F512} ${esc(walletStorageLabel(state.platform))}</span>
                 </div>
+                ${isWryPlatform(state.platform) ? `<div class="settings-row" style="margin-top:var(--gap-sm)">
+                    <button id="settings-reveal-phrase" class="btn btn-sm btn-secondary" style="width:100%">Reveal recovery phrase</button>
+                </div>` : ''}
                 <div id="settings-wallet-qr" style="text-align: center; margin-top: var(--gap-sm)"></div>
             `;
         }
@@ -264,6 +290,11 @@ export function init(root, ctx) {
         // UTXO Management link
         card.querySelector('#settings-utxo-manage')?.addEventListener('click', () => {
             if (window.App) App.navigateTo('utxo-maintenance');
+        });
+
+        // Reveal recovery phrase (WRY only — uses the native exportWallet handler).
+        card.querySelector('#settings-reveal-phrase')?.addEventListener('click', () => {
+            revealRecoveryPhrase();
         });
 
         if (hasWallet && addr) {
@@ -306,6 +337,56 @@ export function init(root, ctx) {
         }
     }
 
+    /** WRY-only: reveal the wallet recovery phrase via the native exportWallet
+     *  handler, behind a "someone could be watching" confirmation. */
+    async function revealRecoveryPhrase() {
+        const { el, close } = openModal({ title: 'Recovery phrase' });
+        el.innerHTML = `
+            <p style="color:var(--error,#e5484d);font-weight:600;margin:0 0 0.75rem">
+                Anyone who sees these words can steal your funds.
+            </p>
+            <p style="color:var(--text-muted);margin:0 0 1.25rem">
+                Make sure no one is watching your screen before continuing.
+            </p>
+            <div style="display:flex;gap:0.5rem">
+                <button id="rp-cancel" class="btn" style="flex:1">Cancel</button>
+                <button id="rp-reveal" class="btn btn-primary" style="flex:1">Reveal phrase</button>
+            </div>`;
+        el.querySelector('#rp-cancel').addEventListener('click', close);
+        el.querySelector('#rp-reveal').addEventListener('click', async () => {
+            el.innerHTML = `<p style="color:var(--text-muted);text-align:center;padding:1rem">Loading…</p>`;
+            let words = [];
+            try {
+                const res = await Bridge.call('noble_app', 'exportWallet');
+                const m = res && res.mnemonic;
+                words = Array.isArray(m) ? m : String(m || '').trim().split(/\s+/).filter(Boolean);
+            } catch (e) {
+                el.innerHTML = `<p style="color:var(--error,#e5484d)">Could not load recovery phrase: ${esc(e.message || String(e))}</p>`;
+                return;
+            }
+            if (!words.length) {
+                el.innerHTML = `<p style="color:var(--error,#e5484d)">No recovery phrase is available for this wallet.</p>`;
+                return;
+            }
+            const grid = words.map((w, i) =>
+                `<div style="display:flex;gap:0.4rem;align-items:baseline;padding:0.35rem 0.5rem;background:var(--bg-secondary,rgba(128,128,128,0.08));border-radius:6px">
+                    <span style="color:var(--text-muted);font-size:0.75rem;min-width:1.2em;text-align:right">${i + 1}</span>
+                    <span style="font-family:var(--font-mono,monospace);font-weight:600">${esc(w)}</span>
+                </div>`
+            ).join('');
+            el.innerHTML = `
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.4rem;text-align:left;margin-bottom:1rem">${grid}</div>
+                <div style="display:flex;gap:0.5rem">
+                    <button id="rp-copy" class="btn" style="flex:1">Copy phrase</button>
+                    <button id="rp-done" class="btn btn-primary" style="flex:1">Done</button>
+                </div>`;
+            el.querySelector('#rp-copy').addEventListener('click', () => {
+                Bridge.call('noble_app', 'copyToClipboard', { text: words.join(' ') }).catch(() => {});
+            });
+            el.querySelector('#rp-done').addEventListener('click', close);
+        });
+    }
+
     // ── Identity & Signing ──
 
     function renderIdentitySection() {
@@ -328,13 +409,23 @@ export function init(root, ctx) {
         importBtn.className = 'btn btn-primary';
         importBtn.textContent = 'Import .p12 Certificate';
         importBtn.addEventListener('click', async () => {
+            // On WRY, collect the password in-WebUI first; on Mac/iOS the native
+            // handler prompts (password stays undefined → no params passed).
+            const password = await promptP12Password(state.platform);
+            if (password === null) return; // cancelled on WRY
             importBtn.disabled = true;
             importBtn.textContent = 'Importing...';
             try {
-                const result = await Bridge.call('noble_security', 'importPKCS12');
+                const params = password === undefined ? undefined : { password };
+                const result = await Bridge.call('noble_security', 'importPKCS12', params);
                 if (result && result.id) loadIdentityKeys();
             } catch (e) {
-                console.error('PKCS#12 import failed:', e);
+                // "cancelled" = user closed the file picker; anything else is a
+                // real failure whose message carries actionable guidance (wrong
+                // password, legacy encryption re-export command, RSA rejection).
+                const msg = (e && e.message) || String(e);
+                console.error('PKCS#12 import failed:', msg);
+                if (msg !== 'cancelled') alert('PKCS#12 import failed:\n' + msg);
             }
             importBtn.disabled = false;
             importBtn.textContent = 'Import .p12 Certificate';
@@ -406,7 +497,7 @@ export function init(root, ctx) {
                 removeBtn.textContent = 'Remove';
                 removeBtn.style.cssText = 'color:var(--error);border-color:var(--error)';
                 removeBtn.addEventListener('click', async () => {
-                    if (!confirm('Remove this signing key? The private key will be permanently deleted from the Keychain.')) return;
+                    if (!confirm('Remove this signing key? The private key will be permanently deleted from secure storage.')) return;
                     try {
                         await Bridge.call('noble_security', 'removeSigningKey', { keyId: sk.id });
                         loadIdentityKeys();
@@ -778,6 +869,16 @@ export function init(root, ctx) {
 
     function refresh(newState) {
         Object.assign(state, newState);
+        // `state` and the incoming patch are the same shared appState object,
+        // so field comparison can't detect changes — compare against what was
+        // last RENDERED instead. Without this, a wallet address arriving after
+        // mount (poll/heartbeat) leaves a stale "No wallet configured" panel
+        // forever, because this page instance stays cached across navigation.
+        if (alive && renderedWalletKey() !== lastRenderedWalletKey) render();
+    }
+
+    function renderedWalletKey() {
+        return `${state.hasWallet}|${state.walletAddress || ''}|${state.isConnected}`;
     }
 
     return {

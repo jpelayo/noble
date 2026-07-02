@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Noble
+GenericName=Document Notarization Client
+Comment=Register and verify documents on the Noble blockchain
+# Binary name = Cargo package name (noble-doc). Adjust if installed elsewhere.
+Exec=noble-doc
+Icon=noble
+Terminal=false
+Categories=Office;Finance;Network;
+Keywords=noble;blockchain;notarize;document;verify;
+StartupWMClass=Noble

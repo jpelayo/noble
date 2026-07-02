@@ -16,8 +16,20 @@
 // RSA rejected: CMS + RSA signature exceeds 256-byte metadata slot.
 
 use cms::content_info::ContentInfo;
+use cms::encrypted_data::EncryptedData;
 use cms::signed_data::SignedData;
+use const_oid::ObjectIdentifier;
+use der::asn1::{ContextSpecific, OctetString};
 use der::{Decode, Encode};
+use pkcs12::authenticated_safe::AuthenticatedSafe;
+use pkcs12::cert_type::CertBag;
+use pkcs12::pfx::Pfx;
+use pkcs12::safe_bag::SafeContents;
+use pkcs12::{PKCS_12_CERT_BAG_OID, PKCS_12_KEY_BAG_OID, PKCS_12_PKCS8_KEY_BAG_OID};
+use pkcs8::pkcs5::pbes2::{Parameters as Pbes2Params, PBES2_OID};
+use pkcs8::pkcs5::EncryptionScheme;
+use pkcs8::{DecodePrivateKey, EncryptedPrivateKeyInfo, PrivateKeyInfo};
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
@@ -67,18 +79,221 @@ fn compute_ski(public_key_bytes: &[u8]) -> [u8; 20] {
 }
 
 // ── PKCS#12 Import ──
+//
+// Extracts an ECDSA P-256 signing identity (private key + X.509 certificate)
+// from a PKCS#12 (.p12/.pfx) file. This is the cross-platform equivalent of
+// Apple's SecPKCS12Import, letting the WRY desktop clients (Linux/Windows)
+// import corporate PKI signing keys the same way NobleMac does.
+//
+// Encryption support: PBES2 (PBKDF2 + AES-CBC / 3DES-CBC), which is the modern
+// default emitted by OpenSSL 3.x and Windows exports. The obsolete PKCS#12 PBE
+// schemes (pbeWithSHAAnd3-KeyTripleDES / RC2, arc 1.2.840.113549.1.12.1.*) that
+// `openssl pkcs12 -legacy` produces are refused with actionable guidance —
+// their cert bag is RC2-40 encrypted, which is out of scope. Keys must be
+// NIST P-256; RSA is rejected (CMS+RSA exceeds the 256-byte metadata slot).
+
+// PKCS#7 content-type OIDs (RFC 2315 §7). Declared locally to avoid pulling in
+// const-oid's optional `db` feature.
+const OID_PKCS7_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
+const OID_PKCS7_ENCRYPTED_DATA: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
+// id-ecPublicKey, the prime256v1 named curve, and rsaEncryption.
+const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const OID_PRIME256V1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+const OID_RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+
+const LEGACY_PBE_HELP: &str =
+    "PKCS#12 file uses legacy encryption (SHA1/3DES/RC2) that is not supported. \
+     Re-export with AES, e.g.: openssl pkcs12 -export -keypbe aes-256-cbc \
+     -certpbe aes-256-cbc -macalg sha256 -inkey key.pem -in cert.pem -out new.p12";
+
+/// True for the obsolete PKCS#12 password-based encryption schemes
+/// (`pbeWithSHAAnd*` — arc 1.2.840.113549.1.12.1.*: 3DES, RC2, RC4).
+fn is_legacy_pkcs12_pbe(oid: &ObjectIdentifier) -> bool {
+    oid.to_string().starts_with("1.2.840.113549.1.12.1.")
+}
+
+/// Decrypt a PBES2-protected blob (PBKDF2 KDF + AES/3DES-CBC cipher).
+fn decrypt_pbes2(
+    alg: &spki::AlgorithmIdentifierOwned,
+    password: &str,
+    mut ciphertext: Vec<u8>,
+) -> CmsResult<Vec<u8>> {
+    let enc_params = alg
+        .parameters
+        .as_ref()
+        .ok_or("PBES2 algorithm missing parameters")?
+        .to_der()
+        .map_err(|e| format!("pbes2 params der: {e}"))?;
+    let params = Pbes2Params::from_der(&enc_params).map_err(|e| format!("pbes2 params: {e}"))?;
+    let scheme = EncryptionScheme::from(params);
+    let plaintext = scheme
+        .decrypt_in_place(password, &mut ciphertext)
+        .map_err(|e| format!("PBES2 decrypt (wrong password?): {e}"))?;
+    Ok(plaintext.to_vec())
+}
 
 pub fn import_pkcs12(params_json: &str) -> CmsResult<Pkcs12Info> {
     let params: serde_json::Value =
         serde_json::from_str(params_json).map_err(|e| format!("parse params: {e}"))?;
-    let _p12_hex = params["p12_hex"].as_str().ok_or("missing p12_hex")?;
-    let _password = params["password"].as_str().ok_or("missing password")?;
+    let p12_hex = params["p12_hex"].as_str().ok_or("missing p12_hex")?;
+    // Empty-password PKCS#12 files are valid — password is optional.
+    let password = params["password"].as_str().unwrap_or("");
+    let p12_bytes = hex::decode(p12_hex).map_err(|e| format!("hex p12: {e}"))?;
 
-    // PKCS#12 extraction requires iterating SafeBag entries. The pkcs12 0.1 crate
-    // has limited high-level API. Platform-native APIs (SecPKCS12Import on Apple)
-    // handle this more robustly. This stub validates the JSON interface; full
-    // extraction will be completed with test .p12 files.
-    Err("PKCS#12 import: awaiting test .p12 files for full extraction".into())
+    let pfx = Pfx::from_der(&p12_bytes).map_err(|e| format!("parse PFX: {e}"))?;
+    if pfx.auth_safe.content_type != OID_PKCS7_DATA {
+        return Err("unsupported PKCS#12: auth-safe is not plain Data (public-key \
+                    protected .p12 is not supported)"
+            .into());
+    }
+    let auth_safes_os = OctetString::from_der(
+        &pfx.auth_safe
+            .content
+            .to_der()
+            .map_err(|e| format!("auth_safe der: {e}"))?,
+    )
+    .map_err(|e| format!("auth_safe octet: {e}"))?;
+    let auth_safes = AuthenticatedSafe::from_der(auth_safes_os.as_bytes())
+        .map_err(|e| format!("authenticated_safe: {e}"))?;
+
+    let mut key_pkcs8: Option<Vec<u8>> = None;
+    let mut cert_der: Option<Vec<u8>> = None;
+
+    for content_info in auth_safes.iter() {
+        // Resolve each auth-safe to a plaintext SafeContents blob, decrypting an
+        // EncryptedData container (cert bags) if present.
+        let safe_contents_der: Vec<u8> = if content_info.content_type == OID_PKCS7_ENCRYPTED_DATA {
+            let enc_data = EncryptedData::from_der(
+                &content_info
+                    .content
+                    .to_der()
+                    .map_err(|e| format!("enc_data der: {e}"))?,
+            )
+            .map_err(|e| format!("EncryptedData: {e}"))?;
+            let alg = &enc_data.enc_content_info.content_enc_alg;
+            if is_legacy_pkcs12_pbe(&alg.oid) {
+                return Err(LEGACY_PBE_HELP.into());
+            }
+            if alg.oid != PBES2_OID {
+                return Err(format!(
+                    "unsupported PKCS#12 cert encryption (OID {}); re-export with AES",
+                    alg.oid
+                ));
+            }
+            let ciphertext = enc_data
+                .enc_content_info
+                .encrypted_content
+                .as_ref()
+                .ok_or("EncryptedData has no encrypted content")?
+                .as_bytes()
+                .to_vec();
+            decrypt_pbes2(alg, password, ciphertext)?
+        } else if content_info.content_type == OID_PKCS7_DATA {
+            OctetString::from_der(
+                &content_info
+                    .content
+                    .to_der()
+                    .map_err(|e| format!("data der: {e}"))?,
+            )
+            .map_err(|e| format!("data octet: {e}"))?
+            .as_bytes()
+            .to_vec()
+        } else {
+            continue; // envelopedData etc. — not produced by standard exporters
+        };
+
+        // A wrong password occasionally (~1/256) yields garbage with valid CBC
+        // padding, so decryption "succeeds" and the failure surfaces here as a
+        // DER parse error instead — hence the password hint.
+        let safe_bags = SafeContents::from_der(&safe_contents_der)
+            .map_err(|e| format!("SafeContents (wrong password?): {e}"))?;
+        // Single-identity import: the first certificate and first key win;
+        // extra bags in a multi-identity PFX are intentionally ignored.
+        for bag in safe_bags {
+            if bag.bag_id == PKCS_12_CERT_BAG_OID {
+                let cs: ContextSpecific<CertBag> = ContextSpecific::from_der(&bag.bag_value)
+                    .map_err(|e| format!("CertBag: {e}"))?;
+                cert_der.get_or_insert_with(|| cs.value.cert_value.as_bytes().to_vec());
+            } else if bag.bag_id == PKCS_12_PKCS8_KEY_BAG_OID {
+                // Shrouded (encrypted) PKCS#8 key. A decode failure here is the
+                // fingerprint of a legacy-PBE key that pkcs5 can't parse.
+                let cs: ContextSpecific<EncryptedPrivateKeyInfo> =
+                    ContextSpecific::from_der(&bag.bag_value)
+                        .map_err(|e| format!("shrouded key bag: {e}. {LEGACY_PBE_HELP}"))?;
+                let secret = cs
+                    .value
+                    .decrypt(password)
+                    .map_err(|e| format!("decrypt private key (wrong password?): {e}"))?;
+                key_pkcs8.get_or_insert_with(|| secret.as_bytes().to_vec());
+            } else if bag.bag_id == PKCS_12_KEY_BAG_OID {
+                // Unencrypted PKCS#8 key bag — bag_value is the PrivateKeyInfo.
+                let cs: ContextSpecific<PrivateKeyInfo> =
+                    ContextSpecific::from_der(&bag.bag_value)
+                        .map_err(|e| format!("key bag: {e}"))?;
+                let der = cs.value.to_der().map_err(|e| format!("key bag der: {e}"))?;
+                key_pkcs8.get_or_insert(der);
+            }
+        }
+    }
+
+    let key_pkcs8 = key_pkcs8.ok_or("no private key found in PKCS#12")?;
+    let cert_der = cert_der.ok_or("no certificate found in PKCS#12")?;
+
+    // Reject non-P256 keys up front with a precise message.
+    let pki = PrivateKeyInfo::from_der(&key_pkcs8).map_err(|e| format!("parse key: {e}"))?;
+    if pki.algorithm.oid == OID_RSA_ENCRYPTION {
+        return Err("RSA keys are not supported (CMS+RSA exceeds the 256-byte metadata \
+                    slot); use an ECDSA P-256 certificate"
+            .into());
+    }
+    if pki.algorithm.oid != OID_EC_PUBLIC_KEY {
+        return Err(format!(
+            "unsupported key algorithm (OID {}); only ECDSA P-256 is supported",
+            pki.algorithm.oid
+        ));
+    }
+    let curve_ok = pki
+        .algorithm
+        .parameters_oid()
+        .map(|o| o == OID_PRIME256V1)
+        .unwrap_or(false);
+    if !curve_ok {
+        return Err("unsupported EC curve; only NIST P-256 (prime256v1) is supported".into());
+    }
+
+    // Load the key and derive both point encodings.
+    let sk =
+        p256::SecretKey::from_pkcs8_der(&key_pkcs8).map_err(|e| format!("load P-256 key: {e}"))?;
+    let pk = sk.public_key();
+    let compressed = pk.to_encoded_point(true);
+    let uncompressed = pk.to_encoded_point(false);
+    let public_key_hex = hex::encode(compressed.as_bytes());
+    let private_key_hex = hex::encode(sk.to_bytes());
+
+    // Parse the certificate for subject + SKI, and prove it matches the key.
+    let cert = Certificate::from_der(&cert_der).map_err(|e| format!("parse cert: {e}"))?;
+    let spki_pk = cert
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .raw_bytes();
+    if spki_pk != uncompressed.as_bytes() {
+        return Err("PKCS#12 certificate public key does not match the private key".into());
+    }
+    // SKI computed over the SPKI subjectPublicKey — identical to sign_cms /
+    // verify_cms, so the imported identity's SKI round-trips with its signatures.
+    let ski = compute_ski(spki_pk);
+    let subject_name = cert.tbs_certificate.subject.to_string();
+
+    Ok(Pkcs12Info {
+        public_key_hex,
+        algorithm: "p256".to_string(),
+        certificate_der_b64: base64_encode(&cert_der),
+        subject_name,
+        ski_hex: hex::encode(ski),
+        private_key_hex,
+    })
 }
 
 // ── CMS Signing (manual DER construction) ──
@@ -454,6 +669,32 @@ fn base64_decode(b64: &str) -> CmsResult<Vec<u8>> {
     base64_decode_inner(&clean).map_err(|e| format!("base64: {e}"))
 }
 
+/// Standard (RFC 4648) base64 encoder with `=` padding — round-trips with
+/// `base64_decode` and is directly consumable by Swift/JS `atob`.
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let a = chunk[0];
+        let b = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let c = if chunk.len() > 2 { chunk[2] } else { 0 };
+        out.push(TABLE[(a >> 2) as usize] as char);
+        out.push(TABLE[((a & 0x03) << 4 | b >> 4) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b & 0x0f) << 2 | c >> 6) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(c & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 fn base64_decode_inner(input: &str) -> Result<Vec<u8>, &'static str> {
     fn val(c: u8) -> Result<u8, &'static str> {
         match c {
@@ -502,6 +743,106 @@ mod tests {
         let pk = [0x04u8; 65];
         assert_eq!(compute_ski(&pk), compute_ski(&pk));
         assert_eq!(compute_ski(&pk).len(), 20);
+    }
+
+    // ── PKCS#12 import ──
+    // Fixtures: self-signed P-256 cert + key, password "test123".
+    //   p256_pbes2_aes.p12   — OpenSSL 3.x default (PBES2 / PBKDF2 / AES-256-CBC)
+    //   p256_legacy_3des.p12 — `openssl pkcs12 -legacy` (SHA1-3DES key, RC2 cert)
+    //   rsa_pbes2.p12        — RSA key (must be rejected)
+    const P12_PBES2: &[u8] = include_bytes!("tests/fixtures/p256_pbes2_aes.p12");
+    const P12_LEGACY: &[u8] = include_bytes!("tests/fixtures/p256_legacy_3des.p12");
+    const P12_RSA: &[u8] = include_bytes!("tests/fixtures/rsa_pbes2.p12");
+    // Compressed pubkey derived independently via `openssl ec -pubout -conv_form compressed`.
+    const EXPECTED_PUBKEY: &str =
+        "037750788a3e32769cdcb02ba7b1289b5c75d5a4d84b793597e70a1fc996478668";
+
+    fn p12_params(bytes: &[u8], password: &str) -> String {
+        serde_json::json!({ "p12_hex": hex::encode(bytes), "password": password }).to_string()
+    }
+
+    // Avoids requiring `Debug` on Pkcs12Info (which holds the private key) just
+    // to call `.unwrap_err()`.
+    fn expect_import_err(result: CmsResult<Pkcs12Info>) -> String {
+        match result {
+            Ok(_) => panic!("expected PKCS#12 import to fail"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn imports_pbes2_aes_p12() {
+        let info = import_pkcs12(&p12_params(P12_PBES2, "test123")).expect("import PBES2 p12");
+        assert_eq!(info.algorithm, "p256");
+        assert_eq!(info.public_key_hex, EXPECTED_PUBKEY);
+        assert_eq!(info.private_key_hex.len(), 64);
+        assert_eq!(info.ski_hex.len(), 40);
+        assert!(
+            info.subject_name.contains("Noble Test Signer"),
+            "subject was {}",
+            info.subject_name
+        );
+        // The returned cert must re-parse and its SPKI must match the pubkey.
+        let cert_der = base64_decode(&info.certificate_der_b64).unwrap();
+        let cert = Certificate::from_der(&cert_der).expect("cert re-parses");
+        let spki = cert
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes();
+        assert_eq!(spki.len(), 65, "uncompressed EC point");
+    }
+
+    #[test]
+    fn imported_key_is_usable_for_signing() {
+        // The extracted identity must produce a verifiable CMS signature — proves
+        // key + cert are internally consistent and usable end-to-end.
+        let info = import_pkcs12(&p12_params(P12_PBES2, "test123")).unwrap();
+        let sign_params = serde_json::json!({
+            "private_key_hex": info.private_key_hex,
+            "certificate_der_b64": info.certificate_der_b64,
+            "field_value": "Imported Identity",
+            "algorithm": "p256",
+        });
+        let cms = sign_cms(&sign_params.to_string()).expect("sign with imported key");
+        let verify_params = serde_json::json!({
+            "cms_hex": cms.cms_hex,
+            "field_value": "Imported Identity",
+            "certificate_der_b64": info.certificate_der_b64,
+        });
+        let verdict = verify_cms(&verify_params.to_string()).expect("verify");
+        assert!(
+            verdict.valid,
+            "imported identity signature must verify: {:?}",
+            verdict.error
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_password() {
+        let err = expect_import_err(import_pkcs12(&p12_params(P12_PBES2, "wrongpass")));
+        assert!(
+            err.to_lowercase().contains("password") || err.to_lowercase().contains("decrypt"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_3des_rc2_p12() {
+        let err = expect_import_err(import_pkcs12(&p12_params(P12_LEGACY, "test123")));
+        assert!(
+            err.to_lowercase().contains("legacy"),
+            "expected legacy-encryption guidance, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_rsa_p12() {
+        let err = expect_import_err(import_pkcs12(&p12_params(P12_RSA, "test123")));
+        assert!(
+            err.to_uppercase().contains("RSA") || err.to_lowercase().contains("p-256"),
+            "expected RSA-unsupported error, got: {err}"
+        );
     }
 
     #[test]
@@ -628,23 +969,4 @@ mod tests {
         result
     }
 
-    fn base64_encode(data: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-        for chunk in data.chunks(3) {
-            let a = chunk[0];
-            let b = if chunk.len() > 1 { chunk[1] } else { 0 };
-            let c = if chunk.len() > 2 { chunk[2] } else { 0 };
-            out.push(TABLE[(a >> 2) as usize] as char);
-            out.push(TABLE[((a & 0x03) << 4 | b >> 4) as usize] as char);
-            if chunk.len() > 1 {
-                out.push(TABLE[((b & 0x0f) << 2 | c >> 6) as usize] as char);
-            } else { out.push('='); }
-            if chunk.len() > 2 {
-                out.push(TABLE[(c & 0x3f) as usize] as char);
-            } else { out.push('='); }
-        }
-        out
-    }
 }

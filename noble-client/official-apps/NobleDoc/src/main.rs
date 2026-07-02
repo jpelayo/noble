@@ -35,13 +35,19 @@ use wry::WebViewBuilder;
 fn build_init_script(state: app::SharedState) -> String {
     let st = state.lock().unwrap();
     let config = serde_json::json!({
-        "platform": "linux",
-        "version": "1.0.0",
+        // 'desktop' fallback for non-Linux dev builds — mirrors NobleWin's
+        // conditional so the WebUI's WRY platform set stays accurate.
+        "platform": if cfg!(target_os = "linux") { "linux" } else { "desktop" },
+        // Single version source: Cargo.toml (avoids a hardcoded ghost copy).
+        "version": env!("CARGO_PKG_VERSION"),
         "isConnected": st.is_connected,
         "hasWallet": st.has_wallet,
         "walletAddress": st.wallet_address,
         "chainId": st.chain_id,
-        "initialRoute": "home",
+        // First run (no wallet in the keyring): land on the WebUI wallet-setup
+        // flow — this shell has no native onboarding. app.js also route-guards
+        // every section to wallet-setup while hasWallet is false.
+        "initialRoute": if st.has_wallet { "home" } else { "wallet-setup" },
     });
     format!("window.NativeConfig = {};", config)
 }
@@ -121,17 +127,84 @@ fn main() {
     // WebView Creation
     // ========================================================================
 
-    // Build self-contained HTML with all CSS + JS inlined.
-    // bridge.js now detects window.ipc directly — no webkit shim needed.
-    let full_html = assets::build_self_contained_html(&init_script);
-    eprintln!("[startup] self-contained HTML: {} bytes", full_html.len());
+    // Serve the embedded WebUI per-file over a custom protocol so the browser
+    // resolves the REAL ES-module import graph — the same architecture as the
+    // Mac app's `noble-app://` scheme handler. This replaces the old
+    // hand-bundled `with_html` approach, whose hardcoded file list silently
+    // broke every time the shared WebUI gained a module.
+    //
+    // URL forms differ per platform (wry 0.48): Linux/WebKitGTK serves
+    // `noble://localhost/...`; Windows/WebView2 maps custom protocols to
+    // `http://noble.localhost/...`.
+    let start_url = if cfg!(target_os = "windows") {
+        "http://noble.localhost/index.html"
+    } else {
+        "noble://localhost/index.html"
+    };
 
-    // WRY's with_html handles the HTML directly. with_initialization_script
-    // injects NativeConfig before any page scripts run.
+    // with_initialization_script works with custom-protocol URLs (unlike plain
+    // remote http), so NativeConfig injects before any module runs — the same
+    // guarantee as WKWebView's `.atDocumentStart`.
+    // Finder/Explorer file drops → window._nobleHandleFileDrop([{name,path,size}]),
+    // matching the Mac client's DroppableWebView (WebContentView.swift). Returning
+    // true suppresses the WebView's default "navigate to the dropped file" action.
+    let drop_proxy = proxy.clone();
+    let drag_drop_handler = move |event: wry::DragDropEvent| {
+        if let wry::DragDropEvent::Drop { paths, .. } = event {
+            let files: Vec<serde_json::Value> = paths
+                .iter()
+                .map(|path| {
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "name": path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        "size": size,
+                    })
+                })
+                .collect();
+            let payload = serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string());
+            let script = format!(
+                "if (typeof window._nobleHandleFileDrop === 'function') {{ window._nobleHandleFileDrop({payload}); }}"
+            );
+            if let Err(e) = drop_proxy.send_event(UserEvent::EvalScript(script)) {
+                eprintln!("[drag-drop] event send failed: {e:?}");
+            }
+            return true;
+        }
+        false
+    };
+
     let webview = WebViewBuilder::new()
         .with_initialization_script(&init_script)
         .with_ipc_handler(ipc_handler)
-        .with_html(&full_html)
+        .with_drag_drop_handler(drag_drop_handler)
+        .with_custom_protocol("noble".into(), |_id, request| {
+            let path = request.uri().path().to_string();
+            match assets::serve_asset(&path) {
+                Some((bytes, mime)) => wry::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", mime)
+                    // Match the Mac scheme handler's no-cache posture and keep
+                    // cross-origin module fetches unrestricted.
+                    .header("Cache-Control", "no-store, no-cache, must-revalidate")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(std::borrow::Cow::Owned(bytes))
+                    .unwrap_or_else(|_| {
+                        wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
+                    }),
+                None => wry::http::Response::builder()
+                    .status(404)
+                    .header("Content-Type", "text/plain")
+                    .body(std::borrow::Cow::Borrowed(&b"not found"[..]))
+                    .unwrap_or_else(|_| {
+                        wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
+                    }),
+            }
+        })
+        .with_url(start_url)
         .with_devtools(cfg!(debug_assertions))
         .build(&window)
         .expect("Failed to create WebView");
@@ -281,7 +354,17 @@ async fn dispatch_bridge_action(
             if action == "downloadAndHash" {
                 security::download_and_hash(params, proxy).await
             } else {
-                security::handle_security_action(action, params)
+                // importPKCS12 blocks on a native file dialog and hashFile on
+                // disk I/O — run on the blocking pool so a parked dialog can't
+                // starve the async workers (which would stall every other
+                // bridge call and fake a "Disconnected" state).
+                let action = action.to_string();
+                let params = params.clone();
+                tokio::task::spawn_blocking(move || {
+                    security::handle_security_action(&action, &params)
+                })
+                .await
+                .map_err(|e| format!("security task panicked: {e}"))?
             }
         }
 

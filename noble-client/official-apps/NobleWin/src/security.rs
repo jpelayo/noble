@@ -137,12 +137,22 @@ pub fn handle_security_action(action: &str, params: &Value) -> Result<Value, Str
                 imported_at: now,
             };
 
+            // Same ownership rule as importPKCS12: My Card must exist before the
+            // keyring write, and a failed contact save rolls the key back —
+            // otherwise the credential is orphaned and the key invisible.
+            let mut contacts = crate::storage::load_contacts();
+            let my_card_idx = contacts.iter().position(|c| c.is_my_card).ok_or(
+                "No 'My Card' contact exists yet — open the Contacts page once, then retry",
+            )?;
+
             store_credential(&signing_key_credential(&entry.id), &priv_bytes)?;
 
-            let mut contacts = crate::storage::load_contacts();
-            if let Some(my_card) = contacts.iter_mut().find(|c| c.is_my_card) {
-                my_card.signing_keys.push(entry.clone());
-                crate::storage::save_contacts(&contacts)?;
+            contacts[my_card_idx].signing_keys.push(entry.clone());
+            if let Err(e) = crate::storage::save_contacts(&contacts) {
+                if let Err(del) = delete_credential(&signing_key_credential(&entry.id)) {
+                    eprintln!("[security] rollback failed, orphaned key credential {}: {del}", entry.id);
+                }
+                return Err(e);
             }
 
             Ok(entry.to_bridge_json())
@@ -169,6 +179,96 @@ pub fn handle_security_action(action: &str, params: &Value) -> Result<Value, Str
             crate::storage::save_contacts(&contacts)?;
 
             Ok(serde_json::json!({ "ok": true }))
+        }
+
+        "importPKCS12" => {
+            // Import an ECDSA P-256 signing identity from a .p12/.pfx file —
+            // the cross-platform equivalent of Mac's SecPKCS12Import. The WebUI
+            // collects the password (platform-gated modal) and passes it here;
+            // the file itself is chosen via the native picker.
+            let password = params
+                .get("password")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Native file picker (blocking rfd — same pattern as app.rs
+            // openFileDialog). A cancelled dialog mirrors Mac's "cancelled"
+            // error, which the WebUI silently ignores.
+            let path = match rfd::FileDialog::new()
+                .add_filter("PKCS#12", &["p12", "pfx"])
+                .pick_file()
+            {
+                Some(p) => p,
+                None => return Err("cancelled".to_string()),
+            };
+            let label = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Imported Key".to_string());
+            let p12_bytes =
+                std::fs::read(&path).map_err(|e| format!("Failed to read PKCS#12 file: {e}"))?;
+
+            let import_params = serde_json::json!({
+                "p12_hex": hex::encode(&p12_bytes),
+                "password": password,
+            });
+            let info = noble_cms_core::cms::import_pkcs12(&import_params.to_string())?;
+
+            // Persist the raw key + cert DER to the OS keyring, then attach a
+            // SigningKeyEntry to My Card — the same storage path as
+            // generateSigningKey, so signMetadataField can load them later.
+            let priv_bytes = hex::decode(&info.private_key_hex)
+                .map_err(|e| format!("Invalid private key hex: {e}"))?;
+            let cert_der = crate::crypto::base64_decode(&info.certificate_der_b64)?;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let entry = crate::models::SigningKeyEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                label,
+                algorithm: info.algorithm,
+                public_key_hex: info.public_key_hex,
+                has_private_key: true,
+                certificate_subject: Some(info.subject_name),
+                certificate_der: Some(info.certificate_der_b64),
+                subject_key_identifier: Some(info.ski_hex),
+                imported_at: now,
+            };
+
+            // My Card must exist BEFORE any keyring write: without an owner the
+            // stored credentials would be unreachable (invisible in Contacts,
+            // unusable for signing) and permanently orphaned in the OS keyring.
+            let mut contacts = crate::storage::load_contacts();
+            let my_card_idx = contacts.iter().position(|c| c.is_my_card).ok_or(
+                "No 'My Card' contact exists yet — open the Contacts page once, then retry",
+            )?;
+
+            store_credential(&signing_key_credential(&entry.id), &priv_bytes)?;
+            if let Err(e) = store_credential(&signing_cert_credential(&entry.id), &cert_der) {
+                // Roll back the key write — never leave an orphaned private key.
+                if let Err(del) = delete_credential(&signing_key_credential(&entry.id)) {
+                    eprintln!("[security] rollback failed, orphaned key credential {}: {del}", entry.id);
+                }
+                return Err(e);
+            }
+
+            contacts[my_card_idx].signing_keys.push(entry.clone());
+            if let Err(e) = crate::storage::save_contacts(&contacts) {
+                for cred in [
+                    signing_key_credential(&entry.id),
+                    signing_cert_credential(&entry.id),
+                ] {
+                    if let Err(del) = delete_credential(&cred) {
+                        eprintln!("[security] rollback failed, orphaned credential {cred}: {del}");
+                    }
+                }
+                return Err(e);
+            }
+
+            Ok(entry.to_bridge_json())
         }
 
         _ => Err(format!("Unknown action: {action}")),

@@ -2,7 +2,14 @@ fn main() {
     #[cfg(windows)]
     {
         let mut res = winres::WindowsResource::new();
-        res.set_icon("assets/icon.ico");
+        // Only embed an icon when one is present — avoid a phantom reference to a
+        // file that isn't in the tree. To ship an icon, convert the shared brand
+        // asset to .ico and drop it at assets/icon.ico, e.g.:
+        //   magick ../../noble-client-libraries/Artwork/applogo.png \
+        //     -define icon:auto-resize=16,32,48,256 assets/icon.ico
+        if std::path::Path::new("assets/icon.ico").exists() {
+            res.set_icon("assets/icon.ico");
+        }
         res.set("ProductName", "Noble");
         res.set("FileDescription", "Noble Document Client");
         res.set("CompanyName", "InfiniteContext");

@@ -112,7 +112,9 @@ pub fn start_polling(
     handle: Handle,
 ) {
     handle.spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        // 10s cadence matches the Mac client (AppState.pollTick) so the desktop
+        // shell's balance/height/peer state feels equally live.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         // Skip the first immediate tick — we poll right after connecting
         interval.tick().await;
 
@@ -207,6 +209,8 @@ pub fn start_polling(
                             "highestKnown": sync.get("highest_known")
                                 .or(sync.get("highestKnown"))
                                 .and_then(|v| v.as_u64()).unwrap_or(0),
+                            // Mac includes state inside syncStatus (AppState.swift:519).
+                            "state": sync_state.clone(),
                         });
                         state_update["nodeState"] = json!(sync_state);
                     }
@@ -238,8 +242,16 @@ pub fn start_polling(
                                 .get("available")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(bal);
+                            // Mac pushes walletImmature too (AppState.swift:540);
+                            // the node exposes it as immature_value / immature.
+                            let immature = balance
+                                .get("immature_value")
+                                .or(balance.get("immature"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             state_update["walletBalance"] = json!(bal);
                             state_update["walletAvailable"] = json!(available);
+                            state_update["walletImmature"] = json!(immature);
                         }
                     }
 
@@ -441,7 +453,8 @@ pub async fn handle_app_action(
                 "nodeURL": st.node_url,
                 "authMode": "none",
                 "tlsFingerprint": "",
-                "appVersion": "1.0.0",
+                // Single version source: Cargo.toml — shown in Settings › About.
+                "appVersion": env!("CARGO_PKG_VERSION"),
                 "autoConnect": st.settings.auto_connect,
                 "rpcApiEnabled": st.settings.rpc_api_enabled.unwrap_or(false),
                 "rpcApiPort": st.settings.rpc_api_port.unwrap_or(8788),

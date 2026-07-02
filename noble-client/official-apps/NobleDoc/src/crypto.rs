@@ -369,6 +369,16 @@ pub fn handle_crypto_action(
             Ok(result)
         }
 
+        "getMetadataFieldRegistry" => {
+            // Canonical T-code metadata field catalog from the shared FFI —
+            // parity with the Mac bridge's getMetadataFieldRegistry action.
+            let registry_json = noble_tx_core::metadata_registry_json()
+                .map_err(|e| format!("metadata_registry_json: {e}"))?;
+            let result: serde_json::Value = serde_json::from_str(&registry_json)
+                .map_err(|e| format!("parse registry: {e}"))?;
+            Ok(result)
+        }
+
         "estimateTxSize" => {
             let estimate_json = serde_json::json!({
                 "tx_type": params.get("tx_type").and_then(|v| v.as_str()).unwrap_or("notarization"),
@@ -517,6 +527,41 @@ fn base64_encode(data: &[u8]) -> String {
         out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
     }
     out
+}
+
+/// Standard (RFC 4648) base64 decoder — tolerates `=` padding and whitespace.
+/// Inverse of `base64_encode`; used to recover raw DER from cms-core's
+/// `certificate_der_b64` before keyring storage.
+pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    fn val(c: u8) -> Result<u8, String> {
+        match c {
+            b'A'..=b'Z' => Ok(c - b'A'),
+            b'a'..=b'z' => Ok(c - b'a' + 26),
+            b'0'..=b'9' => Ok(c - b'0' + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(format!("invalid base64 character: {c:#x}")),
+        }
+    }
+    let bytes: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            return Err("truncated base64 input".to_string());
+        }
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        out.push((a << 2) | (b >> 4));
+        if chunk.len() > 2 && chunk[2] != b'=' {
+            let c = val(chunk[2])?;
+            out.push((b << 4) | (c >> 2));
+            if chunk.len() > 3 && chunk[3] != b'=' {
+                let d = val(chunk[3])?;
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Ok(out)
 }
 
 

@@ -12,13 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 path = "rust-src/lib.rs"
 
 [dependencies]
-p256.workspace = true
+# `pkcs8` feature enables SecretKey::from_pkcs8_der for PKCS#12 key import.
+p256 = { workspace = true, features = ["pkcs8"] }
 k256.workspace = true
 sha2.workspace = true
 sha1.workspace = true
 cms.workspace = true
 x509-cert.workspace = true
 pkcs12.workspace = true
+# PBES2 decryption for PKCS#12 (PBKDF2 + AES/3DES-CBC; sha1 PRF for older files).
+pkcs8 = { version = "0.10", features = ["encryption", "3des", "sha1-insecure"] }
 der.workspace = true
 const-oid.workspace = true
 spki.workspace = true

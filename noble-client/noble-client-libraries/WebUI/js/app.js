@@ -1,5 +1,6 @@
 // NOBLE Document Client — Router & State Controller
 import { Bridge } from './bridge.js';
+import { isWryPlatform } from './utils.js';
 import { emptyState } from './components/empty-state.js';
 import { init as initHome } from './pages/home.js';
 import { init as initDocuments } from './pages/documents.js';
@@ -11,6 +12,7 @@ import { init as initSettings } from './pages/settings.js';
 import { init as initFaucet } from './pages/faucet.js';
 import { init as initTxDetail } from './pages/tx-detail.js';
 import { init as initUtxoMaintenance } from './pages/utxo-maintenance.js';
+import { init as initWalletSetup } from './pages/wallet-setup.js';
 
 // ── Theme management ──
 // Applies data-theme attribute on <html> for manual light/dark override.
@@ -44,7 +46,27 @@ const pages = {
     faucet:     initFaucet,
     'tx-detail': initTxDetail,
     'utxo-maintenance': initUtxoMaintenance,
+    'wallet-setup': initWalletSetup,
 };
+
+/** True while a WRY platform has no wallet yet — those shells have no native
+ *  onboarding, so the WebUI must run wallet setup first. */
+function needsWalletSetup(state) {
+    return !state.hasWallet && isWryPlatform(state.platform);
+}
+
+/** Persistent-nav sections, mirroring Mac's SidebarSection (home, documents,
+ *  drafts, verify, faucet, wallet, contacts, settings). */
+const NAV_ITEMS = [
+    { section: 'home',      icon: '\u{1F3E0}', label: 'Home' },
+    { section: 'documents', icon: '\u{1F4C4}', label: 'Documents' },
+    { section: 'drafts',    icon: '\u{1F4DD}', label: 'Drafts' },
+    { section: 'verify',    icon: '\u{2705}',  label: 'Verify' },
+    { section: 'faucet',    icon: '\u{1F4A7}', label: 'Faucet' },
+    { section: 'wallet',    icon: '\u{1F4B0}', label: 'Wallet' },
+    { section: 'contacts',  icon: '\u{1F465}', label: 'Contacts' },
+    { section: 'settings',  icon: '\u{2699}',  label: 'Settings' },
+];
 
 let currentPage = null;
 let currentRoute = null;
@@ -59,11 +81,25 @@ const mountedPages = {};  // section → { root: HTMLElement, page: pageInstance
 const App = {
     /** Navigate back to previous page, or fallback to wallet. */
     navigateBack() {
-        this.navigateTo(previousRoute || 'wallet');
+        const target = previousRoute || 'wallet';
+        this.navigateTo(target);
+        // Keep native chrome (Mac sidebar) selection in sync — same pattern as
+        // contacts/verify. On WRY this just records selected_section (no echo).
+        Bridge.call('noble_app', 'navigateTo', { section: target }).catch(() => {});
     },
     /** Navigate to a section. Pages are mounted once and hidden/shown, never destroyed.
      *  Parameterized pages (like tx-detail) are always recreated with fresh params. */
     navigateTo(section, params) {
+        // Wallet-setup guard (WRY platforms): until a wallet exists, every
+        // route lands on the setup flow — nothing else is usable without keys.
+        if (needsWalletSetup(appState)) {
+            section = 'wallet-setup';
+            params = undefined;
+        }
+        // 'wallet' and 'payments' are the same page. Canonicalize to one cache
+        // key so toggling between the two route names never mounts a duplicate
+        // payments instance (the nav item stays labeled 'wallet' via _updateNav).
+        if (section === 'wallet') section = 'payments';
         const isParameterized = !!params;
         if (section === currentRoute && !isParameterized) return;
         const container = document.getElementById('app-content');
@@ -118,6 +154,55 @@ const App = {
             mountedPages[section] = { root, page };
             currentPage = page;
         }
+        App._updateNav();
+    },
+
+    /** Build the persistent nav rail once (idempotent). */
+    _renderNav() {
+        const nav = document.getElementById('side-nav');
+        if (!nav || nav.dataset.built) return;
+        nav.dataset.built = '1';
+        const frag = document.createDocumentFragment();
+        const brand = document.createElement('div');
+        brand.className = 'side-nav-brand';
+        brand.textContent = 'Noble';
+        frag.appendChild(brand);
+        for (const item of NAV_ITEMS) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'side-nav-item';
+            btn.dataset.section = item.section;
+            const icon = document.createElement('span');
+            icon.className = 'side-nav-icon';
+            icon.textContent = item.icon;
+            const label = document.createElement('span');
+            label.className = 'side-nav-label';
+            label.textContent = item.label;
+            btn.append(icon, label);
+            btn.addEventListener('click', () => App.navigateTo(item.section));
+            frag.appendChild(btn);
+        }
+        nav.replaceChildren(frag);
+    },
+
+    /** Show/hide the nav rail (WRY only) and highlight the active section. */
+    _updateNav() {
+        const nav = document.getElementById('side-nav');
+        if (!nav) return;
+        const show = isWryPlatform(appState.platform)
+            && appState.hasWallet
+            && currentRoute !== 'wallet-setup'
+            && !needsWalletSetup(appState);
+        document.body.classList.toggle('has-side-nav', show);
+        nav.hidden = !show;
+        if (!show) return;
+        App._renderNav();
+        // 'payments' shares the 'wallet' nav item; parameterized pages
+        // (tx-detail, utxo-maintenance) leave no item highlighted.
+        const active = currentRoute === 'payments' ? 'wallet' : currentRoute;
+        for (const btn of nav.querySelectorAll('.side-nav-item')) {
+            btn.classList.toggle('active', btn.dataset.section === active);
+        }
     },
 
     /** Push a state patch to the current page. */
@@ -126,6 +211,7 @@ const App = {
         const hadWallet = appState.hasWallet;
         Object.assign(appState, patch);
         App._updateChainBar();
+        App._updateNav();
 
         // If connection or wallet state changed AFTER boot, invalidate ALL cached pages
         // so they re-mount fresh on next visit (pages check isConnected on init).
@@ -272,12 +358,19 @@ async function boot() {
     // Swift may report isConnected=false because its poll hasn't run yet.
     // The heartbeat will correct to offline later if the node is truly down.
     appState.isConnected = true;
-    if (!appState.hasWallet) appState.hasWallet = true;
+    // Mac/iOS provision the wallet in native onboarding before the WebUI ever
+    // loads, so a false hasWallet there is a stale-poll artifact — force it.
+    // WRY platforms (linux/windows) have NO native onboarding: a false
+    // hasWallet is REAL and must route to the wallet-setup flow instead.
+    if (!appState.hasWallet && !needsWalletSetup(appState)) {
+        appState.hasWallet = true;
+    }
 
     // Show chain bar if connected
     App._updateChainBar();
 
     // Use NativeConfig initial route if available, otherwise default to home
+    // (the navigateTo guard overrides to wallet-setup while no wallet exists).
     const initialRoute = appState.initialRoute || appState.selectedSection || 'home';
     App.navigateTo(initialRoute);
     bootComplete = true;

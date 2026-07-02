@@ -8,6 +8,10 @@
     <link rel="stylesheet" href="css/noble.css">
 </head>
 <body autocorrect="off" autocapitalize="off" spellcheck="false">
+    <!-- Persistent navigation rail. Hidden by default; app.js reveals it only on
+         WRY desktop shells (Linux/Windows), which have no native sidebar/tab bar.
+         Mac/iOS keep it hidden and navigate via native chrome. -->
+    <nav id="side-nav" hidden></nav>
     <div id="chain-bar" class="chain-bar" hidden></div>
     <main id="app-content"></main>
     <script type="module" src="js/bridge.js"></script>

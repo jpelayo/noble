@@ -80,5 +80,7 @@ fn escape_for_js_single_quote(s: &str) -> String {
 /// Matches Swift's `App.handleEvent('stateUpdate', {...})` pattern.
 pub fn build_state_update_script(state: &Value) -> String {
     let json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
-    format!("App.handleEvent('stateUpdate', {})", json)
+    // Guard against a poll tick landing before the ES-module `App` is defined
+    // (early boot) — matches the Mac client's `typeof App !== 'undefined'` check.
+    format!("if (typeof App !== 'undefined') {{ App.handleEvent('stateUpdate', {json}); }}")
 }

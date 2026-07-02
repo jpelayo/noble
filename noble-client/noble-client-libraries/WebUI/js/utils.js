@@ -1,5 +1,14 @@
 // NOBLE Document Client — Shared Utilities
 
+/** WRY desktop shells (Linux/Windows) — platforms with no native chrome, no
+ *  native onboarding, and no native dialogs. ('desktop' is the WRY fallback
+ *  platform string for non-target-OS dev builds.) Single source of truth:
+ *  app.js (nav + wallet-setup gating), settings.js (reveal phrase, storage
+ *  label), and p12-password.js (password modal) all import this. */
+export function isWryPlatform(platform) {
+    return platform === 'linux' || platform === 'windows' || platform === 'desktop';
+}
+
 export function esc(s) {
     const d = document.createElement('div');
     d.textContent = s || '';

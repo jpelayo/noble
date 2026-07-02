@@ -4,6 +4,7 @@ import { nobleCard } from '../components/noble-card.js';
 import { emptyState } from '../components/empty-state.js';
 import { contactCard } from '../components/contact-card.js';
 import { openModal, closeModal } from '../components/modal.js';
+import { promptP12Password } from '../components/p12-password.js';
 import { esc, truncate, initials } from '../utils.js';
 
 export function init(root, ctx) {
@@ -317,6 +318,10 @@ export function init(root, ctx) {
 
         const card = contactCard(c, {
             onSend: (contact) => {
+                // Drive the in-WebUI router directly (works on every platform);
+                // the native call only keeps Mac's sidebar selection in sync and
+                // is a harmless no-op on WRY, which doesn't re-drive the router.
+                if (window.App) window.App.navigateTo('payments');
                 Bridge.call('noble_app', 'navigateTo', { section: 'payments' });
                 setTimeout(() => {
                     if (window.App && window.App._currentPage && window.App._currentPage.openSendWizard) {
@@ -426,14 +431,25 @@ export function init(root, ctx) {
         importBtn.className = 'btn btn-primary btn-sm';
         importBtn.textContent = 'Import .p12 Key';
         importBtn.addEventListener('click', async () => {
+            // WRY collects the password in-WebUI first; Mac/iOS prompt natively.
+            const password = await promptP12Password(state.platform);
+            if (password === null) return; // cancelled on WRY
             try {
-                const result = await Bridge.call('noble_security', 'importPKCS12');
+                const params = password === undefined ? undefined : { password };
+                const result = await Bridge.call('noble_security', 'importPKCS12', params);
                 if (result && !result.error) {
                     await loadContacts();
                     selectedContact = contacts.find(c => c.id === contact.id) || null;
                     render();
                 }
-            } catch { /* user cancelled or error */ }
+            } catch (e) {
+                // "cancelled" = user closed the file picker; anything else is a
+                // real failure whose message carries actionable guidance (wrong
+                // password, legacy encryption re-export command, RSA rejection).
+                const msg = (e && e.message) || String(e);
+                console.error('[Contacts] PKCS#12 import failed:', msg);
+                if (msg !== 'cancelled') alert('PKCS#12 import failed:\n' + msg);
+            }
         });
         actions.appendChild(importBtn);
 

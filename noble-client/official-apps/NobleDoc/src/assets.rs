@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Embeds the shared WebUI at compile time and serves assets by path.
+//!
+//! Files are served individually through the `noble://` custom protocol
+//! registered in `main.rs`, so the WebView resolves the WebUI's real
+//! ES-module import graph — the same architecture as the Mac app's
+//! `noble-app://` scheme handler. (The previous approach inlined a
+//! hand-maintained list of JS files into one `<script>` block, which silently
+//! broke whenever the shared WebUI gained a module.)
 
 use include_dir::{include_dir, Dir};
 
@@ -27,216 +34,6 @@ pub fn serve_asset(path: &str) -> Option<(Vec<u8>, String)> {
     let mime = mime_for_extension(file_path);
 
     Some((bytes, mime))
-}
-
-/// Serve index.html with init scripts injected into `<head>`.
-///
-/// WRY's `with_initialization_script` only works with custom protocol URLs,
-/// not plain `http://` URLs.  We inject the scripts directly into the HTML
-/// so they execute regardless of how the page is loaded.
-/// Build a fully self-contained HTML page with ALL assets inlined.
-///
-/// CSS is inlined as a `<style>` block, all JS modules are concatenated
-/// into a single `<script>` block (with `export`/`import` statements stripped),
-/// and the init script (webkit shim + NativeConfig) is prepended.
-///
-/// This avoids all cross-origin/ATS/CSP issues: WRY's `with_html` loads
-/// everything from `about:blank` with no external resource fetches.
-pub fn build_self_contained_html(init_script: &str) -> String {
-    // 1. Read CSS
-    let css = WEBUI_DIR
-        .get_file("css/noble.css")
-        .and_then(|f| std::str::from_utf8(f.contents()).ok())
-        .unwrap_or("");
-
-    // 2. Collect all JS files in dependency order.
-    //    Components and utils first, then pages, then bridge, then app (entry).
-    let js_order = [
-        "js/utils.js",
-        "js/components/empty-state.js",
-        "js/components/noble-card.js",
-        "js/components/hash-text.js",
-        "js/components/amount-text.js",
-        "js/components/status-badge.js",
-        "js/components/modal.js",
-        "js/components/qr-code.js",
-        "js/components/contact-card.js",
-        "js/pages/home.js",
-        "js/pages/documents.js",
-        "js/pages/drafts.js",
-        "js/pages/verify.js",
-        "js/pages/payments.js",
-        "js/pages/contacts.js",
-        "js/pages/settings.js",
-        "js/pages/faucet.js",
-        "js/bridge.js",
-        "js/app.js",
-    ];
-
-    let mut js_bundle = String::new();
-    for path in &js_order {
-        if let Some(file) = WEBUI_DIR.get_file(path) {
-            if let Ok(src) = std::str::from_utf8(file.contents()) {
-                js_bundle.push_str(&format!("\n// --- {path} ---\n"));
-
-                // Derive a unique prefix from the file name for disambiguation.
-                // e.g. "js/pages/home.js" → "Home", "js/components/empty-state.js" → "EmptyState"
-                let stem = path.rsplit('/').next().unwrap_or(path)
-                    .strip_suffix(".js").unwrap_or(path);
-                let prefix: String = stem.split('-').map(|part| {
-                    let mut c = part.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                    }
-                }).collect();
-
-                let is_page = path.contains("/pages/");
-                let is_bridge = *path == "js/bridge.js";
-                let is_app = *path == "js/app.js";
-
-                // Wrap each module in an IIFE for scope isolation (avoids duplicate
-                // const/let declarations across modules).  Page init functions and
-                // key globals (Bridge, NativeBridge, App) are hoisted to window.
-                let mut body = String::new();
-                for line in src.lines() {
-                    let trimmed = line.trim_start();
-
-                    // Skip import/re-export lines.
-                    if trimmed.starts_with("import ")
-                        || trimmed.starts_with("export {")
-                        || trimmed.starts_with("export default")
-                    {
-                        continue;
-                    }
-
-                    // Page files: rename "export function init(" to unique name.
-                    if is_page && trimmed.starts_with("export function init(") {
-                        body.push_str(&line.replacen(
-                            "export function init(",
-                            &format!("window.init{prefix} = function("),
-                            1,
-                        ));
-                        body.push('\n');
-                        continue;
-                    }
-
-                    // Strip "export " keyword.
-                    if trimmed.starts_with("export ") {
-                        body.push_str(&line.replacen("export ", "", 1));
-                    } else {
-                        body.push_str(line);
-                    }
-                    body.push('\n');
-                }
-
-                // Collect names of exported functions/consts/classes to hoist to window.
-                let mut exports: Vec<String> = Vec::new();
-                for line in body.lines() {
-                    let t = line.trim_start();
-                    // "function foo(" or "class Foo" or "const foo ="
-                    // These came from "export function foo(" etc. after stripping "export ".
-                    // Page init functions are already "window.initFoo = function(..." so skip those.
-                    if t.starts_with("window.init") { continue; }
-                    if let Some(rest) = t.strip_prefix("function ") {
-                        if let Some(name) = rest.split('(').next() {
-                            let name = name.trim();
-                            if !name.is_empty() { exports.push(name.to_string()); }
-                        }
-                    } else if let Some(rest) = t.strip_prefix("class ") {
-                        if let Some(name) = rest.split_whitespace().next() {
-                            exports.push(name.to_string());
-                        }
-                    } else if let Some(rest) = t.strip_prefix("const ") {
-                        if let Some(name) = rest.split('=').next() {
-                            let name = name.trim();
-                            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                                exports.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-
-                if is_app {
-                    // app.js is the entry point — runs last, accesses globals directly.
-                    // Don't wrap in IIFE so it can reference window.initHome etc. as bare names.
-                    // Pull needed names from window first.
-                    js_bundle.push_str("// --- app.js entry (no IIFE) ---\n");
-                    js_bundle.push_str("var Bridge = window.Bridge;\n");
-                    js_bundle.push_str("var emptyState = window.emptyState;\n");
-                    js_bundle.push_str("var initHome = window.initHome;\n");
-                    js_bundle.push_str("var initDocuments = window.initDocuments;\n");
-                    js_bundle.push_str("var initDrafts = window.initDrafts;\n");
-                    js_bundle.push_str("var initVerify = window.initVerify;\n");
-                    js_bundle.push_str("var initPayments = window.initPayments;\n");
-                    js_bundle.push_str("var initContacts = window.initContacts;\n");
-                    js_bundle.push_str("var initSettings = window.initSettings;\n");
-                    js_bundle.push_str("var initFaucet = window.initFaucet;\n");
-                    js_bundle.push_str(&body);
-                } else {
-                    // Wrap in IIFE for scope isolation + hoist exports to window.
-                    js_bundle.push_str("(function(){\n");
-                    // Pages and bridge need access to globals from other modules.
-                    // Only inject preamble for files that CONSUME these globals (pages),
-                    // not for files that DEFINE them (utils, components, bridge).
-                    if is_page {
-                        js_bundle.push_str("var W=window,Bridge=W.Bridge,esc=W.esc,escAttr=W.escAttr,timeAgo=W.timeAgo,truncate=W.truncate,initials=W.initials,formatBytes=W.formatBytes,formatTimestamp=W.formatTimestamp,showCopyFeedback=W.showCopyFeedback,emptyState=W.emptyState,nobleCard=W.nobleCard,hashText=W.hashText,amountText=W.amountText,formatAmount=W.formatAmount,statusBadge=W.statusBadge,openModal=W.openModal,openWizardModal=W.openWizardModal,closeModal=W.closeModal,renderQR=W.renderQR,contactCard=W.contactCard,NativeBridge=W.NativeBridge,MockBridge=W.MockBridge;\n");
-                    }
-                    js_bundle.push_str(&body);
-                    for name in &exports {
-                        js_bundle.push_str(&format!(
-                            "if(typeof {name}!=='undefined')window.{name}={name};\n"
-                        ));
-                    }
-                    js_bundle.push_str("})();\n");
-                }
-            }
-        }
-    }
-
-    // Fix app.js references: the import aliases like `initHome` map to `initHome` (from home.js).
-    // Our renaming produces `initHome` from "js/pages/home.js" (stem "home" → prefix "Home").
-    // Verify: the pages dict in app.js uses `initHome`, `initDocuments`, etc.
-    // Our bundler renames `export function init(` in pages/home.js to `function initHome(`.
-    // This matches because the import in app.js was `import { init as initHome }`.
-    // ✓ All page init functions are now uniquely named.
-
-    // 3. Assemble HTML
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
-    <meta name="color-scheme" content="light dark">
-    <title>Noble</title>
-    <style>{css}</style>
-</head>
-<body>
-    <div id="chain-bar" class="chain-bar" hidden></div>
-    <main id="app-content"></main>
-    <script>
-    // Init script (webkit shim + NativeConfig)
-    {init_script}
-    // Error display
-    window._errs=[];
-    window.onerror=function(m,f,l){{ document.body.innerHTML='<pre style="color:red;padding:20px;z-index:99999;position:fixed;top:0;left:0;right:0;background:#000">'+m+' @'+f+':'+l+'</pre>'+document.body.innerHTML; }};
-    try {{
-    // Bundled WebUI
-    {js_bundle}
-    }} catch(e) {{ document.body.innerHTML='<pre style="color:red;padding:20px;z-index:99999;position:fixed;top:0;left:0;right:0;background:#000">BUNDLE ERROR: '+e.message+'\\n'+e.stack+'</pre>'+document.body.innerHTML; }}
-    </script>
-</body>
-</html>"#
-    )
-}
-
-/// Get the embedded CSS content as a string.
-pub fn get_css() -> &'static str {
-    WEBUI_DIR
-        .get_file("css/noble.css")
-        .and_then(|f| std::str::from_utf8(f.contents()).ok())
-        .unwrap_or("")
 }
 
 /// Determine MIME type from file extension.
@@ -266,4 +63,103 @@ fn mime_for_extension(path: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serves_entry_modules_with_js_mime() {
+        // The two module entry points index.html loads — if these disappear
+        // from the embedded tree, the app cannot boot.
+        for path in ["js/bridge.js", "js/app.js"] {
+            let (bytes, mime) = serve_asset(path).unwrap_or_else(|| panic!("{path} missing"));
+            assert!(!bytes.is_empty(), "{path} is empty");
+            assert_eq!(mime, "application/javascript", "{path}");
+        }
+    }
+
+    #[test]
+    fn empty_and_slash_paths_fall_back_to_index() {
+        for path in ["", "/"] {
+            let (bytes, mime) = serve_asset(path).expect("index fallback");
+            assert_eq!(mime, "text/html");
+            let html = String::from_utf8_lossy(&bytes);
+            assert!(html.contains("type=\"module\""), "index must load ES modules");
+        }
+    }
+
+    #[test]
+    fn unknown_path_returns_none() {
+        assert!(serve_asset("js/does-not-exist.js").is_none());
+    }
+
+    #[test]
+    fn every_module_imported_by_the_webui_is_embedded() {
+        // Drift guard (replaces the old hardcoded bundle list failure mode):
+        // every relative `import ... from './x.js'` inside the embedded JS must
+        // resolve to an embedded file. Catches a stale snapshot at test time
+        // instead of a runtime ReferenceError.
+        fn collect<'a>(dir: &'a Dir<'a>, out: &mut Vec<&'a include_dir::File<'a>>) {
+            for f in dir.files() {
+                out.push(f);
+            }
+            for d in dir.dirs() {
+                collect(d, out);
+            }
+        }
+        let mut files = Vec::new();
+        collect(&WEBUI_DIR, &mut files);
+
+        let mut missing = Vec::new();
+        for file in &files {
+            let path = file.path().to_string_lossy().to_string();
+            if !path.ends_with(".js") {
+                continue;
+            }
+            let src = match std::str::from_utf8(file.contents()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let base_dir = std::path::Path::new(&path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""));
+            for line in src.lines() {
+                let t = line.trim_start();
+                if !t.starts_with("import ") {
+                    continue;
+                }
+                // Extract the module specifier between quotes.
+                let spec = t
+                    .split(&['\'', '"'][..])
+                    .nth(1)
+                    .unwrap_or("");
+                if !spec.starts_with('.') {
+                    continue; // bare/external specifier — not ours
+                }
+                // Resolve ./ and ../ against the importing file's directory.
+                let mut resolved = base_dir.to_path_buf();
+                for comp in std::path::Path::new(spec).components() {
+                    match comp {
+                        std::path::Component::ParentDir => {
+                            resolved.pop();
+                        }
+                        std::path::Component::CurDir => {}
+                        std::path::Component::Normal(c) => resolved.push(c),
+                        _ => {}
+                    }
+                }
+                let resolved = resolved.to_string_lossy().to_string();
+                if WEBUI_DIR.get_file(&resolved).is_none() {
+                    missing.push(format!("{path} imports {spec} → {resolved}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "embedded WebUI has unresolved imports:\n{}",
+            missing.join("\n")
+        );
+    }
 }

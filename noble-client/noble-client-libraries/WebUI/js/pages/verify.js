@@ -621,6 +621,10 @@ export function init(root, ctx) {
             regBtn.textContent = 'Register it now';
             regBtn.style.marginTop = 'var(--gap)';
             regBtn.addEventListener('click', () => {
+                // Drive the in-WebUI router directly (works on every platform);
+                // the native call only keeps Mac's sidebar selection in sync and
+                // is a harmless no-op on WRY, which doesn't re-drive the router.
+                if (window.App) window.App.navigateTo('documents');
                 Bridge.call('noble_app', 'navigateTo', { section: 'documents' });
             });
             card.appendChild(regBtn);
