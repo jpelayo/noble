@@ -43,6 +43,7 @@ pub use transaction::Transaction;
 pub use utxo::{OutPoint, TxIn, TxOut, UtxoEntry};
 pub use validation::{
     median_timestamp, validate_block, validate_block_timestamp, validate_source_address,
-    validate_transaction, BlockValidationContext, TimeContext, TxValidationContext,
+    validate_transaction, validate_transaction_signatures, validate_transaction_structure,
+    BlockValidationContext, TimeContext, TxValidationContext,
     SYNC_BLOCK_FUTURE_TOLERANCE, SYNC_TX_TIMESTAMP_TOLERANCE,
 };

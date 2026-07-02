@@ -184,6 +184,11 @@ pub struct Mempool {
     output_creator: HashMap<OutPoint, Hash256>,
     /// Dependency graph: child_tx_id → set of parent tx_ids it spends from.
     depends_on: HashMap<Hash256, HashSet<Hash256>>,
+    /// Reverse dependency graph: parent_tx_id → set of child tx_ids spending
+    /// its outputs. Exact mirror of `depends_on`, maintained in lockstep —
+    /// makes cascade eviction and descendant counting O(children) instead of
+    /// O(whole map).
+    children_of: HashMap<Hash256, HashSet<Hash256>>,
     /// Signature verification cache.
     sig_cache: SigCache,
     /// Current total serialized size of all transactions.
@@ -211,6 +216,7 @@ impl Mempool {
             mempool_outputs: HashMap::new(),
             output_creator: HashMap::new(),
             depends_on: HashMap::new(),
+            children_of: HashMap::new(),
             sig_cache,
             total_size_bytes: 0,
             rolling_min_fee_rate: noble_core::MIN_RELAY_FEE_RATE,
@@ -404,12 +410,26 @@ impl Mempool {
     /// Iterate transactions in dependency-safe order for block proposal.
     /// Parents always appear before their children. Within independent groups,
     /// higher fee-rate transactions come first.
-    pub fn iter_for_block_proposal(&self) -> Vec<&MempoolEntry> {
+    ///
+    /// `min_fee_rate` is the proposer's policy floor (groats/byte); pass `0`
+    /// for no filtering. The filter is **package-aware**: excluding a
+    /// below-floor parent also excludes all of its descendants — a child whose
+    /// parent isn't in the feed can never be built into the block (the builder
+    /// would just skip it for a missing input, wasting the slot). Sound
+    /// because cascade eviction guarantees every pooled tx's `depends_on`
+    /// parents are still pooled: an excluded parent simply never enters
+    /// `emitted`, so its descendants never become ready and drop out at the
+    /// no-progress break.
+    pub fn iter_for_block_proposal(&self, min_fee_rate: u64) -> Vec<&MempoolEntry> {
         let mut result: Vec<&MempoolEntry> = Vec::with_capacity(self.by_id.len());
         let mut emitted: HashSet<Hash256> = HashSet::new();
 
-        // Collect all entries sorted by fee rate desc (default priority)
-        let all_by_fee: Vec<&MempoolEntry> = self.iter_by_fee_rate_desc().collect();
+        // Collect entries meeting the fee floor, sorted by fee rate desc
+        // (default priority).
+        let all_by_fee: Vec<&MempoolEntry> = self
+            .iter_by_fee_rate_desc()
+            .filter(|e| e.fee_rate >= min_fee_rate)
+            .collect();
 
         // Repeatedly scan: emit entries whose parents are all emitted (or have no parents).
         // Bounded by max_ancestors+1 passes: a topo layer is emitted each pass,
@@ -550,20 +570,21 @@ impl Mempool {
             }
         }
 
-        // Step 3-6: Full stateless validation via the shared core validator.
+        // Step 3-6: Stateless STRUCTURE validation via the shared core
+        // validator — the same rules block validation enforces, minus
+        // signatures: T1 size/counts, T2 version, T4 timestamp skew, T5
+        // issuer scheme, T8 metadata, T10 tx_id, T15 duplicate inputs in same
+        // tx, T29-T32 type-specific metadata, T-EXPIRY (RealTime).
         //
-        // Audit follow-up: mempool admission now runs the SAME stateless
-        // checks as block validation — T1 size/counts, T2 version, T4
-        // timestamp skew, T5 issuer scheme, T6/T7 signatures, T8 metadata,
-        // T10 tx_id, T15 duplicate inputs in same tx, T29-T32 type-specific
-        // metadata, T-EXPIRY (RealTime). Closes the cheap-flood vector
-        // where adversaries could admit signed-but-invalid txs that only
-        // failed at block-validation time.
+        // Signatures (T6/T7/T26) are deliberately deferred to step 7.5 —
+        // AFTER the UTXO and fee-floor checks — so below-floor / bogus-input
+        // spam is rejected without paying for secp256k1 verification
+        // (Bitcoin's ordering: cheap policy first, expensive crypto last).
         //
         // Stateful checks (T11 fee, UTXO existence, double-spend across
         // mempool, maturity) remain below — they are NOT in noble_core's
-        // stateless `validate_transaction`.
-        tracing::trace!("mempool steps 3-6: stateless validation via noble_core");
+        // stateless validators.
+        tracing::trace!("mempool steps 3-6: stateless structure validation via noble_core");
         let validation_ctx = noble_core::TxValidationContext {
             chain_id: self.config.chain_id.load(std::sync::atomic::Ordering::Relaxed),
             // RealTime is the ONLY correct context for live mempool admission.
@@ -573,11 +594,8 @@ impl Mempool {
             },
             chain_height,
         };
-        noble_core::validate_transaction(tx, &tx_id, &validation_ctx)
+        noble_core::validate_transaction_structure(tx, &tx_id, &validation_ctx)
             .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
-        // Track signature verification for sig_cache so future re-admissions
-        // (after eviction/expiry) skip the heavy crypto when possible.
-        self.sig_cache.insert(tx_id);
 
         // Step 6.5: UTXO existence + double-spend check
         tracing::trace!("mempool step 6.5: UTXO validation");
@@ -681,6 +699,20 @@ impl Mempool {
             });
         }
 
+        // Step 7.5: Signature verification (T6/T7/T26) — the expensive part,
+        // run LAST among the checks so all cheap policy rejections above never
+        // pay for secp256k1, but BEFORE make_room so an invalid-sig tx can
+        // never evict residents. tx_id commits to the full wire bytes
+        // (signatures included), so a cache hit proves these exact signature
+        // bytes verified before — safe to skip re-verification on re-admission
+        // after expiry/eviction.
+        tracing::trace!("mempool step 7.5: signature verification");
+        if !self.sig_cache.contains(&tx_id) {
+            noble_core::validate_transaction_signatures(tx, &validation_ctx)
+                .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
+            self.sig_cache.insert(tx_id);
+        }
+
         // Pre-step 8: Make room (admission-aware eviction). Refuses rather than
         // evict a higher-fee resident for this lower-fee newcomer, rejects an
         // oversize tx outright, and raises the rolling floor from everything it
@@ -773,14 +805,29 @@ impl Mempool {
             self.output_creator.remove(&outpoint);
         }
 
-        // Remove dependency record
-        self.depends_on.remove(tx_id);
+        // Remove dependency records — both directions. Unlink this tx from
+        // each parent's children_of set (using its own depends_on parents),
+        // keeping the two graphs exact mirrors.
+        if let Some(parents) = self.depends_on.remove(tx_id) {
+            for parent in parents {
+                if let Some(children) = self.children_of.get_mut(&parent) {
+                    children.remove(tx_id);
+                    if children.is_empty() {
+                        self.children_of.remove(&parent);
+                    }
+                }
+            }
+        }
 
         self.total_size_bytes -= entry.size_bytes;
-        self.sig_cache.remove(tx_id);
+        // NOTE: the sig_cache entry is intentionally KEPT — tx_id commits to
+        // the exact signature bytes, so if this tx is re-admitted after
+        // expiry/eviction the cached verification is still valid and the
+        // secp256k1 work is skipped. The LRU bounds cache memory.
         out.push(entry); // record the primary before cascading
 
-        // Cascade-evict any tx that depends on this one.
+        // Cascade-evict any tx that depends on this one — O(direct children)
+        // via the reverse index (was a full depends_on scan).
         //
         // NOTE (maturity=finality property): when a parent confirms and is
         // removed via `remove_for_block`, this cascade evicts its in-mempool
@@ -789,19 +836,17 @@ impl Mempool {
         // cannot re-enter the mempool until the (now on-chain) parent output
         // matures — so a CPFP / fast change re-spend is unavailable for
         // COINBASE_MATURITY blocks after the parent confirms. Intentional.
-        let dependents: Vec<Hash256> = self
-            .depends_on
-            .iter()
-            .filter(|(_, parents)| parents.contains(tx_id))
-            .map(|(child, _)| *child)
-            .collect();
-        for child_id in dependents {
-            tracing::debug!(task = "mempool", "cascade-evicting dependent tx {:?}", child_id);
-            self.remove_collecting(&child_id, out);
+        if let Some(children) = self.children_of.remove(tx_id) {
+            for child_id in children {
+                tracing::debug!(task = "mempool", "cascade-evicting dependent tx {:?}", child_id);
+                self.remove_collecting(&child_id, out);
+            }
         }
     }
 
     /// Remove all expired transactions (received_at + expiry_secs < current_time).
+    /// Returns the TOTAL number of removed entries, including any fresher
+    /// descendants cascade-evicted along with an expired parent.
     pub fn expire(&mut self, current_time: u64) -> usize {
         let cutoff = current_time.saturating_sub(self.config.expiry_secs);
 
@@ -812,11 +857,45 @@ impl Mempool {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect();
 
-        let count = expired.len();
+        let mut removed = Vec::new();
         for tx_id in expired {
-            self.remove(&tx_id);
+            self.remove_collecting(&tx_id, &mut removed);
         }
-        count
+        removed.len()
+    }
+
+    /// Drop every entry and reset all internal state to empty. Called on
+    /// chain rollback / wipe / blockchain hop: pooled txs were validated
+    /// against a chain state that no longer exists (after a hop even their
+    /// tx_ids are stale — tx_id commits to the chain_id), so the conservative
+    /// correct move is a full purge; origin wallets re-relay. The rolling fee
+    /// floor and sig cache reset too — they describe the old chain's load.
+    pub fn clear(&mut self) {
+        self.by_id.clear();
+        self.by_fee_rate.clear();
+        self.by_checksum.clear();
+        self.by_timestamp.clear();
+        self.by_sender.clear();
+        self.spent_by_mempool.clear();
+        self.mempool_outputs.clear();
+        self.output_creator.clear();
+        self.depends_on.clear();
+        self.children_of.clear();
+        self.sig_cache = SigCache::new(self.config.sig_cache_size);
+        self.total_size_bytes = 0;
+        self.rolling_min_fee_rate = noble_core::MIN_RELAY_FEE_RATE;
+        self.rolling_updated_at = 0;
+    }
+
+    /// Test-only visibility into the signature cache (retention across
+    /// eviction) and the dependency-graph mirror invariant.
+    #[cfg(test)]
+    fn sig_cache_contains(&self, tx_id: &Hash256) -> bool {
+        self.sig_cache.contains(tx_id)
+    }
+    #[cfg(test)]
+    fn dep_graphs_len(&self) -> (usize, usize) {
+        (self.depends_on.len(), self.children_of.len())
     }
 
     /// Remove all transactions that are now confirmed in a block.
@@ -870,15 +949,6 @@ impl Mempool {
     // Fee rate is checked at admission time (step 7) against MIN_RELAY_FEE_RATE.
     // No dynamic fee scaling — the market decides via fee rate competition.
 
-    /// Compute mempool utilization percentage (0-100).
-    pub fn utilization_pct(&self) -> u8 {
-        if noble_core::MAX_MEMPOOL_SIZE == 0 {
-            return 0;
-        }
-        let pct = (self.total_size_bytes as u128 * 100) / noble_core::MAX_MEMPOOL_SIZE as u128;
-        pct.min(100) as u8
-    }
-
     fn insert_entry(&mut self, entry: MempoolEntry, parent_deps: HashSet<Hash256>) {
         let tx_id = entry.tx_id;
         let fee_rate = entry.fee_rate;
@@ -905,8 +975,12 @@ impl Mempool {
             self.output_creator.insert(outpoint, tx_id);
         }
 
-        // Record dependency graph (for cascade eviction + topo ordering)
+        // Record dependency graph — both directions (for cascade eviction +
+        // topo ordering + O(children) descendant walks).
         if !parent_deps.is_empty() {
+            for parent in &parent_deps {
+                self.children_of.entry(*parent).or_default().insert(tx_id);
+            }
             self.depends_on.insert(tx_id, parent_deps);
         }
 
@@ -955,14 +1029,16 @@ impl Mempool {
 
     /// Count of distinct transitive descendants of `a` currently in the
     /// mempool (NOT counting `a`). A descendant is any tx that transitively
-    /// depends on `a` via the `depends_on` graph.
+    /// depends on `a` — walked O(descendants) via the `children_of` mirror.
     fn descendant_count(&self, a: &Hash256) -> usize {
         let mut descendants: HashSet<Hash256> = HashSet::new();
         let mut frontier: Vec<Hash256> = vec![*a];
         while let Some(node) = frontier.pop() {
-            for (child, parents) in &self.depends_on {
-                if parents.contains(&node) && descendants.insert(*child) {
-                    frontier.push(*child);
+            if let Some(children) = self.children_of.get(&node) {
+                for &child in children {
+                    if descendants.insert(child) {
+                        frontier.push(child);
+                    }
                 }
             }
         }
@@ -1637,25 +1713,10 @@ mod tests {
     }
 
     // --- Signature cache ---
-
-    #[test]
-    fn sig_cache_avoids_reverification() {
-        let mut pool = Mempool::new(test_config());
-        let (sk, pk) = secp256k1::generate_keypair();
-        let tx = make_signed_tx(&sk, &pk, b"cached", TEST_FEE);
-
-        let tx_id = pool
-            .admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10)
-            .unwrap();
-
-        // Verify the sig cache has the tx_id
-        assert!(pool.sig_cache.contains(&tx_id));
-
-        // Remove and re-admit — should use cache
-        pool.remove(&tx_id);
-        // After remove, sig_cache entry is cleared
-        assert!(!pool.sig_cache.contains(&tx_id));
-    }
+    // (Cache-retention-across-eviction and the cached re-admission flow are
+    // covered by `sig_cache_retained_after_eviction` below — the old
+    // `sig_cache_avoids_reverification` test asserted the pre-audit behavior
+    // of purging the cache entry on removal, which defeated the cache.)
 
     // --- remove_confirmed ---
 
@@ -2388,5 +2449,162 @@ mod tests {
         // ~250-byte tx, fee 300 → rate ~1.
         let res = pool.admit(&tx_with_fee(500), NOW, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(res.is_ok(), "min-rate tx must admit under normal load, got {res:?}");
+    }
+
+    // --- Audit fixes: admission ordering, sig cache, clear(), package filter,
+    // --- dependency-graph mirror, expire cascade count ---
+
+    #[test]
+    fn below_floor_fee_rejected_before_sig_work() {
+        // A tx with BOTH a below-floor fee and a corrupt signature must be
+        // rejected as FeeTooLow — proving the fee check runs before the
+        // expensive signature verification (spam never pays for secp256k1).
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"cheap", 100); // ~330B → rate 0
+        tx.issuer_sig.signature = vec![0u8; 64]; // corrupt
+        let res = pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::FeeTooLow { .. })),
+            "below-floor must reject at the fee check, before signatures: {res:?}"
+        );
+    }
+
+    #[test]
+    fn valid_fee_corrupt_sig_still_rejected() {
+        // Signatures are deferred, NOT skipped: a fee-passing tx with a bad
+        // signature must never be inserted.
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let mut tx = make_signed_tx(&sk, &pk, b"badsig", TEST_FEE);
+        tx.issuer_sig.signature = vec![0u8; 64];
+        let res = pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(
+            matches!(res, Err(MempoolError::StructuralValidation(_))),
+            "corrupt sig must be rejected at step 7.5: {res:?}"
+        );
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn sig_cache_retained_after_eviction() {
+        // Cache entries survive removal so a re-admitted identical tx skips
+        // the secp256k1 work (tx_id commits to the signature bytes).
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let tx = make_signed_tx(&sk, &pk, b"cached", TEST_FEE);
+        let tx_id = pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        assert!(pool.sig_cache_contains(&tx_id));
+        pool.remove(&tx_id);
+        assert!(
+            pool.sig_cache_contains(&tx_id),
+            "eviction must keep the sig-cache entry for cheap re-admission"
+        );
+        // Re-admission (cache-hit path) still works end-to-end.
+        pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+        assert_eq!(pool.len(), 1);
+    }
+
+    /// Build a low-fee parent (rate ~1) + high-fee chained child (rate ~57)
+    /// where the child spends the parent's in-mempool change output.
+    fn admit_parent_child_chain(pool: &mut Mempool) -> (Hash256, Hash256, OutPoint) {
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let v = NO_UTXO_LOOKUP_VALUE;
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), v)].into_iter().collect());
+
+        // Parent: fee 500 → rate ~1; change to self at vout 1.
+        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x.clone(), 1_000, v - 1_500);
+        let p_id = pool.admit(&p, NOW, &NoChainLookup, &lookup, 10).unwrap();
+        // Child spends the parent's change (a mempool output): fee 20_000 → rate ~57.
+        let p_change = OutPoint { txid: p_id, vout: 1 };
+        let c_in = v - 1_500;
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, c_in - 20_000, 0);
+        let c_id = pool.admit(&c, NOW, &NoChainLookup, &lookup, 10).unwrap();
+        (p_id, c_id, x)
+    }
+
+    #[test]
+    fn clear_resets_everything() {
+        let mut pool = Mempool::new(test_config());
+        let (_, _, seed) = admit_parent_child_chain(&mut pool);
+        assert_eq!(pool.len(), 2);
+        assert!(pool.is_outpoint_spent(&seed));
+        assert_ne!(pool.dep_graphs_len(), (0, 0));
+
+        pool.clear();
+
+        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.total_size(), 0);
+        assert!(!pool.is_outpoint_spent(&seed));
+        assert_eq!(pool.dep_graphs_len(), (0, 0));
+        assert!(pool.fee_stats() == (0, 0, 0) || pool.is_empty());
+
+        // The pool is fully usable after clear (fresh chain state).
+        let (sk, pk) = secp256k1::generate_keypair();
+        pool.admit(&make_signed_tx(&sk, &pk, b"post-clear", TEST_FEE), NOW, &NoChainLookup, &NoUtxoLookup, 10)
+            .unwrap();
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn package_filter_excludes_below_floor_parent_and_its_child() {
+        let mut pool = Mempool::new(test_config());
+        let (p_id, c_id, _) = admit_parent_child_chain(&mut pool);
+
+        // No floor: both included, parent strictly before child.
+        let all: Vec<Hash256> = pool.iter_for_block_proposal(0).iter().map(|e| e.tx_id).collect();
+        let pi = all.iter().position(|id| *id == p_id).expect("parent in feed");
+        let ci = all.iter().position(|id| *id == c_id).expect("child in feed");
+        assert!(pi < ci, "parent must precede child");
+
+        // Floor 10: parent (rate ~1) excluded → child (rate ~57) must be
+        // excluded too, even though it clears the floor on its own — a child
+        // without its parent is unbuildable and would only waste a slot.
+        let filtered = pool.iter_for_block_proposal(10);
+        assert!(
+            filtered.is_empty(),
+            "below-floor parent must exclude the whole package, got {} entries",
+            filtered.len()
+        );
+    }
+
+    #[test]
+    fn cascade_removes_chain_and_keeps_graph_mirrors_clean() {
+        let mut pool = Mempool::new(test_config());
+        let (p_id, _c_id, seed) = admit_parent_child_chain(&mut pool);
+
+        // Removing the parent cascades the child; both graphs end empty.
+        pool.remove(&p_id);
+        assert!(pool.is_empty(), "cascade must remove the dependent child");
+        assert_eq!(pool.dep_graphs_len(), (0, 0), "depends_on/children_of must mirror to empty");
+        assert!(!pool.is_outpoint_spent(&seed));
+    }
+
+    #[test]
+    fn expire_counts_cascaded_children() {
+        let mut config = test_config();
+        config.expiry_secs = 3600;
+        let mut pool = Mempool::new(config);
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let v = NO_UTXO_LOOKUP_VALUE;
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), v)].into_iter().collect());
+
+        // Parent received at NOW; chained child received at NOW+3000 (fresh).
+        let p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x, 1_000, v - 1_500);
+        let p_id = pool.admit(&p, NOW, &NoChainLookup, &lookup, 10).unwrap();
+        let p_change = OutPoint { txid: p_id, vout: 1 };
+        let c_in = v - 1_500;
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, c_in - 20_000, 0);
+        pool.admit(&c, NOW + 3000, &NoChainLookup, &lookup, 10).unwrap();
+
+        // At NOW+3601 only the parent is past expiry (cutoff = NOW+1), but the
+        // child cascades with it — the return value must count BOTH.
+        let removed = pool.expire(NOW + 3601);
+        assert_eq!(removed, 2, "expire must count cascade-evicted children");
+        assert!(pool.is_empty());
     }
 }

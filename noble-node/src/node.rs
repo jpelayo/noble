@@ -4173,10 +4173,13 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let node_min_fee_rate = self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed);
                     let txs: Vec<noble_core::Transaction> = {
                         let mempool = self.mempool.lock();
+                        // Package-aware fee filtering happens inside the
+                        // mempool: excluding a below-floor parent excludes its
+                        // descendants too (an orphaned child would only waste
+                        // a proposal slot — the builder skips missing inputs).
                         mempool
-                            .iter_for_block_proposal()
+                            .iter_for_block_proposal(node_min_fee_rate)
                             .into_iter()
-                            .filter(|entry| entry.fee_rate >= node_min_fee_rate)
                             .take(max_count)
                             .map(|entry| entry.tx.clone())
                             .collect()

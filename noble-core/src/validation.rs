@@ -389,8 +389,36 @@ fn validate_tx_type_and_advanced(tx: &Transaction) -> Result<(), ValidationError
 /// Validate a transaction against rules T1-T17.
 ///
 /// Returns Ok(()) if all checks pass, or the first validation error encountered.
+///
+/// Composed of [`validate_transaction_structure`] (all cheap structural rules)
+/// followed by [`validate_transaction_signatures`] (the expensive secp256k1
+/// work). Callers that need to stage the expensive part — e.g. the mempool,
+/// which runs fee/UTXO policy checks between the two so spam is rejected
+/// without paying for signature verification — can call the parts directly.
 #[tracing::instrument(skip(tx, ctx), fields(task = "tx_validation"))]
 pub fn validate_transaction(
+    tx: &Transaction,
+    claimed_tx_id: &noble_crypto::Hash256,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
+    validate_transaction_structure(tx, claimed_tx_id, ctx)?;
+    validate_transaction_signatures(tx, ctx)
+}
+
+/// Signature rules only (T6/T7/T26): issuer + additional signature
+/// verification. The expensive half of [`validate_transaction`].
+pub fn validate_transaction_signatures(
+    tx: &Transaction,
+    ctx: &TxValidationContext,
+) -> Result<(), ValidationError> {
+    validate_tx_signatures(tx, ctx)
+}
+
+/// All stateless rules EXCEPT signatures (T6/T7/T26): size/counts, protocol
+/// fields, metadata, tx_id, type-specific and advanced checks. The cheap half
+/// of [`validate_transaction`].
+#[tracing::instrument(skip(tx, ctx), fields(task = "tx_validation"))]
+pub fn validate_transaction_structure(
     tx: &Transaction,
     claimed_tx_id: &noble_crypto::Hash256,
     ctx: &TxValidationContext,
@@ -410,7 +438,8 @@ pub fn validate_transaction(
 
     validate_tx_size_and_counts(tx)?;
     validate_tx_protocol_fields(tx, ctx)?;
-    validate_tx_signatures(tx, ctx)?;
+    // Signatures (T6/T7/T26) are NOT checked here — see
+    // `validate_transaction_signatures`. `validate_transaction` runs both.
 
     // T8: Metadata bounds validation (T9 duplicate-key check removed by decree)
     validate_metadata(&tx.metadata)?;
@@ -472,7 +501,7 @@ pub fn validate_transaction(
     tracing::trace!("T11: fee check deferred to stateful validation");
 
     // T12: Low-S enforcement for secp256k1 is handled by noble-crypto::secp256k1::verify()
-    // which is called in T6 and T7 above.
+    // which is called in T6 and T7 (validate_transaction_signatures).
 
     validate_tx_type_and_advanced(tx)?;
 
@@ -481,7 +510,7 @@ pub fn validate_transaction(
 
     // T18-T20: Validator identity checks deferred to consensus (needs validator list)
 
-    tracing::debug!("transaction validation passed");
+    tracing::debug!("transaction structure validation passed");
     Ok(())
 }
 
@@ -949,6 +978,31 @@ mod tests {
         let result = validate_transaction(&tx, &tx_id, &default_tx_ctx());
         assert!(matches!(
             result,
+            Err(ValidationError::IssuerSigInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn structure_signatures_split_composes() {
+        // The structure half accepts a structurally-valid tx with a CORRUPT
+        // signature; the signatures half (and the composed full validator)
+        // reject it. Lets the mempool run fee/UTXO policy between the halves.
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (mut tx, _) = make_signed_tx(&sk, &pk);
+        tx.issuer_sig.signature = vec![0u8; 64]; // corrupt sig, structure intact
+        let tx_id = tx.compute_tx_id(test_chain_id()).unwrap();
+        let ctx = default_tx_ctx();
+
+        assert!(
+            validate_transaction_structure(&tx, &tx_id, &ctx).is_ok(),
+            "structure half must not check signatures"
+        );
+        assert!(matches!(
+            validate_transaction_signatures(&tx, &ctx),
+            Err(ValidationError::IssuerSigInvalid(_))
+        ));
+        assert!(matches!(
+            validate_transaction(&tx, &tx_id, &ctx),
             Err(ValidationError::IssuerSigInvalid(_))
         ));
     }

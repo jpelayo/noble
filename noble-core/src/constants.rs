@@ -251,8 +251,9 @@ pub fn is_valid_checkpoint(
     None
 }
 
-/// Maximum mempool size in bytes (default 300 MB).
-pub const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;
+// NOTE: mempool sizing lives in noble-mempool (`DEFAULT_MAX_SIZE_BYTES`,
+// 32 MB) — the old `MAX_MEMPOOL_SIZE` constant here (300 MB) was unused and
+// contradicted the real cap, so it was removed (audit fix #6).
 
 /// Minimum relay fee rate in groats per byte.
 /// Transactions below this rate are not relayed or included in blocks.

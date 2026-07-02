@@ -794,6 +794,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         if let Err(e) = storage.clear_cycle_history() {
             tracing::warn!(task = "healing", "clear_cycle_history: {e}");
         }
+        drop(storage);
+        // The chain is gone — every pooled tx was validated against it.
+        // Purge; origin wallets re-relay. (Lock order: Storage(2) < Mempool(5).)
+        self.mempool.lock().clear();
     }
 
     fn rollback_to(&self, height: u64) {
@@ -838,6 +842,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         if let Some(header) = tip_header {
             self.consensus.write().update_tip_with_header(header);
         }
+        // Rolled-back UTXOs no longer exist — pooled txs spending them are
+        // invalid and would pollute proposals/fee stats until expiry. Purge;
+        // still-valid txs are re-relayed by their origin wallets.
+        self.mempool.lock().clear();
     }
 
     fn clear_cycle_history_storage(&self) {
@@ -871,6 +879,9 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.chain_id.store(new_cid, Ordering::Relaxed);
         self.consensus.write().set_chain_id(new_cid);
         self.send_network(NetworkCommand::UpdateChainId(new_cid));
+        // tx_ids commit to the chain_id, so every pooled entry's identity is
+        // now stale (blockchain hop, or pre-genesis→real transition). Purge.
+        self.mempool.lock().clear();
         tracing::info!(task = "chain_id", "chain_id updated to {:#010X}", new_cid);
     }
 
@@ -891,11 +902,16 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         }
     }
 
-    fn evict_from_mempool(&self, tx_ids: &[Hash256]) {
+    /// Remove a committed block's txs from the mempool — INCLUDING any
+    /// conflicting mempool tx that spends an outpoint the block just consumed
+    /// (removeForBlock + removeConflicts). Sync-imported blocks are the most
+    /// conflict-prone (catch-up after being behind/forked), so this must
+    /// mirror the consensus commit path exactly; a plain by-id removal would
+    /// leave permanently-invalid conflicting txs polluting the pool until
+    /// expiry.
+    fn evict_from_mempool(&self, block_txs: &[noble_core::Transaction], tx_ids: &[Hash256]) {
         let mut mempool = self.mempool.lock();
-        for tx_id in tx_ids {
-            mempool.remove(tx_id);
-        }
+        mempool.remove_for_block(block_txs, tx_ids);
     }
 
     fn record_metric_block_validation(&self, duration: f64) {
@@ -2666,9 +2682,10 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         // Update network tip height.
         self.update_tip_height(block.header.height);
 
-        // Remove committed txs from mempool.
+        // Remove committed txs from mempool — plus any conflicting tx that
+        // spends an outpoint this block just consumed.
         if !tx_ids.is_empty() {
-            self.evict_from_mempool(&tx_ids);
+            self.evict_from_mempool(&block.transactions, &tx_ids);
         }
 
         // Metrics.
