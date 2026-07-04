@@ -253,12 +253,18 @@ const App = {
                 App._showDisconnectedBanner();
             } else if (data.isConnected === true) {
                 appState._confirmedDisconnected = false;
+                // Native says connected — any stale deliberate-disconnect flag
+                // is obsolete (e.g. the user reconnected through home/settings).
+                appState._userDisconnected = false;
                 App._hideDisconnectedBanner();
             }
         }
     },
 
     _showDisconnectedBanner() {
+        // A deliberate disconnect is not an outage: no banner, and definitely
+        // no "Reconnecting…" claim. The status row/pill still show the state.
+        if (appState._userDisconnected) return;
         let banner = document.getElementById('disconnected-banner');
         if (banner) return;
         banner = document.createElement('div');
@@ -267,7 +273,28 @@ const App = {
         banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:var(--gap-sm) var(--gap);background:var(--error);color:#fff;text-align:center;font-size:var(--font-size-sm);z-index:2000;display:flex;align-items:center;justify-content:center;gap:var(--gap-sm)';
         banner.innerHTML = '<span>Disconnected from node. Reconnecting...</span><button id="disconnected-retry" style="background:#fff3;border:1px solid #fff6;color:#fff;padding:2px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:var(--font-size-xs)">Retry Now</button>';
         document.body.appendChild(banner);
-        document.getElementById('disconnected-retry').addEventListener('click', () => App._checkConnectivity());
+        document.getElementById('disconnected-retry').addEventListener('click', () => App._retryConnect());
+    },
+
+    /** Banner "Retry Now": actually DIAL the node (connectToNode rebuilds the
+     *  native client and restarts polling) — not just re-read broken state.
+     *  On success the native layer pushes isConnected:true, which clears the
+     *  banner through handleEvent. */
+    async _retryConnect() {
+        const btn = document.getElementById('disconnected-retry');
+        if (btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
+        appState._userDisconnected = false;
+        try {
+            const s = await Bridge.call('noble_app', 'getSettings').catch(() => ({}));
+            const url = (s && s.nodeURL) || appState.nodeURL || '';
+            if (url) {
+                const res = await Bridge.call('noble_app', 'connectToNode', { url });
+                if (res && res.connected === false) throw new Error('still unreachable');
+            }
+            await App._checkConnectivity();
+        } catch { /* node still down — banner stays, button resets below */ }
+        const after = document.getElementById('disconnected-retry');
+        if (after) { after.disabled = false; after.textContent = 'Retry Now'; }
     },
 
     _hideDisconnectedBanner() {

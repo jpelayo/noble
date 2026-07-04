@@ -260,6 +260,12 @@ fn main() {
                         connect_proxy,
                         connect_handle,
                     );
+                } else {
+                    // Node unreachable at launch — keep retrying every 10s so
+                    // the WebUI's "Reconnecting…" banner is truthful and the
+                    // app recovers by itself when the node comes back.
+                    eprintln!("[auto-connect] node unreachable at launch; starting reconnect loop");
+                    app::spawn_reconnect_loop(connect_state, connect_proxy, connect_handle);
                 }
             });
         }

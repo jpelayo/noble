@@ -33,6 +33,14 @@ pub struct AppState {
     pub api_client: Option<ApiClient>,
     poll_failure_count: u32,
     reconnect_handle: Option<tokio::task::JoinHandle<()>>,
+    /// True after a deliberate disconnect — suppresses every automatic
+    /// reconnection path until the user connects again. Without this the poll
+    /// loop would silently re-connect right after "Disconnect".
+    user_disconnected: bool,
+    /// Monotonic token for the polling loop: each start_polling() bumps it and
+    /// older loops exit on their next tick, so repeated connects never stack
+    /// duplicate pollers.
+    poll_generation: u64,
 }
 
 impl AppState {
@@ -66,6 +74,8 @@ impl AppState {
             api_client: None,
             poll_failure_count: 0,
             reconnect_handle: None,
+            user_disconnected: false,
+            poll_generation: 0,
         }
     }
 
@@ -111,6 +121,15 @@ pub fn start_polling(
     proxy: EventLoopProxy<UserEvent>,
     handle: Handle,
 ) {
+    // Generation token: only the newest poll loop stays alive. Every
+    // start_polling() bumps the counter; older loops notice on their next tick
+    // and exit, so repeated connects never stack duplicate pollers.
+    let my_generation = {
+        let mut st = state.lock().expect("app state lock poisoned");
+        st.poll_generation += 1;
+        st.poll_generation
+    };
+
     handle.spawn(async move {
         // 10s cadence matches the Mac client (AppState.pollTick) so the desktop
         // shell's balance/height/peer state feels equally live.
@@ -121,21 +140,32 @@ pub fn start_polling(
         loop {
             interval.tick().await;
 
-            let (node_url, wallet_address, is_connected) = {
+            let (node_url, wallet_address, is_connected, stale, user_disconnected) = {
                 let st = state.lock().expect("app state lock poisoned");
                 (
                     st.node_url.clone(),
                     st.wallet_address.clone(),
                     st.is_connected,
+                    st.poll_generation != my_generation,
+                    st.user_disconnected,
                 )
             };
+            if stale {
+                return; // a newer poll loop owns polling now
+            }
 
-            // If disconnected, attempt silent reconnection with a fresh client.
+            // If disconnected, attempt silent reconnection with a fresh client —
+            // unless the user disconnected on purpose (never override that).
             if !is_connected {
+                if user_disconnected {
+                    continue;
+                }
                 let reconnect_client = ApiClient::new(&node_url);
                 if let Ok(info) = reconnect_client.call_rpc("noble_getNodeInfo", json!([])).await {
+                    // chain_id is a hex STRING on the wire (e.g. "0F48C9C1") —
+                    // same parse as every other call site.
                     let chain_id = info.get("chain_id").or(info.get("chainId"))
-                        .and_then(|v| v.as_u64()).map(|c| format!("{c:08X}")).unwrap_or_default();
+                        .and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let block_height = info.get("block_height").or(info.get("blockHeight"))
                         .and_then(|v| v.as_u64()).unwrap_or(0);
                     {
@@ -288,6 +318,101 @@ pub fn start_polling(
             }
         }
     });
+}
+
+// ============================================================================
+// Reconnect Loop
+// ============================================================================
+
+/// Spawn (or replace) the background reconnect loop: retries the saved node
+/// URL every 10s until it connects, then starts polling and exits. Used by
+/// `connectToNode` on failure AND by the launch auto-connect failure path, so
+/// the WebUI's "Reconnecting…" banner is always backed by a real dialer.
+/// Aborts any previous loop and stores its own handle in `reconnect_handle`
+/// (cancelled by the next connect/disconnect). Exits permanently if the user
+/// disconnected on purpose.
+pub fn spawn_reconnect_loop(
+    state: SharedState,
+    proxy: EventLoopProxy<UserEvent>,
+    tokio_handle: Handle,
+) {
+    // Cancel any previous loop before replacing it.
+    {
+        let mut st = state.lock().expect("app state lock poisoned");
+        if let Some(old) = st.reconnect_handle.take() {
+            old.abort();
+        }
+    }
+
+    let reconnect_state = state.clone();
+    let reconnect_proxy = proxy.clone();
+    let reconnect_tokio = tokio_handle.clone();
+    let handle = tokio_handle.spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        interval.tick().await; // skip immediate tick
+
+        loop {
+            interval.tick().await;
+
+            let current_url = {
+                let st = reconnect_state.lock().expect("app state lock poisoned");
+                if st.is_connected || st.user_disconnected {
+                    return; // connected elsewhere, or deliberate disconnect
+                }
+                st.node_url.clone()
+            };
+
+            let retry_client = ApiClient::new(&current_url);
+            if let Ok(info) = retry_client
+                .call_rpc("noble_getNodeInfo", json!([]))
+                .await
+            {
+                let chain_id = info
+                    .get("chain_id")
+                    .or(info.get("chainId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let block_height = info
+                    .get("block_height")
+                    .or(info.get("blockHeight"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                {
+                    let mut st = reconnect_state.lock().expect("app state lock poisoned");
+                    st.is_connected = true;
+                    st.chain_id = chain_id.clone();
+                    st.block_height = block_height;
+                    st.api_client = Some(retry_client);
+                    st.poll_failure_count = 0;
+                    st.reconnect_handle = None;
+                    if let Err(e) = security::store_credential(
+                        security::KEY_NODE_URL,
+                        st.node_url.as_bytes(),
+                    ) { eprintln!("credential store failed: {e}"); }
+                }
+
+                // Push connected state to WebView.
+                if let Err(e) = reconnect_proxy.send_event(UserEvent::PollTick(json!({
+                    "isConnected": true,
+                    "chainId": chain_id,
+                    "blockHeight": block_height,
+                }))) { eprintln!("event send failed: {e:?}"); }
+
+                // Start polling loop.
+                start_polling(
+                    reconnect_state.clone(),
+                    reconnect_proxy.clone(),
+                    reconnect_tokio.clone(),
+                );
+                return;
+            }
+        }
+    });
+
+    let mut st = state.lock().expect("app state lock poisoned");
+    st.reconnect_handle = Some(handle);
 }
 
 // ============================================================================
@@ -529,7 +654,22 @@ pub async fn handle_app_action(
 
         "connectToNode" => {
             let url = {
-                let st = state.lock().expect("app state lock poisoned");
+                let mut st = state.lock().expect("app state lock poisoned");
+                // Connecting is always a deliberate act — clear the flag that
+                // suppresses automatic reconnection after a manual disconnect.
+                st.user_disconnected = false;
+                // Honor an explicit URL (Mac's handler requires it; home.js and
+                // settings.js pass it) — persist it like saveSettings does, so
+                // the dial target and the saved target can never diverge.
+                if let Some(u) = params.get("url").and_then(|v| v.as_str()) {
+                    if !u.is_empty() && u != st.node_url {
+                        st.node_url = u.to_string();
+                        st.settings.node_url = u.to_string();
+                        if let Err(e) = storage::save_settings(&st.settings) {
+                            eprintln!("settings save failed: {e}");
+                        }
+                    }
+                }
                 st.node_url.clone()
             };
 
@@ -586,82 +726,9 @@ pub async fn handle_app_action(
                     }))
                 }
                 Err(e) => {
-                    // B1: Connection failed — spawn a reconnect loop that retries every 10s.
-                    let reconnect_state = state.clone();
-                    let reconnect_proxy = proxy.clone();
-                    let reconnect_tokio = tokio_handle.clone();
-                    let handle = tokio_handle.spawn(async move {
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(10),
-                        );
-                        interval.tick().await; // skip immediate tick
-
-                        loop {
-                            interval.tick().await;
-
-                            let current_url = {
-                                let st = reconnect_state.lock().expect("app state lock poisoned");
-                                if st.is_connected {
-                                    return; // Already connected (e.g. manual retry succeeded).
-                                }
-                                st.node_url.clone()
-                            };
-
-                            let retry_client = ApiClient::new(&current_url);
-                            if let Ok(info) = retry_client
-                                .call_rpc("noble_getNodeInfo", json!([]))
-                                .await
-                            {
-                                let chain_id = info
-                                    .get("chain_id")
-                                    .or(info.get("chainId"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let block_height = info
-                                    .get("block_height")
-                                    .or(info.get("blockHeight"))
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-
-                                {
-                                    let mut st = reconnect_state.lock().expect("app state lock poisoned");
-                                    st.is_connected = true;
-                                    st.chain_id = chain_id.clone();
-                                    st.block_height = block_height;
-                                    st.api_client = Some(retry_client);
-                                    st.poll_failure_count = 0;
-                                    st.reconnect_handle = None;
-                                    if let Err(e) = security::store_credential(
-                                        security::KEY_NODE_URL,
-                                        st.node_url.as_bytes(),
-                                    ) { eprintln!("credential store failed: {e}"); }
-                                }
-
-                                // Push connected state to WebView.
-                                if let Err(e) = reconnect_proxy.send_event(UserEvent::PollTick(json!({
-                                    "isConnected": true,
-                                    "chainId": chain_id,
-                                    "blockHeight": block_height,
-                                }))) { eprintln!("event send failed: {e:?}"); }
-
-                                // Start polling loop.
-                                start_polling(
-                                    reconnect_state.clone(),
-                                    reconnect_proxy.clone(),
-                                    reconnect_tokio.clone(),
-                                );
-                                return;
-                            }
-                        }
-                    });
-
-                    // Store the handle so it can be cancelled on next connectToNode or disconnect.
-                    {
-                        let mut st = state.lock().expect("app state lock poisoned");
-                        st.reconnect_handle = Some(handle);
-                    }
-
+                    // B1: Connection failed — keep retrying in the background so
+                    // the WebUI's "Reconnecting…" banner is truthful.
+                    spawn_reconnect_loop(state.clone(), proxy.clone(), tokio_handle.clone());
                     Err(format!("Connection failed: {e}"))
                 }
             }
@@ -676,6 +743,10 @@ pub async fn handle_app_action(
                 st.node_state = String::new();
                 st.api_client = None;
                 st.poll_failure_count = 0;
+                // Deliberate disconnect: suppress every automatic reconnection
+                // path (poll silent-reconnect, reconnect loop) until the user
+                // explicitly connects again.
+                st.user_disconnected = true;
                 // Cancel any pending reconnect loop.
                 if let Some(handle) = st.reconnect_handle.take() {
                     handle.abort();

@@ -147,6 +147,11 @@ final class AppState {
     /// Whether to auto-connect to saved node on launch.
     var autoConnect = true
 
+    /// True after a deliberate disconnect — suppresses every automatic
+    /// reconnection path (launch, scene re-activation) until the user
+    /// explicitly connects again. Matches the WRY apps' semantics.
+    var userDisconnected = false
+
     // MARK: - Services
 
     /// Live API service for the connected node.
@@ -282,6 +287,9 @@ final class AppState {
     /// Test connection to the node and update state.
     func connectToNode() async {
         connectionError = nil
+        // Connecting is always a deliberate act — automatic reconnection is
+        // welcome again after this.
+        userDisconnected = false
         reconnectTimer?.invalidate()
         reconnectTimer = nil
 
@@ -368,6 +376,9 @@ final class AppState {
     func disconnect() {
         stopPolling()
         stopDeveloperApiServers()
+        // Deliberate disconnect: stay disconnected across scene re-activation
+        // and launch auto-connect until the user explicitly connects again.
+        userDisconnected = true
         apiService = nil
         isConnected = false
         chainId = ""

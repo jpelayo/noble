@@ -127,7 +127,14 @@ export function init(root, ctx) {
         } catch (e) {
             requesting = false;
             resultMsg = null;
-            errorMsg = e.message || 'Faucet request failed.';
+            // The faucet is a standalone daemon (noble-faucet, port 8786).
+            // Transport-level failures mean it isn't running — say that,
+            // instead of leaking the raw URLSession/reqwest error text
+            // ("Could not connect to the server.").
+            const raw = e.message || 'Faucet request failed.';
+            errorMsg = /could not connect|connection refused|network|timed out|unavailable/i.test(raw)
+                ? 'The faucet service is not running on this node.'
+                : raw;
             localStorage.removeItem(COOLDOWN_KEY);
             if (alive) render();
         }

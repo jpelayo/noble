@@ -308,7 +308,31 @@ final class WebBridgeHandler {
         return (fee: 0, feeRate: chosen)
     }
 
+    /// Dispatch a bridge message to its handler and return the raw result.
+    /// Does not touch the web view — reusable by orchestration helpers.
+    func dispatch(
+        handler: String,
+        action: String,
+        params: [String: Any]
+    ) async throws -> Any {
+        switch handler {
+        case "noble_api":
+            return try await handleAPI(action: action, params: params)
+        case "noble_crypto":
+            return try await handleCrypto(action: action, params: params)
+        case "noble_security":
+            return try await handleSecurity(action: action, params: params)
+        case "noble_app":
+            return try await handleApp(action: action, params: params)
+        case "noble_storage":
+            return try await handleStorage(action: action, params: params)
+        default:
+            throw BridgeError.unknownHandler(handler)
+        }
+    }
+
     /// Handle an incoming bridge message and resolve the callback.
+    /// Thin wrapper over `dispatch` plus `evaluateJS`.
     func handle(
         handler: String,
         action: String,
@@ -317,22 +341,7 @@ final class WebBridgeHandler {
         coordinator: WebContentView.Coordinator
     ) async {
         do {
-            let result: Any
-            switch handler {
-            case "noble_api":
-                result = try await handleAPI(action: action, params: params)
-            case "noble_crypto":
-                result = try await handleCrypto(action: action, params: params)
-            case "noble_security":
-                result = try await handleSecurity(action: action, params: params)
-            case "noble_app":
-                result = try await handleApp(action: action, params: params)
-            case "noble_storage":
-                result = try await handleStorage(action: action, params: params)
-            default:
-                throw BridgeError.unknownHandler(handler)
-            }
-
+            let result = try await dispatch(handler: handler, action: action, params: params)
             let json = try serializeToJSON(result)
             let escaped = json.replacingOccurrences(of: "'", with: "\\'")
             coordinator.evaluateJS("NativeBridge._handleCallback('\(callbackId)', null, '\(escaped)')")

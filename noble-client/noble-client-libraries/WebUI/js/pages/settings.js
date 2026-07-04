@@ -194,7 +194,8 @@ export function init(root, ctx) {
                     resultDiv.setAttribute('role', 'status');
                     const chainId = info.chainId || '';
                     const height = info.blockHeight ? ` \u00B7 Block ${Number(info.blockHeight).toLocaleString()}` : '';
-                    resultDiv.innerHTML = `<span style="color: var(--success)">\u2713 Connected</span>`
+                    // A probe result, not a connection state \u2014 say what it means.
+                    resultDiv.innerHTML = `<span style="color: var(--success)">\u2713 Node reachable</span>`
                         + (chainId ? `<div style="margin-top:var(--gap-xs);font-size:var(--font-size-sm)"><span style="color:var(--text-muted)">Chain:</span> <span class="mono" style="font-weight:600">${esc(chainId)}</span>${height}</div>` : '');
                 } catch (e) {
                     resultDiv.setAttribute('role', 'alert');
@@ -210,8 +211,13 @@ export function init(root, ctx) {
         if (disconnBtn) {
             disconnBtn.addEventListener('click', async () => {
                 await Bridge.call('noble_app', 'disconnectNode');
-                state.isConnected = false;
-                render();
+                // Route through updateState (not direct mutation) so the chain
+                // bar, nav, and page cache all react; _userDisconnected keeps
+                // the "Reconnecting…" banner honest — a deliberate disconnect
+                // is not an outage.
+                if (window.App) {
+                    window.App.updateState({ isConnected: false, _userDisconnected: true });
+                }
             });
         }
 
@@ -222,10 +228,22 @@ export function init(root, ctx) {
                 if (!url) return;
                 connBtn.disabled = true;
                 connBtn.textContent = 'Connecting\u2026';
+                // Clear the deliberate-disconnect flag: connecting is an
+                // explicit act, so automatic reconnection is welcome again.
+                if (window.App) window.App.updateState({ _userDisconnected: false });
                 try {
                     await Bridge.call('noble_app', 'saveSettings', { nodeURL: url });
-                    await Bridge.call('noble_app', 'testConnection', { url });
-                    state.isConnected = true;
+                    // The REAL connect: rebuilds the native client and starts
+                    // polling (testConnection is only a probe and must never be
+                    // used here). Mac returns {connected:bool} and schedules its
+                    // own 10s retries on failure; WRY rejects the promise and
+                    // its reconnect loop keeps dialing. On success the native
+                    // layer pushes isConnected:true, which clears the banner
+                    // and re-renders this page through updateState.
+                    const res = await Bridge.call('noble_app', 'connectToNode', { url });
+                    if (res && res.connected === false) {
+                        throw new Error('Could not connect \u2014 automatic retries are running.');
+                    }
                     await loadSettings();
                 } catch (e) {
                     const res = card.querySelector('#settings-conn-result');

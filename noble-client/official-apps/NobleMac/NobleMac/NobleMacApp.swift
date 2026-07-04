@@ -27,12 +27,25 @@ struct NobleMacApp: App {
             }
             .task {
                 appState.checkExistingWallet()
+                // Launch connect. Do NOT rely on the scenePhase handler below —
+                // .onChange only fires on transitions, and macOS does not
+                // reliably deliver an initial one, which left the app forever
+                // "Disconnected" with a healthy node. Double-firing with the
+                // scenePhase path is benign: connectToNode is idempotent
+                // (invalidates the retry timer, rebuilds the client).
+                if appState.autoConnect && !appState.userDisconnected
+                    && !appState.isConnected && !appState.nodeURL.isEmpty {
+                    await appState.connectToNode()
+                }
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
                     appState.startPolling()
-                    if !appState.isConnected && !appState.nodeURL.isEmpty {
+                    // Respect a deliberate disconnect — re-activating the app
+                    // must not override the user's choice.
+                    if !appState.isConnected && !appState.userDisconnected
+                        && !appState.nodeURL.isEmpty {
                         Task { await appState.connectToNode() }
                     }
                 case .background, .inactive:
@@ -63,7 +76,16 @@ struct NobleMacApp: App {
             }
             CommandMenu("Node") {
                 Button("Refresh") {
-                    Task { await appState.pollTick() }
+                    // pollTick() is a silent no-op while disconnected (its first
+                    // line bails when apiService is nil) — fall back to a real
+                    // dial so ⌘R always does something useful.
+                    Task {
+                        if appState.isConnected {
+                            await appState.pollTick()
+                        } else {
+                            await appState.connectToNode()
+                        }
+                    }
                 }
                 .keyboardShortcut("r", modifiers: .command)
                 Button("Disconnect") { appState.disconnect() }
