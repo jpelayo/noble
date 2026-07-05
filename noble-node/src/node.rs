@@ -281,22 +281,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         };
 
         // --- Load per-installation encryption entropy + keystore ---
-        let keystore_file_path = if config.wallet.keystore_path.is_relative() {
-            config.storage.data_dir.join(&config.wallet.keystore_path)
-        } else {
-            config.wallet.keystore_path.clone()
-        };
+        // Single source of truth for the keystore file location — the same
+        // resolution is handed to the spawned faucet via --node-keystore.
+        let keystore_file_path = config.resolved_keystore_file();
 
         // Detect old directory-based keystore for migration
         let old_keystore_dir = config.storage.data_dir.join("keystore");
-
-        // When the configured keystore_path IS a directory (old config with "keystore"),
-        // the new keystore file goes next to it with a .noble extension.
-        let keystore_file_path = if keystore_file_path.is_dir() {
-            keystore_file_path.with_extension("noble")
-        } else {
-            keystore_file_path
-        };
 
         let (chain_meta, mut keystore) = if KeyStore::exists(&keystore_file_path) {
             // New format: single-file keystore
@@ -2427,6 +2417,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     .display()
                     .to_string(),
                 node_data_dir: config.storage.data_dir.clone(),
+                node_keystore: config.resolved_keystore_file(),
                 log_path: config.storage.data_dir.join("faucet.log"),
                 tls_cert_path: config.storage.data_dir.join("tls-cert.pem"),
                 tls_key_path: config.storage.data_dir.join("tls-key.pem"),

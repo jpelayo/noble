@@ -53,6 +53,11 @@ pub struct FaucetSpawnConfig {
     pub db_path: String,
     pub keystore_dir: String,
     pub node_data_dir: PathBuf,
+    /// The node's RESOLVED wallet keystore file (`NodeConfig::
+    /// resolved_keystore_file()`). Passed as --node-keystore so the faucet
+    /// never guesses `{data_dir}/keystore.noble` — a wrong guess on layouts
+    /// with an absolute keystore_path crash-loops the child.
+    pub node_keystore: PathBuf,
     pub log_path: PathBuf,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
@@ -124,7 +129,9 @@ fn build_command(bin: &PathBuf, cfg: &FaucetSpawnConfig) -> tokio::process::Comm
         .arg("--keystore-dir")
         .arg(&cfg.keystore_dir)
         .arg("--node-data-dir")
-        .arg(&cfg.node_data_dir);
+        .arg(&cfg.node_data_dir)
+        .arg("--node-keystore")
+        .arg(&cfg.node_keystore);
     if cfg.tls_cert_path.exists() && cfg.tls_key_path.exists() {
         cmd.arg("--tls-cert")
             .arg(&cfg.tls_cert_path)
@@ -364,6 +371,9 @@ mod tests {
             db_path: "/tmp/faucet.db".into(),
             keystore_dir: "/tmp/faucet-keystore".into(),
             node_data_dir: PathBuf::from("/tmp/noble-data"),
+            // Deliberately OUTSIDE node_data_dir — the regression this
+            // argument exists to fix (absolute wallet.keystore_path).
+            node_keystore: PathBuf::from("/tmp/elsewhere/keystore.noble"),
             log_path: dir.join("faucet.log"),
             // Non-existent on purpose: TLS args must be omitted.
             tls_cert_path: dir.join("no-cert.pem"),
@@ -384,6 +394,7 @@ mod tests {
                 "--db-path", "/tmp/faucet.db",
                 "--keystore-dir", "/tmp/faucet-keystore",
                 "--node-data-dir", "/tmp/noble-data",
+                "--node-keystore", "/tmp/elsewhere/keystore.noble",
             ]
         );
 

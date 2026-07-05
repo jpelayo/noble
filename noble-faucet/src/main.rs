@@ -205,6 +205,27 @@ struct Cli {
     /// Also reads `NOBLE_NODE_DATA_DIR` env var (CLI flag takes precedence).
     #[arg(long)]
     node_data_dir: Option<PathBuf>,
+
+    /// Explicit path to the node's single-file keystore (keystore.noble).
+    /// The node passes its RESOLVED `wallet.keystore_path` here so nonstandard
+    /// layouts (absolute keystore_path outside data_dir — e.g. migrated legacy
+    /// installs) bootstrap correctly. Defaults to
+    /// `<node_data_dir>/keystore.noble` when omitted.
+    #[arg(long)]
+    node_keystore: Option<PathBuf>,
+}
+
+/// Resolve the node's single-file keystore for local-FS bootstrap: the
+/// explicit --node-keystore path when given, else the standard location
+/// inside the node's data dir. ONE resolver for every consumer (bootstrap,
+/// admin-token refresh, mtime watcher) so they can never disagree.
+fn node_keystore_path(
+    node_data_dir: &std::path::Path,
+    explicit: Option<&std::path::Path>,
+) -> PathBuf {
+    explicit
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| node_data_dir.join("keystore.noble"))
 }
 
 /// Secrets fetched from the node's on-disk keystore (Group A local-FS bootstrap).
@@ -222,6 +243,7 @@ struct LocalSecrets {
 /// `eprintln + std::process::exit(1)` on Err.
 fn bootstrap_via_local_fs(
     node_data_dir: &std::path::Path,
+    node_keystore: Option<&std::path::Path>,
 ) -> Result<LocalSecrets, String> {
     use noble_wallet::KeyStore;
 
@@ -248,8 +270,9 @@ fn bootstrap_via_local_fs(
         node_data_dir.display()
     ))?;
 
-    // 2. Open the node's keystore.
-    let keystore_path = node_data_dir.join("keystore.noble");
+    // 2. Open the node's keystore (explicit --node-keystore path when the
+    //    node supplied one; standard <node_data_dir>/keystore.noble otherwise).
+    let keystore_path = node_keystore_path(node_data_dir, node_keystore);
     let mut ks = KeyStore::open(&keystore_path, &chain_meta).map_err(|e| {
         format!("failed to open node keystore at {}: {e}", keystore_path.display())
     })?;
@@ -311,6 +334,7 @@ fn admin_auth_fingerprint(token_hex: &str) -> String {
 /// bootstrapped it yet), and `Err` on any I/O / decrypt failure.
 fn refresh_admin_token_from_disk(
     node_data_dir: &std::path::Path,
+    node_keystore: Option<&std::path::Path>,
     chain_meta_hex: &str,
 ) -> Result<Option<String>, String> {
     use noble_wallet::KeyStore;
@@ -322,7 +346,7 @@ fn refresh_admin_token_from_disk(
         .try_into()
         .map_err(|_| "cached chain_meta is not 32 bytes".to_string())?;
 
-    let keystore_path = node_data_dir.join("keystore.noble");
+    let keystore_path = node_keystore_path(node_data_dir, node_keystore);
     let mut ks = KeyStore::open(&keystore_path, &chain_meta)
         .map_err(|e| format!("open keystore: {e}"))?;
     let wallet_pass = hex::encode(
@@ -376,7 +400,7 @@ async fn main() {
     // + admin token — narrows the cross-process boundary to local filesystem
     // permissions, which already chmod 0600 the relevant files.
     let local_secrets: Option<LocalSecrets> = if let Some(dir) = &cli.node_data_dir {
-        match bootstrap_via_local_fs(dir) {
+        match bootstrap_via_local_fs(dir, cli.node_keystore.as_deref()) {
             Ok(s) => {
                 tracing::info!(
                     node_data_dir = %dir.display(),
@@ -603,6 +627,7 @@ async fn main() {
         let cache_clone = admin_token_cache.clone();
         let state_clone = state.clone();
         let node_data_dir = cli.node_data_dir.clone();
+        let node_keystore_for_refresh = cli.node_keystore.clone();
         let chain_meta_for_refresh = local_secrets
             .as_ref()
             .map(|s| s.chain_meta_hex.clone());
@@ -613,7 +638,11 @@ async fn main() {
 
             if let (Some(dir), Some(chain_meta_hex)) = (node_data_dir, chain_meta_for_refresh) {
                 // ── Local-FS refresh: check mtime, re-read on change ──
-                let keystore_path = dir.join("keystore.noble");
+                // Watch the REAL keystore file (--node-keystore override) —
+                // watching a guessed path silently kills the hot-reload on
+                // layouts where the keystore lives outside data_dir.
+                let keystore_path =
+                    node_keystore_path(&dir, node_keystore_for_refresh.as_deref());
                 let mut last_mtime: Option<std::time::SystemTime> = None;
                 loop {
                     tick.tick().await;
@@ -624,7 +653,11 @@ async fn main() {
                         continue; // no change, skip the re-read
                     }
                     last_mtime = mtime;
-                    match refresh_admin_token_from_disk(&dir, &chain_meta_hex) {
+                    match refresh_admin_token_from_disk(
+                        &dir,
+                        node_keystore_for_refresh.as_deref(),
+                        &chain_meta_hex,
+                    ) {
                         Ok(Some(tok)) => {
                             let fp = admin_auth_fingerprint(&tok);
                             if fp != last_fp {

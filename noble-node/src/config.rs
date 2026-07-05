@@ -616,6 +616,30 @@ impl NodeConfig {
         Ok(config)
     }
 
+    /// Resolve the single-file keystore path from `wallet.keystore_path`:
+    /// relative → joined to `storage.data_dir`; absolute → as-is; and when
+    /// the configured path IS a directory (legacy config pointing at the old
+    /// directory-based keystore), the file lives next to it with a `.noble`
+    /// extension.
+    ///
+    /// SINGLE source of truth — used both to open the node's own keystore
+    /// (`Node::new`) and to tell the spawned faucet where it is
+    /// (`--node-keystore`). The faucet must never guess this path: on
+    /// layouts with an absolute `keystore_path` outside `data_dir` a guess
+    /// of `{data_dir}/keystore.noble` crash-loops the faucet.
+    pub fn resolved_keystore_file(&self) -> std::path::PathBuf {
+        let path = if self.wallet.keystore_path.is_relative() {
+            self.storage.data_dir.join(&self.wallet.keystore_path)
+        } else {
+            self.wallet.keystore_path.clone()
+        };
+        if path.is_dir() {
+            path.with_extension("noble")
+        } else {
+            path
+        }
+    }
+
     /// Validate the sharding `[storage]` fields. Returns the first
     /// error encountered (if any) as a string. Callers should treat
     /// success as binding for the boot path: any failure must abort
