@@ -213,6 +213,40 @@ struct Cli {
     /// `<node_data_dir>/keystore.noble` when omitted.
     #[arg(long)]
     node_keystore: Option<PathBuf>,
+
+    /// Explicitly create a NEW faucet wallet even when a previous faucet
+    /// address is on record (faucet-address.txt). This ABANDONS any funds
+    /// held by the recorded address — the old key is unrecoverable unless its
+    /// keystore file is restored from backup. Without this flag the faucet
+    /// hard-fails instead of silently rotating its identity.
+    #[arg(long)]
+    force_new_wallet: bool,
+}
+
+/// Read the previously-recorded faucet address — the evidence that a wallet
+/// existed before (and may hold funds).
+fn read_marker_address(node_data_dir: Option<&std::path::Path>) -> Option<String> {
+    let p = node_data_dir?.join("faucet-address.txt");
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Custody rule: wallet creation is refused when a prior address is on
+/// record and the operator did not explicitly opt into abandoning it.
+fn should_refuse_creation(recorded_address: Option<&str>, force_new_wallet: bool) -> bool {
+    recorded_address.is_some() && !force_new_wallet
+}
+
+/// Custody rule: the recorded address may only be replaced by a DIFFERENT
+/// one under --force-new-wallet. (Same address, or no record, is always fine.)
+fn address_rotation_allowed(recorded: Option<&str>, current: &str, force_new_wallet: bool) -> bool {
+    match recorded {
+        None => true,
+        Some(r) if r == current => true,
+        Some(_) => force_new_wallet,
+    }
 }
 
 /// Resolve the node's single-file keystore for local-FS bootstrap: the
@@ -463,67 +497,124 @@ async fn main() {
     }
 
     // Initialize independent faucet wallet (local signing).
+    //
+    // CUSTODY RULES — faucet funds can never be silently lost:
+    //   • open() never creates. Creation happens only on a true first run
+    //     (no faucet-address.txt on record) or under --force-new-wallet.
+    //   • New wallets are passphrase-DERIVED: losing the keystore file no
+    //     longer rotates the faucet identity (same passphrase ⇒ same address).
+    //   • Every custody violation is a hard exit(1) — the node's supervisor
+    //     raises a critical faucet_down alarm. The faucet never runs
+    //     walletless or on a silently-rotated identity.
     let faucet_wallet = if !passphrase.is_empty() {
-        match wallet::FaucetWallet::open_or_create(&keystore_dir, &passphrase, chain_id) {
-            Ok(w) => {
-                tracing::info!("Faucet wallet address: {}", w.address());
+        let marker_addr = read_marker_address(cli.node_data_dir.as_deref());
 
-                // Address propagation to the node:
-                //   • Local-FS mode (--node-data-dir set): write the address to
-                //     <node_data_dir>/faucet-address.txt for the node to read.
-                //     No RPC call, no secret on the wire — the address isn't
-                //     secret anyway (it's where coins go).
-                //   • Legacy mode (RPC bootstrap): fall back to storeFaucetSecret
-                //     which sends BOTH passphrase and address. Retained only for
-                //     pre-Group 4 faucet binaries; will be removed in a future PR.
-                if let Some(ref node_dir) = cli.node_data_dir {
-                    let addr_path = node_dir.join("faucet-address.txt");
-                    let tmp_path = node_dir.join("faucet-address.txt.tmp");
-                    let addr_text = format!("{}\n", w.address());
-                    match std::fs::write(&tmp_path, addr_text.as_bytes()) {
-                        Ok(_) => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                let _ = std::fs::set_permissions(
-                                    &tmp_path,
-                                    std::fs::Permissions::from_mode(0o644),
-                                );
-                            }
-                            match std::fs::rename(&tmp_path, &addr_path) {
-                                Ok(_) => tracing::info!(
-                                    "Faucet address written to {} (local-FS mode)",
-                                    addr_path.display()
-                                ),
-                                Err(e) => tracing::warn!(
-                                    "Failed to rename faucet-address.txt: {e} — node will not see updated address until next boot"
-                                ),
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            "Failed to write faucet-address.txt at {}: {e}",
-                            tmp_path.display()
-                        ),
+        let w = match wallet::FaucetWallet::open(&keystore_dir, &passphrase, chain_id) {
+            Ok(w) => w,
+            Err(open_err @ (wallet::OpenError::Missing(_) | wallet::OpenError::NoKey(_))) => {
+                if should_refuse_creation(marker_addr.as_deref(), cli.force_new_wallet) {
+                    let recorded = marker_addr.as_deref().unwrap_or("<unknown>");
+                    let would = wallet::FaucetWallet::derived_address(&passphrase)
+                        .unwrap_or_else(|e| format!("<derivation failed: {e}>"));
+                    tracing::error!(
+                        "CUSTODY: {open_err}, but a previous faucet address is on record: {recorded}. \
+                         Refusing to mint a new wallet (it would use {would} and strand any funds at \
+                         the recorded address). Restore the faucet keystore from backup, or start with \
+                         --force-new-wallet to explicitly abandon the recorded address."
+                    );
+                    std::process::exit(1);
+                }
+                match wallet::FaucetWallet::create_derived(&keystore_dir, &passphrase, chain_id) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::error!("Could not create faucet wallet: {e}");
+                        std::process::exit(1);
                     }
-                } else {
-                    // Legacy mode (no --node-data-dir) lost its address-propagation
-                    // path with the deletion of storeFaucetSecret. Address visible
-                    // in the dashboard requires the file-write path above.
+                }
+            }
+            Err(other) => {
+                // Corrupt keystore / wrong passphrase / I/O. Creating a new
+                // wallet over an unreadable one would be destructive — stop.
+                tracing::error!(
+                    "Could not open faucet wallet: {other}. NOT creating a new wallet over it — \
+                     investigate the keystore (or restore it from backup) and restart."
+                );
+                std::process::exit(1);
+            }
+        };
+
+        tracing::info!("Faucet wallet address: {}", w.address());
+
+        // Address propagation to the node:
+        //   • Local-FS mode (--node-data-dir set): write the address to
+        //     <node_data_dir>/faucet-address.txt for the node to read.
+        //     No RPC call, no secret on the wire — the address isn't
+        //     secret anyway (it's where coins go).
+        //   • Legacy mode (RPC bootstrap): fall back to storeFaucetSecret
+        //     which sends BOTH passphrase and address. Retained only for
+        //     pre-Group 4 faucet binaries; will be removed in a future PR.
+        if let Some(ref node_dir) = cli.node_data_dir {
+            // Rotation guard: the recorded (possibly funded) address is never
+            // silently replaced by a different one.
+            if !address_rotation_allowed(marker_addr.as_deref(), &w.address(), cli.force_new_wallet) {
+                tracing::error!(
+                    "CUSTODY: recorded faucet address {} differs from this wallet's address {}. \
+                     Refusing to overwrite faucet-address.txt. Restore the matching keystore, or \
+                     start with --force-new-wallet to explicitly abandon the recorded address.",
+                    marker_addr.as_deref().unwrap_or(""),
+                    w.address()
+                );
+                std::process::exit(1);
+            }
+            if let Some(prev) = marker_addr.as_deref() {
+                if prev != w.address() {
                     tracing::warn!(
-                        "No --node-data-dir set — faucet address will not propagate to node \
-                         dashboard. Address: {}",
+                        "--force-new-wallet: abandoning recorded faucet address {prev} in favor of {}",
                         w.address()
                     );
-                    let _ = is_first_boot;
                 }
-
-                Some(w)
             }
-            Err(e) => {
-                tracing::warn!("Could not initialize faucet wallet: {e}");
-                None
+            let addr_path = node_dir.join("faucet-address.txt");
+            let tmp_path = node_dir.join("faucet-address.txt.tmp");
+            let addr_text = format!("{}\n", w.address());
+            match std::fs::write(&tmp_path, addr_text.as_bytes()) {
+                Ok(_) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &tmp_path,
+                            std::fs::Permissions::from_mode(0o644),
+                        );
+                    }
+                    match std::fs::rename(&tmp_path, &addr_path) {
+                        Ok(_) => tracing::info!(
+                            "Faucet address written to {} (local-FS mode)",
+                            addr_path.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to rename faucet-address.txt: {e} — node will not see updated address until next boot"
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "Failed to write faucet-address.txt at {}: {e}",
+                    tmp_path.display()
+                ),
             }
+        } else {
+            // Legacy mode (no --node-data-dir) lost its address-propagation
+            // path with the deletion of storeFaucetSecret. Address visible
+            // in the dashboard requires the file-write path above.
+            tracing::warn!(
+                "No --node-data-dir set — faucet address will not propagate to node \
+                 dashboard. Address: {}",
+                w.address()
+            );
+            let _ = is_first_boot;
         }
+
+        Some(w)
     } else {
         None
     };
@@ -836,6 +927,43 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_refusal_rules() {
+        // (recorded_address, force) → refuse?
+        assert!(!should_refuse_creation(None, false), "true first run: create freely");
+        assert!(!should_refuse_creation(None, true));
+        assert!(
+            should_refuse_creation(Some("nbl1recorded"), false),
+            "prior address on record without --force-new-wallet MUST refuse"
+        );
+        assert!(!should_refuse_creation(Some("nbl1recorded"), true), "force overrides");
+    }
+
+    #[test]
+    fn rotation_guard_rules() {
+        // (recorded, current, force) → allowed?
+        assert!(address_rotation_allowed(None, "nbl1a", false), "no record: allowed");
+        assert!(address_rotation_allowed(Some("nbl1a"), "nbl1a", false), "same address: allowed");
+        assert!(
+            !address_rotation_allowed(Some("nbl1a"), "nbl1b", false),
+            "DIFFERENT address without force MUST be refused"
+        );
+        assert!(address_rotation_allowed(Some("nbl1a"), "nbl1b", true), "force overrides");
+    }
+
+    #[test]
+    fn marker_address_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent dir / absent file / empty file → None.
+        assert_eq!(read_marker_address(None), None);
+        assert_eq!(read_marker_address(Some(dir.path())), None);
+        std::fs::write(dir.path().join("faucet-address.txt"), "  \n").unwrap();
+        assert_eq!(read_marker_address(Some(dir.path())), None);
+        // Real content → trimmed address.
+        std::fs::write(dir.path().join("faucet-address.txt"), "nbl1abc\n").unwrap();
+        assert_eq!(read_marker_address(Some(dir.path())).as_deref(), Some("nbl1abc"));
+    }
 
     #[test]
     fn network_label_detection() {

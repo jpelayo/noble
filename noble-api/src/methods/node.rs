@@ -389,21 +389,34 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             sync_current_height,
             sync_progress_pct,
             faucet_address: {
-                // In-memory value (set by legacy storeFaucetSecret) takes
-                // precedence; falls back to <data_dir>/faucet-address.txt
-                // written by the faucet binary in local-FS mode.
-                let addr = self.faucet_address.read().clone();
-                if !addr.is_empty() {
-                    Some(addr)
-                } else {
-                    self.data_dir.as_ref().and_then(|d| {
-                        let p = d.join("faucet-address.txt");
-                        std::fs::read_to_string(&p)
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
+                // ONE truth: <data_dir>/faucet-address.txt — written by the
+                // faucet that is ACTUALLY running — takes precedence. The
+                // in-memory value (seeded from config [faucet].address /
+                // legacy storeFaucetSecret) is only a fallback: config
+                // fossils from old wallets otherwise shadow the live address.
+                let file_addr = self.data_dir.as_ref().and_then(|d| {
+                    let p = d.join("faucet-address.txt");
+                    std::fs::read_to_string(&p)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+                let mem = self.faucet_address.read().clone();
+                if let Some(f) = &file_addr {
+                    if !mem.is_empty() && mem != *f {
+                        // Warn once per boot — this endpoint is polled.
+                        static SOURCES_DISAGREE: std::sync::Once = std::sync::Once::new();
+                        SOURCES_DISAGREE.call_once(|| {
+                            tracing::warn!(
+                                task = "faucet",
+                                "faucet address sources disagree: faucet-address.txt says {f}, \
+                                 config/in-memory says {mem} — using the file (live faucet). \
+                                 Update or clear [faucet].address in noble.toml."
+                            );
+                        });
+                    }
                 }
+                file_addr.or(if mem.is_empty() { None } else { Some(mem) })
             },
             faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
             faucet_listening: self.faucet_listening.load(std::sync::atomic::Ordering::Relaxed),

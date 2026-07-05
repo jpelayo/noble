@@ -41,6 +41,12 @@ pub fn new_cache() -> FaucetCache {
 ///
 /// Returns `Some(entry)` if the faucet is reachable and responds with valid JSON.
 /// Returns `None` on any error (timeout, connection refused, bad JSON).
+///
+/// The faucet applies its Gatekeeper middleware to EVERY route, including
+/// `/api/faucet/status` — a probe without `Gatekeeper: noble` is rejected
+/// against a perfectly healthy faucet. (A headerless probe once made the
+/// supervisor kill-loop its own healthy child and left peer-faucet discovery
+/// permanently empty.)
 pub fn probe_faucet(ip: &str, port: u16) -> Option<FaucetEntry> {
     let url = format!("https://{}:{}/api/faucet/status", ip, port);
 
@@ -54,6 +60,7 @@ pub fn probe_faucet(ip: &str, port: u16) -> Option<FaucetEntry> {
     let agent = ureq::AgentBuilder::new().tls_config(tls_config).build();
 
     let response = match agent.get(&url)
+        .set("Gatekeeper", "noble") // required by faucet middleware on ALL routes
         .timeout(std::time::Duration::from_secs(5))
         .call()
     {
