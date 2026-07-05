@@ -407,7 +407,16 @@ export function init(root, ctx) {
   }
 
   // Filter change
-  wFilter.addEventListener('change', () => { currentPage = 0; renderTransactions(); });
+  // Restore + persist the history filter across reloads.
+  const savedFilter = localStorage.getItem('noble-wallet-filter');
+  if (savedFilter && wFilter.querySelector(`option[value="${savedFilter}"]`)) {
+    wFilter.value = savedFilter;
+  }
+  wFilter.addEventListener('change', () => {
+    localStorage.setItem('noble-wallet-filter', wFilter.value);
+    currentPage = 0;
+    renderTransactions();
+  });
 
   // ── Mnemonic wallet modal (security-hardened) ──
   const walletGear = root.querySelector('#w-wallet-gear');

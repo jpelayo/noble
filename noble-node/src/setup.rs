@@ -610,6 +610,7 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             compression,
             pruning_mode: pruning_mode.clone(),
             keep_blocks,
+            max_db_size_gb: 0,
             extra_data_dirs: Vec::new(),
             reconcile_mode: crate::config::ReconcileMode::Auto,
         },

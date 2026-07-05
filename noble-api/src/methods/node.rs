@@ -1124,6 +1124,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             ("storage", "compression"),
             ("storage", "pruning_mode"),
             ("storage", "keep_blocks"),
+            ("storage", "max_db_size_gb"),
             ("security", "encryption_mode"),
             ("rewards", "reward_address"),
             ("consensus", "voting_strategy"),

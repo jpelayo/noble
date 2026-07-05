@@ -1,6 +1,6 @@
 // NOBLE Document Client — Router & State Controller
-import { Bridge } from './bridge.js';
-import { isWryPlatform } from './utils.js';
+import { Bridge, Prefs } from './bridge.js';
+import { isWryPlatform, setThousandsSeparator, getThousandsSeparatorId } from './utils.js';
 import { emptyState } from './components/empty-state.js';
 import { init as initHome } from './pages/home.js';
 import { init as initDocuments } from './pages/documents.js';
@@ -30,6 +30,13 @@ window.applyTheme = function(theme) {
         root.style.colorScheme = 'light dark';
     }
 };
+// Restore natively-persisted preferences into localStorage BEFORE anything
+// reads them — the Apple shells wipe localStorage on quit (non-persistent
+// website data store), so localStorage alone reverts every preference.
+await Prefs.hydrate();
+// utils.js cached the separator at module init (before hydration) — re-sync.
+setThousandsSeparator(getThousandsSeparatorId());
+
 // Apply saved theme immediately (before first render)
 const savedTheme = localStorage.getItem('noble.theme') || 'system';
 window.applyTheme(savedTheme);

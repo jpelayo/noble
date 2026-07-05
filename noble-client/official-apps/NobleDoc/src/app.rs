@@ -866,6 +866,32 @@ pub async fn handle_app_action(
             Ok(json!({ "ok": true }))
         }
 
+        // -- Web preferences --
+
+        "getPreferences" => Ok(storage::load_preferences()),
+
+        "setPreference" => {
+            let key = params
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing parameter: key")?;
+
+            let mut prefs = storage::load_preferences();
+            let obj = prefs
+                .as_object_mut()
+                .ok_or("preferences store corrupt (not a JSON object)")?;
+            match params.get("value") {
+                None | Some(Value::Null) => {
+                    obj.remove(key);
+                }
+                Some(v) => {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+            storage::save_preferences(&prefs)?;
+            Ok(json!({ "ok": true }))
+        }
+
         _ => Err(format!("Unknown action: {action}")),
     }
 }

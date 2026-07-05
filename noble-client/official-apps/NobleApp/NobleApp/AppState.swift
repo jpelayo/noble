@@ -203,6 +203,7 @@ final class AppState {
             ("noblemac.settings.autoConnect", "nobleapp.settings.autoConnect"),
             ("noblemac.onboardingComplete", "nobleapp.onboardingComplete"),
             ("noblemac.documentDrafts", "nobleapp.documentDrafts"),
+            ("noblemac.webPreferences", "nobleapp.webPreferences"),
         ]
         for (old, new) in defaultsMappings {
             if let value = defaults.object(forKey: old) {
@@ -229,6 +230,7 @@ final class AppState {
     private static let autoConnectKey = "nobleapp.settings.autoConnect"
     private static let onboardingCompleteKey = "nobleapp.onboardingComplete"
     private static let draftsKey = "nobleapp.documentDrafts"
+    private static let webPreferencesKey = "nobleapp.webPreferences"
 
     // MARK: - iOS Bridge Coordination
 
@@ -634,6 +636,32 @@ final class AppState {
     private func persistDrafts(_ drafts: [[String: Any]]) {
         if let data = try? JSONSerialization.data(withJSONObject: drafts) {
             UserDefaults.standard.set(data, forKey: Self.draftsKey)
+        }
+    }
+
+    // MARK: - Web Preferences
+
+    /// Preferences the WebUI persists through the bridge (theme, thousands
+    /// separator, auto-split, …). The webview runs on a non-persistent data
+    /// store, so its localStorage dies with the process — this dictionary is
+    /// the durable copy, hydrated back into localStorage at boot.
+    func loadWebPreferences() -> [String: Any] {
+        guard let data = UserDefaults.standard.data(forKey: Self.webPreferencesKey),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return dict
+    }
+
+    /// Upsert one preference; a nil/NSNull value deletes the key.
+    func setWebPreference(key: String, value: Any?) {
+        var all = loadWebPreferences()
+        if value == nil || value is NSNull {
+            all.removeValue(forKey: key)
+        } else {
+            all[key] = value
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: all) {
+            UserDefaults.standard.set(data, forKey: Self.webPreferencesKey)
         }
     }
 

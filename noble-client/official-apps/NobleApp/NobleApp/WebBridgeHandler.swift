@@ -2045,6 +2045,18 @@ final class WebBridgeHandler {
             appState.deleteDraft(id: id)
             return ["ok": true]
 
+        // MARK: Web Preferences
+
+        case "getPreferences":
+            return appState.loadWebPreferences()
+
+        case "setPreference":
+            guard let key = params["key"] as? String else {
+                throw BridgeError.missingParam("key")
+            }
+            appState.setWebPreference(key: key, value: params["value"])
+            return ["ok": true]
+
         default:
             throw BridgeError.unknownAction(action)
         }

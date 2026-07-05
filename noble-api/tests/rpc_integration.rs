@@ -165,6 +165,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         seeds: parking_lot::RwLock::new(Vec::new()),
         announce_trigger: tokio::sync::mpsc::channel(4).0,
         cache_size_mb: 64,
+        max_db_size_gb: 0,
         compression_enabled: true,
         extra_data_dirs: Vec::new(),
         reconcile_mode: "auto".to_string(),

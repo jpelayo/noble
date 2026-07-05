@@ -2093,6 +2093,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             seeds: parking_lot::RwLock::new(config.network.seeds.clone()),
             announce_trigger: announce_trigger_tx,
             cache_size_mb: config.storage.cache_size_mb,
+            max_db_size_gb: config.storage.max_db_size_gb,
             compression_enabled: config.storage.compression,
             network_name: { let cid = self.get_chain_id(); if cid != 0 { format!("{:08X}", cid) } else { "00000000".to_string() } },
             genesis_hash: {

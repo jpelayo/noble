@@ -1,6 +1,6 @@
 // NOBLE Document Client — Faucet Page
 // Request coins from the NOBLE faucet.
-import { Bridge } from '../bridge.js';
+import { Bridge, Prefs } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { emptyState } from '../components/empty-state.js';
 import { formatAmount } from '../components/amount-text.js';
@@ -90,7 +90,7 @@ export function init(root, ctx) {
         requesting = true;
         resultMsg = null;
         errorMsg = null;
-        localStorage.setItem(COOLDOWN_KEY, Date.now().toString());
+        Prefs.set(COOLDOWN_KEY, Date.now().toString()); // survives relaunch
         resultMsg = 'Request sent — verifying...';
         render();
 
@@ -135,7 +135,7 @@ export function init(root, ctx) {
             errorMsg = /could not connect|connection refused|network|timed out|unavailable/i.test(raw)
                 ? 'The faucet service is not running on this node.'
                 : raw;
-            localStorage.removeItem(COOLDOWN_KEY);
+            Prefs.set(COOLDOWN_KEY, null); // clear from localStorage + native store
             if (alive) render();
         }
     }

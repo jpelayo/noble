@@ -332,6 +332,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// RocksDB block cache size in megabytes (from `[storage] cache_size_mb`).
     pub cache_size_mb: u32,
+    /// Operator's DB size target in GB (from `[storage] max_db_size_gb`;
+    /// 0 = unlimited; advisory — nothing enforces it yet).
+    pub max_db_size_gb: u32,
 
     /// Whether Zstd compression is enabled on the blocks CF (from `[storage] compression`).
     pub compression_enabled: bool,

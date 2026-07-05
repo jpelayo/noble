@@ -1329,6 +1329,8 @@ pub struct StorageConfigResponse {
     pub compression: bool,
     pub pruning_mode: String,
     pub keep_blocks: u64,
+    /// Operator's DB size target in GB (0 = unlimited; advisory, not enforced).
+    pub max_db_size_gb: u32,
 }
 
 /// Response for `noble_getSetupStatus`.

@@ -345,4 +345,44 @@ window.NobleBridge._onDownloadProgress = function(evt) {
     }
 };
 
-export { Bridge, NativeBridge, MockBridge };
+// ── Persistent preferences ──────────────────────────────────────────────
+// The Apple shells run the WebUI on a non-persistent website data store
+// (fresh-JS guarantee), so localStorage dies with the process. Prefs mirrors
+// preference keys into the native store (UserDefaults on macOS/iOS, a JSON
+// file on WRY) through the app bridge: hydrate() restores them into
+// localStorage at boot, set() writes through to both. In a plain browser
+// (no native bridge) localStorage is durable by itself and the bridge half
+// is a no-op.
+const Prefs = {
+    /** Restore natively-stored preferences into localStorage. Time-bounded
+     *  so a bridge failure can never block boot. Call before first render. */
+    async hydrate() {
+        if (!NativeBridge.isNative) return;
+        try {
+            const timeout = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('getPreferences timed out')), 800));
+            const prefs = await Promise.race([
+                NativeBridge.call('noble_app', 'getPreferences'),
+                timeout,
+            ]);
+            for (const [key, value] of Object.entries(prefs || {})) {
+                if (typeof value === 'string') localStorage.setItem(key, value);
+            }
+        } catch (e) {
+            console.warn('[prefs] hydrate failed — session uses defaults:', e);
+        }
+    },
+
+    /** Write-through setter: localStorage for this session, native store for
+     *  the next launch. value === null deletes the key from both. */
+    set(key, value) {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, String(value));
+        if (NativeBridge.isNative) {
+            NativeBridge.call('noble_app', 'setPreference', { key, value })
+                .catch(e => console.warn('[prefs] native persist failed:', e));
+        }
+    },
+};
+
+export { Bridge, NativeBridge, MockBridge, Prefs };

@@ -114,6 +114,35 @@ export function init(root, ctx) {
   const entriesBody = root.querySelector('#trace-entries');
   const bufferInfo = root.querySelector('#trace-buffer-info');
 
+  // ── Persist trace controls across reloads ──
+  const TRACE_PREFS_KEY = 'noble-trace-prefs';
+  function saveTracePrefs() {
+    try {
+      localStorage.setItem(TRACE_PREFS_KEY, JSON.stringify({
+        filter: filterInput.value,
+        duration: durationSelect.value,
+        level: levelFilter.value,
+        task: taskFilter.value,
+        autoRefresh: autoRefreshCheckbox.checked,
+      }));
+    } catch { /* storage full/unavailable — controls stay session-local */ }
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(TRACE_PREFS_KEY) || 'null');
+    if (saved) {
+      if (typeof saved.filter === 'string' && saved.filter) filterInput.value = saved.filter;
+      if (saved.duration && durationSelect.querySelector(`option[value="${saved.duration}"]`)) {
+        durationSelect.value = saved.duration;
+      }
+      if (typeof saved.level === 'string') levelFilter.value = saved.level;
+      if (typeof saved.task === 'string') taskFilter.value = saved.task;
+      if (typeof saved.autoRefresh === 'boolean') autoRefreshCheckbox.checked = saved.autoRefresh;
+    }
+  } catch { /* corrupt blob — fall back to defaults */ }
+  for (const el of [filterInput, durationSelect, levelFilter, taskFilter, autoRefreshCheckbox]) {
+    el.addEventListener('change', saveTracePrefs);
+  }
+
   async function startSession() {
     try {
       const result = await rpc.call('noble_setTraceFilter', [{

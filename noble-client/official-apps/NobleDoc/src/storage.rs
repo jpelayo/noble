@@ -73,6 +73,34 @@ pub fn save_drafts(drafts: &[Value]) -> Result<(), String> {
 }
 
 // ============================================================================
+// Web preferences
+// ============================================================================
+// The WebUI persists preference keys (theme, thousands separator, auto-split,
+// faucet cooldown) through the bridge because webview localStorage is not
+// guaranteed to survive relaunch. Flat key->string map, hydrated back into
+// localStorage at boot.
+
+fn preferences_path() -> PathBuf {
+    data_dir().join("preferences.json")
+}
+
+pub fn load_preferences() -> Value {
+    match std::fs::read_to_string(preferences_path()) {
+        Ok(json) => serde_json::from_str(&json)
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        Err(_) => Value::Object(serde_json::Map::new()),
+    }
+}
+
+pub fn save_preferences(prefs: &Value) -> Result<(), String> {
+    let dir = ensure_data_dir().map_err(|e| format!("Failed to create data dir: {e}"))?;
+    let json = serde_json::to_string_pretty(prefs)
+        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    std::fs::write(dir.join("preferences.json"), json)
+        .map_err(|e| format!("Failed to write preferences: {e}"))
+}
+
+// ============================================================================
 // Settings
 // ============================================================================
 

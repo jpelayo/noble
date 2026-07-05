@@ -104,6 +104,11 @@ pub struct StorageConfig {
     /// Number of blocks to keep when pruning. 0 = archive (keep all).
     #[serde(default = "default_keep_blocks")]
     pub keep_blocks: u64,
+    /// Operator's database size target in GB (0 = unlimited). Persisted for
+    /// the dashboard Storage page and future pruning enforcement — nothing
+    /// enforces it yet.
+    #[serde(default)]
+    pub max_db_size_gb: u32,
     /// Additional storage tiers (multi-path sharding). Each entry may
     /// be a plain path (`"/mnt/hdd/noble"`, target auto-detected at
     /// boot) or an explicit `{ path, target_gb }` pair. Empty means
@@ -775,6 +780,7 @@ impl Default for StorageConfig {
             compression: true,
             pruning_mode: default_pruning_mode(),
             keep_blocks: default_keep_blocks(),
+            max_db_size_gb: 0,
             extra_data_dirs: Vec::new(),
             reconcile_mode: ReconcileMode::Auto,
         }

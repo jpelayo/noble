@@ -3,7 +3,7 @@
 // All DOM built with createElement — no innerHTML on root. Event listeners
 // are attached directly to stable element references, never lost.
 
-import { Bridge } from '../bridge.js';
+import { Bridge, Prefs } from '../bridge.js';
 import { formatAmount } from '../components/amount-text.js';
 import { openModal, openWizardModal, closeModal, createSlideConfirm } from '../components/modal.js';
 import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
@@ -519,7 +519,8 @@ export function init(root, ctx) {
             minimumReady = Math.max(2, Math.min(63, parseInt(minInput.value) || 5));
             targetReady = Math.max(minimumReady, Math.min(63, parseInt(targetInput.value) || 10));
             try {
-                localStorage.setItem('noble.autoSplit', JSON.stringify({
+                // Write-through: localStorage + native store (survives relaunch).
+                Prefs.set('noble.autoSplit', JSON.stringify({
                     enabled: autoMaintainEnabled, minimumReady, targetReady
                 }));
             } catch {}

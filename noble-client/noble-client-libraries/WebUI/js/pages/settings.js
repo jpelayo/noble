@@ -1,5 +1,5 @@
 // NOBLE Document Client — Settings
-import { Bridge } from '../bridge.js';
+import { Bridge, Prefs } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { hashText } from '../components/hash-text.js';
 import { statusBadge } from '../components/status-badge.js';
@@ -143,7 +143,7 @@ export function init(root, ctx) {
         card.querySelectorAll('#theme-toggle button').forEach(btn => {
             btn.addEventListener('click', () => {
                 const theme = btn.dataset.theme;
-                localStorage.setItem('noble.theme', theme);
+                Prefs.set('noble.theme', theme); // write-through: localStorage + native store
                 window.applyTheme(theme);
                 card.querySelectorAll('#theme-toggle button').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');

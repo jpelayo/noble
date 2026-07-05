@@ -1,4 +1,5 @@
 // NOBLE Document Client — Shared Utilities
+import { Prefs } from './bridge.js';
 
 /** WRY desktop shells (Linux/Windows) — platforms with no native chrome, no
  *  native onboarding, and no native dialogs. ('desktop' is the WRY fallback
@@ -36,7 +37,7 @@ let _sepChar = THOUSANDS_SEPS[localStorage.getItem(THOUSANDS_SEP_KEY)] ?? ' ';
  *  unknown IDs fall back to 'space'). Takes effect on the next render. */
 export function setThousandsSeparator(id) {
     if (!(id in THOUSANDS_SEPS)) id = 'space';
-    localStorage.setItem(THOUSANDS_SEP_KEY, id);
+    Prefs.set(THOUSANDS_SEP_KEY, id); // write-through: localStorage + native store
     _sepChar = THOUSANDS_SEPS[id];
 }
 

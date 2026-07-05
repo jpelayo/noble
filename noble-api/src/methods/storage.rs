@@ -120,6 +120,7 @@ pub trait StorageApi {
         compression: bool,
         pruning_mode: String,
         keep_blocks: u64,
+        max_db_size_gb: u32,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned>;
 
     /// Run a chain integrity check over a range of blocks.
@@ -270,6 +271,7 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
             compression: self.compression_enabled,
             pruning_mode: self.pruning_mode.clone(),
             keep_blocks: self.keep_blocks,
+            max_db_size_gb: self.max_db_size_gb,
         })
     }
 
@@ -280,6 +282,7 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
         compression: bool,
         pruning_mode: String,
         keep_blocks: u64,
+        max_db_size_gb: u32,
     ) -> Result<SetConfigValueResponse, ErrorObjectOwned> {
         let set_fn = self
             .set_config_value
@@ -292,6 +295,7 @@ impl<S: StorageEngine + Send + Sync + 'static> StorageApiServer for Arc<ApiState
             ("compression", compression.to_string()),
             ("pruning_mode", pruning_mode),
             ("keep_blocks", keep_blocks.to_string()),
+            ("max_db_size_gb", max_db_size_gb.to_string()),
         ];
 
         for (key, value) in fields {
