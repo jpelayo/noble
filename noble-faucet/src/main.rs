@@ -221,6 +221,311 @@ struct Cli {
     /// hard-fails instead of silently rotating its identity.
     #[arg(long)]
     force_new_wallet: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Send faucet funds to the connected LOCAL node's wallet and exit (no
+    /// server started). The destination is NOT configurable — it is always
+    /// the node wallet reported by the loopback RPC, so rogue CLI access
+    /// cannot redirect faucet funds to an arbitrary address. Opens the wallet
+    /// strictly read-only w.r.t. custody records: never creates a wallet,
+    /// never touches faucet-address.txt — so it also works on a RESTORED
+    /// backup keystore via --keystore-dir.
+    Discharge {
+        /// Amount in NOBLE decimal (e.g. "120.5"). Mutually exclusive with --all.
+        #[arg(long, conflicts_with = "all")]
+        amount: Option<String>,
+        /// Sweep the ENTIRE available balance (exact fee, no residue).
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Fee rate in groats/byte. Default: the node's recommended estimate.
+        #[arg(long)]
+        fee_rate: Option<u64>,
+        /// Proceed even if a faucet server is currently listening (its drips
+        /// race this transaction's UTXOs — prefer disabling the faucet first).
+        #[arg(long)]
+        allow_running: bool,
+    },
+}
+
+/// Parse a NOBLE decimal amount ("120.5") into groats (integer math, ≤8
+/// decimals, no floats). 1 NOBLE = 100_000_000 groats.
+fn parse_noble_amount(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return Err(format!("invalid amount '{s}' — use NOBLE decimal like 120.5"));
+    }
+    let (whole, frac) = match s.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (s, ""),
+    };
+    if frac.len() > 8 {
+        return Err(format!("amount '{s}' has more than 8 decimal places"));
+    }
+    if whole.is_empty() && frac.is_empty() {
+        return Err(format!("invalid amount '{s}'"));
+    }
+    let whole: u128 = if whole.is_empty() { 0 } else {
+        whole.parse().map_err(|_| format!("invalid amount '{s}'"))?
+    };
+    let frac_padded = format!("{frac:0<8}");
+    let frac: u128 = if frac_padded.is_empty() { 0 } else {
+        frac_padded.parse().map_err(|_| format!("invalid amount '{s}'"))?
+    };
+    let groats = whole
+        .checked_mul(100_000_000)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| format!("amount '{s}' overflows"))?;
+    if groats == 0 {
+        return Err("amount must be greater than zero".into());
+    }
+    u64::try_from(groats).map_err(|_| format!("amount '{s}' exceeds the maximum supply"))
+}
+
+/// Resolve a destination into wire-bytes hex: `nbl1…` bech32/bech32m via the
+/// canonical decoder, or already-hex wire bytes (validated).
+fn resolve_recipient(to: &str) -> Result<String, String> {
+    let to = to.trim();
+    if to.starts_with("nbl1") {
+        let pk = noble_crypto::noble_addr::decode(to)
+            .map_err(|e| format!("invalid Noble address '{to}': {e:?}"))?;
+        return Ok(hex::encode(pk.to_wire_bytes()));
+    }
+    let bytes = hex::decode(to).map_err(|_| {
+        format!("destination '{to}' is neither an nbl1… address nor valid hex")
+    })?;
+    if bytes.len() < 33 || bytes.len() > 66 {
+        return Err(format!(
+            "destination hex has unexpected length {} bytes — expected wire-format public key bytes",
+            bytes.len()
+        ));
+    }
+    Ok(to.to_lowercase())
+}
+
+/// Group thousands with a space — the project-wide separator policy
+/// (never '.' or ',').
+fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Format groats as a NOBLE decimal ("1 234.5", trailing zeros trimmed).
+fn fmt_noble(groats: u64) -> String {
+    let whole = groats / 100_000_000;
+    let frac = groats % 100_000_000;
+    if frac == 0 {
+        group_thousands(whole)
+    } else {
+        let frac_str = format!("{frac:08}");
+        format!("{}.{}", group_thousands(whole), frac_str.trim_end_matches('0'))
+    }
+}
+
+struct DischargeArgs {
+    amount: Option<String>,
+    all: bool,
+    yes: bool,
+    fee_rate: Option<u64>,
+    allow_running: bool,
+}
+
+/// True when the RPC URL's host is a loopback address — the only node a
+/// discharge may talk to (the destination address comes FROM this node).
+fn is_loopback_rpc(rpc_url: &str) -> bool {
+    let host = rpc_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(rpc_url)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    // Strip port; keep bracketed IPv6 intact.
+    let host = if let Some(h) = host.strip_prefix('[') {
+        h.split(']').next().unwrap_or("")
+    } else {
+        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host)
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Send or sweep faucet funds to the connected LOCAL node's wallet address.
+/// The destination is never caller-supplied (anti-theft: rogue CLI access
+/// cannot redirect funds), and the RPC endpoint must be loopback so the
+/// address genuinely comes from the operator's own node. Never creates a
+/// wallet, never writes custody records — safe on restored backup keystores.
+/// Returns the submitted txid.
+async fn run_discharge(
+    keystore_dir: &std::path::Path,
+    passphrase: &str,
+    chain_id: u32,
+    rpc: &rpc_client::NodeRpcClient,
+    rpc_url: &str,
+    listen: &str,
+    args: DischargeArgs,
+) -> Result<String, String> {
+    if passphrase.is_empty() {
+        return Err(
+            "no faucet passphrase available — pass --node-data-dir (default deploy), \
+             --passphrase, or NOBLE_FAUCET_PASSPHRASE"
+                .into(),
+        );
+    }
+    if !args.all && args.amount.is_none() {
+        return Err("specify --amount <NOBLE decimal> or --all".into());
+    }
+    if !is_loopback_rpc(rpc_url) {
+        return Err(format!(
+            "discharge only works against the LOCAL node (loopback RPC) — got '{rpc_url}'. \
+             The destination address is read from the connected node's wallet; a remote \
+             endpoint could substitute an attacker address."
+        ));
+    }
+
+    // A concurrently-running faucet server drips from the same UTXO set —
+    // its spends race this transaction. Refuse unless explicitly overridden.
+    if !args.allow_running {
+        let port: u16 = listen
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8786);
+        let listening = tokio::time::timeout(
+            std::time::Duration::from_millis(700),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+        if listening {
+            return Err(format!(
+                "a faucet server is listening on port {port} — its drips race this \
+                 transaction's UTXOs. Disable the faucet in the dashboard (Settings → \
+                 Faucet) first, or pass --allow-running."
+            ));
+        }
+    }
+
+    let w = wallet::FaucetWallet::open(keystore_dir, passphrase, chain_id).map_err(|e| {
+        if matches!(e, wallet::OpenError::Missing(_)) {
+            format!(
+                "{e} — discharge never creates wallets; point --keystore-dir at an \
+                 existing (or restored-from-backup) faucet keystore"
+            )
+        } else {
+            e.to_string()
+        }
+    })?;
+
+    // Destination: the node's own wallet key, fetched from the loopback RPC.
+    // Prefer the secp256k1 wallet key (the node's one canonical identity).
+    let wallet_info = rpc
+        .get_wallet_info()
+        .await
+        .map_err(|e| format!("get node wallet info: {e}"))?;
+    let node_entry = wallet_info
+        .addresses
+        .iter()
+        .find(|a| a.scheme_id == noble_crypto::SCHEME_SECP256K1)
+        .or_else(|| wallet_info.addresses.first())
+        .ok_or("the connected node's wallet has no keys — nowhere to discharge to")?;
+    let recipient_hex = resolve_recipient(&node_entry.public_key)?;
+    let recipient_display = hex::decode(&recipient_hex)
+        .ok()
+        .and_then(|b| noble_crypto::keys::NoblePublicKey::from_wire_bytes(&b).ok())
+        .map(|pk| pk.to_address())
+        .unwrap_or_else(|| recipient_hex.clone());
+
+    let own_hex = resolve_recipient(&w.address())?;
+    if recipient_hex == own_hex {
+        return Err(
+            "the node wallet key IS the faucet key — funds are already at the destination"
+                .into(),
+        );
+    }
+
+    let fee_rate = match args.fee_rate {
+        Some(0) => return Err("--fee-rate must be greater than zero".into()),
+        Some(r) => r,
+        None => rpc
+            .estimate_fee()
+            .await
+            .map_err(|e| format!("fee estimate from node: {e}"))?
+            .recommended_fee_rate
+            .max(1),
+    };
+
+    let bal = rpc
+        .get_balance(&w.address())
+        .await
+        .map_err(|e| format!("get balance: {e}"))?;
+
+    // Build the signed transaction (nothing is submitted yet).
+    let (tx_hex, amount, fee_note) = if args.all {
+        let (tx, amt, fee) = w.build_sweep(rpc, &recipient_hex, fee_rate).await?;
+        (tx, amt, format!("{} groats (exact)", group_thousands(fee)))
+    } else {
+        let groats = parse_noble_amount(args.amount.as_deref().unwrap_or_default())?;
+        if groats > bal.available {
+            return Err(format!(
+                "amount {} NOBLE exceeds the available balance {} NOBLE",
+                fmt_noble(groats),
+                fmt_noble(bal.available)
+            ));
+        }
+        let tx = w.build_transfer(rpc, &recipient_hex, groats, fee_rate).await?;
+        (
+            tx,
+            groats,
+            format!("{} groats/byte (computed at signing)", group_thousands(fee_rate)),
+        )
+    };
+
+    println!("Faucet discharge");
+    println!("  From:     {}", w.address());
+    println!(
+        "  Balance:  {} NOBLE available, {} NOBLE pending",
+        fmt_noble(bal.available),
+        fmt_noble(bal.pending)
+    );
+    println!("  To:       {recipient_display}  (this node's wallet — fixed destination)");
+    println!(
+        "  Amount:   {} NOBLE{}",
+        fmt_noble(amount),
+        if args.all { "  (SWEEP — entire balance)" } else { "" }
+    );
+    println!("  Fee:      {fee_note}");
+
+    if !args.yes {
+        use std::io::Write as _;
+        print!("Type 'yes' to submit: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| format!("read confirmation: {e}"))?;
+        if line.trim() != "yes" {
+            return Err("aborted — confirmation not given".into());
+        }
+    }
+
+    rpc.submit_raw_transaction(&tx_hex)
+        .await
+        .map_err(|e| format!("submit: {e}"))
 }
 
 /// Read the previously-recorded faucet address — the evidence that a wallet
@@ -494,6 +799,33 @@ async fn main() {
         .unwrap_or(0);
     if chain_id != 0 {
         tracing::info!("Chain ID from node: {:#010X}", chain_id);
+    }
+
+    // ── Discharge subcommand: send/sweep funds and exit (no server) ──
+    // Placed BEFORE the serve-mode wallet-init on purpose: discharge is
+    // read-only w.r.t. custody records — it never creates a wallet and never
+    // touches faucet-address.txt, so it also works on a RESTORED backup
+    // keystore whose address differs from the recorded marker.
+    if let Some(Command::Discharge {
+        amount,
+        all,
+        yes,
+        fee_rate,
+        allow_running,
+    }) = cli.command
+    {
+        let args = DischargeArgs { amount, all, yes, fee_rate, allow_running };
+        match run_discharge(&keystore_dir, &passphrase, chain_id, &rpc, &cli.rpc_url, &cli.listen, args).await {
+            Ok(txid) => {
+                println!("Submitted: {txid}");
+                println!("Track it in the dashboard (Transactions page) or via getTransactionStatus.");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("discharge failed: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Initialize independent faucet wallet (local signing).
@@ -927,6 +1259,72 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noble_amount_parsing() {
+        assert_eq!(parse_noble_amount("1").unwrap(), 100_000_000);
+        assert_eq!(parse_noble_amount("120.5").unwrap(), 12_050_000_000);
+        assert_eq!(parse_noble_amount("0.00000001").unwrap(), 1);
+        assert_eq!(parse_noble_amount(".5").unwrap(), 50_000_000);
+        assert_eq!(parse_noble_amount("7.").unwrap(), 700_000_000);
+        // Rejections: >8 decimals, zero, empty, signs, garbage, multiple dots.
+        assert!(parse_noble_amount("0.000000001").is_err());
+        assert!(parse_noble_amount("0").is_err());
+        assert!(parse_noble_amount("0.0").is_err());
+        assert!(parse_noble_amount("").is_err());
+        assert!(parse_noble_amount("-1").is_err());
+        assert!(parse_noble_amount("+1").is_err());
+        assert!(parse_noble_amount("abc").is_err());
+        assert!(parse_noble_amount("1.2.3").is_err());
+        assert!(parse_noble_amount(".").is_err());
+    }
+
+    #[test]
+    fn recipient_resolution() {
+        // bech32m round-trip: derive a real address, resolve it, expect the
+        // wire bytes back.
+        let dir = tempfile::tempdir().unwrap();
+        let w = wallet::FaucetWallet::create_derived(
+            &dir.path().join("k.noble"),
+            "resolve-test-pass",
+            1,
+        )
+        .unwrap();
+        let hex_from_bech32 = resolve_recipient(&w.address()).unwrap();
+        assert_eq!(hex_from_bech32.len() % 2, 0);
+        // Hex passthrough (same bytes) resolves to itself, case-normalized.
+        assert_eq!(
+            resolve_recipient(&hex_from_bech32.to_uppercase()).unwrap(),
+            hex_from_bech32
+        );
+        // Garbage rejected.
+        assert!(resolve_recipient("nbl1qqqq-not-an-address").is_err());
+        assert!(resolve_recipient("zzzz").is_err());
+        assert!(resolve_recipient("abcd").is_err()); // valid hex, wrong length
+    }
+
+    #[test]
+    fn loopback_rpc_enforcement() {
+        // Only the local node may name the discharge destination.
+        assert!(is_loopback_rpc("https://127.0.0.1:8783"));
+        assert!(is_loopback_rpc("https://localhost:8783"));
+        assert!(is_loopback_rpc("http://127.0.0.1:8783/rpc"));
+        assert!(is_loopback_rpc("https://[::1]:8783"));
+        assert!(!is_loopback_rpc("https://192.168.1.20:8783"));
+        assert!(!is_loopback_rpc("https://evil.example.com:8783"));
+        assert!(!is_loopback_rpc("https://127.0.0.1.evil.com:8783"));
+    }
+
+    #[test]
+    fn amount_formatting_space_separator() {
+        // Thousands separator is ALWAYS a space (project policy).
+        assert_eq!(group_thousands(1_234_567), "1 234 567");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(fmt_noble(100_000_000), "1");
+        assert_eq!(fmt_noble(12_050_000_000), "120.5");
+        assert_eq!(fmt_noble(205_120_000_000_00), "205 120");
+        assert_eq!(fmt_noble(1), "0.00000001");
+    }
 
     #[test]
     fn creation_refusal_rules() {

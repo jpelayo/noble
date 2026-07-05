@@ -32,6 +32,28 @@ impl std::fmt::Display for OpenError {
     }
 }
 
+/// Protocol dust threshold (groats) — outputs below this are rejected by
+/// relay policy. Mirrors the clients' coin-selection constant.
+pub const DUST_THRESHOLD_GROATS: u64 = 500_000;
+
+/// Sweep arithmetic: the amount that sends EVERYTHING minus the exact fee.
+/// Errors when the fee eats the balance or the resulting output would be
+/// dust (and thus rejected by the mempool).
+pub fn sweep_amount(total: u64, fee: u64) -> Result<u64, String> {
+    if fee >= total {
+        return Err(format!(
+            "fee ({fee} groats) meets or exceeds the total balance ({total} groats) — nothing to sweep"
+        ));
+    }
+    let amount = total - fee;
+    if amount < DUST_THRESHOLD_GROATS {
+        return Err(format!(
+            "sweep output would be dust: {amount} groats < {DUST_THRESHOLD_GROATS} (relay would reject it)"
+        ));
+    }
+    Ok(amount)
+}
+
 /// A self-contained faucet wallet backed by a local keystore directory.
 pub struct FaucetWallet {
     keystore: KeyStore,
@@ -181,6 +203,107 @@ impl FaucetWallet {
     /// Return the human-readable Noble address (nbl1…).
     pub fn address(&self) -> String {
         self.signer.to_address()
+    }
+
+    /// Build a signed SWEEP: every available UTXO → one output to
+    /// `recipient_hex`, amount = total − exact fee, nothing left behind.
+    ///
+    /// Two passes through the same tx-core builder the clients use:
+    ///   1. probe: sign with `fee_rate` and a placeholder amount to learn the
+    ///      exact serialized size/fee for (all inputs, 2 outputs);
+    ///   2. final: sign with the EXPLICIT fee and amount = total − fee,
+    ///      change_address = recipient — change is 0 by arithmetic, and any
+    ///      sub-dust drift is folded into the fee by the builder (same
+    ///      behavior the clients' "changeless" coin-selection pass relies on).
+    ///
+    /// Returns `(tx_hex, amount, fee)`.
+    pub async fn build_sweep(
+        &self,
+        rpc: &NodeRpcClient,
+        recipient_hex: &str,
+        fee_rate: u64,
+    ) -> Result<(String, u64, u64), String> {
+        let private_key = self
+            .keystore
+            .get_raw(noble_crypto::SCHEME_SECP256K1)
+            .map_err(|e| format!("load private key: {e}"))?;
+        let private_key_hex = hex::encode(&private_key);
+
+        let utxos = rpc
+            .get_address_utxos(&self.address())
+            .await
+            .map_err(|e| format!("get UTXOs: {e}"))?;
+        let available: Vec<_> = utxos
+            .into_iter()
+            .filter(|u| matches!(u.status.as_deref(), Some("available") | None))
+            .collect();
+        if available.is_empty() {
+            return Err("faucet has no spendable UTXOs (dry, or all immature/pending)".into());
+        }
+
+        let total: u64 = available.iter().map(|u| u.value).sum();
+        let utxo_json: Vec<serde_json::Value> = available
+            .iter()
+            .map(|u| serde_json::json!({ "txid": u.txid, "vout": u.vout, "value": u.value }))
+            .collect();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Pass 1 — size/fee probe with a safe placeholder amount.
+        let probe_amount = (total / 2).max(DUST_THRESHOLD_GROATS.min(total));
+        let probe_params = serde_json::json!({
+            "recipient": recipient_hex,
+            "amount": probe_amount,
+            "fee": 0,
+            "fee_rate": fee_rate,
+            "utxos": utxo_json,
+            "change_address": recipient_hex,
+            "private_key": private_key_hex,
+            "chain_id": self.chain_id,
+            "timestamp": now,
+        });
+        let probe_result = noble_tx_core::sign_transfer(&probe_params.to_string())
+            .map_err(|e| format!("sweep probe: {e}"))?;
+        let probe: serde_json::Value = serde_json::from_str(&probe_result)
+            .map_err(|e| format!("parse probe: {e}"))?;
+        if let Some(err) = probe.get("error").and_then(|v| v.as_str()) {
+            return Err(format!("sweep probe: {err}"));
+        }
+        let fee = probe
+            .get("fee")
+            .and_then(|v| v.as_u64())
+            .ok_or("sweep probe: missing fee in builder response")?;
+
+        let amount = sweep_amount(total, fee)?;
+
+        // Pass 2 — exact-fee final transaction.
+        let params = serde_json::json!({
+            "recipient": recipient_hex,
+            "amount": amount,
+            "fee": fee,
+            "utxos": utxo_json,
+            "change_address": recipient_hex,
+            "private_key": private_key_hex,
+            "chain_id": self.chain_id,
+            "timestamp": now,
+        });
+        let result_json = noble_tx_core::sign_transfer(&params.to_string())
+            .map_err(|e| format!("sweep sign: {e}"))?;
+        let result: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| format!("parse sweep result: {e}"))?;
+        if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            return Err(format!("sweep sign: {err}"));
+        }
+        let tx_hex = result
+            .get("tx_hex")
+            .and_then(|v| v.as_str())
+            .ok_or("sweep sign: missing tx_hex in result")?
+            .to_string();
+
+        Ok((tx_hex, amount, fee))
     }
 
     /// Build a signed transfer using the same noble-tx-core C library the client apps use.
@@ -405,6 +528,22 @@ mod tests {
             .unwrap()
             .address();
         assert_eq!(addr1, addr2, "recreation after keystore loss must restore the same address");
+    }
+
+    #[test]
+    fn sweep_amount_math() {
+        // amount + fee == total, always.
+        assert_eq!(sweep_amount(100_000_000, 2_000).unwrap(), 99_998_000);
+        // fee ≥ total → error.
+        assert!(sweep_amount(1_000, 1_000).is_err());
+        assert!(sweep_amount(1_000, 5_000).is_err());
+        // Result below dust → error (relay would reject the output).
+        assert!(sweep_amount(DUST_THRESHOLD_GROATS + 100, 200).is_err());
+        // Exactly at dust is allowed.
+        assert_eq!(
+            sweep_amount(DUST_THRESHOLD_GROATS + 200, 200).unwrap(),
+            DUST_THRESHOLD_GROATS
+        );
     }
 
     #[test]
