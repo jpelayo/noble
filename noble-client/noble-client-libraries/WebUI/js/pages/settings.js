@@ -6,7 +6,7 @@ import { statusBadge } from '../components/status-badge.js';
 import { renderQR } from '../components/qr-code.js';
 import { openModal } from '../components/modal.js';
 import { promptP12Password } from '../components/p12-password.js';
-import { esc, escAttr, isWryPlatform } from '../utils.js';
+import { esc, escAttr, isWryPlatform, groupThousands, setThousandsSeparator, getThousandsSeparatorId } from '../utils.js';
 
 /** Human label for where private keys live, per platform. */
 function walletStorageLabel(platform) {
@@ -98,6 +98,17 @@ export function init(root, ctx) {
 
     function renderAppearanceSection() {
         const currentTheme = localStorage.getItem('noble.theme') || 'system';
+        const currentSep = getThousandsSeparatorId();
+        // Sample labels rendered literally (the select can't call the live
+        // formatter per option) — keep in sync with THOUSANDS_SEPS in utils.js.
+        const sepOptions = [
+            ['space', 'Space — 205 120.00'],
+            ['narrow', 'Narrow space — 205 120.00'],
+            ['apostrophe', "Apostrophe — 205'120.00"],
+            ['comma', 'Comma — 205,120.00'],
+            ['dot', 'Dot — 205.120.00'],
+            ['none', 'None — 205120.00'],
+        ];
         const card = document.createElement('div');
         card.className = 'panel';
         card.innerHTML = `
@@ -114,6 +125,17 @@ export function init(root, ctx) {
                         <button data-theme="dark" class="${currentTheme === 'dark' ? 'active' : ''}">Dark</button>
                     </div>
                 </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-top:var(--gap)">
+                    <div>
+                        <div style="font-size:var(--font-size-sm);font-weight:500">Thousands separator</div>
+                        <div style="font-size:var(--font-size-xs);color:var(--text-muted)">How large numbers are grouped (decimal point is always ".")</div>
+                    </div>
+                    <select class="input input-sm" id="thousands-sep" aria-label="Thousands separator" style="max-width:230px">
+                        ${sepOptions.map(([id, label]) =>
+                            `<option value="${id}" ${id === currentSep ? 'selected' : ''}>${esc(label)}</option>`
+                        ).join('')}
+                    </select>
+                </div>
             </div>
         `;
         root.appendChild(card);
@@ -126,6 +148,14 @@ export function init(root, ctx) {
                 card.querySelectorAll('#theme-toggle button').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
             });
+        });
+
+        card.querySelector('#thousands-sep').addEventListener('change', (e) => {
+            setThousandsSeparator(e.target.value);
+            // Re-render so this page's own numbers (sync heights, block info)
+            // reflect the choice immediately; other pages pick it up on their
+            // next poll tick or remount.
+            render();
         });
     }
 
@@ -193,7 +223,7 @@ export function init(root, ctx) {
                     const info = await Bridge.call('noble_app', 'testConnection', { url });
                     resultDiv.setAttribute('role', 'status');
                     const chainId = info.chainId || '';
-                    const height = info.blockHeight ? ` \u00B7 Block ${Number(info.blockHeight).toLocaleString()}` : '';
+                    const height = info.blockHeight ? ` \u00B7 Block ${groupThousands(Number(info.blockHeight))}` : '';
                     // A probe result, not a connection state \u2014 say what it means.
                     resultDiv.innerHTML = `<span style="color: var(--success)">\u2713 Node reachable</span>`
                         + (chainId ? `<div style="margin-top:var(--gap-xs);font-size:var(--font-size-sm)"><span style="color:var(--text-muted)">Chain:</span> <span class="mono" style="font-weight:600">${esc(chainId)}</span>${height}</div>` : '');
@@ -556,7 +586,7 @@ export function init(root, ctx) {
                 </div>` : ''}
                 <div class="settings-row">
                     <span class="settings-label">Block Height</span>
-                    <span class="mono">${Number(height).toLocaleString()}</span>
+                    <span class="mono">${groupThousands(Number(height))}</span>
                 </div>
                 <div class="settings-row">
                     <span class="settings-label">Sync Status</span>
@@ -564,7 +594,7 @@ export function init(root, ctx) {
                 </div>
                 ${!synced ? `<div class="settings-row">
                     <span class="settings-label">Highest Known</span>
-                    <span class="mono">${Number(highestKnown).toLocaleString()}</span>
+                    <span class="mono">${groupThousands(Number(highestKnown))}</span>
                 </div>` : ''}
                 <div class="settings-row">
                     <span class="settings-label">Cycle</span>

@@ -4,7 +4,7 @@ import { Bridge } from '../bridge.js';
 import { nobleCard } from '../components/noble-card.js';
 import { emptyState } from '../components/empty-state.js';
 import { formatAmount } from '../components/amount-text.js';
-import { esc } from '../utils.js';
+import { esc, groupThousands } from '../utils.js';
 
 const COOLDOWN_KEY = 'noble.faucet.lastRequest';
 const COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -362,7 +362,7 @@ export function init(root, ctx) {
 
         if (info.distribution_count != null || info.distributionCount != null) {
             const count = info.distribution_count ?? info.distributionCount;
-            rows.push(['Distributions', Number(count).toLocaleString()]);
+            rows.push(['Distributions', groupThousands(Number(count))]);
         }
         if (info.daily_cap != null || info.dailyCap != null) {
             const cap = formatAmount(info.daily_cap ?? info.dailyCap);

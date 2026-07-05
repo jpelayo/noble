@@ -3,7 +3,7 @@
  * IP access control management and system configuration.
  */
 
-import { formatChainLabel, formatFee } from '../utils.js';
+import { formatChainLabel, formatFee, groupThousands, setThousandsSeparator, getThousandsSeparatorId } from '../utils.js';
 
 export function init(root, ctx) {
   const { rpc } = ctx;
@@ -467,6 +467,22 @@ export function init(root, ctx) {
       </div>
     </div>
 
+    <div class="panel">
+      <div class="panel-header">Display</div>
+      <div class="panel-body">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--gap);flex-wrap:wrap">
+          <div>
+            <p style="font-size:var(--font-size-sm);font-weight:600;margin:0 0 2px">Thousands separator</p>
+            <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">How large numbers are grouped everywhere in this dashboard (decimal point is always ".")</p>
+          </div>
+          <div style="display:flex;align-items:center;gap:var(--gap)">
+            <select id="s-thousands-sep" style="padding:6px 10px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:var(--font-size-sm)"></select>
+            <span class="mono" id="s-thousands-example" style="font-size:var(--font-size-sm);color:var(--text-muted)"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Chain Management Modal -->
     <div id="s-chain-modal" style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,0.6);align-items:center;justify-content:center">
       <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);max-width:700px;width:92%;max-height:85vh;overflow-y:auto;padding:var(--gap-lg);position:relative">
@@ -491,6 +507,34 @@ export function init(root, ctx) {
       </div>
     </div>
   `;
+
+  // ── Display: thousands separator ──
+  // Sample labels are literal (an <option> can't call the live formatter per
+  // choice) — keep in sync with THOUSANDS_SEPS in utils.js.
+  {
+    const sepSelect = root.querySelector('#s-thousands-sep');
+    const sepExample = root.querySelector('#s-thousands-example');
+    const sepOptions = [
+      ['space', 'Space'],
+      ['narrow', 'Narrow space'],
+      ['apostrophe', "Apostrophe"],
+      ['comma', 'Comma'],
+      ['dot', 'Dot'],
+      ['none', 'None'],
+    ];
+    const current = getThousandsSeparatorId();
+    sepSelect.innerHTML = sepOptions
+      .map(([id, label]) => `<option value="${id}" ${id === current ? 'selected' : ''}>${label}</option>`)
+      .join('');
+    const paintExample = () => { sepExample.textContent = groupThousands('1234567.89'); };
+    paintExample();
+    sepSelect.addEventListener('change', () => {
+      setThousandsSeparator(sepSelect.value);
+      // Live example updates now; the rest of the dashboard repaints on its
+      // next WS/poll tick (seconds).
+      paintExample();
+    });
+  }
 
   // DOM refs
   const accessBadge = root.querySelector('#s-access-badge');
@@ -1416,13 +1460,28 @@ export function init(root, ctx) {
 
       const balFmt = formatFee(balance);
 
-      faucetBadge.textContent = balance > 0 ? 'Running' : 'Empty';
-      faucetBadge.style.background = balance > 0 ? 'var(--success)' : 'var(--warning)';
-      faucetInfo.innerHTML = `
-        <dt>Address</dt><dd class="mono" style="word-break:break-all">${addr} <button class="btn-copy" data-copy="${addr}" title="Copy faucet address">&#128203;</button></dd>
-        <dt>Balance</dt><dd>${balFmt}${immatureInfo}</dd>
-        <dt>Status</dt><dd>${balance > 0 ? 'Ready to distribute' : (balanceTotal > 0 ? 'Funds maturing — wait for confirmations' : 'Needs funding — send tokens to the address above')}</dd>
-      `;
+      // Liveness first: `faucet_listening` is the node-verified truth (its
+      // supervisor probes the faucet's HTTP endpoint). Config + on-chain
+      // balance survive a dead daemon — they must NEVER paint the badge
+      // green on their own.
+      const listening = info.faucet_listening === true;
+      if (!listening) {
+        faucetBadge.textContent = 'NOT RUNNING';
+        faucetBadge.style.background = 'var(--error)';
+        faucetInfo.innerHTML = `
+          <dt>Address</dt><dd class="mono" style="word-break:break-all">${addr} <button class="btn-copy" data-copy="${addr}" title="Copy faucet address">&#128203;</button></dd>
+          <dt>Balance</dt><dd>${balFmt}${immatureInfo}</dd>
+          <dt>Status</dt><dd style="color:var(--error)">Faucet process is not listening on ${info.faucet_listen || 'its port'}. The node restarts it automatically — check faucet.log in the data directory if this persists.</dd>
+        `;
+      } else {
+        faucetBadge.textContent = balance > 0 ? 'Running' : 'Empty';
+        faucetBadge.style.background = balance > 0 ? 'var(--success)' : 'var(--warning)';
+        faucetInfo.innerHTML = `
+          <dt>Address</dt><dd class="mono" style="word-break:break-all">${addr} <button class="btn-copy" data-copy="${addr}" title="Copy faucet address">&#128203;</button></dd>
+          <dt>Balance</dt><dd>${balFmt}${immatureInfo}</dd>
+          <dt>Status</dt><dd>${balance > 0 ? 'Ready to distribute' : (balanceTotal > 0 ? 'Funds maturing — wait for confirmations' : 'Needs funding — send tokens to the address above')}</dd>
+        `;
+      }
       faucetInfo.querySelectorAll('.btn-copy').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1447,7 +1506,10 @@ export function init(root, ctx) {
     loadFaucet().finally(() => { faucetRefresh.textContent = 'Refresh'; faucetRefresh.disabled = false; });
   });
 
-  // Toggle button — enable/disable faucet in config (takes effect on next restart).
+  // Toggle button — enable/disable faucet. Applied LIVE: the node's faucet
+  // supervisor watches the flag and spawns/kills the child within seconds
+  // (no restart). Wait ~3 s so the spawn + first liveness probe can land
+  // before repainting.
   faucetToggle.addEventListener('click', async () => {
     const isEnabled = faucetToggle.textContent === 'Disable';
     const newValue = isEnabled ? 'false' : 'true';
@@ -1455,7 +1517,7 @@ export function init(root, ctx) {
     faucetToggle.textContent = isEnabled ? 'Disabling...' : 'Enabling...';
     try {
       await rpc.call('noble_setConfigValue', { section: 'faucet', key: 'server_enabled', value: newValue });
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 3000));
       await loadFaucet();
     } catch (e) {
       faucetInfo.innerHTML = `<dt style="grid-column:1/-1;color:var(--error)">${e.message || e}</dt>`;
@@ -2090,7 +2152,7 @@ export function init(root, ctx) {
           ? `<span class="badge" style="background:var(--accent);color:#fff;font-size:var(--font-size-xs);margin-left:var(--gap-sm)">Chain ${chainId}</span>`
           : '';
         // Alignment badge (same state as sidebar)
-        const ALIGN_COLORS = { Isolated: 'var(--error)', Bootstrapping: 'var(--warning)', Creating: 'var(--warning)', Syncing: 'var(--accent)', Aligned: 'var(--success)', Diverged: 'var(--error)' };
+        const ALIGN_COLORS = { Isolated: 'var(--error)', Bootstrapping: 'var(--warning)', Creating: 'var(--warning)', Syncing: 'var(--accent)', Verifying: 'var(--accent)', 'Catching Up': 'var(--accent)', Aligned: 'var(--success)', Diverged: 'var(--error)' };
         const st = syncStatus?.state || '';
         const stColor = ALIGN_COLORS[st] || 'var(--text-muted)';
         const alignBadge = st

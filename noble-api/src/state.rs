@@ -373,8 +373,16 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Faucet listen address (e.g. "0.0.0.0:8786"). Set from config.
     pub faucet_listen: parking_lot::RwLock<String>,
 
-    /// Whether the faucet server is enabled.
-    pub faucet_enabled: std::sync::atomic::AtomicBool,
+    /// Whether the faucet server is enabled. Shared (Arc) with the node's
+    /// faucet supervisor: setConfigValue flips it, the supervisor applies it
+    /// live (spawn/kill the child, no restart required).
+    pub faucet_enabled: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Whether the faucet child is ACTUALLY listening — verified by the
+    /// node's faucet supervisor probing the real HTTP endpoint. The GUI badge
+    /// derives Running/Not-running from this, never from config or on-chain
+    /// balance (which survive a dead daemon).
+    pub faucet_listening: Arc<std::sync::atomic::AtomicBool>,
 
     /// Validator's personal minimum fee rate (groats/byte) for block proposal.
     /// Hot-reloadable via setConfigValue("consensus", "min_fee_rate", "N").

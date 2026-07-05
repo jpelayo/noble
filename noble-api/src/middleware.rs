@@ -3,7 +3,7 @@
 
 //! Tower HTTP middleware for TOTP-based authentication.
 //!
-//! When a [`TotpValidator`] is configured, incoming HTTP requests must
+//! When a [`crate::auth::TotpValidator`] is configured, incoming HTTP requests must
 //! include an `Authorization: Bearer <SHA-256 hex of TOTP code>` header.
 //! Invalid or missing credentials receive a JSON-RPC error response with
 //! code `-32004 AUTH_REQUIRED`.
@@ -39,6 +39,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(test)]
 use parking_lot::RwLock;
 use std::task::{Context, Poll};
 
@@ -49,6 +50,7 @@ use subtle::ConstantTimeEq;
 use tower::{Layer, Service};
 use tracing::Instrument;
 
+#[cfg(test)]
 use crate::auth::TotpValidator;
 use crate::error::AUTH_REQUIRED;
 

@@ -366,6 +366,9 @@ function populateChainIdentity(nodeInfo) {
 const ALIGNMENT_SEVERITY = {
   Isolated: 'high', Bootstrapping: 'syncing', Creating: 'syncing',
   Syncing: 'syncing', Aligned: 'zero', Diverged: 'medium',
+  // Verifying: connected but no peer has announced a tip yet — evidence-free,
+  // rendered like a transient sync state, never green.
+  Verifying: 'syncing', 'Catching Up': 'syncing',
 };
 
 // How long a calmer state (leaving Syncing, going Isolated) must persist before
@@ -455,6 +458,11 @@ function paintAlignment(bar, st, height, highestKnown, cyclesRemaining) {
     detail.textContent = tgt > h
       ? `block ${formatNumber(h)} / ${formatNumber(tgt)} (${(h / tgt * 100).toFixed(1)}%)`
       : 'catching up';
+  } else if (st === 'Verifying') {
+    label.textContent = 'Verifying';
+    detail.textContent = height > 0
+      ? `height ${formatNumber(height)} · confirming with peers`
+      : 'confirming with peers';
   } else if (st === 'Diverged' && cyclesRemaining != null) {
     label.textContent = 'Diverged';
     detail.textContent = `${cyclesRemaining} cycle(s) to resolution`;

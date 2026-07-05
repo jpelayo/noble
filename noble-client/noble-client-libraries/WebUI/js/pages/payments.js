@@ -9,7 +9,7 @@ import { emptyState } from '../components/empty-state.js';
 import { openModal, openWizardModal, closeModal } from '../components/modal.js';
 import { renderQR } from '../components/qr-code.js';
 import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
-import { esc, timeAgo, truncate, initials, showCopyFeedback } from '../utils.js';
+import { esc, timeAgo, truncate, initials, showCopyFeedback, groupThousands } from '../utils.js';
 import { TX_TYPES, txDisplayAmount, formatTxType, txStatusBadge } from '../tx-display.js';
 
 export function init(root, ctx) {
@@ -463,7 +463,7 @@ export function init(root, ctx) {
             const preview = document.createElement('div');
             preview.className = 'form-hint';
             const atomic = parseAmount(amount);
-            if (atomic > 0) preview.textContent = `${atomic.toLocaleString()} atomic units`;
+            if (atomic > 0) preview.textContent = `${groupThousands(atomic)} atomic units`;
             group.appendChild(preview);
 
             // Balance warning element
@@ -475,7 +475,7 @@ export function init(root, ctx) {
 
             input.addEventListener('input', () => {
                 const a = parseAmount(input.value.trim());
-                preview.textContent = a > 0 ? `${a.toLocaleString()} groats` : '';
+                preview.textContent = a > 0 ? `${groupThousands(a)} groats` : '';
                 // Warn if amount exceeds available balance
                 if (balanceData && a > (balanceData.available || 0)) {
                     balWarn.textContent = `Exceeds available balance (\u25C6 ${formatAmount(balanceData.available)})`;

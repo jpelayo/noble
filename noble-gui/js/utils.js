@@ -31,8 +31,6 @@ const fullDateFmt = new Intl.DateTimeFormat('en-US', {
   hour12: false,
 });
 
-const numFmt = new Intl.NumberFormat('en-US');
-
 const DIVISIONS = [
   { amount: 60, name: 'seconds' },
   { amount: 60, name: 'minutes' },
@@ -60,8 +58,50 @@ export function timeAgo(unixSecs) {
   return formatTimestamp(unixSecs);
 }
 
+// ── Thousands separator (user preference) ──
+// Default is the normal space (codebase policy: '.'/',' whose meaning flips
+// between locales are never the DEFAULT). Overridable in Settings → Display;
+// stored as a semantic ID (raw chars — especially spaces — are invisible/
+// fragile in localStorage). Decimal separator is always '.'.
+const THOUSANDS_SEPS = {
+  space: ' ',
+  narrow: '\u202F', // narrow no-break space — thinner, never line-wraps
+  apostrophe: "'",
+  comma: ',',
+  dot: '.',
+  none: '',
+};
+const THOUSANDS_SEP_KEY = 'noble-thousands-sep';
+
+let _sepChar = THOUSANDS_SEPS[localStorage.getItem(THOUSANDS_SEP_KEY)] ?? ' ';
+
+/** Persist + apply a thousands-separator choice (one of THOUSANDS_SEPS' keys;
+ *  unknown IDs fall back to 'space'). Takes effect on the next render. */
+export function setThousandsSeparator(id) {
+  if (!(id in THOUSANDS_SEPS)) id = 'space';
+  localStorage.setItem(THOUSANDS_SEP_KEY, id);
+  _sepChar = THOUSANDS_SEPS[id];
+}
+
+/** Current separator choice ID, for settings controls. */
+export function getThousandsSeparatorId() {
+  const stored = localStorage.getItem(THOUSANDS_SEP_KEY);
+  return stored in THOUSANDS_SEPS ? stored : 'space';
+}
+
+/** Group the integer part of a number with the user's thousands separator
+ *  (default: space — locale-independent). Keeps any decimal part and sign:
+ *  205120 → "205 120", -1234.56 → "-1 234.56". */
+export function groupThousands(value) {
+  const s = String(value);
+  const neg = s.startsWith('-');
+  const [intPart, fracPart] = (neg ? s.slice(1) : s).split('.');
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, _sepChar);
+  return (neg ? '-' : '') + grouped + (fracPart !== undefined ? '.' + fracPart : '');
+}
+
 export function formatNumber(n) {
-  return numFmt.format(n);
+  return groupThousands(n);
 }
 
 export function truncateHash(hex, len = 8) {

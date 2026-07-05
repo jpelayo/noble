@@ -573,7 +573,9 @@ function renderAlignmentBanner(container, state) {
         return;
     }
     const ns = state.nodeState;
-    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown' || ns === 'Isolated' || ns === 'Offline') {
+    // 'Verifying' is a seconds-long evidence-gathering state (fresh connect,
+    // post-reset) — the chain-bar badge covers it; a banner would be noise.
+    if (!ns || ns === 'Aligned' || ns === 'Connected' || ns === 'Unknown' || ns === 'Isolated' || ns === 'Offline' || ns === 'Verifying') {
         container.innerHTML = '';
         return;
     }

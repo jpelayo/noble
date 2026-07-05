@@ -493,6 +493,8 @@ export function init(root, ctx) {
     fork_alignment_pending: '\u21c4',  // right-left arrows
     fork_alignment_clear:   '\u2713',  // checkmark
     alignment_changed:      '\u25c9',  // fisheye (alignment state)
+    faucet_down:            '\u26a0',  // warning triangle (faucet process died)
+    faucet_restarted:       '\u21bb',  // clockwise arrow (supervisor respawned it)
     chain_adoption_started: '\u21c4',  // right-left arrows
     healing_clue:           '\u2764',  // heart (healing)
     healing_action:         '\u2764',  // heart (healing)
@@ -536,6 +538,8 @@ export function init(root, ctx) {
       case 'fork_alignment_pending': return '#f59e0b';
       case 'fork_alignment_clear': return 'var(--success, #22c55e)';
       case 'alignment_changed': return '#60a5fa';
+      case 'faucet_down': return 'var(--danger, #ef4444)';
+      case 'faucet_restarted': return 'var(--success, #22c55e)';
       case 'chain_adoption_started': return 'var(--danger, #ef4444)';
       case 'checkpoints_activated': return 'var(--success, #22c55e)';
       case 'rejected': return '#f87171';
@@ -643,6 +647,12 @@ export function init(root, ctx) {
         return null;
       case 'alignment_changed':
         return `${data.state}${data.previous_state ? ` (was ${data.previous_state})` : ''}`;
+      case 'faucet_down':
+        return data.reason
+          ? `Faucet down: ${data.reason}`
+          : `Faucet process exited${data.exit_code != null ? ` (code ${data.exit_code})` : ''} — restarting`;
+      case 'faucet_restarted':
+        return `Faucet restarted (attempt ${data.restarts ?? '?'})`;
       case 'fork_alignment_pending':
         return `Fork alignment: ${data.cycles_remaining} cycle(s) to resolution`;
       case 'fork_alignment_clear':

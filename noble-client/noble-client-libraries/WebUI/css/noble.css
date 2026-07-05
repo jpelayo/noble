@@ -274,6 +274,8 @@ body.has-side-nav #app-content { max-width: calc(100vw - 210px); }
 .node-state-catching-up,
 .node-state-bootstrapping,
 .node-state-creating { background: #f59e0b; color: #000; }
+/* Verifying: connected, gathering peer evidence (seconds) — calm blue, not amber. */
+.node-state-verifying { background: #60a5fa; color: #000; }
 .node-state-diverged { background: #f97316; color: #fff; }
 /* Fee Distribution transaction type */
 .tx-fee-distribution { color: #22d3ee; }

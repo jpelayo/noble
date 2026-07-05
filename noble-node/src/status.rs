@@ -485,13 +485,15 @@ pub fn show_consensus(rpc: &str, totp: Option<&str>) {
     }
 }
 
-/// Format a number with comma separators (e.g. 1247 → "1,247").
+/// Format a number with SPACE thousands separators (e.g. 1247 → "1 247").
+/// Codebase-wide policy: never '.' or ',' for grouping — their meaning flips
+/// between locales; a space is unambiguous everywhere.
 fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
         if i > 0 && (s.len() - i) % 3 == 0 {
-            result.push(',');
+            result.push(' ');
         }
         result.push(c);
     }

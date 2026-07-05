@@ -7,6 +7,7 @@ mod bridge;
 pub mod ca_store;
 mod config;
 pub mod faucet_probe;
+mod faucet_supervisor;
 mod gui_server;
 mod gui_session;
 pub mod healing;

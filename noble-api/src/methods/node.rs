@@ -406,6 +406,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
                 }
             },
             faucet_enabled: self.faucet_enabled.load(std::sync::atomic::Ordering::Relaxed),
+            faucet_listening: self.faucet_listening.load(std::sync::atomic::Ordering::Relaxed),
             faucet_listen: {
                 let listen = self.faucet_listen.read().clone();
                 if listen.is_empty() { None } else { Some(listen) }

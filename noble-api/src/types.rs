@@ -843,6 +843,10 @@ pub struct NodeInfoResponse {
     pub faucet_address: Option<String>,
     /// Whether the faucet server is enabled in config.
     pub faucet_enabled: bool,
+    /// Whether the faucet child process is ACTUALLY listening (verified by
+    /// the node's supervisor probing the faucet's HTTP endpoint). This is the
+    /// liveness truth — `faucet_enabled` is only intent.
+    pub faucet_listening: bool,
     /// Faucet listen address (e.g. "0.0.0.0:8786"), if configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub faucet_listen: Option<String>,

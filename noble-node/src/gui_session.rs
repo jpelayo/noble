@@ -121,10 +121,14 @@ impl GuiSessionStore {
         }
     }
 
+    /// Test-only accessors — production code has no session-count consumer
+    /// (cfg-gated so the release build carries no dead code).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.sessions.read().len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

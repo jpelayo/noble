@@ -187,7 +187,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         faucet_cache: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         faucet_address: parking_lot::RwLock::new(String::new()),
         faucet_listen: parking_lot::RwLock::new(String::new()),
-        faucet_enabled: std::sync::atomic::AtomicBool::new(false),
+        faucet_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        faucet_listening: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         min_fee_rate: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
     });
 

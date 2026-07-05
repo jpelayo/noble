@@ -816,15 +816,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "core2"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b49ba7ef1ad6107f8824dbe97de947cbaac53c44e7f9756a1fba0d37c1eec505"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2916,11 +2907,10 @@ dependencies = [
 
 [[package]]
 name = "multihash"
-version = "0.19.3"
+version = "0.19.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b430e7953c29dd6a09afc29ff0bb69c6e306329ee6794700aee27b76a1aea8d"
+checksum = "577c63b00ad74d57e8c9aa870b5fccebf2fd64a308a5aee9f1bb88e4aea19447"
 dependencies = [
- "core2",
  "unsigned-varint 0.8.0",
 ]
 
@@ -3015,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "noble-api"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "bytes",
  "hex",
@@ -3058,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "noble-cms-core"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "cms",
  "const-oid",
@@ -3081,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "noble-codec"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "hex",
  "serde",
@@ -3091,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "noble-consensus"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "hex",
  "noble-codec",
@@ -3107,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "noble-core"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -3126,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "noble-crypto"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3150,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "noble-faucet"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "axum",
  "clap",
@@ -3180,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "noble-mcp"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "axum",
  "http 1.4.0",
@@ -3193,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "noble-mempool"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "noble-codec",
  "noble-core",
@@ -3205,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "noble-network"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "hex",
  "libp2p",
@@ -3227,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "noble-node"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "axum",
  "bip32",
@@ -3282,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "noble-storage"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "hex",
  "noble-codec",
@@ -3300,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "noble-test-utils"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "noble-codec",
  "noble-core",
@@ -3311,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "noble-tool"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "bip32",
  "bip39",
@@ -3338,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "noble-tx-core"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "cc",
  "hex",
@@ -3350,7 +3340,7 @@ dependencies = [
 
 [[package]]
 name = "noble-wallet"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3372,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "noble-wire"
-version = "0.126.0"
+version = "0.130.0"
 dependencies = [
  "hex",
  "noble-codec",

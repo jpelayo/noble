@@ -16,8 +16,14 @@ pub enum AlignmentState {
     Bootstrapping,
     /// height 0, peers exist, proposals exist (genesis forming).
     Creating,
-    /// height > 0, behind peers by > 10 blocks.
+    /// height > 0, behind the highest known peer tip beyond the tolerance.
     Syncing,
+    /// Connected, but no peer has announced a chain tip yet — alignment
+    /// cannot be confirmed. Evidence-free is NOT the same as aligned: this
+    /// state exists so a freshly (re)connected or post-reset node never
+    /// claims "Aligned" on zero information. With status solicitation on
+    /// connect it should last seconds.
+    Verifying,
     /// On the majority chain (> 50% of known peers agree).
     Aligned,
     /// Behind peers that share our chain_id — sequential catch-up in progress.
@@ -34,6 +40,7 @@ impl AlignmentState {
             Self::Bootstrapping => "Bootstrapping",
             Self::Creating => "Creating",
             Self::Syncing => "Syncing",
+            Self::Verifying => "Verifying",
             Self::Aligned => "Aligned",
             Self::CatchingUp => "Catching Up",
             Self::Diverged => "Diverged",
@@ -44,7 +51,8 @@ impl AlignmentState {
     pub fn severity(&self) -> &'static str {
         match self {
             Self::Isolated => "high",
-            Self::Bootstrapping | Self::Creating | Self::Syncing | Self::CatchingUp => "syncing",
+            Self::Bootstrapping | Self::Creating | Self::Syncing | Self::CatchingUp
+            | Self::Verifying => "syncing",
             Self::Aligned => "zero",
             Self::Diverged => "medium",
         }

@@ -94,6 +94,13 @@ const SYNC_PEER_MAX_FAILURES: u32 = 2;
 /// 26-day failure mode). Re-fires (and retries recovery) once per window while
 /// stuck; cleared on any progress.
 const SYNC_STALL_ALARM_SECS: u64 = 300;
+/// Height gap (blocks) beyond which alignment REPORTS Syncing. Sync itself
+/// engages at any gap ≥ 1 (`find_best_sync_peer` picks any peer ahead) — this
+/// constant only governs the displayed state. 2 blocks ≈ 32 min at 960 s
+/// cycles: enough to absorb the normal one-block tip race without hiding real
+/// lag (the previous literal of 10 hid ~2.7 h of catch-up behind an "Aligned"
+/// badge).
+const ALIGNMENT_SYNC_GAP_BLOCKS: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // Sync Import Identity
@@ -669,78 +676,51 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             .unwrap_or(height)
             .max(height);
 
-        // 3. Decision tree — early exits for non-majority-check states.
-        let state = if height == 0 && connected_peers == 0 {
-            AlignmentState::Isolated
-        } else if height == 0 && !has_proposals {
-            AlignmentState::Bootstrapping
-        } else if height == 0 {
-            AlignmentState::Creating
-        } else if connected_peers == 0 {
-            AlignmentState::Isolated
-        } else if highest_known.saturating_sub(height) > 10 {
-            AlignmentState::Syncing
-        } else if peers_with_tip == 0 {
-            // Connected peers but none have announced chain tips yet.
-            // No evidence of disagreement — assume aligned.
-            AlignmentState::Aligned
-        } else {
-            // 4. Healing fork override: if dwell timer running, force Diverged.
-            let dwell_counter = {
-                let resolver = self.fork_resolver.lock();
-                resolver.dwell_counter()
-            };
-            if dwell_counter > 0 {
-                AlignmentState::Diverged
-            } else {
-                // 5. Majority chain check. Need storage (lock 2) — safe because
-                //    consensus(4) and peer_info(7) are already dropped.
+        // 3-5. Decision tree — pure logic lives in `decide_alignment` (unit
+        // tested); the two closures keep the fork_resolver and storage locks
+        // lazy, invoked only on the branch that needs them (same lock
+        // discipline as before the extraction).
+        let state = decide_alignment(
+            height,
+            connected_peers,
+            peers_with_tip,
+            highest_known,
+            has_proposals,
+            || self.fork_resolver.lock().dwell_counter() > 0,
+            || {
+                // Majority chain check. Need storage (lock 2) — safe because
+                // consensus(4) and peer_info(7) are already dropped.
                 let mut agreeing: usize = 0;
                 let mut ahead_same_chain: usize = 0;
-                {
-                    let storage = self.storage.read();
-                    for (peer_h, peer_hash) in &peers_snapshot {
-                        let (Some(ph), Some(phash)) = (peer_h, peer_hash) else { continue };
-                        if *phash == local_tip_hex {
-                            // Exact tip match — definitely agreeing.
-                            agreeing += 1;
-                        } else if *ph <= height {
-                            // Peer behind or at same height with different tip.
-                            // Check if their tip matches our chain at their height.
-                            match storage.get_block_hash_by_height(*ph) {
-                                Ok(our_hash) => {
-                                    if hex::encode(our_hash.as_bytes()) == *phash {
-                                        agreeing += 1; // Same chain, just behind.
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::trace!(task = "alignment", "storage miss at height {ph}: {e}");
+                let storage = self.storage.read();
+                for (peer_h, peer_hash) in &peers_snapshot {
+                    let (Some(ph), Some(phash)) = (peer_h, peer_hash) else { continue };
+                    if *phash == local_tip_hex {
+                        // Exact tip match — definitely agreeing.
+                        agreeing += 1;
+                    } else if *ph <= height {
+                        // Peer behind or at same height with different tip.
+                        // Check if their tip matches our chain at their height.
+                        match storage.get_block_hash_by_height(*ph) {
+                            Ok(our_hash) => {
+                                if hex::encode(our_hash.as_bytes()) == *phash {
+                                    agreeing += 1; // Same chain, just behind.
                                 }
                             }
-                        } else {
-                            // Peer ahead — already filtered to same chain_id (line 580).
-                            // Count as agreeing: they're on our chain, just further along.
-                            agreeing += 1;
-                            ahead_same_chain += 1;
+                            Err(e) => {
+                                tracing::trace!(task = "alignment", "storage miss at height {ph}: {e}");
+                            }
                         }
-                    }
-                }
-
-                // agreeing + self vs peers-with-tip + self.
-                // Peers without chain_tip (pre-announce) are excluded from both sides.
-                let local_side = agreeing + 1;
-                let total = peers_with_tip + 1;
-                if local_side * 2 > total {
-                    if ahead_same_chain > 0 {
-                        AlignmentState::CatchingUp
                     } else {
-                        AlignmentState::Aligned
+                        // Peer ahead — already filtered to same chain_id (line 580).
+                        // Count as agreeing: they're on our chain, just further along.
+                        agreeing += 1;
+                        ahead_same_chain += 1;
                     }
-                } else {
-                    AlignmentState::Diverged
                 }
-            }
-        };
+                (agreeing, ahead_same_chain)
+            },
+        );
 
         // 6. Read dwell for cycles_remaining (if Diverged from fork).
         let cycles_remaining = if matches!(state, AlignmentState::Diverged) {
@@ -864,7 +844,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.send_network(NetworkCommand::ClearGossipCaches);
     }
 
-    fn request_sync(&self) {
+    /// Ask ALL connected peers for their status (`SyncRequest::GetStatus`).
+    /// Responses land as `PeerChainTipUpdated`, filling the chain-tip fields
+    /// `compute_alignment` needs — call this whenever peer tips are unknown
+    /// (fresh connect, post-wipe) so "Verifying" lasts seconds, not minutes.
+    pub(crate) fn request_sync(&self) {
         self.send_network(NetworkCommand::RequestSync);
     }
 
@@ -2093,8 +2077,12 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.fork_common_ancestor = None;
         *self.alignment.write() = AlignmentSnapshot::default();
 
-        // Clear stale chain state from peer_info (stale-cache-#3).
+        // Clear stale chain state from peer_info (stale-cache-#3), then
+        // immediately re-solicit peer status — the wipe leaves every peer
+        // tipless, which would otherwise park alignment in Verifying until
+        // the next NodeAnnounce (up to a full cycle away).
         self.clear_peer_chain_state();
+        self.request_sync();
 
         // Clear pending proposals and gossip dedup caches.
         self.clear_pending_proposals();
@@ -2158,8 +2146,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.discovered_blockchains.lock().clear();
         self.persist_discovered_blockchains();
 
-        // 2d. Clear stale chain state from peer_info (stale-cache-#3).
+        // 2d. Clear stale chain state from peer_info (stale-cache-#3), then
+        // immediately re-solicit peer status so alignment regains evidence in
+        // seconds instead of waiting out the announce cadence.
         self.clear_peer_chain_state();
+        self.request_sync();
 
         // 3. Update network tip height.
         self.update_tip_height(0);
@@ -2904,10 +2895,158 @@ pub(crate) fn compute_fork_groups(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Pure alignment decision tree — extracted from `compute_alignment` so the
+/// state logic is unit-testable without a full `HealingManager`. The two lazy
+/// closures preserve the caller's lock discipline: they are invoked only on
+/// the branch that needs them (`dwell_active` → fork_resolver lock,
+/// `majority` → storage lock, returning `(agreeing, ahead_same_chain)`).
+fn decide_alignment(
+    height: u64,
+    connected_peers: usize,
+    peers_with_tip: usize,
+    highest_known: u64,
+    has_proposals: bool,
+    dwell_active: impl FnOnce() -> bool,
+    majority: impl FnOnce() -> (usize, usize),
+) -> AlignmentState {
+    if height == 0 && connected_peers == 0 {
+        AlignmentState::Isolated
+    } else if height == 0 && !has_proposals {
+        AlignmentState::Bootstrapping
+    } else if height == 0 {
+        AlignmentState::Creating
+    } else if connected_peers == 0 {
+        AlignmentState::Isolated
+    } else if highest_known.saturating_sub(height) > ALIGNMENT_SYNC_GAP_BLOCKS {
+        AlignmentState::Syncing
+    } else if peers_with_tip == 0 {
+        // Connected peers but none have announced chain tips yet. Evidence-free
+        // is NOT aligned — report Verifying until at least one tip arrives.
+        // Status is solicited on connect and after peer-state wipes, so this
+        // state lasts seconds, not announce-cycles.
+        AlignmentState::Verifying
+    } else if dwell_active() {
+        // Healing fork override: dwell timer running → force Diverged.
+        AlignmentState::Diverged
+    } else {
+        let (agreeing, ahead_same_chain) = majority();
+        // agreeing + self vs peers-with-tip + self.
+        // Peers without chain_tip (pre-announce) are excluded from both sides.
+        let local_side = agreeing + 1;
+        let total = peers_with_tip + 1;
+        if local_side * 2 > total {
+            if ahead_same_chain > 0 {
+                AlignmentState::CatchingUp
+            } else {
+                AlignmentState::Aligned
+            }
+        } else {
+            AlignmentState::Diverged
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use noble_storage::MemoryStorage;
+
+    // ── decide_alignment: the previously-untested state tree ──
+    // Closure probes: `dwell(false)` / `maj(a, ahead)` return canned values;
+    // `unreachable_dwell`/`unreachable_maj` assert the lazy branches are NOT
+    // taken on early exits.
+
+    fn dwell(v: bool) -> impl FnOnce() -> bool {
+        move || v
+    }
+    fn maj(agreeing: usize, ahead: usize) -> impl FnOnce() -> (usize, usize) {
+        move || (agreeing, ahead)
+    }
+    fn unreachable_dwell() -> bool {
+        panic!("dwell closure must not run on early-exit branches")
+    }
+    fn unreachable_maj() -> (usize, usize) {
+        panic!("majority closure must not run on early-exit branches")
+    }
+
+    #[test]
+    fn alignment_isolated_when_no_peers() {
+        assert_eq!(
+            decide_alignment(0, 0, 0, 0, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Isolated
+        );
+        assert_eq!(
+            decide_alignment(5, 0, 0, 5, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Isolated
+        );
+    }
+
+    #[test]
+    fn alignment_bootstrapping_and_creating_at_height_zero() {
+        assert_eq!(
+            decide_alignment(0, 2, 0, 0, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Bootstrapping
+        );
+        assert_eq!(
+            decide_alignment(0, 2, 0, 0, true, unreachable_dwell, unreachable_maj),
+            AlignmentState::Creating
+        );
+    }
+
+    #[test]
+    fn alignment_verifying_when_peers_have_no_tips() {
+        // THE fix: connected but evidence-free must NOT claim Aligned.
+        // (Previously returned Aligned — two nodes 22 blocks apart both
+        // showed "ALIGNED".)
+        assert_eq!(
+            decide_alignment(2751, 1, 0, 2751, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Verifying
+        );
+    }
+
+    #[test]
+    fn alignment_gap_threshold_is_two_blocks() {
+        // Gap ≤ 2 (one-block tip race territory): not Syncing.
+        for gap in 0..=ALIGNMENT_SYNC_GAP_BLOCKS {
+            assert_eq!(
+                decide_alignment(100, 1, 1, 100 + gap, false, dwell(false), maj(1, 0)),
+                AlignmentState::Aligned,
+                "gap {gap} must stay Aligned"
+            );
+        }
+        // Gap 3: Syncing — no more hiding hours of lag behind a green badge.
+        assert_eq!(
+            decide_alignment(100, 1, 1, 100 + ALIGNMENT_SYNC_GAP_BLOCKS + 1, false, unreachable_dwell, unreachable_maj),
+            AlignmentState::Syncing
+        );
+    }
+
+    #[test]
+    fn alignment_dwell_forces_diverged() {
+        assert_eq!(
+            decide_alignment(100, 2, 2, 100, false, dwell(true), unreachable_maj),
+            AlignmentState::Diverged
+        );
+    }
+
+    #[test]
+    fn alignment_majority_paths() {
+        // Majority agrees, someone ahead within tolerance → CatchingUp.
+        assert_eq!(
+            decide_alignment(100, 2, 2, 101, false, dwell(false), maj(2, 1)),
+            AlignmentState::CatchingUp
+        );
+        // Majority agrees, nobody ahead → Aligned.
+        assert_eq!(
+            decide_alignment(100, 2, 2, 100, false, dwell(false), maj(2, 0)),
+            AlignmentState::Aligned
+        );
+        // Minority (0 agreeing of 2 with tips: 1+0=1 vs 3) → Diverged.
+        assert_eq!(
+            decide_alignment(100, 2, 2, 100, false, dwell(false), maj(0, 0)),
+            AlignmentState::Diverged
+        );
+    }
 
     fn make_healing_manager() -> HealingManager<MemoryStorage> {
         let storage = Arc::new(RwLock::new(MemoryStorage::new()));

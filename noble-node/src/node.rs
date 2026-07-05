@@ -1904,8 +1904,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
                     tracing::info!(task = "config", "Updated {section}.{key} = {value} in {}", cp.display());
 
-                    // Port changes always require restart.
-                    Ok(true)
+                    // Most keys require a restart. A few are applied live:
+                    // the faucet supervisor watches the shared enabled-atomic
+                    // (flipped by the RPC handler) and spawns/kills the child
+                    // within seconds — no restart needed.
+                    let applied_live = matches!((section, key), ("faucet", "server_enabled"));
+                    Ok(!applied_live)
                 }))
             } else {
                 None
@@ -1988,6 +1992,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
         // Share node identity as Arc<RwLock> for announce publishing.
         let shared_identity = Arc::new(RwLock::new(node_identity));
+
+        // Faucet runtime flags — shared between the RPC layer (live toggle via
+        // setConfigValue + getNodeInfo reporting) and the faucet supervisor
+        // (applies the toggle, maintains real liveness by probing the port).
+        let faucet_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.faucet.server_enabled,
+        ));
+        let faucet_listening = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // --- Build ApiState ---
         let api_state = Arc::new(ApiState {
@@ -2111,7 +2123,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             faucet_listen: parking_lot::RwLock::new(
                 format!("0.0.0.0:{}", config.faucet.server_port)
             ),
-            faucet_enabled: std::sync::atomic::AtomicBool::new(config.faucet.server_enabled),
+            faucet_enabled: faucet_enabled.clone(),
+            faucet_listening: faucet_listening.clone(),
             min_fee_rate: self.min_fee_rate.clone(),
         });
 
@@ -2355,111 +2368,75 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             metrics.clone(),
         );
 
-        // --- Start embedded faucet process if enabled ---
-        let mut _faucet_child: Option<tokio::process::Child> = None;
-        if self.faucet_config.server_enabled {
-            // Audit follow-up #4: eagerly bootstrap BOTH the faucet
-            // passphrase AND the admin token so they're present in the
-            // keystore BEFORE the faucet subprocess starts reading via
-            // local-FS. Eliminates the legacy RPC handoff entirely:
-            //   • Without passphrase pre-creation, faucet would call the
-            //     legacy storeFaucetSecret (sends passphrase over RPC).
-            //   • Without admin-token pre-creation, admin endpoints
-            //     return 503 until the operator clicks the GUI panel.
-            if let Err(e) = noble_api::methods::node::ensure_faucet_passphrase(
-                &self.wallet_keystore,
-                &self.chain_meta,
-            ) {
-                tracing::warn!(
-                    task = "faucet_passphrase",
-                    "could not pre-create faucet passphrase: {e} — faucet will fall back to legacy bootstrap"
-                );
-            }
-            match noble_api::methods::node::ensure_faucet_admin_token(
-                &self.wallet_keystore,
-                &self.chain_meta,
-            ) {
-                Ok(fingerprint) => tracing::info!(
-                    task = "faucet_admin",
-                    fingerprint = %fingerprint,
-                    "admin token ready in keystore before faucet spawn"
-                ),
-                Err(e) => tracing::warn!(
-                    task = "faucet_admin",
-                    "could not pre-create admin token: {e} — faucet will retry via refresh"
-                ),
-            }
+        // --- Faucet: bootstrap secrets, then hand the child to a supervisor ---
+        // Audit follow-up #4: eagerly bootstrap BOTH the faucet passphrase AND
+        // the admin token so they're present in the keystore BEFORE the faucet
+        // subprocess starts reading via local-FS. Eliminates the legacy RPC
+        // handoff entirely:
+        //   • Without passphrase pre-creation, faucet would call the legacy
+        //     storeFaucetSecret (sends passphrase over RPC).
+        //   • Without admin-token pre-creation, admin endpoints return 503
+        //     until the operator clicks the GUI panel.
+        // Bootstrap runs unconditionally (idempotent get-or-create) so a
+        // live Enable from the dashboard finds the secrets ready even when
+        // the node booted with the faucet disabled.
+        if let Err(e) = noble_api::methods::node::ensure_faucet_passphrase(
+            &self.wallet_keystore,
+            &self.chain_meta,
+        ) {
+            tracing::warn!(
+                task = "faucet_passphrase",
+                "could not pre-create faucet passphrase: {e} — faucet will fall back to legacy bootstrap"
+            );
+        }
+        match noble_api::methods::node::ensure_faucet_admin_token(
+            &self.wallet_keystore,
+            &self.chain_meta,
+        ) {
+            Ok(fingerprint) => tracing::info!(
+                task = "faucet_admin",
+                fingerprint = %fingerprint,
+                "admin token ready in keystore before faucet spawn"
+            ),
+            Err(e) => tracing::warn!(
+                task = "faucet_admin",
+                "could not pre-create admin token: {e} — faucet will retry via refresh"
+            ),
+        }
 
-            let faucet_port = self.faucet_config.server_port;
-            // Find noble-faucet binary next to noble-node.
-            let faucet_bin = std::env::current_exe()
-                .ok()
-                .and_then(|p| {
-                    let dir = p.parent()?;
-                    let candidate = dir.join("noble-faucet");
-                    candidate.exists().then_some(candidate)
-                });
-            if let Some(bin) = faucet_bin {
-                let rpc_port = config.api.rpc_addr.split(':').last().unwrap_or("8783");
-                let rpc_url = format!("https://127.0.0.1:{rpc_port}");
-                let db_path = config.storage.data_dir.join("faucet.db").display().to_string();
-                let ks_dir = config.storage.data_dir.join("faucet-keystore").display().to_string();
-                let log_path = config.storage.data_dir.join("faucet.log");
-                let (log_file, log_err) = match std::fs::File::create(&log_path) {
-                    Ok(f) => {
-                        let err = f.try_clone().ok();
-                        (std::process::Stdio::from(f), err.map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null))
-                    }
-                    Err(e) => {
-                        tracing::warn!(task = "faucet", "Cannot create faucet log at {}: {e}", log_path.display());
-                        (std::process::Stdio::null(), std::process::Stdio::null())
-                    }
-                };
-
-                // Audit follow-up #3: pass --node-data-dir so the faucet
-                // reads chain_meta + passphrase + admin token directly from
-                // the node's keystore via local-FS bootstrap (Group A
-                // Tier 3). No secret crosses the loopback RPC port in the
-                // default deploy.
-                let tls_cert_path = config.storage.data_dir.join("tls-cert.pem");
-                let tls_key_path = config.storage.data_dir.join("tls-key.pem");
-
-                let mut cmd = tokio::process::Command::new(&bin);
-                cmd.arg("--listen").arg(format!("0.0.0.0:{faucet_port}"))
-                    .arg("--rpc-url").arg(&rpc_url)
-                    .arg("--db-path").arg(&db_path)
-                    .arg("--keystore-dir").arg(&ks_dir)
-                    .arg("--node-data-dir").arg(&config.storage.data_dir);
-
-                // Pass TLS cert + encrypted key path. The faucet now gets
-                // chain_meta directly from --node-data-dir's .chain_meta
-                // file to decrypt the key in memory (no RPC roundtrip).
-                if tls_cert_path.exists() && tls_key_path.exists() {
-                    cmd.arg("--tls-cert").arg(&tls_cert_path)
-                        .arg("--tls-key").arg(&tls_key_path);
-                }
-
-                match cmd
-                    .stdout(log_file)
-                    .stderr(log_err)
-                    .kill_on_drop(true)
-                    .spawn()
-                {
-                    Ok(child) => {
-                        tracing::info!(
-                            task = "faucet",
-                            "Faucet server started on port {faucet_port} (PID {})",
-                            child.id().unwrap_or(0)
-                        );
-                        _faucet_child = Some(child);
-                    }
-                    Err(e) => {
-                        tracing::warn!(task = "faucet", "Failed to start faucet: {e}");
-                    }
-                }
-            } else {
-                tracing::info!(task = "faucet", "noble-faucet binary not found — faucet disabled");
-            }
+        // The supervisor owns the child end-to-end: spawns it, restarts it
+        // with backoff when it dies (with CRITICAL faucet_down events),
+        // applies the dashboard's Enable/Disable live via the shared
+        // `faucet_enabled` atomic, and keeps `faucet_listening` truthful by
+        // probing the real HTTP endpoint. The faucet can no longer die
+        // silently — see faucet_supervisor.rs.
+        //
+        // Audit follow-up #3 (unchanged semantics): --node-data-dir makes the
+        // faucet read chain_meta + passphrase + admin token via local-FS
+        // bootstrap; no secret crosses the loopback RPC port.
+        {
+            let rpc_port = config.api.rpc_addr.split(':').last().unwrap_or("8783");
+            let spawn_cfg = crate::faucet_supervisor::FaucetSpawnConfig {
+                server_port: self.faucet_config.server_port,
+                rpc_url: format!("https://127.0.0.1:{rpc_port}"),
+                db_path: config.storage.data_dir.join("faucet.db").display().to_string(),
+                keystore_dir: config
+                    .storage
+                    .data_dir
+                    .join("faucet-keystore")
+                    .display()
+                    .to_string(),
+                node_data_dir: config.storage.data_dir.clone(),
+                log_path: config.storage.data_dir.join("faucet.log"),
+                tls_cert_path: config.storage.data_dir.join("tls-cert.pem"),
+                tls_key_path: config.storage.data_dir.join("tls-key.pem"),
+            };
+            let _faucet_supervisor = crate::faucet_supervisor::spawn_supervisor(
+                faucet_enabled.clone(),
+                faucet_listening.clone(),
+                spawn_cfg,
+                cycle_phase_tx.clone(),
+            );
         }
 
         tracing::info!(
@@ -2516,6 +2493,12 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                                 initial_announce_sent = true;
                                 announce_delay.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(3));
                                 announce_delay_armed = true;
+                                // Solicit peer status immediately: a fresh
+                                // connection has no announced chain tip, and
+                                // without asking, alignment would sit in
+                                // "Verifying" until the peer's next
+                                // NodeAnnounce (up to a full cycle away).
+                                self.healing.request_sync();
                             }
                             // Recompute alignment immediately on peer connect/disconnect
                             // so the GUI transitions out of ISOLATED without waiting for
