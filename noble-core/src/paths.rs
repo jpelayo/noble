@@ -229,11 +229,22 @@ fn creation_config_path() -> PathBuf {
 
 /// Determine the platform-aware default data directory.
 ///
+/// - `NOBLE_DATA_DIR` env var (when set and non-empty) — the container
+///   contract: docker/entrypoint.sh and docker-compose.yml declare the
+///   bind-mounted data path this way (`/var/lib/noble`), so honoring it
+///   here makes the setup wizard, `resolve_data_dir()`, and every default
+///   recommend the durable path inside our image.
 /// - macOS: `~/Library/Application Support/NOBLE/data`
 /// - Linux: `~/.noble/data` (non-root) or `/var/lib/noble/data` (root)
 /// - Windows: `{AppData}/NOBLE/data`
 /// - Other: `./data`
 pub fn platform_data_dir() -> PathBuf {
+    if let Ok(env_dir) = std::env::var("NOBLE_DATA_DIR") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     match std::env::consts::OS {
         "macos" => dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -336,6 +347,132 @@ pub fn filesystem_free_bytes(_path: &Path) -> std::io::Result<u64> {
     ))
 }
 
+// ── Environment recognition (container / mount awareness) ──────────────
+//
+// Used by the setup wizard (CLI + noble_checkDataDir RPC) to recognize a
+// container environment and to warn when a chosen data directory lives on
+// the container's ephemeral overlay filesystem instead of a bind-mount.
+
+/// True when this process runs inside a container (Docker, Podman, LXC,
+/// Kubernetes). Non-Linux hosts always return false — macOS/Windows Docker
+/// runs Linux VMs, so the Linux branch is the one that matters.
+pub fn running_in_container() -> bool {
+    if std::env::consts::OS != "linux" {
+        return false;
+    }
+    if Path::new("/.dockerenv").exists() {
+        return true;
+    }
+    // Podman/systemd-nspawn set `container=<runtime>`.
+    if std::env::var("container").map(|v| !v.is_empty()).unwrap_or(false) {
+        return true;
+    }
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|c| cgroup_indicates_container(&c))
+        .unwrap_or(false)
+}
+
+/// Pure classifier for `/proc/1/cgroup` content (separated for tests).
+pub fn cgroup_indicates_container(cgroup: &str) -> bool {
+    ["docker", "containerd", "kubepods", "lxc", "podman"]
+        .iter()
+        .any(|marker| cgroup.contains(marker))
+}
+
+/// The mount entry governing a path (Linux only — None elsewhere).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountInfo {
+    pub mount_point: PathBuf,
+    pub fstype: String,
+}
+
+/// Find the mount entry whose mount point is the longest prefix of `path`.
+/// The path need not exist — we walk up to the first existing ancestor
+/// first (same as the wizard's writability probe). Linux only.
+pub fn mount_for_path(path: &Path) -> Option<MountInfo> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        probe = probe.parent()?.to_path_buf();
+    }
+    let content = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    parse_mountinfo(&content, &probe)
+}
+
+/// Pure `/proc/self/mountinfo` parser (separated for tests). Format per
+/// proc(5): `ID PARENT MAJ:MIN ROOT MOUNT_POINT OPTS [OPTIONAL...] - FSTYPE
+/// SOURCE SUPER_OPTS`; the fstype is the first field after the `-`
+/// separator. Returns the entry with the longest mount-point prefix of
+/// `path`.
+pub fn parse_mountinfo(content: &str, path: &Path) -> Option<MountInfo> {
+    let mut best: Option<MountInfo> = None;
+    for line in content.lines() {
+        let mut halves = line.splitn(2, " - ");
+        let pre = halves.next()?;
+        let post = halves.next();
+        let mount_point = match pre.split(' ').nth(4) {
+            Some(mp) => PathBuf::from(mp),
+            None => continue,
+        };
+        if !path.starts_with(&mount_point) {
+            continue;
+        }
+        let fstype = post
+            .and_then(|p| p.split(' ').next())
+            .unwrap_or("")
+            .to_string();
+        let better = match &best {
+            Some(b) => mount_point.as_os_str().len() > b.mount_point.as_os_str().len(),
+            None => true,
+        };
+        if better {
+            best = Some(MountInfo { mount_point, fstype });
+        }
+    }
+    best
+}
+
+/// True when `path` (or its first existing ancestor) is writable by this
+/// process. Uses `access(2)` W_OK — no test-file litter. Single source of
+/// truth; noble-api's checkDataDir delegates here.
+#[cfg(unix)]
+pub fn path_appears_writable(path: &Path) -> bool {
+    use std::ffi::CString;
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) => probe = p.to_path_buf(),
+            None => return false,
+        }
+    }
+    let Some(s) = probe.as_os_str().to_str() else {
+        return false;
+    };
+    let Ok(cpath) = CString::new(s) else {
+        return false;
+    };
+    // SAFETY: valid NUL-terminated C string; access() only reads it.
+    unsafe { libc::access(cpath.as_ptr(), libc::W_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn path_appears_writable(path: &Path) -> bool {
+    // Windows: fall back to a metadata readonly probe on the first
+    // existing ancestor.
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) => probe = p.to_path_buf(),
+            None => return false,
+        }
+    }
+    std::fs::metadata(&probe)
+        .map(|m| !m.permissions().readonly())
+        .unwrap_or(false)
+}
+
 #[cfg(all(test, unix))]
 mod free_bytes_tests {
     use super::*;
@@ -356,5 +493,73 @@ mod free_bytes_tests {
         let err = filesystem_free_bytes(&p).unwrap_err();
         // statvfs returns ENOENT here.
         assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    fn cgroup_classifier() {
+        // Real-world docker cgroup v1 line.
+        assert!(cgroup_indicates_container(
+            "12:pids:/docker/8c1a3b\n11:memory:/docker/8c1a3b\n"
+        ));
+        // containerd / kubernetes.
+        assert!(cgroup_indicates_container("0::/kubepods/besteffort/pod1/abc\n"));
+        assert!(cgroup_indicates_container("0::/system.slice/containerd.service\n"));
+        // Bare host (cgroup v2 unified).
+        assert!(!cgroup_indicates_container("0::/init.scope\n"));
+        assert!(!cgroup_indicates_container(
+            "12:pids:/user.slice/user-1000.slice/session-2.scope\n"
+        ));
+    }
+
+    #[test]
+    fn mountinfo_longest_prefix_wins() {
+        // Container-shaped mountinfo: overlay root + a bind-mounted data dir.
+        let mi = "\
+676 675 0:139 / / rw,relatime - overlay overlay rw,lowerdir=/a,upperdir=/b\n\
+677 676 8:1 /opt/noble /var/lib/noble rw,relatime - ext4 /dev/sda1 rw\n\
+678 676 0:140 / /proc rw,nosuid - proc proc rw\n";
+
+        // Path under the bind mount → ext4 entry (longest prefix).
+        let m = parse_mountinfo(mi, Path::new("/var/lib/noble/data")).unwrap();
+        assert_eq!(m.mount_point, PathBuf::from("/var/lib/noble"));
+        assert_eq!(m.fstype, "ext4");
+
+        // Path elsewhere → the root overlay governs it (EPHEMERAL in a container).
+        let m = parse_mountinfo(mi, Path::new("/home/user/noble")).unwrap();
+        assert_eq!(m.mount_point, PathBuf::from("/"));
+        assert_eq!(m.fstype, "overlay");
+
+        // Empty content → None.
+        assert!(parse_mountinfo("", Path::new("/anything")).is_none());
+    }
+
+    #[test]
+    fn writable_probe_walks_to_existing_ancestor() {
+        let tmp = std::env::temp_dir();
+        // Nonexistent child of a writable dir → still writable (ancestor probe).
+        assert!(path_appears_writable(&tmp.join("noble-does-not-exist/sub/dir")));
+        // Root-owned location should not be writable for a normal user; if the
+        // test runs as root it legitimately is — accept both, but the call
+        // must not panic.
+        let _ = path_appears_writable(Path::new("/etc/noble-test-probe"));
+    }
+
+    #[test]
+    fn env_var_overrides_platform_data_dir() {
+        // NOBLE_DATA_DIR (the container contract) must win over OS defaults.
+        // Serialized via a lock-free single test: set → check → restore.
+        let prev = std::env::var("NOBLE_DATA_DIR").ok();
+        std::env::set_var("NOBLE_DATA_DIR", "/var/lib/noble");
+        assert_eq!(platform_data_dir(), PathBuf::from("/var/lib/noble"));
+        std::env::set_var("NOBLE_DATA_DIR", "   ");
+        assert_ne!(
+            platform_data_dir(),
+            PathBuf::from("   "),
+            "blank env var must fall through to the OS default"
+        );
+        match prev {
+            Some(v) => std::env::set_var("NOBLE_DATA_DIR", v),
+            None => std::env::remove_var("NOBLE_DATA_DIR"),
+        }
     }
 }

@@ -1803,6 +1803,11 @@ export class MockRpcClient {
           writable: true,
           available_bytes: 107_374_182_400, // ~100 GB
           error: null,
+          container: false,
+          durable: true,
+          mount_fstype: 'apfs',
+          recommended_dir: '/var/lib/noble',
+          warning: null,
         };
       }
 

@@ -1075,12 +1075,30 @@ export function init(root, ctx) {
           state.dataDirError = result.error;
           statusEl.innerHTML = `<span style="color:var(--error)">${esc(result.error)}</span>`;
           diskBar.style.display = 'none';
+        } else if (result.container && result.durable === false) {
+          // Container + ephemeral overlay: data (and keys) die on rebuild.
+          state.dataDirValid = false;
+          state.dataDirError = result.warning || 'Path is not durable in this container';
+          statusEl.innerHTML = `
+            <span style="color:var(--error)">${esc(state.dataDirError)}</span>
+            <button type="button" class="btn btn-sm" id="setup-use-recommended"
+                    style="margin-left:8px">Use ${esc(result.recommended_dir)}</button>`;
+          diskBar.style.display = 'none';
+          const useBtn = statusEl.querySelector('#setup-use-recommended');
+          if (useBtn) useBtn.addEventListener('click', () => {
+            body.querySelector('#setup-data-dir').value = result.recommended_dir;
+            state.dataDir = result.recommended_dir;
+            checkBtn.click();
+          });
         } else {
           state.dataDirValid = true;
           state.dataDirError = '';
           state.diskAvailable = result.available_bytes || 0;
           const gb = (state.diskAvailable / (1024 ** 3)).toFixed(1);
-          statusEl.innerHTML = `<span style="color:var(--success)">Directory OK — ${gb} GB available</span>`;
+          const envNote = result.container && result.durable === true
+            ? ' · container path is bind-mounted to the host (durable)'
+            : '';
+          statusEl.innerHTML = `<span style="color:var(--success)">Directory OK — ${gb} GB available${esc(envNote)}</span>`;
           diskBar.style.display = 'block';
           // Simple usage bar (available vs 100GB reference)
           const pct = Math.min(100, (state.diskAvailable / (100 * 1024 ** 3)) * 100);

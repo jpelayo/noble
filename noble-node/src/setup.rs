@@ -443,12 +443,55 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     section_header("7", "Storage");
 
+    // Environment recognition: inside a container the only durable paths
+    // are bind-mounts/volumes — everything else dies on rebuild.
+    let in_container = noble_core::paths::running_in_container();
+    if in_container {
+        println!(
+            "  Detected: container environment. Standard data path: {} \
+             (keep it unless you know your volume layout).",
+            noble_core::paths::platform_data_dir().display()
+        );
+    }
+
     let default_data_dir = defaults.storage.data_dir.to_string_lossy().to_string();
 
-    let data_dir: String = Input::new()
-        .with_prompt("Data directory")
-        .default(default_data_dir)
-        .interact_text()?;
+    let data_dir: String = loop {
+        let candidate: String = Input::new()
+            .with_prompt("Data directory")
+            .default(default_data_dir.clone())
+            .interact_text()?;
+        let path = std::path::Path::new(&candidate);
+
+        if !noble_core::paths::path_appears_writable(path) {
+            println!("  ✗ {candidate} is not writable by this process — choose another path.");
+            continue;
+        }
+        if let Ok(free) = noble_core::paths::filesystem_free_bytes(path) {
+            println!("  Free space: {:.1} GB", free as f64 / 1_073_741_824.0);
+        }
+        if in_container {
+            let ephemeral = noble_core::paths::mount_for_path(path)
+                .map(|m| m.fstype == "overlay")
+                .unwrap_or(false);
+            if ephemeral {
+                println!(
+                    "  ⚠ {candidate} lives on the container's ephemeral overlay filesystem — \
+                     blockchain data and KEYS will be LOST when the container is rebuilt. \
+                     Use a bind-mounted path (e.g. {}) instead.",
+                    noble_core::paths::platform_data_dir().display()
+                );
+                let proceed = Confirm::new()
+                    .with_prompt("Use this ephemeral path anyway?")
+                    .default(false)
+                    .interact()?;
+                if !proceed {
+                    continue;
+                }
+            }
+        }
+        break candidate;
+    };
 
     let cache_size: u32 = Input::new()
         .with_prompt("Cache size (MB)")

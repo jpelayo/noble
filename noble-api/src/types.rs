@@ -1515,6 +1515,20 @@ pub struct CheckDataDirResponse {
     pub available_bytes: u64,
     /// Error message if any check failed.
     pub error: Option<String>,
+    /// True when the node runs inside a container (Docker/Podman/K8s/LXC).
+    pub container: bool,
+    /// Whether data written to this path survives a container rebuild.
+    /// `None` when undetectable (non-Linux hosts).
+    pub durable: Option<bool>,
+    /// Filesystem type of the mount governing this path (e.g. "overlay",
+    /// "ext4"). Diagnostic only; `None` when undetectable.
+    pub mount_fstype: Option<String>,
+    /// The best standard data directory for this environment
+    /// (`platform_data_dir()`, which honors the container's NOBLE_DATA_DIR).
+    pub recommended_dir: String,
+    /// Human-readable custody warning; set only when the chosen path is
+    /// dangerous (e.g. ephemeral overlay inside a container).
+    pub warning: Option<String>,
 }
 
 /// A single directory entry for the folder browser.

@@ -1448,11 +1448,43 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let check_path = if exists { p } else { p.parent().unwrap_or(p) };
         available_bytes = disk_available(check_path);
 
+        // Environment recognition: is this a container, and does the chosen
+        // path live on a durable mount (bind-mount/volume) or the ephemeral
+        // overlay layer that dies with the container?
+        let container = noble_core::paths::running_in_container();
+        let mount = noble_core::paths::mount_for_path(p);
+        let mount_fstype = mount.as_ref().map(|m| m.fstype.clone());
+        let durable = match (&mount, container) {
+            (Some(m), true) => Some(m.fstype != "overlay"),
+            (Some(_), false) => Some(true),
+            (None, _) => None, // non-Linux — undetectable
+        };
+        let recommended_dir = noble_core::paths::platform_data_dir()
+            .display()
+            .to_string();
+        let warning = if container && durable == Some(false) {
+            Some(format!(
+                "This node runs in a container and {} lives on its ephemeral \
+                 overlay filesystem — blockchain data and KEYS will be LOST \
+                 when the container is rebuilt. Use {} (bind-mounted to the \
+                 host) or add a volume for this path.",
+                p.display(),
+                recommended_dir
+            ))
+        } else {
+            None
+        };
+
         Ok(CheckDataDirResponse {
             exists,
             writable,
             available_bytes,
             error,
+            container,
+            durable,
+            mount_fstype,
+            recommended_dir,
+            warning,
         })
     }
 
@@ -2037,22 +2069,9 @@ pub(crate) fn disk_capacity(path: &std::path::Path) -> u64 {
 ///
 /// Used by the TOTP-gated `checkDataDir` + `listDirectory` operator tools.
 pub(crate) fn path_appears_writable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // W_OK = 2 — check write permission for the calling process.
-        unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        match std::fs::metadata(path) {
-            Ok(md) => !md.permissions().readonly(),
-            Err(_) => false,
-        }
-    }
+    // Single source of truth lives in noble-core (shared with the CLI
+    // setup wizard); this wrapper keeps existing call sites unchanged.
+    noble_core::paths::path_appears_writable(path)
 }
 
 /// Get the available (free) disk space at the given path.
