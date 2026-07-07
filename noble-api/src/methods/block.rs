@@ -70,6 +70,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             (block, tip.block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed))
         }; // storage lock dropped
         let mut resp = block_to_response(&block, &block_hash, chain_id);
+        self.enrich_block_fees(&block, &mut resp);
         resp.validator_name = self.resolve_friendly_name(&block.header.validator_id.to_wire_bytes());
         Ok(resp)
     }
@@ -114,6 +115,7 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
 
         drop(storage);
         let mut resp = block_to_response(&block, &block_hash, self.chain_id.load(std::sync::atomic::Ordering::Relaxed));
+        self.enrich_block_fees(&block, &mut resp);
         resp.validator_name = self.resolve_friendly_name(&block.header.validator_id.to_wire_bytes());
         Ok(resp)
     }
@@ -230,5 +232,20 @@ impl<S: StorageEngine + Send + Sync + 'static> BlockApiServer for Arc<ApiState<S
             total_transactions: total_tx,
             chain_id: self.chain_id.load(std::sync::atomic::Ordering::Relaxed),
         })
+    }
+}
+
+impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
+    /// Resolve the implicit fee (and per-input value/address) for every
+    /// transaction in a block response, so the block tx-list can show a
+    /// notarization's fee instead of a bare "0". Reuses the same resolver the
+    /// single-tx receipt path uses; index-aligned with `block.transactions`.
+    fn enrich_block_fees(&self, block: &noble_core::Block, resp: &mut BlockResponse) {
+        let storage = self.storage.read();
+        for (i, tx_resp) in resp.transactions.iter_mut().enumerate() {
+            if let Some(tx) = block.transactions.get(i) {
+                crate::methods::transaction::resolve_inputs_and_fee(&*storage, tx, tx_resp);
+            }
+        }
     }
 }

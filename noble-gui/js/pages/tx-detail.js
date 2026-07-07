@@ -167,9 +167,10 @@ export function init(root, ctx) {
     } else if (txType === TX_TYPES.COINBASE) {
       gridHtml += `<dt>Block Reward</dt><dd>${formatFee(disp.amount)} (${formatNumber(disp.amount)} groats)</dd>`;
     } else {
-      // Notarization, Locked, Unlocking, Key Rotation, Badge types
+      // Notarization, Locked, Unlocking, Key Rotation, Badge types.
+      // The fee (input − outputs) is the real cost; the change is covered by
+      // the Balance Changes ledger below, so no misleading "Total Output".
       if (tx.fee != null) gridHtml += `<dt>Fee</dt><dd>${formatFee(tx.fee)} (${formatNumber(tx.fee)} groats)</dd>`;
-      gridHtml += `<dt>Total Output</dt><dd style="color:var(--text-muted)">${formatFee(tx.total_output)} (${formatNumber(tx.total_output)} groats)</dd>`;
     }
 
     if (tx.gateway_address) {
@@ -182,6 +183,9 @@ export function init(root, ctx) {
     if (tx.fee_rate) gridHtml += `<dt>Fee Rate</dt><dd>${tx.fee_rate} groats/byte</dd>`;
     grid.innerHTML = gridHtml;
     root.appendChild(grid);
+
+    // ── Balance Changes ledger (who paid/received what, net per address) ──
+    renderBalanceChanges(root, tx);
 
     // ── Type-specific sections ──
     if (txType === TX_TYPES.LOCKED) {
@@ -215,15 +219,22 @@ export function init(root, ctx) {
 
     // ── Inputs panel ──
     const inputs = tx.inputs || [];
+    // Addresses that funded this tx — used to tag change outputs below.
+    const payerSet = new Set(inputs.filter(i => i.address).map(i => i.address));
     if (inputs.length > 0) {
       const inputPanel = document.createElement('div'); inputPanel.className = 'panel';
       const isCoinbase = inputs.length === 1 && inputs[0].txid === '0'.repeat(64);
-      let inputHtml = `<div class="panel-header">Inputs (${inputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Previous Tx</th><th>Output Index</th></tr></thead><tbody>`;
+      // Show resolved value/address columns when the backend supplied them.
+      const resolved = inputs.some(i => i.value != null || i.address != null);
+      let inputHtml = `<div class="panel-header">Inputs (${inputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Previous Tx</th><th>Output Index</th>${resolved ? '<th>Value</th><th>Address</th>' : ''}</tr></thead><tbody>`;
       inputs.forEach((inp, i) => {
         const txLink = isCoinbase
           ? '<span class="badge coinbase">Coinbase (new coins)</span>'
           : `<a href="#/tx/${inp.txid}" class="mono" style="word-break:break-all">${inp.txid}</a>`;
-        inputHtml += `<tr><td>${i}</td><td>${txLink}</td><td>${isCoinbase ? '&mdash;' : inp.vout}</td></tr>`;
+        const extra = resolved
+          ? `<td>${inp.value != null ? formatFee(inp.value) : '&mdash;'}</td><td class="mono" style="word-break:break-all">${inp.address ? esc(inp.address) : '&mdash;'}</td>`
+          : '';
+        inputHtml += `<tr><td>${i}</td><td>${txLink}</td><td>${isCoinbase ? '&mdash;' : inp.vout}</td>${extra}</tr>`;
       });
       inputHtml += '</tbody></table></div>';
       inputPanel.innerHTML = inputHtml;
@@ -236,7 +247,10 @@ export function init(root, ctx) {
       const outputPanel = document.createElement('div'); outputPanel.className = 'panel';
       let outputHtml = `<div class="panel-header">Outputs (${outputs.length})</div><div class="panel-body" style="padding:0"><table class="data-table"><thead><tr><th>#</th><th>Value</th><th>Address</th></tr></thead><tbody>`;
       outputs.forEach((out, i) => {
-        outputHtml += `<tr><td>${i}</td><td>${formatFee(out.value)}</td><td class="mono" style="word-break:break-all">${out.address}</td></tr>`;
+        // An output back to a funding address is change, not a payment.
+        const changeTag = payerSet.has(out.address)
+          ? ' <span class="tag-change">change</span>' : '';
+        outputHtml += `<tr><td>${i}</td><td>${formatFee(out.value)}</td><td class="mono" style="word-break:break-all">${esc(out.address)}${changeTag}</td></tr>`;
       });
       outputHtml += '</tbody></table></div>';
       outputPanel.innerHTML = outputHtml;
@@ -410,6 +424,131 @@ function renderUserMetadataPanel(root, user, signatures, allMetadata) {
   html += '</div>';
   metaPanel.innerHTML = html;
   root.appendChild(metaPanel);
+}
+
+// ── Balance Changes ledger ──
+
+/** NOBLE amount without the " NOBLE" suffix, magnitude only. */
+function amtBare(groats) {
+  return formatFee(Math.abs(groats)).replace(' NOBLE', '');
+}
+/** Signed compact amount: "−0.005401" / "+0.005401" / "0". */
+function fmtSigned(groats) {
+  if (groats === 0) return '0';
+  return (groats < 0 ? '−' : '+') + amtBare(groats);
+}
+
+/**
+ * Per-party net-delta ledger for a transaction.
+ * Returns { mode, parties[], ... }. A party has { addr|label, paidIn,
+ * received, net, role, isPayer, isFee }. paidIn/received === null means
+ * "unknown" (privacy-stripped or pruned), rendered as "—".
+ */
+export function computeLedger(tx) {
+  const inputs = tx.inputs || [];
+  const outputs = tx.outputs || [];
+  const fee = (tx.fee != null) ? tx.fee : null;
+  const signer = tx.signer;
+
+  // Coinbase / fee-distribution: no real inputs — coins minted or collected.
+  const isCoinbaseStyle = (tx.tx_type === TX_TYPES.COINBASE)
+    || (tx.tx_type === TX_TYPES.FEE_DISTRIBUTION)
+    || (inputs.length === 1 && inputs[0].txid === '0'.repeat(64));
+  if (isCoinbaseStyle) {
+    const label = tx.tx_type === TX_TYPES.FEE_DISTRIBUTION ? 'fee income' : 'block reward';
+    return {
+      mode: 'coinbase',
+      parties: outputs.map(o => ({ addr: o.address, role: label, paidIn: null, received: o.value, net: o.value })),
+    };
+  }
+
+  const payers = new Set(inputs.filter(i => i.address).map(i => i.address));
+  const inputsResolved = inputs.length > 0 && inputs.every(i => i.value != null && i.address != null);
+
+  if (inputsResolved) {
+    const map = new Map();
+    const party = (addr) => {
+      if (!map.has(addr)) map.set(addr, { addr, paidIn: 0, received: 0, isPayer: payers.has(addr) });
+      return map.get(addr);
+    };
+    for (const inp of inputs) party(inp.address).paidIn += inp.value;
+    for (const out of outputs) party(out.address).received += out.value;
+
+    const parties = [...map.values()]
+      .map(p => ({ ...p, net: p.received - p.paidIn, role: p.isPayer ? 'signer' : 'recipient' }))
+      .sort((a, b) => (a.isPayer === b.isPayer) ? 0 : (a.isPayer ? -1 : 1));
+
+    if (fee != null && fee > 0) {
+      parties.push({ addr: null, label: 'network fee → validator', paidIn: 0, received: fee, net: fee, isFee: true });
+    }
+    const totalIn = parties.reduce((s, p) => s + (p.paidIn || 0), 0);
+    const totalRecv = parties.reduce((s, p) => s + (p.received || 0), 0);
+    const netSum = parties.reduce((s, p) => s + p.net, 0);
+    return { mode: 'full', parties, totalIn, totalRecv, balanced: netSum === 0 };
+  }
+
+  // Degraded: transfers strip inputs (privacy) or the source tx was pruned.
+  // Change returns to self and nets out, so signer net = −(payments + fee).
+  const payments = outputs.filter(o => o.address !== signer);
+  const paymentsTotal = payments.reduce((s, o) => s + o.value, 0);
+  const transferVal = (tx.transfer_value != null && tx.transfer_value > 0) ? tx.transfer_value : paymentsTotal;
+  const feeVal = (fee != null) ? fee : 0;
+  const parties = [];
+  if (signer) parties.push({ addr: signer, role: 'signer', isPayer: true, paidIn: null, received: null, net: -(transferVal + feeVal) });
+  for (const o of payments) parties.push({ addr: o.address, role: 'recipient', paidIn: null, received: o.value, net: o.value });
+  if (fee != null && fee > 0) parties.push({ addr: null, label: 'network fee → validator', isFee: true, paidIn: null, received: fee, net: fee });
+  return { mode: 'partial', parties, note: inputs.length === 0 ? 'sender inputs hidden (privacy)' : 'some inputs pruned' };
+}
+
+function renderBalanceChanges(root, tx) {
+  const ledger = computeLedger(tx);
+  if (!ledger.parties.length) return;
+
+  const roleBadge = (p) => {
+    if (p.isFee) return '';
+    const cls = p.role === 'signer' ? 'badge-signer' : (p.role === 'recipient' ? 'badge-recipient' : 'badge-reward');
+    return ` <span class="badge ${cls}">${esc(p.role)}</span>`;
+  };
+  const partyCell = (p) => p.isFee
+    ? `<span style="color:var(--text-muted)">${esc(p.label)}</span>`
+    : `<span class="mono" title="${esc(p.addr || '')}">${esc(truncateHash(p.addr || '', 8))}</span>${roleBadge(p)}`;
+  const numCell = (v, isChange) => (v == null)
+    ? '<td class="num" style="color:var(--text-muted)">&mdash;</td>'
+    : (v === 0 ? '<td class="num" style="color:var(--text-muted)">&mdash;</td>'
+      : `<td class="num">${amtBare(v)}${isChange ? ' <span class="tag-change">change</span>' : ''}</td>`);
+  const netCell = (n) => {
+    const cls = n < 0 ? 'amt-neg' : (n > 0 ? 'amt-pos' : '');
+    return `<td class="num ${cls}"><strong>${fmtSigned(n)}</strong></td>`;
+  };
+
+  const rows = ledger.parties.map(p => {
+    const isChange = !p.isFee && p.isPayer && p.received > 0;
+    return `<tr><td>${partyCell(p)}</td>${numCell(p.paidIn)}${numCell(p.received, isChange)}${netCell(p.net)}</tr>`;
+  }).join('');
+
+  let foot = '';
+  if (ledger.mode === 'full') {
+    foot = `<tfoot><tr class="ledger-totals">
+      <td>totals</td><td class="num">${amtBare(ledger.totalIn)}</td>
+      <td class="num">${amtBare(ledger.totalRecv)}</td>
+      <td class="num">${ledger.balanced ? '0' : ''}</td></tr></tfoot>`;
+  }
+  const headerBadge = ledger.mode === 'full' && ledger.balanced
+    ? ' <span class="badge badge-confirmed">balanced &check;</span>' : '';
+  const note = ledger.note
+    ? `<div style="padding:6px 12px;color:var(--text-muted);font-size:var(--font-size-xs)">${esc(ledger.note)}</div>`
+    : '';
+
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.innerHTML = `<div class="panel-header">Balance Changes${headerBadge}</div>
+    <div class="panel-body" style="padding:0">
+      <table class="data-table ledger">
+        <thead><tr><th>Party</th><th class="num">Paid in</th><th class="num">Received</th><th class="num">Net</th></tr></thead>
+        <tbody>${rows}</tbody>${foot}
+      </table>${note}
+    </div>`;
+  root.appendChild(panel);
 }
 
 // ── Helpers ──

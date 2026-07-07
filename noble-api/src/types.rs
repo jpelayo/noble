@@ -249,6 +249,8 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
             tx.inputs.iter().map(|i| TxInputResponse {
                 txid: hash_to_hex(&i.prev_output.txid),
                 vout: i.prev_output.vout,
+                value: None,   // resolved by resolve_inputs_and_fee (needs storage)
+                address: None,
             }).collect()
         },
         outputs: tx.outputs.iter().map(|o| TxOutputResponse {
@@ -400,6 +402,13 @@ pub struct TransactionResponse {
 pub struct TxInputResponse {
     pub txid: String,
     pub vout: u32,
+    /// Value of the UTXO this input spends (resolved from the previous tx's
+    /// output). `None` when the source tx is pruned/unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<u64>,
+    /// Address that owned the spent UTXO. `None` when unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// Transaction output response.

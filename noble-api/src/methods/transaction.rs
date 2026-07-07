@@ -48,6 +48,51 @@ impl<S: StorageEngine> UtxoLookup for StorageUtxoLookup<'_, S> {
     }
 }
 
+/// Resolve each input's spent UTXO (value + owner address) from storage,
+/// compute the implicit fee, and enrich the response in place.
+///
+/// - Sets `resp.fee = Some(Σinputs − Σoutputs)` when every input resolves
+///   (coinbase is skipped — no fee).
+/// - For non-transfer types, `resp.inputs` is populated (1:1 with
+///   `tx.inputs`), so we also write each input's `value` + `address`.
+///   Transfers keep `resp.inputs = []` for privacy but still get `fee`.
+///
+/// The tx-detail "Balance Changes" ledger needs the per-input address+value
+/// to attribute who paid what; the on-chain receipt path previously left
+/// `fee = None` and never resolved inputs at all.
+pub(crate) fn resolve_inputs_and_fee<S: StorageEngine>(
+    storage: &S,
+    tx: &Transaction,
+    resp: &mut TransactionResponse,
+) {
+    if tx.is_coinbase() {
+        return;
+    }
+    let mut input_total: u64 = 0;
+    let mut all_resolved = true;
+    for (i, inp) in tx.inputs.iter().enumerate() {
+        match storage.get_transaction(&inp.prev_output.txid) {
+            Ok(prev_tx) => match prev_tx.outputs.get(inp.prev_output.vout as usize) {
+                Some(out) => {
+                    input_total = input_total.saturating_add(out.value);
+                    // Enrich the matching response input when present (index
+                    // alignment holds because non-transfer inputs are mapped
+                    // 1:1 in tx_to_response).
+                    if let Some(ri) = resp.inputs.get_mut(i) {
+                        ri.value = Some(out.value);
+                        ri.address = Some(out.address.to_display_address());
+                    }
+                }
+                None => all_resolved = false,
+            },
+            Err(_) => all_resolved = false,
+        }
+    }
+    if all_resolved {
+        resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
+    }
+}
+
 #[rpc(server, namespace = "noble")]
 pub trait TransactionApi {
     /// Submit a hex-encoded CBOR transaction to the mempool.
@@ -196,28 +241,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             .map_err(ApiError::from)?;
 
         let mut resp = tx_to_response(&tx, &tx_id);
-        // Coinbase txs have no fee.
-        if !tx.is_coinbase() {
-            // Look up input values from the previous transactions' outputs.
-            // UTXOs are already spent, so we trace back to the source tx.
-            let mut input_total: u64 = 0;
-            let mut all_resolved = true;
-            for inp in &tx.inputs {
-                match storage.get_transaction(&inp.prev_output.txid) {
-                    Ok(prev_tx) => {
-                        if let Some(out) = prev_tx.outputs.get(inp.prev_output.vout as usize) {
-                            input_total += out.value;
-                        } else {
-                            all_resolved = false;
-                        }
-                    }
-                    Err(_) => { all_resolved = false; }
-                }
-            }
-            if all_resolved && input_total > 0 {
-                resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
-            }
-        }
+        resolve_inputs_and_fee(&*storage, &tx, &mut resp);
         // Compute confirmation status from tx location
         if let Ok((tx_height, _)) = storage.get_transaction_location(&tx_id_hash) {
             let tip = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
@@ -303,6 +327,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         let confirmations = tip.map(|t| t.height.saturating_sub(height) + 1);
 
         let mut tx_resp = tx_to_response(&tx, &tx_id);
+        resolve_inputs_and_fee(&*storage, &tx, &mut tx_resp);
         tx_resp.confirmations = confirmations;
         tx_resp.confirmation_status = Some(confirmation_status_label(confirmations));
         tx_resp.block_height = Some(height);

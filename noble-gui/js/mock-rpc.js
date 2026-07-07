@@ -179,18 +179,25 @@ function makeTransaction(seed, timestamp) {
   const changeValue = Math.floor(Math.abs(Math.sin(seed * 3)) * 200_000);
   const totalOutput = outputValue + changeValue;
 
+  // Payer address funds the tx; change (if any) returns to it so the tx-detail
+  // Balance Changes ledger can tag it as change.
+  const payerAddr = deterministicHash(seed * 71).slice(0, 40);
   const outputs = [
     { value: outputValue, address: deterministicHash(seed * 61).slice(0, 40) },
   ];
   if (changeValue > 0) {
-    outputs.push({ value: changeValue, address: deterministicHash(seed * 63).slice(0, 40) });
+    outputs.push({ value: changeValue, address: payerAddr });
   }
 
-  const inputs = [
-    { txid: deterministicHash(seed * 71), vout: seed % 4 },
-  ];
-  if (seed % 5 === 0) {
-    inputs.push({ txid: deterministicHash(seed * 73), vout: (seed + 1) % 3 });
+  // Inputs carry resolved value+address (matches enriched real API), summing
+  // to outputs + fee so the ledger balances to zero.
+  const inputTotal = totalOutput + fee;
+  const nInputs = seed % 5 === 0 ? 2 : 1;
+  const per = Math.floor(inputTotal / nInputs);
+  const inputs = [];
+  for (let k = 0; k < nInputs; k++) {
+    const val = k === nInputs - 1 ? inputTotal - per * (nInputs - 1) : per;
+    inputs.push({ txid: deterministicHash(seed * (71 + k * 2)), vout: (seed + k) % 4, value: val, address: payerAddr });
   }
 
   // signer = hex-encoded public key (matches real API TransactionResponse.signer)
@@ -202,6 +209,7 @@ function makeTransaction(seed, timestamp) {
     checksum: deterministicHash(seed * 17),
     timestamp,
     total_output: totalOutput,
+    fee, // implicit fee (input − outputs), resolved by the real API too
     inputs,
     outputs,
     signer: signerHex,

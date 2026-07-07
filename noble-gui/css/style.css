@@ -1383,3 +1383,17 @@ body {
   background: rgba(34, 197, 94, 0.15);
   color: var(--success);
 }
+
+/* ── Balance Changes ledger (tx-detail) ── */
+.ledger td.num, .ledger th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger .amt-pos { color: var(--success); }
+.ledger .amt-neg { color: var(--error); }
+.ledger .ledger-totals td { border-top: 1px solid var(--border); font-weight: 600; color: var(--text-secondary); }
+.tag-change {
+  display: inline-block; font-size: 0.6rem; padding: 0 5px; border-radius: 6px;
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent); color: var(--text-secondary);
+  vertical-align: middle; letter-spacing: 0.02em;
+}
+.badge-signer   { background: color-mix(in srgb, var(--accent, #6366f1) 15%, transparent); color: var(--accent, #6366f1); }
+.badge-recipient{ background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.badge-reward   { background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent); color: var(--warning, #f59e0b); }
