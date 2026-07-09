@@ -242,9 +242,18 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
     /// single-tx receipt path uses; index-aligned with `block.transactions`.
     fn enrich_block_fees(&self, block: &noble_core::Block, resp: &mut BlockResponse) {
         let storage = self.storage.read();
+        // One prev-tx memo for the whole block: many inputs share a source
+        // tx, and each uncached read is a full CBOR decode.
+        let mut memo = std::collections::HashMap::new();
         for (i, tx_resp) in resp.transactions.iter_mut().enumerate() {
-            if let Some(tx) = block.transactions.get(i) {
-                crate::methods::transaction::resolve_inputs_and_fee(&*storage, tx, tx_resp);
+            match block.transactions.get(i) {
+                Some(tx) => crate::methods::transaction::resolve_inputs_and_fee(
+                    &*storage, tx, tx_resp, &mut memo,
+                ),
+                None => tracing::warn!(
+                    index = i,
+                    "enrich_block_fees: response/blocks tx index mismatch"
+                ),
             }
         }
     }

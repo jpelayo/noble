@@ -629,7 +629,30 @@ export class MockRpcClient {
 
       case 'noble_getTransactionReceipt': {
         const entry = this.#chain.txIndex.get(params.tx_id);
-        if (!entry) throw { code: -32602, message: 'Transaction not found' };
+        if (!entry) {
+          // Pending mempool tx: serve it with UNRESOLVED inputs (no
+          // value/address) so dev mode exercises the ledger's partial mode —
+          // the path where pending-display bugs live.
+          const mp = this.#mempool.find(m => m.tx_id === params.tx_id);
+          if (mp) {
+            const pendingTx = {
+              ...mp.tx,
+              fee: mp.fee,
+              confirmation_status: 'pending',
+              inputs: (mp.tx.inputs || []).map(i => ({ txid: i.txid, vout: i.vout })),
+            };
+            return {
+              transaction: pendingTx,
+              tx_id: mp.tx_id,
+              status: 'pending',
+              block_height: null,
+              block_hash: null,
+              tx_index: null,
+              confirmations: null,
+            };
+          }
+          throw { code: -32602, message: 'Transaction not found' };
+        }
         return {
           transaction: entry.tx,
           tx_id: entry.tx_id,
@@ -1814,7 +1837,7 @@ export class MockRpcClient {
           container: false,
           durable: true,
           mount_fstype: 'apfs',
-          recommended_dir: '/var/lib/noble',
+          recommended_dir: '/Users/demo/Library/Application Support/NOBLE/data',
           warning: null,
         };
       }

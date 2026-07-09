@@ -374,12 +374,19 @@ const Prefs = {
     },
 
     /** Write-through setter: localStorage for this session, native store for
-     *  the next launch. value === null deletes the key from both. */
+     *  the next launch. value === null deletes the key from both. Values are
+     *  stringified for BOTH stores — hydrate() only restores strings, so a
+     *  raw number/bool sent natively would be silently dropped next boot. */
     set(key, value) {
-        if (value === null) localStorage.removeItem(key);
-        else localStorage.setItem(key, String(value));
+        const stored = value === null ? null : String(value);
+        try {
+            if (stored === null) localStorage.removeItem(key);
+            else localStorage.setItem(key, stored);
+        } catch (e) {
+            console.warn('[prefs] localStorage write failed (quota/security):', e);
+        }
         if (NativeBridge.isNative) {
-            NativeBridge.call('noble_app', 'setPreference', { key, value })
+            NativeBridge.call('noble_app', 'setPreference', { key, value: stored })
                 .catch(e => console.warn('[prefs] native persist failed:', e));
         }
     },

@@ -413,7 +413,9 @@ export function init(root, ctx) {
     wFilter.value = savedFilter;
   }
   wFilter.addEventListener('change', () => {
-    localStorage.setItem('noble-wallet-filter', wFilter.value);
+    try {
+      localStorage.setItem('noble-wallet-filter', wFilter.value);
+    } catch { /* storage full/unavailable — filter stays session-local */ }
     currentPage = 0;
     renderTransactions();
   });

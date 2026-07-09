@@ -874,21 +874,18 @@ pub async fn handle_app_action(
             let key = params
                 .get("key")
                 .and_then(|v| v.as_str())
-                .ok_or("Missing parameter: key")?;
+                .ok_or("Missing parameter: key")?
+                .to_string();
+            let value = params.get("value").cloned();
 
-            let mut prefs = storage::load_preferences();
-            let obj = prefs
-                .as_object_mut()
-                .ok_or("preferences store corrupt (not a JSON object)")?;
-            match params.get("value") {
+            storage::update_preferences(|obj| match value {
                 None | Some(Value::Null) => {
-                    obj.remove(key);
+                    obj.remove(&key);
                 }
                 Some(v) => {
-                    obj.insert(key.to_string(), v.clone());
+                    obj.insert(key, v);
                 }
-            }
-            storage::save_preferences(&prefs)?;
+            })?;
             Ok(json!({ "ok": true }))
         }
 

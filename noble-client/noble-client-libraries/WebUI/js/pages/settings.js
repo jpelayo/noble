@@ -6,7 +6,7 @@ import { statusBadge } from '../components/status-badge.js';
 import { renderQR } from '../components/qr-code.js';
 import { openModal } from '../components/modal.js';
 import { promptP12Password } from '../components/p12-password.js';
-import { esc, escAttr, isWryPlatform, groupThousands, setThousandsSeparator, getThousandsSeparatorId } from '../utils.js';
+import { esc, escAttr, isWryPlatform, groupThousands, setThousandsSeparator, getThousandsSeparatorId, THEME_KEY } from '../utils.js';
 
 /** Human label for where private keys live, per platform. */
 function walletStorageLabel(platform) {
@@ -97,7 +97,7 @@ export function init(root, ctx) {
     // ── Appearance ──
 
     function renderAppearanceSection() {
-        const currentTheme = localStorage.getItem('noble.theme') || 'system';
+        const currentTheme = localStorage.getItem(THEME_KEY) || 'system';
         const currentSep = getThousandsSeparatorId();
         // Sample labels rendered literally (the select can't call the live
         // formatter per option) — keep in sync with THOUSANDS_SEPS in utils.js.
@@ -143,7 +143,7 @@ export function init(root, ctx) {
         card.querySelectorAll('#theme-toggle button').forEach(btn => {
             btn.addEventListener('click', () => {
                 const theme = btn.dataset.theme;
-                Prefs.set('noble.theme', theme); // write-through: localStorage + native store
+                Prefs.set(THEME_KEY, theme); // write-through: localStorage + native store
                 window.applyTheme(theme);
                 card.querySelectorAll('#theme-toggle button').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');

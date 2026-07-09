@@ -5,7 +5,7 @@ import { hashText } from '../components/hash-text.js';
 import { amountText, formatAmount, formatSignedAmount } from '../components/amount-text.js';
 import { statusBadge } from '../components/status-badge.js';
 import { emptyState } from '../components/empty-state.js';
-import { esc, timeAgo, showCopyFeedback } from '../utils.js';
+import { esc, timeAgo, showCopyFeedback, AUTOSPLIT_KEY } from '../utils.js';
 import { txDisplayAmount, formatTxType, txStatusBadge } from '../tx-display.js';
 
 export function init(root, ctx) {
@@ -292,7 +292,7 @@ export function init(root, ctx) {
         // Try loading persisted auto-split config
         let minReady = 5;
         try {
-            const saved = localStorage.getItem('noble.autoSplit');
+            const saved = localStorage.getItem(AUTOSPLIT_KEY);
             if (saved) {
                 const cfg = JSON.parse(saved);
                 if (!cfg.enabled) return; // auto-split disabled, no warning

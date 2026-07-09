@@ -257,7 +257,13 @@ pub fn tx_to_response(tx: &Transaction, tx_id: &str) -> TransactionResponse {
             value: o.value,
             address: o.address.to_display_address(),
         }).collect(),
-        signer: noble_crypto::noble_addr::encode_wire_bytes(&tx.issuer_sig.public_key)
+        // Parity-safe: the envelope holds a RAW 33-byte SEC1 key whose first
+        // byte is 0x02 (even Y) or 0x03 (odd Y). encode_wire_bytes gates on
+        // 0x02 == SCHEME_SECP256K1, so odd-Y keys fell through to hex —
+        // to_noble_public_key keys off scheme_id and handles both parities.
+        signer: tx.issuer_sig.to_noble_public_key()
+            .ok()
+            .map(|pk| pk.to_address())
             .unwrap_or_else(|| hex::encode(&tx.issuer_sig.public_key)),
         signer_name: None,   // Populated by caller via resolve_friendly_name
         recipient,

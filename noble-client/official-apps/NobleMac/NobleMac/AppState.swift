@@ -702,23 +702,33 @@ final class AppState {
     /// store, so its localStorage dies with the process — this dictionary is
     /// the durable copy, hydrated back into localStorage at boot.
     func loadWebPreferences() -> [String: Any] {
-        guard let data = UserDefaults.standard.data(forKey: Self.webPreferencesKey),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return [:] }
+        guard let data = UserDefaults.standard.data(forKey: Self.webPreferencesKey) else {
+            return [:]
+        }
+        guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // Corrupt store: surface it instead of silently losing every pref.
+            print("[prefs] web preferences store is corrupt — resetting to empty")
+            return [:]
+        }
         return dict
     }
 
     /// Upsert one preference; a nil/NSNull value deletes the key.
-    func setWebPreference(key: String, value: Any?) {
+    /// Returns false when the store could not be serialized — callers must
+    /// surface that to the bridge instead of reporting a phantom success.
+    func setWebPreference(key: String, value: Any?) -> Bool {
         var all = loadWebPreferences()
         if value == nil || value is NSNull {
             all.removeValue(forKey: key)
         } else {
             all[key] = value
         }
-        if let data = try? JSONSerialization.data(withJSONObject: all) {
-            UserDefaults.standard.set(data, forKey: Self.webPreferencesKey)
+        guard let data = try? JSONSerialization.data(withJSONObject: all) else {
+            print("[prefs] failed to serialize web preferences — write dropped")
+            return false
         }
+        UserDefaults.standard.set(data, forKey: Self.webPreferencesKey)
+        return true
     }
 
     /// Complete onboarding and transition to main app.

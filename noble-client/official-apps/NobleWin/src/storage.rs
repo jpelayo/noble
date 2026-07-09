@@ -84,10 +84,26 @@ fn preferences_path() -> PathBuf {
     data_dir().join("preferences.json")
 }
 
+/// Serializes every preferences read-modify-write: the IPC layer spawns an
+/// independent task per bridge message, so two rapid setPreference calls
+/// would otherwise interleave load/save and lose a key (or tear the file).
+static PREFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn load_preferences() -> Value {
     match std::fs::read_to_string(preferences_path()) {
-        Ok(json) => serde_json::from_str(&json)
-            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                // Preserve the corrupt file for diagnosis instead of letting
+                // the next write silently overwrite it.
+                eprintln!("preferences.json is corrupt ({e}) — resetting to empty");
+                let _ = std::fs::rename(
+                    preferences_path(),
+                    preferences_path().with_extension("json.corrupt"),
+                );
+                Value::Object(serde_json::Map::new())
+            }
+        },
         Err(_) => Value::Object(serde_json::Map::new()),
     }
 }
@@ -96,8 +112,27 @@ pub fn save_preferences(prefs: &Value) -> Result<(), String> {
     let dir = ensure_data_dir().map_err(|e| format!("Failed to create data dir: {e}"))?;
     let json = serde_json::to_string_pretty(prefs)
         .map_err(|e| format!("JSON serialize error: {e}"))?;
-    std::fs::write(dir.join("preferences.json"), json)
-        .map_err(|e| format!("Failed to write preferences: {e}"))
+    // Atomic write: a crash mid-write must never leave a torn file.
+    let tmp = dir.join("preferences.json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("Failed to write preferences: {e}"))?;
+    std::fs::rename(&tmp, dir.join("preferences.json"))
+        .map_err(|e| format!("Failed to commit preferences: {e}"))
+}
+
+/// Locked read-modify-write for one preference mutation. All setPreference
+/// handlers MUST go through this instead of open-coding load+save.
+pub fn update_preferences(
+    f: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Result<(), String> {
+    let _guard = PREFS_LOCK
+        .lock()
+        .map_err(|_| "preferences lock poisoned".to_string())?;
+    let mut prefs = load_preferences();
+    let obj = prefs
+        .as_object_mut()
+        .ok_or("preferences store corrupt (not a JSON object)")?;
+    f(obj);
+    save_preferences(&prefs)
 }
 
 // ============================================================================

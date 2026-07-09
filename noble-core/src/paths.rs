@@ -241,8 +241,17 @@ fn creation_config_path() -> PathBuf {
 pub fn platform_data_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("NOBLE_DATA_DIR") {
         let trimmed = env_dir.trim();
+        // Absolute paths only — a relative NOBLE_DATA_DIR would resolve
+        // against whatever CWD the binary happens to run in, scattering
+        // data dirs. Misconfigured values fall through to the OS default.
         if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+            if std::path::Path::new(trimmed).is_absolute() {
+                return PathBuf::from(trimmed);
+            }
+            tracing::warn!(
+                "NOBLE_DATA_DIR '{trimmed}' is not an absolute path — ignoring it \
+                 and using the platform default"
+            );
         }
     }
     match std::env::consts::OS {
@@ -379,6 +388,17 @@ pub fn cgroup_indicates_container(cgroup: &str) -> bool {
         .any(|marker| cgroup.contains(marker))
 }
 
+/// True when a filesystem type does not survive a container rebuild.
+/// `overlay` is the container's writable rootfs layer; `tmpfs`/`ramfs`
+/// are RAM-backed (Docker mounts /dev/shm as tmpfs by default, and
+/// `--tmpfs` / compose `tmpfs:` mounts are common). Data (and KEYS) on any
+/// of these die with the container — a path is durable only on a real
+/// bind-mount/volume. Single source of truth for the setup wizard (CLI)
+/// and the checkDataDir RPC.
+pub fn fstype_is_ephemeral(fstype: &str) -> bool {
+    matches!(fstype, "overlay" | "tmpfs" | "ramfs")
+}
+
 /// The mount entry governing a path (Linux only — None elsewhere).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountInfo {
@@ -401,11 +421,35 @@ pub fn mount_for_path(path: &Path) -> Option<MountInfo> {
     parse_mountinfo(&content, &probe)
 }
 
+/// Undo proc(5) octal escaping in a mountinfo path token: space `\040`,
+/// tab `\011`, newline `\012`, backslash `\134`. Without this, a mount at
+/// `/mnt/my data` reads as `/mnt/my\040data` and never prefix-matches the
+/// real path being probed.
+fn unescape_mountinfo_path(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let bytes = token.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            match &token[i + 1..i + 4] {
+                "040" => { out.push(' '); i += 4; continue; }
+                "011" => { out.push('\t'); i += 4; continue; }
+                "012" => { out.push('\n'); i += 4; continue; }
+                "134" => { out.push('\\'); i += 4; continue; }
+                _ => {}
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 /// Pure `/proc/self/mountinfo` parser (separated for tests). Format per
 /// proc(5): `ID PARENT MAJ:MIN ROOT MOUNT_POINT OPTS [OPTIONAL...] - FSTYPE
 /// SOURCE SUPER_OPTS`; the fstype is the first field after the `-`
-/// separator. Returns the entry with the longest mount-point prefix of
-/// `path`.
+/// separator. Mount-point tokens are octal-unescaped per proc(5). Returns
+/// the entry with the longest mount-point prefix of `path`.
 pub fn parse_mountinfo(content: &str, path: &Path) -> Option<MountInfo> {
     let mut best: Option<MountInfo> = None;
     for line in content.lines() {
@@ -413,7 +457,7 @@ pub fn parse_mountinfo(content: &str, path: &Path) -> Option<MountInfo> {
         let pre = halves.next()?;
         let post = halves.next();
         let mount_point = match pre.split(' ').nth(4) {
-            Some(mp) => PathBuf::from(mp),
+            Some(mp) => PathBuf::from(unescape_mountinfo_path(mp)),
             None => continue,
         };
         if !path.starts_with(&mount_point) {
@@ -437,6 +481,11 @@ pub fn parse_mountinfo(content: &str, path: &Path) -> Option<MountInfo> {
 /// True when `path` (or its first existing ancestor) is writable by this
 /// process. Uses `access(2)` W_OK — no test-file litter. Single source of
 /// truth; noble-api's checkDataDir delegates here.
+///
+/// Caveat: for uid 0, `access(W_OK)` returns success on any filesystem not
+/// mounted read-only — including pseudo-filesystems like procfs where a
+/// later `mkdir` will still fail. Root gets a false positive here; the
+/// actual directory creation remains the final arbiter.
 #[cfg(unix)]
 pub fn path_appears_writable(path: &Path) -> bool {
     use std::ffi::CString;
@@ -545,6 +594,39 @@ mod free_bytes_tests {
     }
 
     #[test]
+    fn ephemeral_fstype_classifier() {
+        // Container-fatal filesystems.
+        assert!(fstype_is_ephemeral("overlay"));
+        assert!(fstype_is_ephemeral("tmpfs"));
+        assert!(fstype_is_ephemeral("ramfs"));
+        // Durable ones.
+        assert!(!fstype_is_ephemeral("ext4"));
+        assert!(!fstype_is_ephemeral("xfs"));
+        assert!(!fstype_is_ephemeral("btrfs"));
+        assert!(!fstype_is_ephemeral("zfs"));
+        assert!(!fstype_is_ephemeral("apfs"));
+    }
+
+    #[test]
+    fn mountinfo_octal_unescape() {
+        // A bind mount whose path contains a space is escaped as \040 in
+        // /proc/self/mountinfo; the parser must match the REAL path.
+        let mi = "\
+676 675 0:139 / / rw,relatime - overlay overlay rw\n\
+677 676 8:1 /opt/x /mnt/my\\040data rw,relatime - ext4 /dev/sda1 rw\n";
+        let m = parse_mountinfo(mi, Path::new("/mnt/my data/noble")).unwrap();
+        assert_eq!(m.mount_point, PathBuf::from("/mnt/my data"));
+        assert_eq!(m.fstype, "ext4");
+        // Unescape helper table.
+        assert_eq!(unescape_mountinfo_path("/a\\040b"), "/a b");
+        assert_eq!(unescape_mountinfo_path("/a\\011b"), "/a\tb");
+        assert_eq!(unescape_mountinfo_path("/a\\134b"), "/a\\b");
+        assert_eq!(unescape_mountinfo_path("/plain"), "/plain");
+        // Unknown escape passes through untouched.
+        assert_eq!(unescape_mountinfo_path("/a\\999b"), "/a\\999b");
+    }
+
+    #[test]
     fn env_var_overrides_platform_data_dir() {
         // NOBLE_DATA_DIR (the container contract) must win over OS defaults.
         // Serialized via a lock-free single test: set → check → restore.
@@ -556,6 +638,14 @@ mod free_bytes_tests {
             platform_data_dir(),
             PathBuf::from("   "),
             "blank env var must fall through to the OS default"
+        );
+        // Relative value must also fall through (CWD-relative data dirs
+        // scatter state) — same serialized test to avoid env races.
+        std::env::set_var("NOBLE_DATA_DIR", "data");
+        assert_ne!(
+            platform_data_dir(),
+            PathBuf::from("data"),
+            "relative env var must fall through to the OS default"
         );
         match prev {
             Some(v) => std::env::set_var("NOBLE_DATA_DIR", v),

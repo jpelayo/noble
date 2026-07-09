@@ -33,8 +33,10 @@ impl std::fmt::Display for OpenError {
 }
 
 /// Protocol dust threshold (groats) — outputs below this are rejected by
-/// relay policy. Mirrors the clients' coin-selection constant.
-pub const DUST_THRESHOLD_GROATS: u64 = 500_000;
+/// relay policy. Re-exported from noble-core so the faucet can never drift
+/// from the protocol constant (same value lives in the C tx-core and Swift
+/// clients).
+pub use noble_core::DUST_THRESHOLD as DUST_THRESHOLD_GROATS;
 
 /// Sweep arithmetic: the amount that sends EVERYTHING minus the exact fee.
 /// Errors when the fee eats the balance or the resulting output would be
@@ -249,7 +251,7 @@ impl FaucetWallet {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .map_err(|_| "system clock is set before 1970 — refusing to sign a tx with timestamp 0".to_string())?
             .as_secs();
 
         // Pass 1 — size/fee probe with a safe placeholder amount.
@@ -388,7 +390,7 @@ impl FaucetWallet {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .map_err(|_| "system clock is set before 1970 — refusing to sign a tx with timestamp 0".to_string())?
             .as_secs();
 
         let result_json = if split_count > 1 {

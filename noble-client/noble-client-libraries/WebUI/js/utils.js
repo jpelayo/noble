@@ -30,6 +30,10 @@ const THOUSANDS_SEPS = {
     none: '',
 };
 const THOUSANDS_SEP_KEY = 'noble.thousandsSep';
+/** Preference keys shared across pages — single definition to prevent
+ *  reader/writer typo drift. */
+export const THEME_KEY = 'noble.theme';
+export const AUTOSPLIT_KEY = 'noble.autoSplit';
 
 let _sepChar = THOUSANDS_SEPS[localStorage.getItem(THOUSANDS_SEP_KEY)] ?? ' ';
 

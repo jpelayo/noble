@@ -467,18 +467,22 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             println!("  ✗ {candidate} is not writable by this process — choose another path.");
             continue;
         }
-        if let Ok(free) = noble_core::paths::filesystem_free_bytes(path) {
-            println!("  Free space: {:.1} GB", free as f64 / 1_073_741_824.0);
+        match noble_core::paths::filesystem_free_bytes(path) {
+            Ok(free) => println!("  Free space: {:.1} GB", free as f64 / 1_073_741_824.0),
+            Err(e) => println!("  Free space: could not be determined ({e})"),
         }
         if in_container {
-            let ephemeral = noble_core::paths::mount_for_path(path)
-                .map(|m| m.fstype == "overlay")
+            let mount = noble_core::paths::mount_for_path(path);
+            let ephemeral = mount
+                .as_ref()
+                .map(|m| noble_core::paths::fstype_is_ephemeral(&m.fstype))
                 .unwrap_or(false);
             if ephemeral {
                 println!(
-                    "  ⚠ {candidate} lives on the container's ephemeral overlay filesystem — \
+                    "  ⚠ {candidate} lives on an ephemeral filesystem ({}) — \
                      blockchain data and KEYS will be LOST when the container is rebuilt. \
                      Use a bind-mounted path (e.g. {}) instead.",
+                    mount.map(|m| m.fstype).unwrap_or_else(|| "unknown".into()),
                     noble_core::paths::platform_data_dir().display()
                 );
                 let proceed = Confirm::new()

@@ -1455,7 +1455,7 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
         let mount = noble_core::paths::mount_for_path(p);
         let mount_fstype = mount.as_ref().map(|m| m.fstype.clone());
         let durable = match (&mount, container) {
-            (Some(m), true) => Some(m.fstype != "overlay"),
+            (Some(m), true) => Some(!noble_core::paths::fstype_is_ephemeral(&m.fstype)),
             (Some(_), false) => Some(true),
             (None, _) => None, // non-Linux — undetectable
         };
@@ -1464,11 +1464,12 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             .to_string();
         let warning = if container && durable == Some(false) {
             Some(format!(
-                "This node runs in a container and {} lives on its ephemeral \
-                 overlay filesystem — blockchain data and KEYS will be LOST \
+                "This node runs in a container and {} lives on an ephemeral \
+                 filesystem ({}) — blockchain data and KEYS will be LOST \
                  when the container is rebuilt. Use {} (bind-mounted to the \
                  host) or add a volume for this path.",
                 p.display(),
+                mount_fstype.as_deref().unwrap_or("unknown"),
                 recommended_dir
             ))
         } else {

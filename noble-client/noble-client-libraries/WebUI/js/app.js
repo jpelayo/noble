@@ -1,6 +1,6 @@
 // NOBLE Document Client — Router & State Controller
 import { Bridge, Prefs } from './bridge.js';
-import { isWryPlatform, setThousandsSeparator, getThousandsSeparatorId } from './utils.js';
+import { isWryPlatform, setThousandsSeparator, getThousandsSeparatorId, THEME_KEY } from './utils.js';
 import { emptyState } from './components/empty-state.js';
 import { init as initHome } from './pages/home.js';
 import { init as initDocuments } from './pages/documents.js';
@@ -38,7 +38,7 @@ await Prefs.hydrate();
 setThousandsSeparator(getThousandsSeparatorId());
 
 // Apply saved theme immediately (before first render)
-const savedTheme = localStorage.getItem('noble.theme') || 'system';
+const savedTheme = localStorage.getItem(THEME_KEY) || 'system';
 window.applyTheme(savedTheme);
 
 const pages = {

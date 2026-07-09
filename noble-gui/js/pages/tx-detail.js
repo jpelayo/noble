@@ -488,16 +488,26 @@ export function computeLedger(tx) {
   }
 
   // Degraded: transfers strip inputs (privacy) or the source tx was pruned.
-  // Change returns to self and nets out, so signer net = −(payments + fee).
+  // Change returns to self and nets out.
   const payments = outputs.filter(o => o.address !== signer);
   const paymentsTotal = payments.reduce((s, o) => s + o.value, 0);
-  const transferVal = (tx.transfer_value != null && tx.transfer_value > 0) ? tx.transfer_value : paymentsTotal;
+  const isTransfer = tx.tx_type === TX_TYPES.TRANSFER;
+  // transfer_value is ONLY meaningful for transfers: for a notarization
+  // (all outputs are change to self) the backend's fallback returns the
+  // full change amount — treating that as a payment showed the signer
+  // "paying" ~its whole input. Non-transfers pay nothing but the fee.
+  const transferVal = isTransfer
+    ? ((tx.transfer_value != null && tx.transfer_value > 0) ? tx.transfer_value : paymentsTotal)
+    : paymentsTotal;
   const feeVal = (fee != null) ? fee : 0;
   const parties = [];
   if (signer) parties.push({ addr: signer, role: 'signer', isPayer: true, paidIn: null, received: null, net: -(transferVal + feeVal) });
   for (const o of payments) parties.push({ addr: o.address, role: 'recipient', paidIn: null, received: o.value, net: o.value });
   if (fee != null && fee > 0) parties.push({ addr: null, label: 'network fee → validator', isFee: true, paidIn: null, received: fee, net: fee });
-  return { mode: 'partial', parties, note: inputs.length === 0 ? 'sender inputs hidden (privacy)' : 'some inputs pruned' };
+  const note = tx.confirmation_status === 'pending'
+    ? 'pending — inputs not yet confirmed'
+    : (inputs.length === 0 ? 'sender inputs hidden (privacy)' : 'some inputs unresolved (pruned source)');
+  return { mode: 'partial', parties, note };
 }
 
 function renderBalanceChanges(root, tx) {

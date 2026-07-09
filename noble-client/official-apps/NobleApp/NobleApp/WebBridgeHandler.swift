@@ -2054,7 +2054,9 @@ final class WebBridgeHandler {
             guard let key = params["key"] as? String else {
                 throw BridgeError.missingParam("key")
             }
-            appState.setWebPreference(key: key, value: params["value"])
+            guard appState.setWebPreference(key: key, value: params["value"]) else {
+                throw BridgeError.operationFailed("preference store write failed")
+            }
             return ["ok": true]
 
         default:

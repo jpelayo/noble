@@ -7,7 +7,7 @@ import { Bridge, Prefs } from '../bridge.js';
 import { formatAmount } from '../components/amount-text.js';
 import { openModal, openWizardModal, closeModal, createSlideConfirm } from '../components/modal.js';
 import { buildFeeData, renderFeePicker, getSelectedRate, getSelectedTotal, validateCustomRate } from '../components/fee-picker.js';
-import { esc } from '../utils.js';
+import { esc, AUTOSPLIT_KEY } from '../utils.js';
 
 export function init(root, ctx) {
     let alive = true;
@@ -22,7 +22,7 @@ export function init(root, ctx) {
 
     // Load persisted auto-split config
     try {
-        const saved = localStorage.getItem('noble.autoSplit');
+        const saved = localStorage.getItem(AUTOSPLIT_KEY);
         if (saved) {
             const cfg = JSON.parse(saved);
             minimumReady = Math.max(2, Math.min(63, parseInt(cfg.minimumReady, 10) || 5));
@@ -520,7 +520,7 @@ export function init(root, ctx) {
             targetReady = Math.max(minimumReady, Math.min(63, parseInt(targetInput.value) || 10));
             try {
                 // Write-through: localStorage + native store (survives relaunch).
-                Prefs.set('noble.autoSplit', JSON.stringify({
+                Prefs.set(AUTOSPLIT_KEY, JSON.stringify({
                     enabled: autoMaintainEnabled, minimumReady, targetReady
                 }));
             } catch {}

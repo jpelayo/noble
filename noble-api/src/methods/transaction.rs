@@ -64,6 +64,10 @@ pub(crate) fn resolve_inputs_and_fee<S: StorageEngine>(
     storage: &S,
     tx: &Transaction,
     resp: &mut TransactionResponse,
+    // Per-request memo of previously-read source transactions: within a
+    // block view many inputs share a prev tx, and each get_transaction is
+    // a full CBOR decode — the memo collapses that to one read per source.
+    memo: &mut std::collections::HashMap<Hash256, Transaction>,
 ) {
     if tx.is_coinbase() {
         return;
@@ -71,25 +75,73 @@ pub(crate) fn resolve_inputs_and_fee<S: StorageEngine>(
     let mut input_total: u64 = 0;
     let mut all_resolved = true;
     for (i, inp) in tx.inputs.iter().enumerate() {
-        match storage.get_transaction(&inp.prev_output.txid) {
-            Ok(prev_tx) => match prev_tx.outputs.get(inp.prev_output.vout as usize) {
-                Some(out) => {
-                    input_total = input_total.saturating_add(out.value);
-                    // Enrich the matching response input when present (index
-                    // alignment holds because non-transfer inputs are mapped
-                    // 1:1 in tx_to_response).
-                    if let Some(ri) = resp.inputs.get_mut(i) {
-                        ri.value = Some(out.value);
-                        ri.address = Some(out.address.to_display_address());
+        let prev_tx = match memo.entry(inp.prev_output.txid) {
+            std::collections::hash_map::Entry::Occupied(e) => Some(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                match storage.get_transaction(&inp.prev_output.txid) {
+                    Ok(t) => Some(v.insert(t)),
+                    Err(e) => {
+                        tracing::warn!(
+                            prev_txid = %hex::encode(inp.prev_output.txid.as_bytes()),
+                            "input resolution: prev tx read failed \
+                             (pruned storage or corruption?): {e}"
+                        );
+                        None
                     }
                 }
-                None => all_resolved = false,
-            },
-            Err(_) => all_resolved = false,
+            }
+        };
+        match prev_tx.and_then(|p| p.outputs.get(inp.prev_output.vout as usize)) {
+            Some(out) => {
+                input_total = input_total.saturating_add(out.value);
+                // Enrich the matching response input when present (index
+                // alignment holds because non-transfer inputs are mapped
+                // 1:1 in tx_to_response).
+                if let Some(ri) = resp.inputs.get_mut(i) {
+                    ri.value = Some(out.value);
+                    ri.address = Some(out.address.to_display_address());
+                }
+            }
+            None => {
+                tracing::debug!(
+                    vout = inp.prev_output.vout,
+                    "input resolution: prev tx missing or vout out of range"
+                );
+                all_resolved = false;
+            }
         }
     }
     if all_resolved {
         resp.fee = Some(input_total.saturating_sub(tx.total_output_value()));
+    }
+}
+
+/// Resolve a PENDING transaction's inputs from the live UTXO set — a
+/// mempool tx's inputs are by definition still unspent, so `get_utxo` is a
+/// cheap point lookup (no prev-tx decode). Fee is NOT computed here — the
+/// mempool entry already carries the exact fee.
+pub(crate) fn resolve_inputs_from_utxos<S: StorageEngine>(
+    storage: &S,
+    tx: &Transaction,
+    resp: &mut TransactionResponse,
+) {
+    for (i, inp) in tx.inputs.iter().enumerate() {
+        match storage.get_utxo(&inp.prev_output) {
+            Ok(Some(entry)) => {
+                if let Some(ri) = resp.inputs.get_mut(i) {
+                    ri.value = Some(entry.value);
+                    ri.address = Some(entry.address.to_display_address());
+                }
+            }
+            Ok(None) => {
+                // Raced a commit (input just got spent) — leave unresolved;
+                // the next query hits the on-chain path.
+                tracing::debug!("pending input resolution: UTXO already spent/absent");
+            }
+            Err(e) => {
+                tracing::warn!("pending input resolution: UTXO read failed: {e}");
+            }
+        }
     }
 }
 
@@ -223,15 +275,24 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         let tx_id_hash = parse_hash(&tx_id)?;
 
         // Check mempool first — fee is pre-computed in the mempool entry.
-        {
+        // Clone out of the mempool lock before touching storage: the lock
+        // order is Storage(2) < Mempool(5), so storage must never be
+        // acquired while the mempool lock is held.
+        let pending = {
             let mempool = self.mempool.lock();
-            if let Some(entry) = mempool.get(&tx_id_hash) {
-                let mut resp = tx_to_response(&entry.tx, &tx_id);
-                resp.fee = Some(entry.fee);
-                resp.confirmation_status = Some("pending".to_string());
-                resp.confirmations = None;
-                return Ok(resp);
-            }
+            mempool.get(&tx_id_hash).map(|entry| (entry.tx.clone(), entry.fee))
+        };
+        if let Some((tx, fee)) = pending {
+            let mut resp = tx_to_response(&tx, &tx_id);
+            resp.fee = Some(fee);
+            resp.confirmation_status = Some("pending".to_string());
+            resp.confirmations = None;
+            // Pending inputs are still unspent — resolve value/address from
+            // the live UTXO set so the tx-detail Balance Changes ledger
+            // reaches full mode instead of a misleading partial view.
+            let storage = self.storage.read();
+            resolve_inputs_from_utxos(&*storage, &tx, &mut resp);
+            return Ok(resp);
         }
 
         // Check on-chain storage — compute fee from UTXO inputs.
@@ -241,7 +302,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
             .map_err(ApiError::from)?;
 
         let mut resp = tx_to_response(&tx, &tx_id);
-        resolve_inputs_and_fee(&*storage, &tx, &mut resp);
+        resolve_inputs_and_fee(&*storage, &tx, &mut resp, &mut Default::default());
         // Compute confirmation status from tx location
         if let Ok((tx_height, _)) = storage.get_transaction_location(&tx_id_hash) {
             let tip = storage.get_chain_tip().ok().flatten().map(|t| t.height).unwrap_or(0);
@@ -291,24 +352,33 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
     ) -> Result<TransactionReceiptResponse, ErrorObjectOwned> {
         let tx_id_hash = parse_hash(&tx_id)?;
 
-        // Check mempool first — pending transactions have no block info
-        {
+        // Check mempool first — pending transactions have no block info.
+        // Clone out of the mempool lock before touching storage (lock order:
+        // Storage(2) < Mempool(5)).
+        let pending = {
             let mempool = self.mempool.lock();
-            if let Some(entry) = mempool.get(&tx_id_hash) {
-                let mut tx_resp = tx_to_response(&entry.tx, &tx_id);
-                tx_resp.fee = Some(entry.fee);
-                tx_resp.confirmation_status = Some("pending".to_string());
-                tx_resp.confirmations = None;
-                return Ok(TransactionReceiptResponse {
-                    tx_id: tx_id.clone(),
-                    transaction: tx_resp,
-                    status: "pending".to_string(),
-                    block_height: None,
-                    block_hash: None,
-                    tx_index: None,
-                    confirmations: None,
-                });
+            mempool.get(&tx_id_hash).map(|entry| (entry.tx.clone(), entry.fee))
+        };
+        if let Some((tx, fee)) = pending {
+            let mut tx_resp = tx_to_response(&tx, &tx_id);
+            tx_resp.fee = Some(fee);
+            tx_resp.confirmation_status = Some("pending".to_string());
+            tx_resp.confirmations = None;
+            // Pending inputs are still unspent — resolve from the UTXO set
+            // so the ledger shows the real per-address flow while pending.
+            {
+                let storage = self.storage.read();
+                resolve_inputs_from_utxos(&*storage, &tx, &mut tx_resp);
             }
+            return Ok(TransactionReceiptResponse {
+                tx_id: tx_id.clone(),
+                transaction: tx_resp,
+                status: "pending".to_string(),
+                block_height: None,
+                block_hash: None,
+                tx_index: None,
+                confirmations: None,
+            });
         }
 
         // Look up on-chain location
@@ -327,7 +397,7 @@ impl<S: StorageEngine + Send + Sync + 'static> TransactionApiServer for Arc<ApiS
         let confirmations = tip.map(|t| t.height.saturating_sub(height) + 1);
 
         let mut tx_resp = tx_to_response(&tx, &tx_id);
-        resolve_inputs_and_fee(&*storage, &tx, &mut tx_resp);
+        resolve_inputs_and_fee(&*storage, &tx, &mut tx_resp, &mut Default::default());
         tx_resp.confirmations = confirmations;
         tx_resp.confirmation_status = Some(confirmation_status_label(confirmations));
         tx_resp.block_height = Some(height);

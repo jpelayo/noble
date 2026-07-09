@@ -113,6 +113,10 @@ async fn gatekeeper_middleware(
     next.run(req).await
 }
 
+/// Default faucet listen address — single source for the clap default and
+/// the discharge running-server probe.
+const DEFAULT_LISTEN: &str = "0.0.0.0:8786";
+
 /// NOBLE Faucet — token dispenser for chain onboarding.
 #[derive(Parser)]
 #[command(
@@ -122,7 +126,7 @@ async fn gatekeeper_middleware(
 )]
 struct Cli {
     /// Listen address (e.g. "0.0.0.0:8786").
-    #[arg(long, default_value = "0.0.0.0:8786")]
+    #[arg(long, default_value = DEFAULT_LISTEN)]
     listen: String,
 
     /// NOBLE node JSON-RPC URL.
@@ -280,7 +284,7 @@ fn parse_noble_amount(s: &str) -> Result<u64, String> {
         frac_padded.parse().map_err(|_| format!("invalid amount '{s}'"))?
     };
     let groats = whole
-        .checked_mul(100_000_000)
+        .checked_mul(noble_core::GROATS_PER_NOBLE as u128)
         .and_then(|w| w.checked_add(frac))
         .ok_or_else(|| format!("amount '{s}' overflows"))?;
     if groats == 0 {
@@ -326,8 +330,8 @@ fn group_thousands(n: u64) -> String {
 
 /// Format groats as a NOBLE decimal ("1 234.5", trailing zeros trimmed).
 fn fmt_noble(groats: u64) -> String {
-    let whole = groats / 100_000_000;
-    let frac = groats % 100_000_000;
+    let whole = groats / noble_core::GROATS_PER_NOBLE;
+    let frac = groats % noble_core::GROATS_PER_NOBLE;
     if frac == 0 {
         group_thousands(whole)
     } else {
@@ -388,6 +392,7 @@ async fn run_discharge(
     if !args.all && args.amount.is_none() {
         return Err("specify --amount <NOBLE decimal> or --all".into());
     }
+    ensure_chain_id(chain_id)?;
     if !is_loopback_rpc(rpc_url) {
         return Err(format!(
             "discharge only works against the LOCAL node (loopback RPC) — got '{rpc_url}'. \
@@ -399,11 +404,15 @@ async fn run_discharge(
     // A concurrently-running faucet server drips from the same UTXO set —
     // its spends race this transaction. Refuse unless explicitly overridden.
     if !args.allow_running {
-        let port: u16 = listen
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(8786);
+        let port: u16 = match listen.rsplit(':').next().and_then(|p| p.parse().ok()) {
+            Some(p) => p,
+            None => {
+                return Err(format!(
+                    "cannot parse a port out of --listen '{listen}' — refusing to \
+                     guess which port to probe for a running faucet (default is {DEFAULT_LISTEN})"
+                ));
+            }
+        };
         let listening = tokio::time::timeout(
             std::time::Duration::from_millis(700),
             tokio::net::TcpStream::connect(("127.0.0.1", port)),
@@ -444,11 +453,15 @@ async fn run_discharge(
         .or_else(|| wallet_info.addresses.first())
         .ok_or("the connected node's wallet has no keys — nowhere to discharge to")?;
     let recipient_hex = resolve_recipient(&node_entry.public_key)?;
+    // Unreachable after resolve_recipient's validation — fail loudly rather
+    // than silently masking the human-verifiable destination as raw hex.
     let recipient_display = hex::decode(&recipient_hex)
-        .ok()
-        .and_then(|b| noble_crypto::keys::NoblePublicKey::from_wire_bytes(&b).ok())
-        .map(|pk| pk.to_address())
-        .unwrap_or_else(|| recipient_hex.clone());
+        .map_err(|e| format!("decode recipient for display: {e}"))
+        .and_then(|b| {
+            noble_crypto::keys::NoblePublicKey::from_wire_bytes(&b)
+                .map(|pk| pk.to_address())
+                .map_err(|e| format!("decode recipient for display: {e}"))
+        })?;
 
     let own_hex = resolve_recipient(&w.address())?;
     if recipient_hex == own_hex {
@@ -479,11 +492,19 @@ async fn run_discharge(
         let (tx, amt, fee) = w.build_sweep(rpc, &recipient_hex, fee_rate).await?;
         (tx, amt, format!("{} groats (exact)", group_thousands(fee)))
     } else {
-        let groats = parse_noble_amount(args.amount.as_deref().unwrap_or_default())?;
-        if groats > bal.available {
+        let groats = parse_noble_amount(
+            args.amount
+                .as_deref()
+                .expect("guarded above: --amount is required when --all is not set"),
+        )?;
+        // Same size heuristic build_transfer's selector uses (~500 bytes).
+        let est_fee = fee_rate.saturating_mul(500);
+        if groats.saturating_add(est_fee) > bal.available {
             return Err(format!(
-                "amount {} NOBLE exceeds the available balance {} NOBLE",
+                "amount {} NOBLE plus the estimated fee (~{} groats) exceeds the \
+                 available balance {} NOBLE — use --all to sweep everything",
                 fmt_noble(groats),
+                group_thousands(est_fee),
                 fmt_noble(bal.available)
             ));
         }
@@ -513,7 +534,9 @@ async fn run_discharge(
     if !args.yes {
         use std::io::Write as _;
         print!("Type 'yes' to submit: ");
-        std::io::stdout().flush().ok();
+        std::io::stdout()
+            .flush()
+            .map_err(|e| format!("prompt flush: {e}"))?;
         let mut line = String::new();
         std::io::stdin()
             .read_line(&mut line)
@@ -542,6 +565,21 @@ fn read_marker_address(node_data_dir: Option<&std::path::Path>) -> Option<String
 /// record and the operator did not explicitly opt into abandoning it.
 fn should_refuse_creation(recorded_address: Option<&str>, force_new_wallet: bool) -> bool {
     recorded_address.is_some() && !force_new_wallet
+}
+
+/// Discharge precondition: a chain_id of 0 means the node was unreachable
+/// when it was probed — signing with it would produce a tx invalid on the
+/// real chain, rejected at submit with an opaque error.
+fn ensure_chain_id(chain_id: u32) -> Result<(), String> {
+    if chain_id == 0 {
+        return Err(
+            "could not determine the chain id from the node (was it reachable at \
+             startup?) — refusing to sign a transaction that would be invalid on \
+             the real chain; check the node and retry"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Custody rule: the recorded address may only be replaced by a DIFFERENT
@@ -799,6 +837,11 @@ async fn main() {
         .unwrap_or(0);
     if chain_id != 0 {
         tracing::info!("Chain ID from node: {:#010X}", chain_id);
+    } else {
+        tracing::warn!(
+            "could not read chain_id from the node — a transaction signed \
+             with chain_id 0 would be invalid on the real chain"
+        );
     }
 
     // ── Discharge subcommand: send/sweep funds and exit (no server) ──
@@ -1301,6 +1344,12 @@ mod tests {
         assert!(resolve_recipient("nbl1qqqq-not-an-address").is_err());
         assert!(resolve_recipient("zzzz").is_err());
         assert!(resolve_recipient("abcd").is_err()); // valid hex, wrong length
+    }
+
+    #[test]
+    fn chain_id_guard() {
+        assert!(ensure_chain_id(0).is_err(), "chain_id 0 must refuse to sign");
+        assert!(ensure_chain_id(0x34E9E7A4).is_ok());
     }
 
     #[test]
