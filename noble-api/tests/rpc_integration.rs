@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
+use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
 use std::time::Instant;
 
 use jsonrpsee::core::client::ClientT;
@@ -41,7 +42,7 @@ use noble_wallet::{KeyStore, WalletState};
 
 /// Build a fully-wired `ApiState<MemoryStorage>` with genesis committed.
 fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+    let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
 
     // Commit genesis block
     let genesis = test_genesis_block();
@@ -56,9 +57,9 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         .commit_block(&genesis, &block_hash, &tx_ids)
         .expect("commit genesis");
 
-    let mempool = Arc::new(Mutex::new(Mempool::with_defaults()));
+    let mempool = Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::with_defaults()));
     let (network_cmd, _rx) = tokio::sync::mpsc::channel(16);
-    let consensus = Arc::new(RwLock::new(CycleEngine::new(
+    let consensus = Arc::new(TrackedRwLock::new(LockOrder::Consensus, CycleEngine::new(
         ConsensusConfig::default(),
         0,
         block_hash,
@@ -75,7 +76,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     keystore.unlock(&ks_pass).expect("unlock");
     let wallet_keystore = Arc::new(Mutex::new(keystore));
     let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
-    let network_stats = Arc::new(RwLock::new(NetworkStats::default()));
+    let network_stats = Arc::new(TrackedRwLock::new(LockOrder::NetworkStats, NetworkStats::default()));
 
     let (new_block_tx, _) = tokio::sync::broadcast::channel(16);
     let (new_tx_tx, _) = tokio::sync::broadcast::channel(16);
@@ -85,7 +86,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let state = Arc::new(ApiState {
         storage,
         mempool,
-        validator_registry: Arc::new(RwLock::new(noble_consensus::ValidatorRegistry::new(
+        validator_registry: Arc::new(TrackedRwLock::new(LockOrder::ValidatorRegistry, noble_consensus::ValidatorRegistry::new(
             noble_consensus::ValidatorList::new(),
             None,
         ))),
@@ -116,8 +117,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         gateway_key_path: None,
         ip_filter: None, // no IP filter in tests
         validator_list_path: None,
-        peer_info: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        node_identity: Arc::new(RwLock::new(NodeIdentityData {
+        peer_info: Arc::new(TrackedRwLock::new(LockOrder::PeerInfo, std::collections::HashMap::new())),
+        node_identity: Arc::new(TrackedRwLock::new(LockOrder::NodeIdentity, NodeIdentityData {
             node_name: String::new(),
             org_type: "Individual".to_string(),
             org_name: String::new(),
@@ -151,7 +152,7 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         gui_port: 8785,
         tls_plaintext_mode: false,
         peer_id: "12D3KooWTestPeerIdPlaceholder".to_string(),
-        validator_pubkey: parking_lot::RwLock::new(None),
+        validator_pubkey: TrackedRwLock::new(LockOrder::ValidatorPubkey, None),
         validator_scheme: parking_lot::RwLock::new(None),
         validator_key_path: parking_lot::RwLock::new(None),
         data_dir: None,
@@ -856,4 +857,111 @@ async fn get_storage_stats_returns_valid_response() {
     assert_eq!(resp["total_db_bytes"], 0);
     assert_eq!(resp["cache_size_bytes"], 64 * 1024 * 1024);
     assert_eq!(resp["compression_enabled"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Deadlock regression (0.140.0): the RPC readers that formed the production
+// lock cycle must keep serving while the consensus loop writes registry +
+// consensus. Pre-fix (0.138.0) this hung forever; post-fix it completes fast.
+// With the lock-order tracker now live, a residual inversion would PANIC here
+// instead of hanging — either way the test fails loudly.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_readers_do_not_deadlock_under_writer_contention() {
+    use noble_api::methods::badge::BadgeApiServer;
+    use noble_api::methods::consensus::ConsensusApiServer;
+    use noble_api::methods::dao::DaoApiServer;
+    use noble_api::methods::node::NodeApiServer;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (state, _dir) = make_test_state();
+
+    // Seed a poll + block-votes with an EMPTY voter name so the
+    // `resolve_friendly_name` branch in getBlockVotes / getActivePolls /
+    // getPollHistory (C2/C3/C4) actually executes under contention. Empty
+    // stores skip that branch, so the previously-buggy guard overlap would
+    // never be exercised (which is exactly why these sites slipped past the
+    // first test run — the tracker only fires on executed paths).
+    {
+        use noble_consensus::dao::DaoPoll;
+        let mk_poll = |id: &str, status: &str| DaoPoll {
+            poll_id: id.to_string(),
+            question: "seed?".to_string(),
+            proposer: vec![0x02; 33],
+            created_at_cycle: 1,
+            expires_at_cycle: 100,
+            votes_yes: vec![],
+            votes_no: vec![],
+            votes_abstain: vec![],
+            status: status.to_string(),
+        };
+        let mut eng = state.consensus.write();
+        eng.dao_store_mut().insert(mk_poll("seed-active", "active"));
+        eng.dao_store_mut().insert(mk_poll("seed-closed", "closed"));
+    }
+    {
+        use noble_codec::NobleCbor;
+        use noble_consensus::history::BlockVoter;
+        let votes = noble_consensus::BlockVotes {
+            cycle_number: 1,
+            voter_count: 1,
+            strength: "Strong".to_string(),
+            r1_voters: vec![BlockVoter {
+                validator_key: format!("02{}", "ab".repeat(32)),
+                name: String::new(), // empty → triggers resolve_friendly_name (C2)
+            }],
+            r2_voters: vec![],
+            unique_witness_count: 1,
+            dual_witness_required: false,
+            dual_witness_met: false,
+        };
+        let bytes = votes.to_cbor().expect("encode block votes");
+        state
+            .storage
+            .read()
+            .store_block_votes(1, &bytes)
+            .expect("store block votes");
+    }
+
+    // Writer: hammer registry.write() then consensus.write() (ascending order),
+    // mimicking a network reconnect's announce/commit burst that makes queued
+    // writers block new readers under parking_lot writer-fairness.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let writer_state = state.clone();
+    let writer_stop = stop.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        while !writer_stop.load(Ordering::Relaxed) {
+            {
+                let _r = writer_state.validator_registry.write();
+                let _c = writer_state.consensus.write();
+            }
+            std::hint::spin_loop();
+        }
+    });
+
+    // Readers: hammer the two methods that previously closed the lock cycle.
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let s = state.clone();
+        readers.push(tokio::spawn(async move {
+            for _ in 0..150 {
+                let _ = s.get_validator_list().await;
+                let _ = s.get_badge_holders().await;
+                let _ = s.get_node_info().await; // C1: recursive validator_pubkey read
+                let _ = s.get_block_votes(1).await; // C2: resolve under storage guard
+                let _ = s.get_active_polls().await; // C3: resolve under consensus guard
+                let _ = s.get_poll_history(None).await; // C4: same as C3
+            }
+        }));
+    }
+
+    for h in readers {
+        tokio::time::timeout(std::time::Duration::from_secs(30), h)
+            .await
+            .expect("RPC readers deadlocked under writer contention (lock cycle regressed)")
+            .expect("RPC reader task panicked (lock-order violation?)");
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = writer.await;
 }

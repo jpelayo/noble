@@ -298,35 +298,82 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
             })
             .count();
 
-        let consensus = self.consensus.read();
-        let reputation = consensus.reputation();
-        let candidate_tracker = consensus.candidate_tracker();
-        let entries: Vec<ValidatorEntry> = validators
-            .into_iter()
-            .map(|(pk, weight, liveness, added_at, friendly_name, val_host, val_cc)| {
-                let wire = pk.to_wire_bytes();
-                let rep_data = reputation.get(&wire);
-                let score = rep_data.map(|d| d.score()).unwrap_or(0.0);
+        // Snapshot everything the entry-builder needs into OWNED data, then
+        // drop every lock BEFORE the map. Holding validator_registry + consensus
+        // across the map (and recursively re-reading consensus inside it, for the
+        // badge check) is what deadlocked the node under writer contention — a
+        // reader parked mid-map while the consensus loop queued a write. See the
+        // lock hierarchy in state.rs. No lock may be held across the map.
+        let wants_validate_map: std::collections::HashMap<String, bool> = registry
+            .known_peers()
+            .iter()
+            .map(|(k, kp)| (k.clone(), kp.wants_to_validate))
+            .collect();
+        drop(registry);
 
-                let (
-                    blocks_accepted,
-                    blocks_rejected,
-                    votes_cast,
-                    votes_missed,
-                    uptime_cycles,
-                    total_cycles,
-                ) = rep_data
-                    .map(|d| {
+        // Self identity — each lock read once and released immediately.
+        let self_pubkey_hex: Option<String> = self.validator_pubkey.read().clone();
+        let (self_host, self_country) = {
+            let id = self.node_identity.read();
+            (id.host_address.clone(), id.country_code.clone())
+        };
+        let self_min_fee_rate =
+            self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Reputation + proposed + badge snapshots, keyed by validator wire bytes.
+        type RepSnap = (f64, u64, u64, u64, u64, u64, u64);
+        let mut rep_map: std::collections::HashMap<Vec<u8>, RepSnap> =
+            std::collections::HashMap::new();
+        let mut proposed_set: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
+        let mut badge_set: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
+        {
+            let consensus = self.consensus.read();
+            let reputation = consensus.reputation();
+            let candidate_tracker = consensus.candidate_tracker();
+            let badge_store = consensus.badge_store();
+            for (pk, _, _, _, _, _, _) in &validators {
+                let wire = pk.to_wire_bytes();
+                if let Some(d) = reputation.get(&wire) {
+                    rep_map.insert(
+                        wire.clone(),
                         (
+                            d.score(),
                             d.blocks_accepted,
                             d.blocks_rejected,
                             d.votes_cast,
                             d.votes_missed,
                             d.uptime_cycles,
                             d.total_cycles,
-                        )
-                    })
-                    .unwrap_or_default();
+                        ),
+                    );
+                }
+                if candidate_tracker.has_proposed(&wire) {
+                    proposed_set.insert(wire.clone());
+                }
+                if badge_store.is_active(&wire) {
+                    badge_set.insert(wire.clone());
+                }
+            }
+        } // consensus dropped
+
+        let entries: Vec<ValidatorEntry> = validators
+            .into_iter()
+            .map(|(pk, weight, liveness, added_at, friendly_name, val_host, val_cc)| {
+                let wire = pk.to_wire_bytes();
+                let (
+                    score,
+                    blocks_accepted,
+                    blocks_rejected,
+                    votes_cast,
+                    votes_missed,
+                    uptime_cycles,
+                    total_cycles,
+                ) = rep_map
+                    .get(&wire)
+                    .copied()
+                    .unwrap_or((0.0, 0, 0, 0, 0, 0, 0));
 
                 let blocks_produced = blocks_accepted + blocks_rejected;
 
@@ -353,35 +400,23 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                 let key_display = noble_crypto::noble_addr::encode_wire_bytes(&wire)
                     .unwrap_or_else(|| hex::encode(&wire));
                 let key_hex = hex::encode(&wire);
-                if host_addr.is_none() && country.is_none() {
-                    if let Some(ref self_pk) = *self.validator_pubkey.read() {
-                        if key_hex == *self_pk {
-                            let id = self.node_identity.read();
-                            if !id.host_address.is_empty() {
-                                host_addr = Some(id.host_address.clone());
-                            }
-                            if !id.country_code.is_empty() {
-                                country = Some(id.country_code.clone());
-                            }
-                        }
+                let is_self = self_pubkey_hex.as_deref() == Some(key_hex.as_str());
+                if host_addr.is_none() && country.is_none() && is_self {
+                    if !self_host.is_empty() {
+                        host_addr = Some(self_host.clone());
+                    }
+                    if !self_country.is_empty() {
+                        country = Some(self_country.clone());
                     }
                 }
 
-                // Determine wants_to_validate from known_peers or peer_records.
-                // known_peers map is keyed by hex wire bytes (internal format).
-                let is_self = self
-                    .validator_pubkey
-                    .read()
-                    .as_deref()
-                    .map_or(false, |s| key_hex == s);
+                // Determine wants_to_validate from the snapshot (keyed by hex wire).
                 let wants_validate = if is_self {
                     // Self always wants to validate (we're in the list).
                     true
-                } else if let Some(kp) = registry.known_peers().get(&key_hex) {
-                    kp.wants_to_validate
                 } else {
                     // No announce data — benefit of doubt.
-                    true
+                    wants_validate_map.get(&key_hex).copied().unwrap_or(true)
                 };
 
                 ValidatorEntry {
@@ -416,22 +451,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
                     host_address: host_addr,
                     country_code: country,
                     listers_count: alive_count,
-                    min_fee_rate: fee_rate_map.get(&wire.to_vec()).copied().flatten()
-                        .or_else(|| {
-                            // Self validator: use own config fee rate
-                            if let Some(ref self_pk) = *self.validator_pubkey.read() {
-                                if key_hex == *self_pk {
-                                    return Some(self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed));
-                                }
-                            }
-                            None
-                        }),
-                    proposed_this_cycle: candidate_tracker.has_proposed(&wire),
+                    min_fee_rate: fee_rate_map.get(&wire).copied().flatten()
+                        .or_else(|| if is_self { Some(self_min_fee_rate) } else { None }),
+                    proposed_this_cycle: proposed_set.contains(&wire),
                     wants_to_validate: wants_validate,
-                    has_badge: {
-                        let engine = self.consensus.read();
-                        engine.badge_store().is_active(&wire.to_vec())
-                    },
+                    has_badge: badge_set.contains(&wire),
                 }
             })
             .collect();
@@ -440,8 +464,6 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         // Validators are only removed by explicit removeValidator RPC/GUI action.
         // wants_to_validate=false is shown as a status flag in the GUI but does
         // NOT trigger automatic removal.
-        drop(consensus);
-        drop(registry);
         let filtered_entries = entries;
         let filtered_count = filtered_entries.len();
 
@@ -865,10 +887,17 @@ impl<S: StorageEngine + Send + Sync + 'static> ConsensusApiServer for Arc<ApiSta
         &self,
         height: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let storage = self.storage.read();
-        let raw = storage
-            .get_block_votes(height)
-            .map_err(|e| ApiError::Internal(format!("read block votes: {e}")))?;
+        // Snapshot-and-drop: scope the storage guard to just the fetch. The
+        // `resolve_voter_name` closure below calls `resolve_friendly_name`,
+        // which re-acquires storage(2)+registry(3)+identity+pubkey — holding
+        // the storage guard across it is a recursive read that deadlocks under
+        // a queued storage writer (parking_lot writer-fairness). See lock_order.rs.
+        let raw = {
+            let storage = self.storage.read();
+            storage
+                .get_block_votes(height)
+                .map_err(|e| ApiError::Internal(format!("read block votes: {e}")))?
+        };
         match raw {
             Some(bytes) => {
                 let votes: noble_consensus::BlockVotes =

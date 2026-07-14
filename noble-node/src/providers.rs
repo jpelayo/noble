@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
 
 use noble_core::{Block, BlockHeader, Transaction};
 use noble_crypto::Hash256;
@@ -17,14 +16,16 @@ use noble_mempool::Mempool;
 use noble_network::{BlockProvider, TxProvider};
 use noble_storage::StorageEngine;
 
+use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
+
 /// Implements [`BlockProvider`] using an `Arc<RwLock<S>>` storage backend.
 pub struct StorageBlockProvider<S: StorageEngine> {
-    storage: Arc<RwLock<S>>,
+    storage: Arc<TrackedRwLock<S>>,
 }
 
 impl<S: StorageEngine> StorageBlockProvider<S> {
     /// Create a new block provider wrapping the given storage.
-    pub fn new(storage: Arc<RwLock<S>>) -> Self {
+    pub fn new(storage: Arc<TrackedRwLock<S>>) -> Self {
         Self { storage }
     }
 }
@@ -105,13 +106,13 @@ impl<S: StorageEngine + Send + Sync> BlockProvider for StorageBlockProvider<S> {
 /// after receiving a `TxAnnounce`, the tx is typically still in the
 /// mempool (not yet committed to a block).
 pub struct StorageTxProvider<S: StorageEngine> {
-    storage: Arc<RwLock<S>>,
-    mempool: Arc<Mutex<Mempool>>,
+    storage: Arc<TrackedRwLock<S>>,
+    mempool: Arc<TrackedMutex<Mempool>>,
 }
 
 impl<S: StorageEngine> StorageTxProvider<S> {
     /// Create a new transaction provider wrapping storage and mempool.
-    pub fn new(storage: Arc<RwLock<S>>, mempool: Arc<Mutex<Mempool>>) -> Self {
+    pub fn new(storage: Arc<TrackedRwLock<S>>, mempool: Arc<TrackedMutex<Mempool>>) -> Self {
         Self { storage, mempool }
     }
 }
@@ -150,13 +151,13 @@ mod tests {
     use noble_mempool::MempoolConfig;
     use noble_storage::MemoryStorage;
 
-    fn test_mempool() -> Arc<Mutex<Mempool>> {
-        Arc::new(Mutex::new(Mempool::new(MempoolConfig::default())))
+    fn test_mempool() -> Arc<TrackedMutex<Mempool>> {
+        Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::new(MempoolConfig::default())))
     }
 
     #[test]
     fn block_provider_empty_chain_tip() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let bp = StorageBlockProvider::new(storage);
         let (height, hash) = bp.chain_tip();
         assert_eq!(height, 0);
@@ -165,42 +166,42 @@ mod tests {
 
     #[test]
     fn block_provider_get_block_not_found() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let bp = StorageBlockProvider::new(storage);
         assert!(bp.get_block(&[0xFF; 32]).is_none());
     }
 
     #[test]
     fn block_provider_get_block_by_height_not_found() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let bp = StorageBlockProvider::new(storage);
         assert!(bp.get_block_by_height(999).is_none());
     }
 
     #[test]
     fn block_provider_get_block_header_not_found() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let bp = StorageBlockProvider::new(storage);
         assert!(bp.get_block_header(&[0xFF; 32]).is_none());
     }
 
     #[test]
     fn tx_provider_get_transaction_not_found() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let tp = StorageTxProvider::new(storage, test_mempool());
         assert!(tp.get_transaction(&[0xFF; 32]).is_none());
     }
 
     #[test]
     fn tx_provider_has_transaction_not_found() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
         let tp = StorageTxProvider::new(storage, test_mempool());
         assert!(!tp.has_transaction(&[0xFF; 32]));
     }
 
     #[test]
     fn block_provider_with_committed_block() {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
 
         // Commit genesis block.
         let genesis = noble_test_utils::fixtures::test_genesis_block();

@@ -13,7 +13,8 @@ mod gui_session;
 pub mod healing;
 mod tls_cert;
 #[allow(unused)]
-mod lock_order;
+// Lock-order tracker relocated to `noble_api::lock_order` (B1) so both
+// `ApiState` and `Node` — which share the same lock Arcs — can name it.
 mod log_rotate;
 pub mod metrics;
 mod node;

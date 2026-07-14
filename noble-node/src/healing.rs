@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
 use noble_api::state::PeerInfoEntry;
 use noble_api::types::DiscoveredBlockchainInfo;
 use noble_consensus::{ConsensusStateMachine, CycleEngine};
@@ -378,11 +379,11 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     chain_vote_weight: AtomicU64,
 
     // ── Subsystem references ──
-    storage: Arc<RwLock<S>>,
-    consensus: Arc<RwLock<CycleEngine>>,
-    mempool: Arc<Mutex<Mempool>>,
+    storage: Arc<TrackedRwLock<S>>,
+    consensus: Arc<TrackedRwLock<CycleEngine>>,
+    mempool: Arc<TrackedMutex<Mempool>>,
     chain_id: Arc<AtomicU32>,
-    peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
+    peer_info: Arc<TrackedRwLock<HashMap<String, PeerInfoEntry>>>,
     last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
 
     // ── Fork resolver (owned by HealingManager, shared with ApiState) ──
@@ -404,11 +405,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// Create a new HealingManager with default (pre-genesis) state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        storage: Arc<RwLock<S>>,
-        consensus: Arc<RwLock<CycleEngine>>,
-        mempool: Arc<Mutex<Mempool>>,
+        storage: Arc<TrackedRwLock<S>>,
+        consensus: Arc<TrackedRwLock<CycleEngine>>,
+        mempool: Arc<TrackedMutex<Mempool>>,
         chain_id: Arc<AtomicU32>,
-        peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
+        peer_info: Arc<TrackedRwLock<HashMap<String, PeerInfoEntry>>>,
         last_proposed: Arc<parking_lot::Mutex<Option<(u64, [u8; 32])>>>,
         discovered_blockchains: Arc<Mutex<HashMap<u32, DiscoveredBlockchainInfo>>>,
         discovered_blockchains_path: Option<PathBuf>,
@@ -3049,8 +3050,8 @@ mod tests {
     }
 
     fn make_healing_manager() -> HealingManager<MemoryStorage> {
-        let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-        let consensus = Arc::new(RwLock::new(CycleEngine::new(
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, MemoryStorage::new()));
+        let consensus = Arc::new(TrackedRwLock::new(LockOrder::Consensus, CycleEngine::new(
             noble_consensus::ConsensusConfig::default(),
             0,
             Hash256::ZERO,
@@ -3061,8 +3062,8 @@ mod tests {
         let chain_id = Arc::new(AtomicU32::new(0));
         let mut mempool_config = noble_mempool::MempoolConfig::default();
         mempool_config.chain_id = chain_id.clone();
-        let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
-        let peer_info = Arc::new(RwLock::new(HashMap::new()));
+        let mempool = Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::new(mempool_config)));
+        let peer_info = Arc::new(TrackedRwLock::new(LockOrder::PeerInfo, HashMap::new()));
         let last_proposed = Arc::new(parking_lot::Mutex::new(None));
         HealingManager::new(
             storage,

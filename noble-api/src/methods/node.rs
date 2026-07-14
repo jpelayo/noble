@@ -362,6 +362,13 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             0
         };
 
+        // Snapshot-and-drop: read the validator pubkey ONCE into an owned value
+        // before the struct literal. Reading it twice inside the literal keeps
+        // both guards alive to the end of the statement — a recursive read that
+        // deadlocks under a queued `setNodeIdentity` writer (parking_lot is
+        // writer-fair). See lock_order.rs.
+        let validator_pubkey_hex: Option<String> = self.validator_pubkey.read().clone();
+
         Ok(NodeInfoResponse {
             version: SOFTWARE_VERSION.to_string(),
             software_version: SOFTWARE_VERSION.to_string(),
@@ -379,8 +386,8 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
             storage_capacity_bytes,
             data_dir: data_dir_str,
             config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
-            validator_pubkey: self.validator_pubkey.read().clone(),
-            validator_pubkey_display: self.validator_pubkey.read().as_ref().and_then(|hex_str| {
+            validator_pubkey: validator_pubkey_hex.clone(),
+            validator_pubkey_display: validator_pubkey_hex.as_ref().and_then(|hex_str| {
                 let bytes = hex::decode(hex_str).ok()?;
                 noble_crypto::noble_addr::encode_wire_bytes(&bytes)
             }),

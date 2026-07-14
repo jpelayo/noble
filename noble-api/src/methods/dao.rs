@@ -49,7 +49,12 @@ impl<S: StorageEngine + Send + Sync + 'static> DaoApiServer for Arc<ApiState<S>>
     async fn get_active_polls(&self) -> Result<Vec<DaoPollResponse>, ErrorObjectOwned> {
         let engine = self.consensus.read();
         let badge_count = engine.badge_store().count_active();
-        let active = engine.dao_store().list_active();
+        // Snapshot-and-drop: `list_active` returns borrowed `&DaoPoll`s, so clone
+        // them into owned form before dropping the consensus guard. The `.map()`
+        // closure below calls `resolve_friendly_name` (storage(2) under
+        // consensus(4) = lock-order inversion). See lock_order.rs.
+        let active: Vec<_> = engine.dao_store().list_active().into_iter().cloned().collect();
+        drop(engine);
 
         let polls: Vec<DaoPollResponse> = active
             .into_iter()
@@ -81,7 +86,16 @@ impl<S: StorageEngine + Send + Sync + 'static> DaoApiServer for Arc<ApiState<S>>
     ) -> Result<Vec<DaoPollResponse>, ErrorObjectOwned> {
         let engine = self.consensus.read();
         let badge_count = engine.badge_store().count_active();
-        let history = engine.dao_store().list_history(limit.unwrap_or(50));
+        // Snapshot-and-drop: clone borrowed `&DaoPoll`s into owned form before
+        // dropping the consensus guard; the `.map()` closure calls
+        // `resolve_friendly_name` (storage(2) under consensus(4) inversion).
+        let history: Vec<_> = engine
+            .dao_store()
+            .list_history(limit.unwrap_or(50))
+            .into_iter()
+            .cloned()
+            .collect();
+        drop(engine);
 
         let polls: Vec<DaoPollResponse> = history
             .into_iter()

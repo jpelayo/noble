@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
 use noble_api::auth::TotpValidator;
+use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
 use noble_api::state::{ApiState, NodeIdentityData};
 use noble_api::NetworkStats;
 use noble_consensus::{
@@ -64,27 +65,27 @@ pub enum NodeError {
 ///
 /// # Lock ordering
 ///
-/// All shared locks follow the hierarchy in [`crate::lock_order::LockOrder`].
+/// All shared locks follow the hierarchy in [`noble_api::lock_order::LockOrder`].
 /// When acquiring multiple locks, always acquire lower-ordered locks first:
 ///
 /// `WalletKeystore < WalletState < Storage < ValidatorRegistry < Consensus < Mempool < NetworkStats < PeerInfo`
 pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// Shared block/transaction storage. **Lock order: 2 (Storage).**
-    pub storage: Arc<RwLock<S>>,
+    pub storage: Arc<TrackedRwLock<S>>,
     /// Transaction mempool. **Lock order: 5 (Mempool).**
-    pub mempool: Arc<Mutex<Mempool>>,
+    pub mempool: Arc<TrackedMutex<Mempool>>,
     /// Validator/participant registry. **Lock order: 3 (ValidatorRegistry).**
-    pub validator_registry: Arc<RwLock<noble_consensus::ValidatorRegistry>>,
+    pub validator_registry: Arc<TrackedRwLock<noble_consensus::ValidatorRegistry>>,
     /// PoR consensus engine. **Lock order: 4 (Consensus).**
-    pub consensus: Arc<RwLock<CycleEngine>>,
+    pub consensus: Arc<TrackedRwLock<CycleEngine>>,
     /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
     pub wallet_keystore: Arc<Mutex<KeyStore>>,
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
     pub wallet_state: Arc<Mutex<WalletState>>,
     /// Network statistics (peer counts). **Lock order: 6 (NetworkStats).**
-    pub network_stats: Arc<RwLock<NetworkStats>>,
+    pub network_stats: Arc<TrackedRwLock<NetworkStats>>,
     /// Live connected peer info (H-004). **Lock order: 7 (PeerInfo).**
-    pub peer_info: Arc<RwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
+    pub peer_info: Arc<TrackedRwLock<std::collections::HashMap<String, noble_api::state::PeerInfoEntry>>>,
     /// Active chain ID (mutable via AtomicU32 for cross-chain adoption). Shared with ApiState.
     pub chain_id: Arc<std::sync::atomic::AtomicU32>,
     /// Chain label (hex chain ID or "pre-genesis").
@@ -178,7 +179,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         encryption_password: Option<&str>,
         extras: Vec<(std::path::PathBuf, u64)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let storage = Arc::new(RwLock::new(storage));
+        let storage = Arc::new(TrackedRwLock::new(LockOrder::Storage, storage));
 
         // Derive chain_id from the earliest block hash in storage.
         // Genesis-imported chains have block 0; consensus-bootstrapped chains start at block 1.
@@ -206,7 +207,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Create mempool with shared chain_id.
         let mut mempool_config = noble_mempool::MempoolConfig::default();
         mempool_config.chain_id = chain_id_arc.clone();
-        let mempool = Arc::new(Mutex::new(Mempool::new(mempool_config)));
+        let mempool = Arc::new(TrackedMutex::new(LockOrder::Mempool, Mempool::new(mempool_config)));
 
         // Determine chain tip for the consensus engine.
         let mut tip = storage
@@ -444,7 +445,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             validator_list,
             Some(validator_list_path.clone()),
         );
-        let validator_registry = Arc::new(RwLock::new(validator_registry));
+        let validator_registry = Arc::new(TrackedRwLock::new(LockOrder::ValidatorRegistry, validator_registry));
 
         // Copy the validator keypair before CycleEngine takes ownership —
         // we need it for signing NodeAnnounce broadcasts.
@@ -603,7 +604,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Grab shared reward address Arc BEFORE engine is moved into the consensus lock.
         // This Arc is shared with ApiState so RPC hot-reload updates the engine immediately.
         let engine_reward_address_arc = engine.reward_address_arc();
-        let consensus = Arc::new(RwLock::new(engine));
+        let consensus = Arc::new(TrackedRwLock::new(LockOrder::Consensus, engine));
 
         // --- Migrate legacy scattered key files into the unified keystore ---
         migrate_legacy_keys_into_keystore(
@@ -617,8 +618,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let wallet_keystore = Arc::new(Mutex::new(keystore));
         let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
 
-        let network_stats = Arc::new(RwLock::new(NetworkStats::default()));
-        let peer_info = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let network_stats = Arc::new(TrackedRwLock::new(LockOrder::NetworkStats, NetworkStats::default()));
+        let peer_info = Arc::new(TrackedRwLock::new(LockOrder::PeerInfo, std::collections::HashMap::new()));
 
         // --- PKI identity attestation ---
         let pki_attestation = init_pki_attestation(config, &chain_meta);
@@ -1134,7 +1135,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
     fn publish_node_announce(
         &self,
-        identity: &Arc<RwLock<NodeIdentityData>>,
+        identity: &Arc<TrackedRwLock<NodeIdentityData>>,
         cmd: &mpsc::Sender<NetworkCommand>,
         activity_tx: &tokio::sync::broadcast::Sender<serde_json::Value>,
     ) {
@@ -1981,7 +1982,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let (announce_trigger_tx, mut announce_trigger_rx) = mpsc::channel::<()>(4);
 
         // Share node identity as Arc<RwLock> for announce publishing.
-        let shared_identity = Arc::new(RwLock::new(node_identity));
+        let shared_identity = Arc::new(TrackedRwLock::new(LockOrder::NodeIdentity, node_identity));
 
         // Faucet runtime flags — shared between the RPC layer (live toggle via
         // setConfigValue + getNodeInfo reporting) and the faucet supervisor
@@ -2047,7 +2048,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             gui_port,
             tls_plaintext_mode,
             peer_id: peer_id_str,
-            validator_pubkey: parking_lot::RwLock::new(validator_pubkey_str),
+            validator_pubkey: TrackedRwLock::new(LockOrder::ValidatorPubkey, validator_pubkey_str),
             validator_scheme: parking_lot::RwLock::new(validator_scheme_str),
             validator_key_path: parking_lot::RwLock::new(validator_key_path_str),
             data_dir: Some(config.storage.data_dir.clone()),
@@ -2771,7 +2772,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         peer_update_tx: &broadcast::Sender<serde_json::Value>,
         cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
         metrics: &Option<NobleMetrics>,
-        shared_identity: &Arc<RwLock<NodeIdentityData>>,
+        shared_identity: &Arc<TrackedRwLock<NodeIdentityData>>,
     ) {
         match event {
             NetworkEvent::PeerConnected {
@@ -3710,7 +3711,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         new_block_tx: &broadcast::Sender<serde_json::Value>,
         cycle_phase_tx: &broadcast::Sender<serde_json::Value>,
         metrics: &Option<NobleMetrics>,
-        shared_identity: &Arc<RwLock<NodeIdentityData>>,
+        shared_identity: &Arc<TrackedRwLock<NodeIdentityData>>,
     ) {
         // Track the last evidence hash: when PublishEvidence is followed by BanPeer
         // in the same batch, the hash is injected into the ban for operator auditability.
@@ -4456,7 +4457,7 @@ impl<S: StorageEngine> UtxoLookup for StorageUtxoLookupAdapter<'_, S> {
 /// The consensus engine holds this as a `Box<dyn UtxoValueLookup>` to resolve
 /// input UTXO values when building block proposals (fee computation).
 struct ArcStorageUtxoValueLookup<S: StorageEngine + Send + Sync + 'static> {
-    storage: Arc<RwLock<S>>,
+    storage: Arc<TrackedRwLock<S>>,
 }
 
 impl<S: StorageEngine + Send + Sync + 'static> noble_consensus::proposal::UtxoValueLookup
@@ -5590,7 +5591,7 @@ mod tests {
         let (tx_tx, _) = broadcast::channel(16);
         let (peer_tx, _) = broadcast::channel(16);
         let (cycle_tx, _) = broadcast::channel(16);
-        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+        let test_identity = Arc::new(TrackedRwLock::new(LockOrder::NodeIdentity, NodeIdentityData {
             node_name: String::new(),
             org_type: String::new(),
             org_name: String::new(),
@@ -5739,7 +5740,7 @@ mod tests {
         let (tx_tx, _) = broadcast::channel(16);
         let (peer_tx, _) = broadcast::channel(16);
         let (cycle_tx, _) = broadcast::channel(16);
-        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+        let test_identity = Arc::new(TrackedRwLock::new(LockOrder::NodeIdentity, NodeIdentityData {
             node_name: String::new(),
             org_type: String::new(),
             org_name: String::new(),
@@ -5814,7 +5815,7 @@ mod tests {
             },
             CycleIo::SetTimer { duration_secs: 10 },
         ];
-        let test_identity = Arc::new(RwLock::new(NodeIdentityData {
+        let test_identity = Arc::new(TrackedRwLock::new(LockOrder::NodeIdentity, NodeIdentityData {
             node_name: String::new(),
             org_type: String::new(),
             org_name: String::new(),

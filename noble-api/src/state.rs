@@ -11,6 +11,8 @@ use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
+use crate::lock_order::{TrackedMutex, TrackedRwLock};
+
 use tokio::sync::{broadcast, mpsc};
 
 use noble_consensus::CycleEngine;
@@ -127,13 +129,13 @@ pub type SharedTotpSlot =
 
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Block/transaction persistence. **Lock order: 2 (Storage).**
-    pub storage: Arc<RwLock<S>>,
+    pub storage: Arc<TrackedRwLock<S>>,
     /// Transaction mempool. **Lock order: 5 (Mempool).**
-    pub mempool: Arc<Mutex<Mempool>>,
+    pub mempool: Arc<TrackedMutex<Mempool>>,
     /// Validator/participant registry. **Lock order: 3 (ValidatorRegistry).**
-    pub validator_registry: Arc<RwLock<noble_consensus::ValidatorRegistry>>,
+    pub validator_registry: Arc<TrackedRwLock<noble_consensus::ValidatorRegistry>>,
     /// Consensus engine (cycle management, validator list). **Lock order: 4 (Consensus).**
-    pub consensus: Arc<RwLock<CycleEngine>>,
+    pub consensus: Arc<TrackedRwLock<CycleEngine>>,
     /// Channel to send commands to the network service.
     pub network_cmd: mpsc::Sender<NetworkCommand>,
     /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
@@ -141,7 +143,7 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
     pub wallet_state: Arc<Mutex<WalletState>>,
     /// Network statistics (updated by the node event loop). **Lock order: 6 (NetworkStats).**
-    pub network_stats: Arc<RwLock<NetworkStats>>,
+    pub network_stats: Arc<TrackedRwLock<NetworkStats>>,
     /// Chain ID for tx_id computation and validation. Shared with Node so updates propagate.
     pub chain_id: Arc<AtomicU32>,
     /// Server start time (for uptime reporting).
@@ -204,10 +206,10 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     pub validator_list_path: Option<std::path::PathBuf>,
 
     /// Live connected peer info, keyed by hex peer_id. Updated by the node event loop. **Lock order: 7 (PeerInfo).**
-    pub peer_info: Arc<RwLock<HashMap<String, PeerInfoEntry>>>,
+    pub peer_info: Arc<TrackedRwLock<HashMap<String, PeerInfoEntry>>>,
 
-    /// Mutable node identity. Loaded from identity.json (or noble.toml fallback).
-    pub node_identity: Arc<RwLock<NodeIdentityData>>,
+    /// Mutable node identity. Loaded from identity.json (or noble.toml fallback). **Lock order: 11 (NodeIdentity).**
+    pub node_identity: Arc<TrackedRwLock<NodeIdentityData>>,
     /// Path to identity.json for persistence. None = no persistence.
     pub identity_path: Option<std::path::PathBuf>,
 
@@ -272,7 +274,8 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
 
     /// Hex-encoded wire pubkey of the validator key (if the node is in validator mode).
     /// Wrapped in RwLock so `setNodeIdentity` can hot-reload after setup.
-    pub validator_pubkey: parking_lot::RwLock<Option<String>>,
+    /// **Lock order: 12 (ValidatorPubkey).**
+    pub validator_pubkey: TrackedRwLock<Option<String>>,
 
     /// Signature scheme of the validator key: `"secp256k1"`.
     pub validator_scheme: parking_lot::RwLock<Option<String>>,
@@ -453,7 +456,13 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
     /// Resolve a node name from wire bytes using all available sources.
     /// Convenience method that delegates to the free function [`resolve_node_name`].
     ///
-    /// Lock acquisition order: Storage(2) < ValidatorRegistry(3).
+    /// # Lock contract — DO NOT CALL WHILE HOLDING ANY OF THESE LOCKS
+    /// This acquires `storage`(2), `validator_registry`(3), `node_identity`,
+    /// and `validator_pubkey` internally. A caller that already holds
+    /// `validator_registry` (any mode) re-locks it recursively → deadlock; a
+    /// caller holding `peer_info`(7) inverts the hierarchy. Snapshot the wires
+    /// you need into owned data, drop your guards, THEN call this in a second
+    /// loop. See `get_badge_holders` for the correct pattern.
     pub fn resolve_name(&self, wire: &[u8]) -> String {
         let storage = self.storage.read();         // Lock order: 2
         let registry = self.validator_registry.read(); // Lock order: 3
@@ -469,7 +478,11 @@ impl<S: StorageEngine + Send + Sync + 'static> ApiState<S> {
 
     /// Resolve a node name, returning `None` if only the raw key fallback was available.
     ///
-    /// Lock acquisition order: Storage(2) < ValidatorRegistry(3).
+    /// # Lock contract — DO NOT CALL WHILE HOLDING ANY OF THESE LOCKS
+    /// Same as [`Self::resolve_name`]: acquires `storage`(2),
+    /// `validator_registry`(3), `node_identity`, `validator_pubkey`. Never call
+    /// it while holding `validator_registry` or `peer_info` — snapshot first,
+    /// drop, then resolve.
     pub fn resolve_friendly_name(&self, wire: &[u8]) -> Option<String> {
         let storage = self.storage.read();         // Lock order: 2
         let registry = self.validator_registry.read(); // Lock order: 3

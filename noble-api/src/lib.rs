@@ -7,6 +7,7 @@ pub mod auth;
 pub mod error;
 pub mod gatekeeper;
 pub mod ip_filter;
+pub mod lock_order;
 pub mod middleware;
 pub mod peer_addr;
 pub mod rate_limit;
@@ -21,6 +22,7 @@ pub mod server;
 pub use error::ApiError;
 pub use rate_limit::RpcRateLimiter;
 pub use server::{start_server, ServerHandles};
+pub use lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
 pub use state::{ApiState, NetworkStats, NodeIdentityData, resolve_node_name};
 
 /// API version string, included in the `X-Noble-API-Version` response header

@@ -102,39 +102,50 @@ impl<S: StorageEngine + Send + Sync + 'static> BadgeApiServer for Arc<ApiState<S
 
         // 2. During bootstrap: all voting-capable peers (registry + connected peers with identity_key)
         if in_bootstrap {
-            // Local validator registry
-            {
+            // Local validator registry — snapshot wires, DROP the guard, THEN
+            // resolve names. resolve_friendly_name locks storage+registry+identity,
+            // so calling it under the registry read lock re-locks registry
+            // recursively and deadlocks under writer contention.
+            let registry_wires: Vec<Vec<u8>> = {
                 let registry = self.validator_registry.read();
-                for (pubkey, _) in registry.list_validators() {
-                    let wire = pubkey.to_wire_bytes();
-                    let hex = noble_crypto::noble_addr::encode_wire_bytes(&wire)
-                        .unwrap_or_else(|| hex::encode(&wire));
-                    if seen.insert(hex.clone()) {
-                        let node_name = self.resolve_friendly_name(&wire);
-                        holders.push(BadgeHolderResponse {
-                            pubkey: hex, node_name,
-                            status: "bootstrap".to_string(),
-                            granted_at_height: 0, last_seen: 0,
-                        });
-                    }
+                registry
+                    .list_validators()
+                    .into_iter()
+                    .map(|(pubkey, _)| pubkey.to_wire_bytes())
+                    .collect()
+            };
+            for wire in &registry_wires {
+                let hex = noble_crypto::noble_addr::encode_wire_bytes(wire)
+                    .unwrap_or_else(|| hex::encode(wire));
+                if seen.insert(hex.clone()) {
+                    let node_name = self.resolve_friendly_name(wire);
+                    holders.push(BadgeHolderResponse {
+                        pubkey: hex, node_name,
+                        status: "bootstrap".to_string(),
+                        granted_at_height: 0, last_seen: 0,
+                    });
                 }
             }
-            // Connected peers that announced as validators
-            {
+            // Connected peers — snapshot identity_keys, DROP peer_info, THEN
+            // resolve names. Calling resolve_friendly_name (storage(2)+registry(3))
+            // under peer_info(7) is a lock-order inversion.
+            let peer_iks: Vec<Vec<u8>> = {
                 let peer_info = self.peer_info.read();
-                for p in peer_info.values() {
-                    if let Some(ref ik) = p.identity_key {
-                        let hex = noble_crypto::noble_addr::encode_wire_bytes(ik)
-                            .unwrap_or_else(|| hex::encode(ik));
-                        if seen.insert(hex.clone()) {
-                            let node_name = self.resolve_friendly_name(ik);
-                            holders.push(BadgeHolderResponse {
-                                pubkey: hex, node_name,
-                                status: "bootstrap".to_string(),
-                                granted_at_height: 0, last_seen: 0,
-                            });
-                        }
-                    }
+                peer_info
+                    .values()
+                    .filter_map(|p| p.identity_key.clone())
+                    .collect()
+            };
+            for ik in &peer_iks {
+                let hex = noble_crypto::noble_addr::encode_wire_bytes(ik)
+                    .unwrap_or_else(|| hex::encode(ik));
+                if seen.insert(hex.clone()) {
+                    let node_name = self.resolve_friendly_name(ik);
+                    holders.push(BadgeHolderResponse {
+                        pubkey: hex, node_name,
+                        status: "bootstrap".to_string(),
+                        granted_at_height: 0, last_seen: 0,
+                    });
                 }
             }
         }
