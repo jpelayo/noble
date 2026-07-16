@@ -2352,112 +2352,128 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         announce: &NodeAnnounce,
         identity_wire: &[u8],
     ) {
-        let mut cache = self.announce_cache.lock();
-        let mut contradiction: Option<noble_core::AnnounceContradiction> = None;
+        // Detect under the cache lock, act after dropping it: the evidence
+        // actions below acquire storage(2) and consensus(4), and holding the
+        // (untracked) announce_cache mutex across those acquisitions is a
+        // latent lock-order hazard — one future counter-path (any code that
+        // takes announce_cache while holding storage/consensus) would close a
+        // deadlock cycle. See lock_order.rs. Detection/action separation per
+        // walkabout Discipline 6.
+        let mut evidence_to_publish: Option<noble_core::AnnounceEquivocationEvidence> = None;
+        {
+            let mut cache = self.announce_cache.lock();
+            let mut contradiction: Option<noble_core::AnnounceContradiction> = None;
 
-        if let Some(prev) = cache.get(identity_wire) {
-            // If the peer changed chain_id, their old cached announce is
-            // stale (they adopted a new chain).  Skip ALL equivocation checks
-            // — chain adoption legitimately changes chain_id AND can regress
-            // chain_tip to 0.
-            let chain_changed = prev.chain_id != 0
-                && announce.chain_id != 0
-                && prev.chain_id != announce.chain_id;
+            if let Some(prev) = cache.get(identity_wire) {
+                // If the peer changed chain_id, their old cached announce is
+                // stale (they adopted a new chain).  Skip ALL equivocation checks
+                // — chain adoption legitimately changes chain_id AND can regress
+                // chain_tip to 0.
+                let chain_changed = prev.chain_id != 0
+                    && announce.chain_id != 0
+                    && prev.chain_id != announce.chain_id;
 
-            if chain_changed {
-                tracing::debug!(
-                    task = "evidence",
-                    "peer {} changed chain_id ({:#010X} → {:#010X}) — likely adoption, skipping equivocation check",
-                    hex::encode(identity_wire),
-                    prev.chain_id,
-                    announce.chain_id,
-                );
-            } else if prev.chain_id == announce.chain_id
-                && prev.chain_tip_height.is_some()
-                && announce.chain_tip_height.is_some()
-            {
-                // Same chain — check for tip regression.
-                let prev_h = prev.chain_tip_height.unwrap_or(0);
-                let ann_h = announce.chain_tip_height.unwrap_or(0);
-                let prev_t = prev.timestamp;
-                let ann_t = announce.timestamp;
-                if (ann_t > prev_t && ann_h < prev_h)
-                    || (prev_t > ann_t && prev_h < ann_h)
-                {
-                    contradiction = Some(noble_core::AnnounceContradiction::ChainTipRegression);
-                }
-            }
-
-            // Check competing proposals (same chain only).
-            if !chain_changed && contradiction.is_none() {
-                if prev.proposed_height.is_some()
-                    && prev.proposed_height == announce.proposed_height
-                    && prev.proposed_hash != announce.proposed_hash
-                {
-                    contradiction = Some(noble_core::AnnounceContradiction::CompetingProposals);
-                }
-            }
-
-            // ── Evidence construction, storage, and publication ──
-            if let Some(c) = contradiction {
-                let evidence = noble_core::AnnounceEquivocationEvidence {
-                    identity_key: announce.identity_key.clone(),
-                    announce_a: prev.clone(),
-                    announce_b: announce.clone(),
-                    contradiction: c,
-                };
-                if evidence.verify().is_ok() {
-                    tracing::warn!(
+                if chain_changed {
+                    tracing::debug!(
                         task = "evidence",
-                        "announce equivocation detected for {}",
+                        "peer {} changed chain_id ({:#010X} → {:#010X}) — likely adoption, skipping equivocation check",
                         hex::encode(identity_wire),
+                        prev.chain_id,
+                        announce.chain_id,
                     );
-                    match noble_codec::NobleCbor::to_cbor(
-                        &noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence.clone()),
-                    ) {
-                        Ok(cbor) => {
-                            let ev_hash = noble_crypto::sha256(&cbor);
-                            if let Err(e) = self.storage.read().store_evidence(
-                                ev_hash.as_bytes(),
-                                &cbor,
-                            ) {
-                                tracing::warn!(task = "evidence", "failed to store evidence: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(task = "evidence", "failed to serialize equivocation evidence: {e}");
+                } else if prev.chain_id == announce.chain_id
+                    && prev.chain_tip_height.is_some()
+                    && announce.chain_tip_height.is_some()
+                {
+                    // Same chain — check for tip regression.
+                    let prev_h = prev.chain_tip_height.unwrap_or(0);
+                    let ann_h = announce.chain_tip_height.unwrap_or(0);
+                    let prev_t = prev.timestamp;
+                    let ann_t = announce.timestamp;
+                    if (ann_t > prev_t && ann_h < prev_h)
+                        || (prev_t > ann_t && prev_h < ann_h)
+                    {
+                        contradiction = Some(noble_core::AnnounceContradiction::ChainTipRegression);
+                    }
+                }
+
+                // Check competing proposals (same chain only).
+                if !chain_changed && contradiction.is_none() {
+                    if prev.proposed_height.is_some()
+                        && prev.proposed_height == announce.proposed_height
+                        && prev.proposed_hash != announce.proposed_hash
+                    {
+                        contradiction = Some(noble_core::AnnounceContradiction::CompetingProposals);
+                    }
+                }
+
+                // ── Evidence construction (owned — actions happen after the
+                // cache guard drops) ──
+                if let Some(c) = contradiction {
+                    evidence_to_publish = Some(noble_core::AnnounceEquivocationEvidence {
+                        identity_key: announce.identity_key.clone(),
+                        announce_a: prev.clone(),
+                        announce_b: announce.clone(),
+                        contradiction: c,
+                    });
+                }
+            }
+
+            // Evict stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS).
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if cache.len() > 512 {
+                cache.retain(|_, a| {
+                    now_ts.saturating_sub(a.timestamp) < noble_core::NODE_ANNOUNCE_MAX_AGE_SECS
+                });
+            }
+            // Cap at 1024 entries to bound memory.
+            if cache.len() >= 1024 {
+                if let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, a)| a.timestamp)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest_key);
+                }
+            }
+            // Update cache with latest announce.
+            cache.insert(identity_wire.to_vec(), announce.clone());
+        } // announce_cache guard drops here — actions below hold nothing.
+
+        // ── Evidence verification, storage, and publication (lock-free
+        // entry: storage(2) and consensus(4) each taken as temporaries) ──
+        if let Some(evidence) = evidence_to_publish {
+            if evidence.verify().is_ok() {
+                tracing::warn!(
+                    task = "evidence",
+                    "announce equivocation detected for {}",
+                    hex::encode(identity_wire),
+                );
+                match noble_codec::NobleCbor::to_cbor(
+                    &noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence.clone()),
+                ) {
+                    Ok(cbor) => {
+                        let ev_hash = noble_crypto::sha256(&cbor);
+                        if let Err(e) = self.storage.read().store_evidence(
+                            ev_hash.as_bytes(),
+                            &cbor,
+                        ) {
+                            tracing::warn!(task = "evidence", "failed to store evidence: {e}");
                         }
                     }
-                    self.consensus.write().reputation_mut().record_misbehavior(identity_wire);
-                    self.send_network(NetworkCommand::PublishEvidence(
-                        Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
-                    ));
+                    Err(e) => {
+                        tracing::warn!(task = "evidence", "failed to serialize equivocation evidence: {e}");
+                    }
                 }
+                self.consensus.write().reputation_mut().record_misbehavior(identity_wire);
+                self.send_network(NetworkCommand::PublishEvidence(
+                    Box::new(noble_core::MisbehaviorEvidence::AnnounceEquivocation(evidence)),
+                ));
             }
         }
-
-        // Evict stale entries (older than NODE_ANNOUNCE_MAX_AGE_SECS).
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if cache.len() > 512 {
-            cache.retain(|_, a| {
-                now_ts.saturating_sub(a.timestamp) < noble_core::NODE_ANNOUNCE_MAX_AGE_SECS
-            });
-        }
-        // Cap at 1024 entries to bound memory.
-        if cache.len() >= 1024 {
-            if let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, a)| a.timestamp)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest_key);
-            }
-        }
-        // Update cache with latest announce.
-        cache.insert(identity_wire.to_vec(), announce.clone());
     }
 
     // ── Sync import ──

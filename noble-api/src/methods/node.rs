@@ -2238,7 +2238,7 @@ fn faucet_admin_token_fingerprint(token_hex: &str) -> String {
 /// (via [`ensure_faucet_admin_token`]) so the token is present in the
 /// keystore before the faucet subprocess starts reading via local-FS.
 pub fn read_or_create_faucet_admin_token_with(
-    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    keystore: &crate::lock_order::TrackedMutex<noble_wallet::KeyStore>,
     chain_meta: &[u8; 32],
 ) -> Result<(String, u64, String), String> {
     let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));
@@ -2302,7 +2302,7 @@ pub fn read_or_create_faucet_admin_token_with(
 /// Generates a fresh token even if one already exists; persists
 /// atomically (delete + store). Returns the new value.
 pub fn rotate_faucet_admin_token_with(
-    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    keystore: &crate::lock_order::TrackedMutex<noble_wallet::KeyStore>,
     chain_meta: &[u8; 32],
 ) -> Result<(String, u64, String), String> {
     let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));
@@ -2347,7 +2347,7 @@ pub fn rotate_faucet_admin_token_with(
 ///
 /// Audit follow-up #4.
 pub fn ensure_faucet_admin_token(
-    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    keystore: &crate::lock_order::TrackedMutex<noble_wallet::KeyStore>,
     chain_meta: &[u8; 32],
 ) -> Result<String, String> {
     read_or_create_faucet_admin_token_with(keystore, chain_meta)
@@ -2364,7 +2364,7 @@ pub fn ensure_faucet_admin_token(
 ///
 /// Open-node hardening Group 4 (audit follow-up #4 + #5).
 pub fn ensure_faucet_passphrase(
-    keystore: &parking_lot::Mutex<noble_wallet::KeyStore>,
+    keystore: &crate::lock_order::TrackedMutex<noble_wallet::KeyStore>,
     chain_meta: &[u8; 32],
 ) -> Result<(), String> {
     let wallet_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(chain_meta));

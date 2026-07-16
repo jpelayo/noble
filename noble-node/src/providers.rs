@@ -121,6 +121,10 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
     fn get_transaction(&self, tx_id: &[u8; 32]) -> Option<Transaction> {
         let h = Hash256(*tx_id);
         // Check mempool first (pending txs not yet in a block).
+        // LOCK ORDER: this mempool(5) block MUST stay closed before the
+        // storage(2) read below — merging them is a 5→2 descending acquisition.
+        // This runs on the network service thread, so an inversion here
+        // collides cross-thread with the event loop's storage→mempool order.
         {
             let pool = self.mempool.lock();
             if let Some(entry) = pool.get(&h) {
@@ -134,6 +138,8 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
 
     fn has_transaction(&self, tx_id: &[u8; 32]) -> bool {
         let h = Hash256(*tx_id);
+        // LOCK ORDER: same as get_transaction — mempool(5) block must close
+        // before storage(2) is read.
         {
             let pool = self.mempool.lock();
             if pool.contains(&h) {

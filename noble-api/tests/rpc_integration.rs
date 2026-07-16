@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
 use std::time::Instant;
 
@@ -74,8 +74,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
     let mut keystore = KeyStore::create_for_faucet(&ks_path, &chain_meta).expect("keystore");
     let ks_pass = hex::encode(noble_crypto::file_encrypt::derive_wallet_key(&chain_meta));
     keystore.unlock(&ks_pass).expect("unlock");
-    let wallet_keystore = Arc::new(Mutex::new(keystore));
-    let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
+    let wallet_keystore = Arc::new(TrackedMutex::new(LockOrder::WalletKeystore, keystore));
+    let wallet_state = Arc::new(TrackedMutex::new(LockOrder::WalletState, WalletState::new(3600)));
     let network_stats = Arc::new(TrackedRwLock::new(LockOrder::NetworkStats, NetworkStats::default()));
 
     let (new_block_tx, _) = tokio::sync::broadcast::channel(16);
@@ -951,6 +951,7 @@ async fn rpc_readers_do_not_deadlock_under_writer_contention() {
                 let _ = s.get_block_votes(1).await; // C2: resolve under storage guard
                 let _ = s.get_active_polls().await; // C3: resolve under consensus guard
                 let _ = s.get_poll_history(None).await; // C4: same as C3
+                let _ = s.get_wallet_info(None).await; // D1: wallet_state→keystore order
             }
         }));
     }

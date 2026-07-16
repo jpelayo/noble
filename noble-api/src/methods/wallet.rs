@@ -229,7 +229,14 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
     }
 
     async fn get_wallet_info(&self, addresses_only: Option<bool>) -> Result<WalletInfoResponse, ErrorObjectOwned> {
-        let state = self.wallet_state.lock();
+        // Snapshot-and-drop: read wallet_state(1) ONCE into owned values. Holding
+        // the guard across the keystore(0) acquisition below would be a DESCENDING
+        // 1→0 acquisition against the lock hierarchy (see lock_order.rs) — and it
+        // needlessly pins wallet_state across the whole balance scan.
+        let (unlocked, expires_at) = {
+            let state = self.wallet_state.lock();
+            (state.is_unlocked(), state.expires_at_unix())
+        };
 
         let all_keys = if addresses_only.unwrap_or(false) {
             // Client mode: wallet keystore keys only (skip validator key).
@@ -334,8 +341,8 @@ impl<S: StorageEngine + Send + Sync + 'static> WalletApiServer for Arc<ApiState<
             .saturating_sub(total_pending);
 
         Ok(WalletInfoResponse {
-            unlocked: state.is_unlocked(),
-            expires_at: state.expires_at_unix(),
+            unlocked,
+            expires_at,
             key_count,
             balance: total_balance,
             available,

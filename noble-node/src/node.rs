@@ -79,9 +79,9 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// PoR consensus engine. **Lock order: 4 (Consensus).**
     pub consensus: Arc<TrackedRwLock<CycleEngine>>,
     /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
-    pub wallet_keystore: Arc<Mutex<KeyStore>>,
+    pub wallet_keystore: Arc<TrackedMutex<KeyStore>>,
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
-    pub wallet_state: Arc<Mutex<WalletState>>,
+    pub wallet_state: Arc<TrackedMutex<WalletState>>,
     /// Network statistics (peer counts). **Lock order: 6 (NetworkStats).**
     pub network_stats: Arc<TrackedRwLock<NetworkStats>>,
     /// Live connected peer info (H-004). **Lock order: 7 (PeerInfo).**
@@ -615,8 +615,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             &migration_validator_key,
         );
 
-        let wallet_keystore = Arc::new(Mutex::new(keystore));
-        let wallet_state = Arc::new(Mutex::new(WalletState::new(3600)));
+        let wallet_keystore = Arc::new(TrackedMutex::new(LockOrder::WalletKeystore, keystore));
+        let wallet_state = Arc::new(TrackedMutex::new(LockOrder::WalletState, WalletState::new(3600)));
 
         let network_stats = Arc::new(TrackedRwLock::new(LockOrder::NetworkStats, NetworkStats::default()));
         let peer_info = Arc::new(TrackedRwLock::new(LockOrder::PeerInfo, std::collections::HashMap::new()));
@@ -2801,6 +2801,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     return;
                 }
 
+                // LOCK ORDER: the network_stats(6) block below MUST stay closed
+                // before the consensus(4) block — merging them would be a 6→4
+                // descending acquisition (deadlock under writer-fair parking_lot).
                 let new_count = {
                     let mut stats = self.network_stats.write();
                     stats.peer_count += 1;
@@ -2851,6 +2854,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // Look up friendly name from known_peers (set by previous NodeAnnounce).
                 // Fallback: check persistent peer records in storage for inbound
                 // connections where peer_id_hex may not yet be in known_peers.
+                // LOCK ORDER: the registry(3) block must keep dropping at its
+                // closing brace BEFORE the `.or_else` closure takes storage(2)
+                // — inlining them would be a 3→2 descending acquisition.
                 let peer_name = {
                     let registry = self.validator_registry.read();
                     registry.known_peers().values()
@@ -3055,6 +3061,10 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         stats.outbound_count = stats.outbound_count.saturating_sub(1);
                     }
                     let new_count = stats.peer_count;
+                    // LOCK ORDER: this drop is LOAD-BEARING — without it the
+                    // consensus(4) write below happens under network_stats(6),
+                    // a 6→4 descending acquisition (deadlock under writer-fair
+                    // parking_lot). Do not remove or reorder.
                     drop(stats);
                     let mut engine = self.consensus.write();
                     engine.set_peer_count(new_count);
@@ -4042,9 +4052,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 }
                 CycleIo::PersistFinalityState { height, hash, cycle } => {
                     let data = encode_finality_state(height, &hash, cycle);
-                    let storage = self.storage.read();
-                    if let Err(e) = storage.store_finality_state(&data) {
-                        tracing::warn!(task = "finality", "failed to persist finality state: {e}");
+                    // Scope the storage(2) guard so it drops before the
+                    // (untracked) fork_resolver mutex below — holding storage
+                    // across it is a latent lock-order hazard. See lock_order.rs.
+                    {
+                        let storage = self.storage.read();
+                        if let Err(e) = storage.store_finality_state(&data) {
+                            tracing::warn!(task = "finality", "failed to persist finality state: {e}");
+                        }
                     }
                     // Sync fork resolver's finality floor.
                     self.healing.fork_resolver().lock().set_finalized_height(height);
@@ -5068,7 +5083,7 @@ fn parse_voting_strategy(
 /// 3. If `[gateway] enabled = false`, returns None.
 fn resolve_gateway_key(
     config: &NodeConfig,
-    wallet_keystore: &Arc<Mutex<noble_wallet::KeyStore>>,
+    wallet_keystore: &Arc<TrackedMutex<noble_wallet::KeyStore>>,
 ) -> Option<Vec<u8>> {
     if !config.gateway.enabled {
         tracing::info!(task = "config_load", "Gateway fee split disabled by config");

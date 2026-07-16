@@ -139,9 +139,9 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Channel to send commands to the network service.
     pub network_cmd: mpsc::Sender<NetworkCommand>,
     /// Encrypted keystore for signing. **Lock order: 0 (WalletKeystore).**
-    pub wallet_keystore: Arc<Mutex<KeyStore>>,
+    pub wallet_keystore: Arc<TrackedMutex<KeyStore>>,
     /// Wallet lock/unlock state with auto-expire. **Lock order: 1 (WalletState).**
-    pub wallet_state: Arc<Mutex<WalletState>>,
+    pub wallet_state: Arc<TrackedMutex<WalletState>>,
     /// Network statistics (updated by the node event loop). **Lock order: 6 (NetworkStats).**
     pub network_stats: Arc<TrackedRwLock<NetworkStats>>,
     /// Chain ID for tx_id computation and validation. Shared with Node so updates propagate.
