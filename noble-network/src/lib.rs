@@ -53,3 +53,63 @@ pub use traits::{BlockProvider, TxProvider};
 
 // Re-export libp2p Multiaddr so dependents don't need a direct libp2p dependency.
 pub use libp2p::Multiaddr;
+
+/// Rebuild a multiaddr string replacing ONLY its `/tcp/<port>` component
+/// (K3-10). Typed component walk — safe for `/ip6/…`, `/dns4/…`, and any
+/// trailing protocol suffixes, unlike string surgery. Errors if the input is
+/// not a valid multiaddr.
+pub fn multiaddr_with_tcp_port(addr: &str, port: u16) -> Result<String, String> {
+    let parsed: Multiaddr = addr
+        .parse()
+        .map_err(|e| format!("invalid multiaddr {addr:?}: {e}"))?;
+    // libp2p parses "" as a valid EMPTY multiaddr; require a Tcp component so
+    // a portless (useless-as-listener) address is rejected, not passed through.
+    let mut found_tcp = false;
+    let rebuilt: Multiaddr = parsed
+        .iter()
+        .map(|p| match p {
+            libp2p::multiaddr::Protocol::Tcp(_) => {
+                found_tcp = true;
+                libp2p::multiaddr::Protocol::Tcp(port)
+            }
+            other => other,
+        })
+        .collect();
+    if !found_tcp {
+        return Err(format!("multiaddr {addr:?} has no /tcp component"));
+    }
+    Ok(rebuilt.to_string())
+}
+
+#[cfg(test)]
+mod multiaddr_port_tests {
+    use super::multiaddr_with_tcp_port;
+
+    #[test]
+    fn swaps_only_the_tcp_port() {
+        assert_eq!(
+            multiaddr_with_tcp_port("/ip4/0.0.0.0/tcp/8780", 9000).unwrap(),
+            "/ip4/0.0.0.0/tcp/9000"
+        );
+        assert_eq!(
+            multiaddr_with_tcp_port("/ip4/192.168.1.7/tcp/8780", 9000).unwrap(),
+            "/ip4/192.168.1.7/tcp/9000"
+        );
+        // IPv6 host survives intact (the string-surgery approach broke this).
+        assert_eq!(
+            multiaddr_with_tcp_port("/ip6/::1/tcp/8780", 9000).unwrap(),
+            "/ip6/::1/tcp/9000"
+        );
+        // DNS + trailing p2p suffix survive.
+        assert_eq!(
+            multiaddr_with_tcp_port("/dns4/node.example.com/tcp/8780", 9000).unwrap(),
+            "/dns4/node.example.com/tcp/9000"
+        );
+    }
+
+    #[test]
+    fn invalid_multiaddr_is_an_error() {
+        assert!(multiaddr_with_tcp_port("0.0.0.0:8780", 9000).is_err());
+        assert!(multiaddr_with_tcp_port("", 9000).is_err());
+    }
+}

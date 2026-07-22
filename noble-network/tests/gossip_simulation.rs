@@ -66,11 +66,10 @@ impl TxProvider for NullTxProvider {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Network config tuned for fast gossip tests: random port, 1s heartbeat, no mDNS/Kademlia.
+/// Network config tuned for fast gossip tests: random port, 1s heartbeat, no Kademlia.
 fn gossip_test_config() -> NetworkConfig {
     NetworkConfig {
         listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
-        enable_mdns: false,
         enable_kademlia: false,
         gossipsub_heartbeat_interval_secs: 1,
         max_outbound_per_subnet: 10,

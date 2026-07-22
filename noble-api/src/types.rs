@@ -556,9 +556,13 @@ pub struct PeerInfoResponse {
     pub last_ban_reason: Option<BanReasonResponse>,
     /// Connection status: "connected" or "disconnected".
     pub status: String,
-    /// Peer's chain tip height (from last status exchange).
+    /// Peer's ADVERTISED chain tip height (from last status exchange).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_tip_height: Option<u64>,
+    /// Highest height VERIFIED from this peer (blocks they served that
+    /// validated + committed). K3-04.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_height: Option<u64>,
     /// Peer's chain tip hash (from last status exchange).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_tip_hash: Option<String>,

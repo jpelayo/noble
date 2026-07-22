@@ -111,6 +111,16 @@ pub struct MempoolEntry {
     pub received_at: u64,
 }
 
+/// Single source of truth for protocol-level transaction expiry (K3-03).
+/// A tx is expired when `now > expires_at` — the exact boundary the admission
+/// check has always used. Admission, the periodic sweep, and the
+/// block-proposal iterator all call this one helper so the boundary can
+/// never drift between them.
+#[inline]
+pub fn tx_is_expired(tx: &Transaction, now: u64) -> bool {
+    tx.expires_at.is_some_and(|e| now > e)
+}
+
 /// Callback trait for checking whether a transaction exists in the confirmed chain.
 ///
 /// This allows the mempool to reject duplicates without depending directly
@@ -171,6 +181,10 @@ pub struct Mempool {
     by_checksum: HashMap<Hash256, HashSet<Hash256>>,
     /// Timestamp index: received_at → set of tx_ids (for expiry).
     by_timestamp: BTreeMap<u64, HashSet<Hash256>>,
+    /// Protocol-expiry index: tx.expires_at → set of tx_ids (K3-03). Only
+    /// txs that carry `expires_at` appear here. Lets `expire()` sweep
+    /// protocol-expired entries without a full-pool scan.
+    by_expiry: BTreeMap<u64, HashSet<Hash256>>,
     /// Sender index: pubkey wire bytes → set of tx_ids (for pending debit calc).
     by_sender: HashMap<Vec<u8>, HashSet<Hash256>>,
     /// UTXO double-spend prevention: outpoint → the in-mempool tx spending it
@@ -211,6 +225,7 @@ impl Mempool {
             by_fee_rate: BTreeMap::new(),
             by_checksum: HashMap::new(),
             by_timestamp: BTreeMap::new(),
+            by_expiry: BTreeMap::new(),
             by_sender: HashMap::new(),
             spent_by_mempool: HashMap::new(),
             mempool_outputs: HashMap::new(),
@@ -420,15 +435,19 @@ impl Mempool {
     /// parents are still pooled: an excluded parent simply never enters
     /// `emitted`, so its descendants never become ready and drop out at the
     /// no-progress break.
-    pub fn iter_for_block_proposal(&self, min_fee_rate: u64) -> Vec<&MempoolEntry> {
+    pub fn iter_for_block_proposal(&self, min_fee_rate: u64, now: u64) -> Vec<&MempoolEntry> {
         let mut result: Vec<&MempoolEntry> = Vec::with_capacity(self.by_id.len());
         let mut emitted: HashSet<Hash256> = HashSet::new();
 
         // Collect entries meeting the fee floor, sorted by fee rate desc
-        // (default priority).
+        // (default priority). Defensively exclude protocol-expired entries
+        // (K3-03): a tx can expire between admission and the next expire()
+        // sweep — proposing it would make our own block invalid at every
+        // other validator. An excluded parent keeps its descendants out via
+        // the topo gate below (they never become ready).
         let all_by_fee: Vec<&MempoolEntry> = self
             .iter_by_fee_rate_desc()
-            .filter(|e| e.fee_rate >= min_fee_rate)
+            .filter(|e| e.fee_rate >= min_fee_rate && !tx_is_expired(&e.tx, now))
             .collect();
 
         // Repeatedly scan: emit entries whose parents are all emitted (or have no parents).
@@ -554,6 +573,14 @@ impl Mempool {
             ));
         }
 
+        // Step 2.58: Protocol expiry check (shared boundary — see tx_is_expired).
+        // Runs BEFORE the core structural validator so an expired tx yields the
+        // typed `Expired` variant; the core T-EXPIRY check (which reports via
+        // ValidationError::Internal) never fires for mempool admission.
+        if tx_is_expired(tx, current_time) {
+            return Err(MempoolError::Expired);
+        }
+
         // Step 2.6: Version chain — if doc:prev_checksum is present, verify it exists on-chain
         if noble_core::tx_types::handler_for(tx.tx_type).map_or(false, |h| h.validates_version_chain()) {
             if let Some(prev_hex) = tx
@@ -594,8 +621,15 @@ impl Mempool {
             },
             chain_height,
         };
-        noble_core::validate_transaction_structure(tx, &tx_id, &validation_ctx)
-            .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
+        noble_core::validate_transaction_structure(tx, &tx_id, &validation_ctx).map_err(|e| {
+            match e {
+                // T4 is clock-dependent — never objective peer misbehavior (K3-01).
+                noble_core::ValidationError::TimestampOutOfRange { .. } => {
+                    MempoolError::TimestampOutOfRange(e.to_string())
+                }
+                other => MempoolError::StructuralValidation(other.to_string()),
+            }
+        })?;
 
         // Step 6.5: UTXO existence + double-spend check
         tracing::trace!("mempool step 6.5: UTXO validation");
@@ -613,10 +647,7 @@ impl Mempool {
 
             // Check for in-mempool double-spend
             if self.spent_by_mempool.contains_key(outpoint) {
-                return Err(MempoolError::StructuralValidation(
-                    "Double spend detected. One of the inputs in this transaction is already \
-                    being used by another pending transaction in the mempool.".into(),
-                ));
+                return Err(MempoolError::DoubleSpend);
             }
 
             // Verify UTXO exists: check on-chain first, then mempool outputs
@@ -625,18 +656,10 @@ impl Mempool {
                     // Maturity check — ALL UTXOs need COINBASE_MATURITY confirmations.
                     if chain_height < creation_height + noble_core::COINBASE_MATURITY {
                         let blocks_remaining = (creation_height + noble_core::COINBASE_MATURITY).saturating_sub(chain_height);
-                        return Err(MempoolError::StructuralValidation(
-                            format!(
-                                "Output not yet spendable. Transactions require {} confirmations \
-                                before they can be used. This output was created at block {} and will be \
-                                available at block {} ({} block{} remaining).",
-                                noble_core::COINBASE_MATURITY,
-                                creation_height,
-                                creation_height + noble_core::COINBASE_MATURITY,
-                                blocks_remaining,
-                                if blocks_remaining == 1 { "" } else { "s" },
-                            ),
-                        ));
+                        return Err(MempoolError::ImmatureInput {
+                            available_at: creation_height + noble_core::COINBASE_MATURITY,
+                            blocks_remaining,
+                        });
                     }
                     input_value_sum = input_value_sum.saturating_add(value);
                 }
@@ -649,10 +672,7 @@ impl Mempool {
                             parent_deps.insert(*parent_id);
                         }
                     } else {
-                        return Err(MempoolError::StructuralValidation(
-                            "Input references a coin that does not exist or has already been spent. \
-                            This usually means the funds were used in another transaction.".into(),
-                        ));
+                        return Err(MempoolError::MissingInput);
                     }
                 }
             }
@@ -665,25 +685,14 @@ impl Mempool {
 
         // Compute implicit fee: sum(inputs) - sum(outputs)
         let output_value_sum = tx.total_output_value();
-        let fee = input_value_sum.checked_sub(output_value_sum).ok_or_else(|| {
-            MempoolError::StructuralValidation(format!(
-                "Insufficient funds. The transaction sends {} groats but only {} groats are available \
-                in the selected inputs (short by {} groats).",
-                output_value_sum, input_value_sum,
-                output_value_sum.saturating_sub(input_value_sum),
-            ))
-        })?;
+        let fee = input_value_sum.checked_sub(output_value_sum).ok_or(
+            MempoolError::InsufficientBalance {
+                have: input_value_sum,
+                need: output_value_sum,
+            },
+        )?;
 
         // Step 7: Fee rate check (Bitcoin-style free market)
-        // Step 6b: Transaction expiry check.
-        if let Some(expires_at) = tx.expires_at {
-            if current_time > expires_at {
-                return Err(MempoolError::StructuralValidation(
-                    "Transaction has expired. It was valid until a specific time that has now passed. \
-                    Please create a new transaction.".into(),
-                ));
-            }
-        }
 
         tracing::trace!("mempool step 7: fee rate check");
         let fee_rate = if size_bytes > 0 { fee / size_bytes as u64 } else { 0 };
@@ -708,8 +717,11 @@ impl Mempool {
         // after expiry/eviction.
         tracing::trace!("mempool step 7.5: signature verification");
         if !self.sig_cache.contains(&tx_id) {
+            // K3-01: signature failures use the dedicated typed variant
+            // (previously funneled into StructuralValidation, leaving
+            // SignatureInvalid dead).
             noble_core::validate_transaction_signatures(tx, &validation_ctx)
-                .map_err(|e| MempoolError::StructuralValidation(e.to_string()))?;
+                .map_err(|e| MempoolError::SignatureInvalid(e.to_string()))?;
             self.sig_cache.insert(tx_id);
         }
 
@@ -782,6 +794,16 @@ impl Mempool {
             }
         }
 
+        // Remove from protocol-expiry index (K3-03)
+        if let Some(expires_at) = entry.tx.expires_at {
+            if let Some(set) = self.by_expiry.get_mut(&expires_at) {
+                set.remove(tx_id);
+                if set.is_empty() {
+                    self.by_expiry.remove(&expires_at);
+                }
+            }
+        }
+
         // Remove from sender index
         if let Ok(sender) = entry.tx.issuer_sig.to_noble_public_key() {
             let sender_wire = sender.to_wire_bytes();
@@ -844,18 +866,30 @@ impl Mempool {
         }
     }
 
-    /// Remove all expired transactions (received_at + expiry_secs < current_time).
+    /// Remove all expired transactions — by mempool residence TTL
+    /// (received_at + expiry_secs < current_time) AND by protocol-level
+    /// `tx.expires_at` (K3-03: a tx valid at admission can expire while
+    /// resident; without this sweep it stayed proposal-eligible).
     /// Returns the TOTAL number of removed entries, including any fresher
     /// descendants cascade-evicted along with an expired parent.
     pub fn expire(&mut self, current_time: u64) -> usize {
         let cutoff = current_time.saturating_sub(self.config.expiry_secs);
 
-        // Collect expired tx_ids
-        let expired: Vec<Hash256> = self
+        // Collect TTL-expired tx_ids
+        let mut expired: Vec<Hash256> = self
             .by_timestamp
             .range(..=cutoff)
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect();
+
+        // Collect protocol-expired tx_ids (expired ⟺ now > expires_at,
+        // i.e. keys strictly below current_time — same boundary as
+        // tx_is_expired / admission).
+        expired.extend(
+            self.by_expiry
+                .range(..current_time)
+                .flat_map(|(_, ids)| ids.iter().copied()),
+        );
 
         let mut removed = Vec::new();
         for tx_id in expired {
@@ -875,6 +909,7 @@ impl Mempool {
         self.by_fee_rate.clear();
         self.by_checksum.clear();
         self.by_timestamp.clear();
+        self.by_expiry.clear();
         self.by_sender.clear();
         self.spent_by_mempool.clear();
         self.mempool_outputs.clear();
@@ -984,6 +1019,10 @@ impl Mempool {
             self.depends_on.insert(tx_id, parent_deps);
         }
 
+        // Protocol-expiry index (K3-03): only txs carrying expires_at.
+        if let Some(expires_at) = entry.tx.expires_at {
+            self.by_expiry.entry(expires_at).or_default().insert(tx_id);
+        }
         self.by_id.insert(tx_id, entry);
         self.by_fee_rate.entry(fee_rate).or_default().insert(tx_id);
         self.by_checksum.entry(checksum).or_default().insert(tx_id);
@@ -1394,7 +1433,7 @@ mod tests {
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         let result = pool.admit(&tx, current_time, &NoChainLookup, &NoUtxoLookup, 100);
-        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+        assert!(matches!(result, Err(MempoolError::TimestampOutOfRange(_))),
             "future timestamp must be rejected at admission, got {result:?}");
     }
 
@@ -1412,7 +1451,7 @@ mod tests {
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
         let result = pool.admit(&tx, current_time, &NoChainLookup, &NoUtxoLookup, 100);
-        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))),
+        assert!(matches!(result, Err(MempoolError::TimestampOutOfRange(_))),
             "stale timestamp must be rejected at admission, got {result:?}");
     }
 
@@ -1481,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn step4_reject_duplicate_metadata_keys() {
+    fn duplicate_metadata_keys_allowed_by_decree() {
         let mut pool = Mempool::new(test_config());
         let (sk, pk) = secp256k1::generate_keypair();
         let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
@@ -1520,8 +1559,12 @@ mod tests {
         let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
         tx.issuer_sig = priv_key.sign(&msg).unwrap();
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
+        // T9 was removed by decree (2026-04-01, noble-core/src/metadata.rs):
+        // duplicate metadata keys are ALLOWED. The old expectation only ever
+        // "passed" because the height-0 maturity error masked it (both were
+        // StructuralValidation strings before the K3-01 typed variants).
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
+        assert!(result.is_ok(), "duplicate metadata keys are legal: {result:?}");
     }
 
     // --- Step 5+6: Signature verification ---
@@ -1533,10 +1576,14 @@ mod tests {
         let mut tx = make_signed_tx(&sk, &pk, b"doc1", TEST_FEE);
         tx.issuer_sig.signature = vec![0u8; 64]; // Corrupt signature
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        // Signature failures surface through the shared stateless validator, which
-        // admit() funnels into StructuralValidation (SignatureInvalid is unused here).
-        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
+        // chain_height 10: clears the COINBASE_MATURITY(3) gate so admission
+        // actually REACHES the signature check (at height 0 the maturity
+        // error fired first and masked it — exposed by the K3-01 typed
+        // variants).
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
+        // K3-01: signature failures now surface through the dedicated
+        // SignatureInvalid variant (typed rejection classes).
+        assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
     #[test]
@@ -1550,10 +1597,11 @@ mod tests {
             signature: vec![0u8; 64],
         });
 
-        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 0);
-        // Signature failures surface through the shared stateless validator, which
-        // admit() funnels into StructuralValidation (SignatureInvalid is unused here).
-        assert!(matches!(result, Err(MempoolError::StructuralValidation(_))));
+        // chain_height 10: see step6_reject_invalid_issuer_sig.
+        let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
+        // K3-01: signature failures now surface through the dedicated
+        // SignatureInvalid variant (typed rejection classes).
+        assert!(matches!(result, Err(MempoolError::SignatureInvalid(_))));
     }
 
     // --- Step 7: Fee check ---
@@ -1811,7 +1859,7 @@ mod tests {
         let tx = make_signed_transfer_with_outpoint(&sk, &pk, &recip, outpoint, 500_000, 499_000);
         let result = pool.admit(&tx, 1_700_000_000, &NoChainLookup, &EmptyUtxoLookup, 0);
         assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("does not exist or has already been spent")),
+            matches!(result, Err(MempoolError::MissingInput)),
             "expected unknown UTXO error, got {:?}",
             result
         );
@@ -1846,7 +1894,7 @@ mod tests {
             .unwrap();
         let result = pool.admit(&tx2, 1_700_000_000, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(
-            matches!(result, Err(MempoolError::StructuralValidation(ref s)) if s.contains("Double spend")),
+            matches!(result, Err(MempoolError::DoubleSpend)),
             "double spend should be rejected, got {:?}",
             result
         );
@@ -2480,7 +2528,7 @@ mod tests {
         tx.issuer_sig.signature = vec![0u8; 64];
         let res = pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10);
         assert!(
-            matches!(res, Err(MempoolError::StructuralValidation(_))),
+            matches!(res, Err(MempoolError::SignatureInvalid(_))),
             "corrupt sig must be rejected at step 7.5: {res:?}"
         );
         assert!(pool.is_empty());
@@ -2554,7 +2602,7 @@ mod tests {
         let (p_id, c_id, _) = admit_parent_child_chain(&mut pool);
 
         // No floor: both included, parent strictly before child.
-        let all: Vec<Hash256> = pool.iter_for_block_proposal(0).iter().map(|e| e.tx_id).collect();
+        let all: Vec<Hash256> = pool.iter_for_block_proposal(0, NOW).iter().map(|e| e.tx_id).collect();
         let pi = all.iter().position(|id| *id == p_id).expect("parent in feed");
         let ci = all.iter().position(|id| *id == c_id).expect("child in feed");
         assert!(pi < ci, "parent must precede child");
@@ -2562,7 +2610,7 @@ mod tests {
         // Floor 10: parent (rate ~1) excluded → child (rate ~57) must be
         // excluded too, even though it clears the floor on its own — a child
         // without its parent is unbuildable and would only waste a slot.
-        let filtered = pool.iter_for_block_proposal(10);
+        let filtered = pool.iter_for_block_proposal(10, NOW);
         assert!(
             filtered.is_empty(),
             "below-floor parent must exclude the whole package, got {} entries",
@@ -2606,5 +2654,86 @@ mod tests {
         let removed = pool.expire(NOW + 3601);
         assert_eq!(removed, 2, "expire must count cascade-evicted children");
         assert!(pool.is_empty());
+    }
+
+    // --- K3-03: protocol-level expires_at enforcement ---
+
+    /// Like make_signed_tx but with a protocol expiry set BEFORE signing.
+    fn make_signed_tx_expiring(
+        sk: &[u8],
+        pk: &[u8],
+        doc: &[u8],
+        fee: u64,
+        expires_at: u64,
+    ) -> Transaction {
+        let priv_key = NoblePrivateKey::Secp256k1(sk.to_vec());
+        let mut tx = make_signed_tx(sk, pk, doc, fee);
+        tx.expires_at = Some(expires_at);
+        let msg = tx.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        tx.issuer_sig = priv_key.sign(&msg).unwrap();
+        tx
+    }
+
+    #[test]
+    fn protocol_expiry_sweep_and_proposal_filter() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let exp = NOW + 100;
+        let tx = make_signed_tx_expiring(&sk, &pk, b"expiring", TEST_FEE, exp);
+
+        // Valid at admission (NOW < expires_at).
+        let tx_id = pool.admit(&tx, NOW, &NoChainLookup, &NoUtxoLookup, 10).unwrap();
+
+        // Boundary: at now == expires_at the tx is NOT yet expired
+        // (admission boundary is `now > expires_at`) — still proposable,
+        // and the sweep must not remove it.
+        assert_eq!(pool.iter_for_block_proposal(0, exp).len(), 1);
+        assert_eq!(pool.expire(exp), 0, "not expired at now == expires_at");
+        assert_eq!(pool.len(), 1);
+
+        // One second past: excluded from proposal BEFORE any sweep runs.
+        assert!(
+            pool.iter_for_block_proposal(0, exp + 1).is_empty(),
+            "expired tx must never be proposed, even pre-sweep"
+        );
+        // Still resident (mempool TTL not reached) until the sweep…
+        assert_eq!(pool.len(), 1);
+        // …which now removes it by protocol expiry, long before the TTL.
+        assert_eq!(pool.expire(exp + 1), 1);
+        assert!(pool.is_empty());
+        assert!(!pool.contains(&tx_id));
+    }
+
+    #[test]
+    fn expired_parent_excludes_child_from_proposal_and_sweep_cascades() {
+        let mut pool = Mempool::new(test_config());
+        let (sk, pk) = secp256k1::generate_keypair();
+        let (_, recip) = secp256k1::generate_keypair();
+        let v = NO_UTXO_LOOKUP_VALUE;
+        let x = unique_outpoint();
+        let lookup = MapUtxoLookup([(x.clone(), v)].into_iter().collect());
+        let exp = NOW + 100;
+
+        // Parent expires at `exp`; child (spending parent's change) does not.
+        let mut p = make_signed_transfer_with_outpoint(&sk, &pk, &recip, x, 1_000, v - 1_500);
+        p.expires_at = Some(exp);
+        let msg = p.compute_signing_message_for_chain(test_chain_id()).unwrap();
+        p.issuer_sig = NoblePrivateKey::Secp256k1(sk.to_vec()).sign(&msg).unwrap();
+        let p_id = pool.admit(&p, NOW, &NoChainLookup, &lookup, 10).unwrap();
+        let p_change = OutPoint { txid: p_id, vout: 1 };
+        let c = make_signed_transfer_with_outpoint(&sk, &pk, &recip, p_change, v - 1_500 - 20_000, 0);
+        let c_id = pool.admit(&c, NOW, &NoChainLookup, &lookup, 10).unwrap();
+
+        // Past parent expiry: parent excluded → child (unexpired but
+        // unbuildable without its parent) excluded via the topo gate.
+        assert!(
+            pool.iter_for_block_proposal(0, exp + 1).is_empty(),
+            "expired parent must exclude the whole package from proposal"
+        );
+
+        // Sweep removes the parent by protocol expiry and cascades the child.
+        assert_eq!(pool.expire(exp + 1), 2, "sweep must cascade to descendants");
+        assert!(pool.is_empty());
+        assert!(!pool.contains(&p_id) && !pool.contains(&c_id));
     }
 }

@@ -26,6 +26,13 @@ pub trait NodeApi {
     #[method(name = "getNodeInfo")]
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned>;
 
+    /// K3-08: issue a one-use, 30s WebSocket upgrade ticket. Requires normal
+    /// HTTP authentication (TOTP per scope) — the ticket then authenticates
+    /// exactly one WS upgrade via `?ticket=<hex>` without placing credential
+    /// material in the URL.
+    #[method(name = "issueWsTicket")]
+    async fn issue_ws_ticket(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Get the API version and method count.
     #[method(name = "getApiVersion")]
     async fn get_api_version(&self) -> Result<ApiVersionResponse, ErrorObjectOwned>;
@@ -328,6 +335,23 @@ pub trait NodeApi {
 
 #[jsonrpsee::core::async_trait]
 impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>> {
+    async fn issue_ws_ticket(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+        let ticket = hex::encode(bytes);
+        {
+            let mut tickets = self.ws_tickets.lock();
+            let now = std::time::Instant::now();
+            // Expire stale, bound outstanding at 64 (oldest evicted).
+            tickets.retain(|(_, at)| now.duration_since(*at).as_secs() < 30);
+            if tickets.len() >= 64 {
+                tickets.remove(0);
+            }
+            tickets.push((ticket.clone(), now));
+        }
+        Ok(serde_json::json!({ "ticket": ticket, "expires_in_secs": 30 }))
+    }
+
     async fn get_node_info(&self) -> Result<NodeInfoResponse, ErrorObjectOwned> {
         let uptime = self.start_time.elapsed().as_secs();
         let max_ver = self.max_network_version.read().clone();
@@ -775,10 +799,18 @@ impl<S: StorageEngine + Send + Sync + 'static> NodeApiServer for Arc<ApiState<S>
 
         // Disable remote_setup now that setup is complete (security: prevent
         // re-exposure of the wizard if identity.json is later deleted).
+        // K3-12: persistence failure is an ERROR, not a warning — returning
+        // success while the one-shot disable silently failed would leave a
+        // stale `remote_setup = true` armed for any future identity damage.
+        // Identity was already persisted atomically above, so the operator
+        // can safely retry this call.
         if let Some(ref set_fn) = self.set_config_value {
-            if let Err(e) = set_fn("api", "remote_setup", "false") {
-                tracing::warn!(task = "identity", "failed to disable remote_setup: {e}");
-            }
+            set_fn("api", "remote_setup", "false").map_err(|e| {
+                ApiError::Internal(format!(
+                    "identity saved, but persisting remote_setup=false failed: {e}. \
+                     Retry setNodeIdentity or set [api] remote_setup = false in noble.toml manually."
+                ))
+            })?;
         }
 
         // Trigger NodeAnnounce re-broadcast so peers see updated identity.

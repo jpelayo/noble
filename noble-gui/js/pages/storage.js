@@ -329,13 +329,24 @@ export function init(root, ctx) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
     try {
+      // K3-09: numeric fields must parse — an invalid explicit value aborts
+      // the save with a field-specific error instead of silently becoming a
+      // default.
+      const numField = (sel, label, min) => {
+        const raw = root.querySelector(sel).value.trim();
+        const n = parseInt(raw, 10);
+        if (!Number.isInteger(n) || n < min) {
+          throw new Error(`${label}: "${raw}" is not a valid number (min ${min})`);
+        }
+        return n;
+      };
       await rpc.call('noble_setStorageConfig', {
         data_dir: root.querySelector('#stc-data-dir').value.trim(),
-        cache_size_mb: parseInt(root.querySelector('#stc-cache-size').value, 10) || 256,
+        cache_size_mb: numField('#stc-cache-size', 'Cache size (MB)', 16),
         compression: root.querySelector('#stc-compression').checked,
         pruning_mode: root.querySelector('#stc-pruning').value,
-        keep_blocks: parseInt(root.querySelector('#stc-keep-blocks').value, 10) || 10000,
-        max_db_size_gb: parseInt(root.querySelector('#stc-max-size').value, 10) || 0,
+        keep_blocks: numField('#stc-keep-blocks', 'Keep blocks', 0),
+        max_db_size_gb: numField('#stc-max-size', 'Max DB size (GB)', 0),
         volumes: currentVolumes.filter(v => v.path),
       });
       statusEl.textContent = 'Configuration saved. Restart the node for changes to take effect.';

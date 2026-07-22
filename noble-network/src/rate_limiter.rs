@@ -108,6 +108,219 @@ impl TxRateLimiter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// K3-05: weighted ingress budgets with a reserved consensus pool
+// ---------------------------------------------------------------------------
+
+/// Gossip topic classes for ingress accounting (K3-05). Costs reflect the
+/// expected decode + signature-verification + routing work, not message count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressTopic {
+    TxAnnounce,
+    BlockAnnounce,
+    Vote,
+    Evidence,
+    NodeAnnounce,
+    PeerExchange,
+}
+
+impl IngressTopic {
+    /// Weighted cost in budget units (tunable here — one place).
+    pub fn cost(self) -> f64 {
+        match self {
+            IngressTopic::TxAnnounce => 1.0,
+            IngressTopic::BlockAnnounce => 2.0,
+            IngressTopic::Vote => 1.0,
+            IngressTopic::Evidence => 4.0,
+            IngressTopic::NodeAnnounce => 4.0,
+            IngressTopic::PeerExchange => 8.0,
+        }
+    }
+
+    /// Consensus-critical topics draw from their OWN reserved global pool so
+    /// tx/announce/PeX floods can never starve votes, blocks, or evidence.
+    pub fn is_consensus(self) -> bool {
+        matches!(
+            self,
+            IngressTopic::Vote | IngressTopic::BlockAnnounce | IngressTopic::Evidence
+        )
+    }
+}
+
+/// A single weighted token bucket.
+struct GlobalBucket {
+    tokens: f64,
+    capacity: f64,
+    rate: f64,
+    last_refill: Instant,
+}
+
+impl GlobalBucket {
+    fn new(capacity: f64, rate: f64) -> Self {
+        Self { tokens: capacity, capacity, rate, last_refill: Instant::now() }
+    }
+    fn try_consume(&mut self, cost: f64, now: Instant) -> bool {
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
+        self.last_refill = now;
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Two-level weighted ingress budget (K3-05):
+///
+/// 1. **Per-peer** weighted bucket — one peer cannot flood any topic.
+/// 2. **Global** buckets with a RESERVED consensus pool — consensus topics
+///    (votes/blocks/evidence) have independent capacity, so flooding any
+///    non-consensus topic leaves a tested minimum of consensus throughput.
+///
+/// Checked BEFORE decode and signature verification (the caller maps the
+/// gossipsub topic id to an [`IngressTopic`] without touching the payload).
+pub struct IngressBudget {
+    /// Per-peer weighted buckets (all topics share one bucket per peer; the
+    /// COST differs per topic). Reuses the bounded LRU discipline.
+    per_peer: TxRateLimiter,
+    /// Reserved pool for consensus-critical topics.
+    global_consensus: GlobalBucket,
+    /// Pool for everything else.
+    global_general: GlobalBucket,
+    /// Drop counters per topic (bounded, observable via periodic log).
+    pub dropped: [u64; 6],
+}
+
+impl IngressBudget {
+    /// `peer_burst`/`peer_rate`: weighted units per peer (burst / per-second).
+    /// `consensus_burst`/`consensus_rate` and `general_burst`/`general_rate`:
+    /// the two global pools.
+    pub fn new(
+        peer_burst: u32,
+        peer_rate: u32,
+        consensus_burst: u32,
+        consensus_rate: u32,
+        general_burst: u32,
+        general_rate: u32,
+    ) -> Self {
+        Self {
+            per_peer: TxRateLimiter::new(peer_burst, peer_rate),
+            global_consensus: GlobalBucket::new(consensus_burst as f64, consensus_rate as f64),
+            global_general: GlobalBucket::new(general_burst as f64, general_rate as f64),
+            dropped: [0; 6],
+        }
+    }
+
+    fn topic_index(topic: IngressTopic) -> usize {
+        match topic {
+            IngressTopic::TxAnnounce => 0,
+            IngressTopic::BlockAnnounce => 1,
+            IngressTopic::Vote => 2,
+            IngressTopic::Evidence => 3,
+            IngressTopic::NodeAnnounce => 4,
+            IngressTopic::PeerExchange => 5,
+        }
+    }
+
+    /// Charge `topic`'s cost for a message relayed by `peer`.
+    /// Returns `false` (drop before decode) when either the peer's or the
+    /// applicable global budget is exhausted.
+    pub fn try_consume(&mut self, peer: &PeerId, topic: IngressTopic) -> bool {
+        let cost = topic.cost();
+        let now = Instant::now();
+        // Per-peer first (weighted: charge `cost` tokens).
+        if !self.per_peer.try_consume_weighted(peer, cost) {
+            self.dropped[Self::topic_index(topic)] += 1;
+            return false;
+        }
+        let pool = if topic.is_consensus() {
+            &mut self.global_consensus
+        } else {
+            &mut self.global_general
+        };
+        if !pool.try_consume(cost, now) {
+            self.dropped[Self::topic_index(topic)] += 1;
+            return false;
+        }
+        true
+    }
+
+    /// Remove a peer's bucket (on disconnect).
+    pub fn remove_peer(&mut self, peer_id: &PeerId) {
+        self.per_peer.remove_peer(peer_id);
+    }
+
+    /// Drop idle per-peer buckets.
+    pub fn cleanup(&mut self, max_idle: std::time::Duration) {
+        self.per_peer.cleanup(max_idle);
+    }
+
+    /// Total drops across all topics (for periodic observability logging).
+    pub fn total_dropped(&self) -> u64 {
+        self.dropped.iter().sum()
+    }
+}
+
+impl TxRateLimiter {
+    /// Weighted variant of [`TxRateLimiter::try_consume`]: charge `cost`
+    /// tokens instead of exactly one.
+    pub fn try_consume_weighted(&mut self, peer_id: &PeerId, cost: f64) -> bool {
+        let now = Instant::now();
+        if self.buckets.len() >= self.max_tracked && !self.buckets.contains_key(peer_id) {
+            self.evict_oldest();
+        }
+        let capacity = self.capacity;
+        let rate = self.rate;
+        let bucket = self.buckets.entry(*peer_id).or_insert(Bucket {
+            tokens: capacity,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(capacity);
+        bucket.last_refill = now;
+        if bucket.tokens >= cost {
+            bucket.tokens -= cost;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::*;
+
+    #[test]
+    fn consensus_pool_survives_general_flood() {
+        // Tiny general pool, independent consensus pool.
+        let mut b = IngressBudget::new(1000, 1000, 100, 0, 10, 0);
+        let flooder = PeerId::random();
+        // Exhaust the general pool with PeX (cost 8) + NodeAnnounce (cost 4).
+        assert!(b.try_consume(&flooder, IngressTopic::PeerExchange)); // 10-8=2
+        assert!(!b.try_consume(&flooder, IngressTopic::NodeAnnounce)); // needs 4 > 2
+        // Consensus topics still flow from their reserved pool.
+        for _ in 0..50 {
+            assert!(b.try_consume(&flooder, IngressTopic::Vote), "votes must never starve");
+        }
+        assert!(b.try_consume(&flooder, IngressTopic::BlockAnnounce));
+        assert!(b.total_dropped() >= 1);
+    }
+
+    #[test]
+    fn per_peer_budget_is_weighted_and_independent() {
+        // Per-peer burst 8, no refill: one PeX (8) exhausts a peer.
+        let mut b = IngressBudget::new(8, 0, 1000, 1000, 1000, 1000);
+        let p1 = PeerId::random();
+        let p2 = PeerId::random();
+        assert!(b.try_consume(&p1, IngressTopic::PeerExchange)); // 8-8=0
+        assert!(!b.try_consume(&p1, IngressTopic::Vote), "peer budget exhausted");
+        assert!(b.try_consume(&p2, IngressTopic::Vote), "other peers unaffected");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

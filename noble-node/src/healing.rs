@@ -88,6 +88,23 @@ const SYNC_RETRY_SECS: u64 = 10;
 /// redialed. 2 keeps a wedged channel from lingering — with the ≤10s fast-fail
 /// signal the rebuild happens in ~20s — while tolerating a single transient blip.
 const SYNC_PEER_MAX_FAILURES: u32 = 2;
+
+/// K3-04: max per-peer tip-failure records kept (bounded memory).
+const TIP_QUARANTINE_CAP: usize = 256;
+/// K3-04: base quarantine after repeated failed tip substantiation (secs).
+const TIP_QUARANTINE_BASE_SECS: u64 = 60;
+/// K3-04: quarantine ceiling (secs).
+const TIP_QUARANTINE_MAX_SECS: u64 = 3600;
+
+/// Per-peer record of failed attempts to substantiate a claimed chain tip
+/// (K3-04). Survives disconnect; cleared on any successful import.
+#[derive(Debug, Clone, Copy, Default)]
+struct TipFailureRecord {
+    failures: u32,
+    /// Epoch secs until which this peer's ADVERTISED tips are ignored for
+    /// sync selection and proposal suppression. 0 = not quarantined.
+    until: u64,
+}
 /// Backstop: if we remain behind a known-ahead peer with NO tip progress for
 /// this long, the per-peer recovery (Layers 1-4) has somehow failed. Fire a
 /// CRITICAL alarm and force a full re-sync. This must never trigger if the
@@ -361,6 +378,12 @@ pub struct HealingManager<S: StorageEngine + Send + Sync + 'static> {
     /// is force-dropped (and then redialed) to rebuild a wedged channel rather
     /// than retrying the same dead one forever. Reset to 0 on any sync progress.
     sync_failure_streak: u32,
+    /// K3-04: per-peer memory of failed tip substantiation, surviving
+    /// disconnect/reconnect (the global streak resets on disconnect — a false-
+    /// tip peer could previously reconnect and repeat forever). Keyed by hex
+    /// peer_id; bounded at [`TIP_QUARANTINE_CAP`] (oldest-`until` evicted).
+    /// `failures` drives exponential quarantine: 60s × 2^(n-1), cap 3600s.
+    tip_quarantine: HashMap<String, TipFailureRecord>,
     /// Tip height observed when the current "behind a peer" episode began
     /// (stall watchdog, Layer 6). Reset on progress / catch-up.
     stall_watch_height: u64,
@@ -437,6 +460,7 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
             sync_start_height: 0,
             sync_verify_retries: 0,
             sync_failure_streak: 0,
+            tip_quarantine: HashMap::new(),
             stall_watch_height: 0,
             stall_watch_since: 0,
             discovered_blockchains,
@@ -1433,6 +1457,11 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
         self.sync_state = SyncState::Idle;
         self.sync_failure_streak = self.sync_failure_streak.saturating_add(1);
         let streak = self.sync_failure_streak;
+        // K3-04: per-peer memory (survives the disconnect below, unlike the
+        // global streak). Exponential quarantine of this peer's ADVERTISED
+        // tips once failures repeat — timeouts alone are NOT protocol
+        // violations, so no ban category is applied here.
+        self.record_tip_failure(&failed_peer, now);
 
         if streak >= SYNC_PEER_MAX_FAILURES {
             // Channel to this peer is wedged (connected but not answering).
@@ -1667,11 +1696,30 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
     /// here would stall sync after block 1 commit (chain_id changes from 0
     /// to derived before the peer's gossipsub announce arrives).
     fn find_best_sync_peer(&self, our_height: u64) -> (Option<Vec<u8>>, u64) {
+        self.select_sync_peer(our_height, None)
+    }
+
+    /// K3-04 selection core: prefer the highest VERIFIED height (a peer that
+    /// actually served us valid blocks); fall back to the highest ADVERTISED
+    /// height from peers not under tip quarantine. `exclude_hex` skips one
+    /// peer (retry escalation).
+    fn select_sync_peer(
+        &self,
+        our_height: u64,
+        exclude_hex: Option<&str>,
+    ) -> (Option<Vec<u8>>, u64) {
         let local_chain_id = self.get_chain_id();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let peers = self.peer_info.read();
-        let mut best_peer = None;
-        let mut best_height = our_height;
+        let mut best_verified: Option<(Vec<u8>, u64)> = None;
+        let mut best_advertised: Option<(Vec<u8>, u64)> = None;
         for entry in peers.values() {
+            if exclude_hex.is_some_and(|x| entry.peer_id == x) {
+                continue;
+            }
             // Skip peers on a known-different chain.  chain_id=None means
             // "not yet announced" — allow (service.rs mismatch check is authoritative).
             if local_chain_id != 0 {
@@ -1679,43 +1727,89 @@ impl<S: StorageEngine + Send + Sync + 'static> HealingManager<S> {
                     if peer_cid != local_chain_id { continue; }
                 }
             }
+            let Ok(pid) = hex::decode(&entry.peer_id) else { continue };
+            if let Some(v) = entry.verified_height {
+                if v > our_height && best_verified.as_ref().is_none_or(|(_, bh)| v > *bh) {
+                    best_verified = Some((pid.clone(), v));
+                }
+            }
             if let Some(h) = entry.chain_tip_height {
-                if h > best_height {
-                    if let Ok(pid) = hex::decode(&entry.peer_id) {
-                        best_height = h;
-                        best_peer = Some(pid);
-                    }
+                if h > our_height
+                    && !self.is_tip_quarantined(&entry.peer_id, now)
+                    && best_advertised.as_ref().is_none_or(|(_, bh)| h > *bh)
+                {
+                    best_advertised = Some((pid, h));
                 }
             }
         }
-        (best_peer, best_height)
+        // Verified wins even at a lower height than an unverified claim —
+        // a proven source beats a promise. (An advertised-only claim still
+        // gets its bounded probe when no verified source exists.)
+        match best_verified.or(best_advertised) {
+            Some((pid, h)) => (Some(pid), h),
+            None => (None, our_height),
+        }
     }
 
     /// Find the best sync peer on the same chain, excluding a specific peer.
     fn find_best_sync_peer_excluding(&self, our_height: u64, exclude: &[u8]) -> (Option<Vec<u8>>, u64) {
-        let local_chain_id = self.get_chain_id();
-        let peers = self.peer_info.read();
         let exclude_hex = hex::encode(exclude);
-        let mut best_peer = None;
-        let mut best_height = our_height;
-        for entry in peers.values() {
-            if entry.peer_id == exclude_hex { continue; }
-            // Skip peers on a known-different chain (see find_best_sync_peer doc).
-            if local_chain_id != 0 {
-                if let Some(peer_cid) = entry.chain_id {
-                    if peer_cid != local_chain_id { continue; }
-                }
-            }
-            if let Some(h) = entry.chain_tip_height {
-                if h > best_height {
-                    if let Ok(pid) = hex::decode(&entry.peer_id) {
-                        best_height = h;
-                        best_peer = Some(pid);
-                    }
-                }
+        self.select_sync_peer(our_height, Some(&exclude_hex))
+    }
+
+    /// K3-04: record a failed attempt to substantiate `peer`'s claimed tip.
+    /// Second-and-later failures start an exponential quarantine of the
+    /// peer's ADVERTISED heights (60s x 2^(n-1), capped 3600s).
+    fn record_tip_failure(&mut self, peer: &[u8], now: u64) {
+        let hex_pid = hex::encode(peer);
+        // Bound the map: evict the record with the OLDEST `until` when full
+        // and the peer isn't already tracked.
+        if !self.tip_quarantine.contains_key(&hex_pid)
+            && self.tip_quarantine.len() >= TIP_QUARANTINE_CAP
+        {
+            if let Some(oldest) = self
+                .tip_quarantine
+                .iter()
+                .min_by_key(|(_, r)| r.until)
+                .map(|(k, _)| k.clone())
+            {
+                self.tip_quarantine.remove(&oldest);
             }
         }
-        (best_peer, best_height)
+        let rec = self.tip_quarantine.entry(hex_pid.clone()).or_default();
+        rec.failures = rec.failures.saturating_add(1);
+        let failures = rec.failures;
+        if failures >= SYNC_PEER_MAX_FAILURES {
+            let exp = failures.saturating_sub(SYNC_PEER_MAX_FAILURES).min(6);
+            let dur = (TIP_QUARANTINE_BASE_SECS << exp).min(TIP_QUARANTINE_MAX_SECS);
+            rec.until = now.saturating_add(dur);
+            tracing::warn!(
+                task = "sync",
+                peer = %hex_pid,
+                failures,
+                quarantine_secs = dur,
+                "peer repeatedly failed to substantiate its claimed tip — advertised heights quarantined",
+            );
+            self.broadcast_event(serde_json::json!({
+                "event": "tip_quarantine",
+                "peer_id": hex_pid,
+                "failures": failures,
+                "quarantine_secs": dur,
+            }));
+        }
+    }
+
+    /// K3-04: true while `peer_hex`'s ADVERTISED tips must be ignored.
+    pub fn is_tip_quarantined(&self, peer_hex: &str, now: u64) -> bool {
+        self.tip_quarantine
+            .get(peer_hex)
+            .is_some_and(|r| r.until > now)
+    }
+
+    /// K3-04: a block from this peer validated + committed — its tip claims
+    /// are substantiated. Clears failure memory and any active quarantine.
+    pub fn clear_tip_failures(&mut self, peer: &[u8]) {
+        self.tip_quarantine.remove(&hex::encode(peer));
     }
 
     /// Handle sync peer disconnecting — reset to Idle so next advance_sync picks new peer.
@@ -3143,6 +3237,97 @@ mod tests {
         );
     }
 
+    /// K3-04: repeated failed tip substantiation quarantines the peer's
+    /// ADVERTISED heights with exponential backoff; success clears it.
+    #[test]
+    fn tip_quarantine_lifecycle() {
+        let mut h = make_healing_manager();
+        let _net_rx = wire_io(&mut h);
+        let peer = vec![7u8, 7, 7];
+        let hex_pid = hex::encode(&peer);
+        let now = 1_000_000u64;
+
+        // First failure: recorded, but below the quarantine threshold.
+        h.record_tip_failure(&peer, now);
+        assert!(!h.is_tip_quarantined(&hex_pid, now));
+
+        // Second failure: quarantine starts (base 60s).
+        h.record_tip_failure(&peer, now);
+        assert!(h.is_tip_quarantined(&hex_pid, now));
+        assert!(h.is_tip_quarantined(&hex_pid, now + 59));
+        assert!(!h.is_tip_quarantined(&hex_pid, now + 61), "base quarantine is 60s");
+
+        // Third failure: exponential — 120s.
+        h.record_tip_failure(&peer, now + 100);
+        assert!(h.is_tip_quarantined(&hex_pid, now + 100 + 119));
+        assert!(!h.is_tip_quarantined(&hex_pid, now + 100 + 121));
+
+        // A validated block from the peer clears everything.
+        h.clear_tip_failures(&peer);
+        assert!(!h.is_tip_quarantined(&hex_pid, now));
+        h.record_tip_failure(&peer, now);
+        assert!(!h.is_tip_quarantined(&hex_pid, now), "history restarts after clear");
+    }
+
+    /// K3-04: sync selection prefers VERIFIED heights and ignores advertised
+    /// claims from quarantined peers.
+    #[test]
+    fn sync_selection_prefers_verified_and_skips_quarantined() {
+        let mut h = make_healing_manager();
+        let _net_rx = wire_io(&mut h);
+        let real_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mk = |id: &str, adv: Option<u64>, ver: Option<u64>| PeerInfoEntry {
+            peer_id: id.to_string(),
+            direction: "outbound".to_string(),
+            addr: String::new(),
+            connected_at: 0,
+            ban_score: 0,
+            misbehavior_categories: Vec::new(),
+            chain_tip_height: adv,
+            chain_tip_hash: None,
+            verified_height: ver,
+            proposed_height: None,
+            identity_key: None,
+            node_name: None,
+            latency_ms: None,
+            last_ban_reason: None,
+            chain_id: None,
+            min_fee_rate: None,
+        };
+        let a = hex::encode([0xAAu8; 4]);
+        let b = hex::encode([0xBBu8; 4]);
+        let c = hex::encode([0xCCu8; 4]);
+        {
+            let mut info = h.peer_info.write();
+            info.insert(a.clone(), mk(&a, Some(100), None)); // loudest claim
+            info.insert(b.clone(), mk(&b, Some(50), None));
+            info.insert(c.clone(), mk(&c, Some(30), Some(30))); // proven source
+        }
+
+        // Verified beats a louder unverified claim.
+        let (peer, height) = h.find_best_sync_peer(10);
+        assert_eq!(peer, Some(hex::decode(&c).unwrap()), "verified source must win");
+        assert_eq!(height, 30);
+
+        // Without any verified source, the loudest NON-quarantined claim wins:
+        // quarantine A (2 failures) -> B (50) is selected, not A (100).
+        {
+            let mut info = h.peer_info.write();
+            info.get_mut(&c).unwrap().verified_height = None;
+        }
+        let a_bytes = hex::decode(&a).unwrap();
+        h.record_tip_failure(&a_bytes, real_now);
+        h.record_tip_failure(&a_bytes, real_now);
+        assert!(h.is_tip_quarantined(&a, real_now));
+        let (peer, height) = h.find_best_sync_peer(10);
+        assert_eq!(peer, Some(hex::decode(&b).unwrap()), "quarantined claim must be skipped");
+        assert_eq!(height, 50);
+    }
+
     /// A4 regression: a failure for a peer we are NOT syncing from is ignored
     /// (no escalation, no disconnect).
     #[test]
@@ -3284,6 +3469,7 @@ mod tests {
                 misbehavior_categories: Vec::new(),
                 chain_tip_height: Some(20),
                 chain_tip_hash: Some("aa".repeat(32)),
+                verified_height: None,
                 chain_id: Some(0xDEADBEEF), // different chain
                 identity_key: None,
                 proposed_height: None,

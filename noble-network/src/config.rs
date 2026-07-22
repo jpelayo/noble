@@ -89,9 +89,6 @@ pub struct NetworkConfig {
     /// Protocol version for compatibility checks.
     pub protocol_version: u16,
 
-    /// Whether to enable mDNS local peer discovery (useful for development).
-    pub enable_mdns: bool,
-
     /// Whether to enable Kademlia DHT for peer discovery.
     pub enable_kademlia: bool,
 
@@ -100,6 +97,22 @@ pub struct NetworkConfig {
 
     /// Maximum transaction relay rate per peer per second (token bucket).
     pub tx_relay_rate_per_sec: u32,
+
+    /// K3-05: reserved GLOBAL budget for consensus topics (votes/blocks/
+    /// evidence) — burst capacity and refill per second, in weighted units.
+    /// Independent of the general pool so floods can't starve consensus.
+    pub ingress_consensus_burst: u32,
+    pub ingress_consensus_rate: u32,
+    /// K3-05: global budget for all non-consensus gossip (tx announces,
+    /// node announces, peer exchange), weighted units.
+    pub ingress_general_burst: u32,
+    pub ingress_general_rate: u32,
+
+    /// K3-06: per-peer weighted budget for SERVING sync/tx requests
+    /// (storage reads + serialization). Sized generously so honest initial
+    /// sync never trips it; GetStatus is exempt.
+    pub serving_burst: u32,
+    pub serving_rate: u32,
 
     /// Burst capacity for the per-peer transaction relay token bucket.
     pub tx_relay_burst: u32,
@@ -152,13 +165,18 @@ impl Default for NetworkConfig {
             ban_duration_secs: DEFAULT_BAN_DURATION_SECS,
             chain_id: 0,
             protocol_version: PROTOCOL_VERSION,
-            enable_mdns: true,
             enable_kademlia: true,
             kad_walk_interval_secs: 300,
             tx_relay_rate_per_sec: 100,
+            ingress_consensus_burst: 512,
+            ingress_consensus_rate: 256,
+            ingress_general_burst: 1024,
+            ingress_general_rate: 512,
+            serving_burst: 256,
+            serving_rate: 64,
             tx_relay_burst: 100,
             peer_exchange_interval_secs: 960,
-            max_addrs_per_exchange: 1000,
+            max_addrs_per_exchange: 64,
             max_outbound_per_subnet: 2,
             peer_rotation_interval_secs: 600,
             chain_meta: None,
@@ -171,7 +189,7 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Create a local test configuration with mDNS enabled and a random port.
+    /// Create a local test configuration with a random port.
     pub fn local_test() -> Self {
         Self {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
@@ -198,14 +216,13 @@ mod tests {
         assert_eq!(cfg.ban_duration_secs, 86_400);
         assert_eq!(cfg.chain_id, 0);
         assert_eq!(cfg.protocol_version, PROTOCOL_VERSION);
-        assert!(cfg.enable_mdns);
         assert!(cfg.listen_addr.contains("8780"));
         assert!(cfg.enable_kademlia);
         assert_eq!(cfg.kad_walk_interval_secs, 300);
         assert_eq!(cfg.tx_relay_rate_per_sec, 100);
         assert_eq!(cfg.tx_relay_burst, 100);
         assert_eq!(cfg.peer_exchange_interval_secs, 960);
-        assert_eq!(cfg.max_addrs_per_exchange, 1000);
+        assert_eq!(cfg.max_addrs_per_exchange, 64);
         assert_eq!(cfg.max_outbound_per_subnet, 2);
         assert_eq!(cfg.peer_rotation_interval_secs, 600);
     }

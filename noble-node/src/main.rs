@@ -17,6 +17,7 @@ mod tls_cert;
 // `ApiState` and `Node` — which share the same lock Arcs — can name it.
 mod log_rotate;
 pub mod metrics;
+mod net_config;
 mod node;
 mod pidfile;
 pub mod pkcs12;

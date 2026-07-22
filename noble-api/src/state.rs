@@ -84,8 +84,14 @@ pub struct PeerInfoEntry {
     pub ban_score: u32,
     /// Misbehavior category codes accumulated by this peer.
     pub misbehavior_categories: Vec<u8>,
-    /// Peer's chain tip height (from last status exchange). `None` if unknown.
+    /// Peer's ADVERTISED chain tip height (from status exchange / signed
+    /// NodeAnnounce). K3-04: a signed claim proves who made it, not that the
+    /// chain exists — treat as an untrusted hint for scheduling probes.
     pub chain_tip_height: Option<u64>,
+    /// Highest height VERIFIED from this peer: a block they served validated
+    /// and committed at this height via sync import (K3-04). Preferred over
+    /// `chain_tip_height` for sync-source selection and proposal suppression.
+    pub verified_height: Option<u64>,
     /// Peer's chain tip hash (from last status exchange). `None` if unknown.
     pub chain_tip_hash: Option<String>,
     /// Peer's active proposal height (from gossip NodeAnnounce). `None` if not proposing.
@@ -126,6 +132,12 @@ pub struct PeerInfoEntry {
 /// without a restart. Both layers hold a clone of the SAME outer `Arc`.
 pub type SharedTotpSlot =
     Arc<RwLock<Option<Arc<RwLock<crate::auth::TotpValidator>>>>>;
+
+/// K3-08: one-use WebSocket upgrade tickets `(ticket_hex, issued_at)`.
+/// Issued by `noble_issueWsTicket` (over the authenticated HTTP channel),
+/// consumed exactly once at WS upgrade, 30s TTL, bounded at 64 outstanding.
+/// Leaf lock: never held across any other acquisition.
+pub type WsTicketStore = Arc<Mutex<Vec<(String, Instant)>>>;
 
 pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Block/transaction persistence. **Lock order: 2 (Storage).**
@@ -276,6 +288,12 @@ pub struct ApiState<S: StorageEngine + Send + Sync + 'static> {
     /// Wrapped in RwLock so `setNodeIdentity` can hot-reload after setup.
     /// **Lock order: 12 (ValidatorPubkey).**
     pub validator_pubkey: TrackedRwLock<Option<String>>,
+
+    /// K3-08: outstanding one-use WebSocket tickets.
+    pub ws_tickets: WsTicketStore,
+    /// K3-08: accept the legacy `?token=<sha256(TOTP)>` WS query auth.
+    /// Deprecation flag — default true for one release, then false.
+    pub ws_legacy_token: bool,
 
     /// Signature scheme of the validator key: `"secp256k1"`.
     pub validator_scheme: parking_lot::RwLock<Option<String>>,

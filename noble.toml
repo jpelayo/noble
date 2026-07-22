@@ -12,6 +12,13 @@ listen_addr = "/ip4/0.0.0.0/tcp/8780"
 seeds = ["/dns4/node.infinitecontext.com/tcp/8780"]
 max_peers = 50
 ban_threshold = 100
+# Bounded queue for relayed-tx admission (K3-02). Overflow -> typed Busy
+# (retryable), never event-loop stalls.
+tx_admission_queue = 512
+# Explicit advertised address for peers to dial back (K3-14). Empty =
+# auto-detect first non-loopback IPv4 interface (unreliable on multi-homed/
+# VPN/container hosts -- set this explicitly there).
+advertised_addr = ""
 
 [storage]
 data_dir = "data"
@@ -46,6 +53,10 @@ tls_enabled = true
 tls_san = []
 tls_allow_plaintext_fallback = false
 remote_setup = false
+# Accept the DEPRECATED ?token=<sha256(TOTP)> WebSocket query auth (K3-08).
+# Clients should migrate to noble_issueWsTicket; this flag will default to
+# false in a future release.
+ws_legacy_token = true
 
 [wallet]
 keystore_path = "keystore.noble"

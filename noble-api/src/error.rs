@@ -218,6 +218,31 @@ impl From<noble_mempool::MempoolError> for ApiError {
                 format!("Referenced previous document checksum not found on-chain: {cs}"),
             ),
             ValidationFailed(msg) => ApiError::TxStructural(msg.clone()),
+            // Typed UTXO-view variants (K3-01) — same RPC codes and friendly
+            // texts these cases had when they arrived as StructuralValidation
+            // strings.
+            MissingInput => ApiError::TxMissingInput(
+                "Input references a coin that does not exist or has already been spent. \
+                 This usually means the funds were used in another transaction.".into(),
+            ),
+            DoubleSpend => ApiError::TxDoubleSpend(
+                "Double spend detected. One of the inputs in this transaction is already \
+                 being used by another pending transaction in the mempool.".into(),
+            ),
+            ImmatureInput { available_at, blocks_remaining } => ApiError::TxImmatureUtxo(
+                format!(
+                    "Output not yet spendable. This output will be available at block {} \
+                     ({} block{} remaining).",
+                    available_at,
+                    blocks_remaining,
+                    if *blocks_remaining == 1 { "" } else { "s" },
+                ),
+            ),
+            Expired => ApiError::TxExpired(
+                "Transaction has expired. It was valid until a specific time that has now \
+                 passed. Please create a new transaction.".into(),
+            ),
+            TimestampOutOfRange(msg) => ApiError::TxStructural(msg.clone()),
             Internal(msg) => ApiError::Internal(msg.clone()),
             _ => ApiError::TxRejected(e.to_string()),
         }

@@ -24,7 +24,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.141.0"
+version = "0.146.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -58,7 +58,7 @@ proptest = "1"
 rocksdb = "0.22"
 libp2p = { version = "0.54", features = [
     "tcp", "noise", "yamux", "gossipsub", "request-response",
-    "identify", "ping", "mdns", "macros", "tokio", "cbor", "kad"
+    "identify", "ping", "macros", "tokio", "cbor", "kad"
 ] }
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 tokio = { version = "1", features = ["full"] }

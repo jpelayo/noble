@@ -405,7 +405,17 @@ export function init(root, ctx) {
       }
       case 'networking': {
         const portSel = body.querySelector('#setup-p2p-port');
-        if (portSel) state.p2pPort = parseInt(portSel.value, 10) || 8780;
+        if (portSel) {
+          // K3-09: reject invalid input explicitly — never silently
+          // substitute a default for an operator-supplied value.
+          const p = parseInt(portSel.value, 10);
+          if (Number.isInteger(p) && p >= 1 && p <= 65535) {
+            state.p2pPort = p;
+          } else if (portSel.value.trim() !== '') {
+            portSel.setCustomValidity('Port must be 1-65535');
+            portSel.reportValidity();
+          }
+        }
         state.seeds = body.querySelector('#setup-seeds')?.value?.trim() || '';
         const maxP = parseInt(body.querySelector('#setup-max-peers')?.value, 10);
         if (!isNaN(maxP) && maxP > 0) state.maxPeers = maxP;

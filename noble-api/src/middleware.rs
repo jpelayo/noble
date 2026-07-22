@@ -196,6 +196,10 @@ pub struct AuthLayer {
     scope: TotpScope,
     /// Per-boot GUI proxy-trust secret (see [`GUI_PROXY_AUTH_HEADER`]).
     gui_proxy_secret: Arc<String>,
+    /// K3-08: one-use WS upgrade tickets.
+    ws_tickets: crate::state::WsTicketStore,
+    /// K3-08: legacy `?token=` acceptance flag.
+    ws_legacy_token: bool,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
 }
@@ -209,11 +213,15 @@ impl AuthLayer {
         totp_slot: crate::state::SharedTotpSlot,
         scope: TotpScope,
         gui_proxy_secret: Arc<String>,
+        ws_tickets: crate::state::WsTicketStore,
+        ws_legacy_token: bool,
     ) -> Self {
         Self {
             totp_slot,
             scope,
             gui_proxy_secret,
+            ws_tickets,
+            ws_legacy_token,
             next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -228,6 +236,8 @@ impl<S> Layer<S> for AuthLayer {
             totp_slot: self.totp_slot.clone(),
             scope: self.scope,
             gui_proxy_secret: self.gui_proxy_secret.clone(),
+            ws_tickets: self.ws_tickets.clone(),
+            ws_legacy_token: self.ws_legacy_token,
             next_request_id: self.next_request_id.clone(),
         }
     }
@@ -241,6 +251,8 @@ pub struct AuthService<S> {
     totp_slot: crate::state::SharedTotpSlot,
     scope: TotpScope,
     gui_proxy_secret: Arc<String>,
+    ws_tickets: crate::state::WsTicketStore,
+    ws_legacy_token: bool,
     /// AUD4-F3: Monotonic counter for per-request correlation IDs.
     next_request_id: Arc<AtomicU64>,
 }
@@ -278,6 +290,8 @@ where
         let validator = self.totp_slot.read().clone();
         let scope = self.scope;
         let gui_proxy_secret = self.gui_proxy_secret.clone();
+        let ws_tickets = self.ws_tickets.clone();
+        let ws_legacy_token = self.ws_legacy_token;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
         Box::pin(async move {
@@ -349,19 +363,60 @@ where
                 .map(|v| v.eq_ignore_ascii_case("websocket"))
                 .unwrap_or(false);
             if is_ws_upgrade {
-                let query_token = parts.uri.query().and_then(|q| {
-                    q.split('&').find_map(|seg| seg.strip_prefix("token="))
+                // K3-08: preferred WS auth — a one-use ticket issued over the
+                // authenticated HTTP channel (noble_issueWsTicket). Consumed
+                // atomically here: found → removed → single use by design.
+                let query_ticket = parts.uri.query().and_then(|q| {
+                    q.split('&').find_map(|seg| seg.strip_prefix("ticket="))
                 });
-                if let Some(hash_hex) = query_token {
-                    let valid = validator.read().validate_hash(hash_hex);
-                    if valid {
-                        tracing::info!(task = "rpc_auth", "WS auth via query token successful");
+                if let Some(ticket) = query_ticket {
+                    let now = std::time::Instant::now();
+                    let consumed = {
+                        let mut tickets = ws_tickets.lock();
+                        // Expire first (30s TTL), then consume on match.
+                        tickets.retain(|(_, at)| now.duration_since(*at).as_secs() < 30);
+                        if let Some(pos) = tickets.iter().position(|(t, _)| t == ticket) {
+                            tickets.remove(pos);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if consumed {
+                        tracing::info!(task = "rpc_auth", "WS auth via one-use ticket successful");
                         let new_req = Request::from_parts(parts, Full::new(body_bytes));
                         let resp = inner.call(new_req).instrument(rpc_span).await?;
                         return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
                     }
+                    tracing::warn!(task = "rpc_auth", "WS upgrade rejected: unknown/expired/reused ticket");
+                    let resp = auth_error_response();
+                    return Ok(resp.map(|b| {
+                        b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
+                            .boxed_unsync()
+                    }));
                 }
-                tracing::warn!(task = "rpc_auth", "WS upgrade rejected: missing/invalid query token");
+                // Legacy `?token=<sha256(TOTP)>` — deprecated (K3-08): the
+                // hash is credential material in a URL that histories and
+                // intermediary logs retain. Accepted only while the
+                // `ws_legacy_token` flag is on.
+                let query_token = parts.uri.query().and_then(|q| {
+                    q.split('&').find_map(|seg| seg.strip_prefix("token="))
+                });
+                if ws_legacy_token {
+                    if let Some(hash_hex) = query_token {
+                        let valid = validator.read().validate_hash(hash_hex);
+                        if valid {
+                            tracing::info!(
+                                task = "rpc_auth",
+                                "WS auth via legacy query token successful (deprecated — migrate to noble_issueWsTicket)"
+                            );
+                            let new_req = Request::from_parts(parts, Full::new(body_bytes));
+                            let resp = inner.call(new_req).instrument(rpc_span).await?;
+                            return Ok(resp.map(|b| b.map_err(Into::into).boxed_unsync()));
+                        }
+                    }
+                }
+                tracing::warn!(task = "rpc_auth", "WS upgrade rejected: missing/invalid ticket or token");
                 let resp = auth_error_response();
                 return Ok(resp.map(|b| {
                     b.map_err(|never: std::convert::Infallible| -> BoxError { match never {} })
@@ -660,14 +715,14 @@ mod tests {
 
     #[test]
     fn auth_layer_none_creates_passthrough() {
-        let layer = AuthLayer::new(test_slot(None), TotpScope::All, no_gui_secret());
+        let layer = AuthLayer::new(test_slot(None), TotpScope::All, no_gui_secret(), std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())), true);
         let _service = layer.layer(DummyService);
     }
 
     #[test]
     fn auth_layer_some_creates_checking_service() {
         let (validator, _) = TotpValidator::generate().unwrap();
-        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, no_gui_secret());
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, no_gui_secret(), std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())), true);
         let _service = layer.layer(DummyService);
     }
 
@@ -726,7 +781,7 @@ mod tests {
     fn auth_layer_write_only_scope_propagates() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let layer =
-            AuthLayer::new(test_slot(Some(validator)), TotpScope::WriteOnly, no_gui_secret());
+            AuthLayer::new(test_slot(Some(validator)), TotpScope::WriteOnly, no_gui_secret(), std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())), true);
         let service = layer.layer(DummyService);
         assert_eq!(service.scope, TotpScope::WriteOnly);
     }
@@ -740,6 +795,8 @@ mod tests {
             test_slot(Some(validator)),
             TotpScope::All,
             no_gui_secret(),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            true,
         );
         let mut service = layer.layer(DummyService);
 
@@ -762,6 +819,8 @@ mod tests {
             test_slot(Some(validator)),
             TotpScope::All,
             no_gui_secret(),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            true,
         );
         let mut service = layer.layer(DummyService);
 
@@ -796,6 +855,8 @@ mod tests {
             test_slot(Some(validator)),
             TotpScope::All,
             no_gui_secret(),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            true,
         );
         let mut service = layer.layer(DummyService);
 
@@ -815,7 +876,7 @@ mod tests {
     async fn gui_proxy_bridge_secret_bypasses_totp_under_scope_all() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let secret = Arc::new("per-boot-secret-abc123".to_string());
-        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret.clone());
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret.clone(), std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())), true);
         let mut service = layer.layer(DummyService);
 
         // No Authorization header — only the in-process proxy-trust secret.
@@ -837,7 +898,7 @@ mod tests {
     async fn gui_proxy_bridge_forged_secret_is_rejected() {
         let (validator, _) = TotpValidator::generate().unwrap();
         let secret = Arc::new("per-boot-secret-abc123".to_string());
-        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret);
+        let layer = AuthLayer::new(test_slot(Some(validator)), TotpScope::All, secret, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())), true);
         let mut service = layer.layer(DummyService);
 
         // A client-supplied (forged) marker that does NOT equal the per-boot

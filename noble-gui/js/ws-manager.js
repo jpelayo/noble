@@ -45,6 +45,7 @@ const HEALTH_CHECK_MS     = 10_000; // check WS state every 10s (catch silent de
 
 export class WsManager {
   #url;
+  #ticketProvider;
   #ws = null;
   #handlers = new Map();          // topic → Set<{id, callback}>
   #subIds = new Map();            // topic → subscription_id string
@@ -62,9 +63,12 @@ export class WsManager {
   #lastMessageAt = 0;             // timestamp of last received message
   #visibilityHandler = null;
 
-  constructor(url, { onStatusChange } = {}) {
+  constructor(url, { onStatusChange, ticketProvider } = {}) {
     this.#url = url;
     this.#onStatusChange = onStatusChange;
+    // K3-08: async () => ticket-hex — issued over the authenticated HTTP
+    // channel so no credential material lands in the WS URL.
+    this.#ticketProvider = ticketProvider || null;
   }
 
   /**
@@ -76,7 +80,7 @@ export class WsManager {
     this.#authToken = hash;
   }
 
-  connect() {
+  async connect() {
     this.#shouldConnect = true;
     this.#doConnect();
     this.#startVisibilityWatcher();
@@ -95,10 +99,21 @@ export class WsManager {
 
     this.#onStatusChange?.('connecting');
 
-    // F3: append ?token=<hash> when TOTP auth is active.
-    const connectUrl = this.#authToken
-      ? `${this.#url}?token=${this.#authToken}`
-      : this.#url;
+    // K3-08: prefer a one-use ticket from noble_issueWsTicket (no credential
+    // material in the URL). Fall back to the legacy ?token=<hash> only if the
+    // ticket RPC is unavailable (older node) — that path is deprecated.
+    let connectUrl = this.#url;
+    if (this.#authToken) {
+      let ticket = null;
+      if (this.#ticketProvider) {
+        try {
+          ticket = await this.#ticketProvider();
+        } catch { /* older node or RPC unavailable — legacy fallback below */ }
+      }
+      connectUrl = ticket
+        ? `${this.#url}?ticket=${ticket}`
+        : `${this.#url}?token=${this.#authToken}`;
+    }
 
     try {
       this.#ws = new WebSocket(connectUrl);

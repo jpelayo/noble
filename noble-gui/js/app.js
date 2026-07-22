@@ -92,7 +92,11 @@ if (!wsUrl) {
   const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   wsUrl = `${wsProto}://${window.location.host}/ws`;
 }
-const ws = new WsManager(wsUrl, { onStatusChange });
+const ws = new WsManager(wsUrl, {
+  onStatusChange,
+  // K3-08: one-use WS tickets over the authenticated HTTP channel.
+  ticketProvider: async () => (await rpc.call('noble_issueWsTicket'))?.ticket || null,
+});
 console.info(`[app] RPC: ${rpcUrl}, WS: ${wsUrl}`);
 
 // ── GUI admin lock: redirect to the login wall when the session is gone ──

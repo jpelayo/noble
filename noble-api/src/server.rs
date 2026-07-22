@@ -111,6 +111,8 @@ async fn start_single_server<S: StorageEngine + Send + Sync + 'static>(
         state.totp_slot.clone(),
         state.totp_scope,
         state.gui_proxy_secret.clone(),
+        state.ws_tickets.clone(),
+        state.ws_legacy_token,
     );
 
     // AUD3-D2: always layer IpFilter. Fail CLOSED when no list is configured —

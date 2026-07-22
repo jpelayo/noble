@@ -650,6 +650,8 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             seeds,
             max_peers,
             ban_threshold: defaults.network.ban_threshold,
+            tx_admission_queue: defaults.network.tx_admission_queue,
+            advertised_addr: defaults.network.advertised_addr.clone(),
         },
         storage: StorageConfig {
             data_dir: PathBuf::from(&data_dir),
@@ -691,7 +693,13 @@ pub fn run_setup(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             tls_enabled: defaults.api.tls_enabled,
             tls_san: defaults.api.tls_san.clone(),
             tls_allow_plaintext_fallback: defaults.api.tls_allow_plaintext_fallback,
-            remote_setup: defaults.api.remote_setup,
+            // K3-12: completing the (local, terminal) wizard closes the
+            // remote-setup window — a stale `true` must not survive setup to
+            // re-arm the wizard if identity.json is later damaged. (The GUI
+            // setup path clears this via setNodeIdentity; this is the CLI
+            // path's equivalent.)
+            remote_setup: false,
+            ws_legacy_token: defaults.api.ws_legacy_token,
         },
         wallet: WalletConfig {
             keystore_path: PathBuf::from("keystore.noble"),

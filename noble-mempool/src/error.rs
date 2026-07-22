@@ -70,7 +70,154 @@ pub enum MempoolError {
     #[error("fee too low to evict: incoming {incoming} groat/byte does not exceed resident floor {resident}")]
     FeeTooLowToEvict { incoming: u64, resident: u64 },
 
+    /// Step 6.5: An input references a UTXO that does not exist on-chain or
+    /// in the mempool (missing, or already spent from our local view).
+    #[error("step 6.5: input references a coin that does not exist or has already been spent")]
+    MissingInput,
+
+    /// Step 6.5: An input is already spent by another in-mempool transaction.
+    #[error("step 6.5: double spend — input already used by a pending mempool transaction")]
+    DoubleSpend,
+
+    /// Step 6.5: An input UTXO has not yet reached COINBASE_MATURITY
+    /// confirmations.
+    #[error("step 6.5: output not yet spendable — available at block {available_at} ({blocks_remaining} block(s) remaining)")]
+    ImmatureInput {
+        available_at: u64,
+        blocks_remaining: u64,
+    },
+
+    /// Step 6b: The transaction's protocol-level `expires_at` has passed.
+    #[error("step 6b: transaction has expired (expires_at elapsed)")]
+    Expired,
+
+    /// Step 4 (T4): Transaction timestamp outside the allowed skew window.
+    /// Clock-dependent — split out from StructuralValidation because it must
+    /// never be treated as objective peer misbehavior (K3-01).
+    #[error("step 4: timestamp out of range: {0}")]
+    TimestampOutOfRange(String),
+
     /// Internal error (codec, crypto, etc.).
     #[error("internal: {0}")]
     Internal(String),
+}
+
+/// Typed transaction-admission outcome shared by the node and the network
+/// service (K3-01). Decides seen-cache finalization, retry behavior, and —
+/// only for `ObjectivelyInvalid` — an attributable penalty for the peer that
+/// served the transaction body. Derived from `MempoolError` by TYPED mapping
+/// only; deciding peer penalties by parsing error strings is forbidden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOutcome {
+    /// Admitted to the mempool.
+    Accepted,
+    /// Already in the mempool or confirmed on-chain — benign duplicate.
+    AlreadyKnown,
+    /// Fails consensus/protocol rules verifiable by anyone (structure,
+    /// signatures, size, version, coinbase-in-mempool). Attributable to the
+    /// body-serving peer.
+    ObjectivelyInvalid { reason: String },
+    /// Valid transaction rejected by LOCAL policy (fee floor, sender limits,
+    /// chain limits, capacity). Never a peer fault.
+    PolicyRejected { reason: String },
+    /// Rejected because of OUR local view or timing (missing/spent UTXO,
+    /// mempool double-spend race, maturity, expiry, timestamp skew,
+    /// balance). Never a peer fault.
+    LocalViewRejected { reason: String },
+    /// Could not be processed right now (overload/internal) — retryable,
+    /// never a peer fault.
+    Busy,
+}
+
+impl AdmissionOutcome {
+    /// Typed mapping from an admission result. The ONLY place this
+    /// classification is defined.
+    pub fn from_result<T>(res: &Result<T, MempoolError>) -> Self {
+        use MempoolError::*;
+        match res {
+            Ok(_) => AdmissionOutcome::Accepted,
+            Err(Duplicate(_)) => AdmissionOutcome::AlreadyKnown,
+            Err(e @ (TxTooLarge { .. } | UnrecognizedVersion(_) | StructuralValidation(_)
+                | SignatureInvalid(_))) => {
+                AdmissionOutcome::ObjectivelyInvalid { reason: e.to_string() }
+            }
+            Err(e @ (FeeTooLow { .. } | SenderRateLimit { .. } | AtCapacity
+                | ChainTooLong { .. } | FeeTooLowToEvict { .. })) => {
+                AdmissionOutcome::PolicyRejected { reason: e.to_string() }
+            }
+            Err(e @ (InsufficientBalance { .. } | PrevChecksumNotFound(_)
+                | ValidationFailed(_) | MissingInput | DoubleSpend
+                | ImmatureInput { .. } | Expired | TimestampOutOfRange(_))) => {
+                AdmissionOutcome::LocalViewRejected { reason: e.to_string() }
+            }
+            Err(Internal(_)) => AdmissionOutcome::Busy,
+            // MempoolError is #[non_exhaustive]-shaped for future variants:
+            // default any unknown rejection to the no-penalty class.
+            #[allow(unreachable_patterns)]
+            Err(e) => AdmissionOutcome::LocalViewRejected { reason: e.to_string() },
+        }
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn typed_outcome_classification() {
+        let ok: Result<(), MempoolError> = Ok(());
+        assert_eq!(AdmissionOutcome::from_result(&ok), AdmissionOutcome::Accepted);
+
+        let dup: Result<(), _> = Err(MempoolError::Duplicate("ab".into()));
+        assert_eq!(AdmissionOutcome::from_result(&dup), AdmissionOutcome::AlreadyKnown);
+
+        // Objective: attributable to the serving peer.
+        for e in [
+            MempoolError::SignatureInvalid("bad sig".into()),
+            MempoolError::StructuralValidation("T8".into()),
+            MempoolError::TxTooLarge { size: 9000, max: 8192 },
+            MempoolError::UnrecognizedVersion(99),
+        ] {
+            let r: Result<(), _> = Err(e);
+            assert!(
+                matches!(AdmissionOutcome::from_result(&r), AdmissionOutcome::ObjectivelyInvalid { .. }),
+                "{r:?} must be ObjectivelyInvalid"
+            );
+        }
+
+        // Policy: never a peer fault.
+        for e in [
+            MempoolError::FeeTooLow { fee: 1, min_fee: 100 },
+            MempoolError::SenderRateLimit { count: 9, max: 8 },
+            MempoolError::AtCapacity,
+            MempoolError::ChainTooLong { kind: "ancestor", limit: 25 },
+            MempoolError::FeeTooLowToEvict { incoming: 1, resident: 5 },
+        ] {
+            let r: Result<(), _> = Err(e);
+            assert!(
+                matches!(AdmissionOutcome::from_result(&r), AdmissionOutcome::PolicyRejected { .. }),
+                "{r:?} must be PolicyRejected"
+            );
+        }
+
+        // Local view / timing: never a peer fault.
+        for e in [
+            MempoolError::MissingInput,
+            MempoolError::DoubleSpend,
+            MempoolError::ImmatureInput { available_at: 10, blocks_remaining: 3 },
+            MempoolError::Expired,
+            MempoolError::TimestampOutOfRange("T4".into()),
+            MempoolError::InsufficientBalance { have: 1, need: 2 },
+            MempoolError::PrevChecksumNotFound("aa".into()),
+        ] {
+            let r: Result<(), _> = Err(e);
+            assert!(
+                matches!(AdmissionOutcome::from_result(&r), AdmissionOutcome::LocalViewRejected { .. }),
+                "{r:?} must be LocalViewRejected"
+            );
+        }
+
+        let busy: Result<(), _> = Err(MempoolError::Internal("db".into()));
+        assert_eq!(AdmissionOutcome::from_result(&busy), AdmissionOutcome::Busy);
+    }
 }

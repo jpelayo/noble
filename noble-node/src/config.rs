@@ -84,6 +84,14 @@ pub struct NetworkConfig {
     pub seeds: Vec<String>,
     pub max_peers: u32,
     pub ban_threshold: u32,
+    /// Bounded queue capacity for the relayed-transaction admission worker
+    /// (K3-02). When full, relayed txs get a `Busy` outcome (retryable) —
+    /// they never block the network event loop.
+    pub tx_admission_queue: usize,
+    /// K3-14: explicit advertised address (IP or hostname) for the Identify
+    /// protocol. Empty = auto-detect (first non-loopback IPv4 interface —
+    /// unreliable on multi-homed/VPN/container hosts, hence this override).
+    pub advertised_addr: String,
 }
 
 /// RocksDB storage configuration.
@@ -334,6 +342,10 @@ pub struct ApiConfig {
     /// need to bypass the whitelist and allow all remote addresses (e.g. dynamic IP cloud node).
     #[serde(default)]
     pub remote_setup: bool,
+    /// K3-08: accept the deprecated `?token=<sha256(TOTP)>` WebSocket query
+    /// auth. Default true for one release; migrate clients to
+    /// `noble_issueWsTicket` and set false.
+    pub ws_legacy_token: bool,
 }
 
 fn default_tls_enabled() -> bool {
@@ -768,6 +780,8 @@ impl Default for NetworkConfig {
             seeds: vec![noble_network::config::DEFAULT_GENESIS_SEED.to_string()],
             max_peers: 50,
             ban_threshold: 100,
+            tx_admission_queue: 512,
+            advertised_addr: String::new(),
         }
     }
 }
@@ -822,6 +836,7 @@ impl Default for ApiConfig {
             tls_san: Vec::new(),
             tls_allow_plaintext_fallback: false,
             remote_setup: false,
+            ws_legacy_token: true,
         }
     }
 }

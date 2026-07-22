@@ -28,7 +28,7 @@ use crate::messages::{
 use crate::peer_manager::{
     BanCategory, BanReason, Direction, MisbehaviorOutcome, PeerManager, MAX_PING_FAILURES,
 };
-use crate::rate_limiter::TxRateLimiter;
+use crate::rate_limiter::{IngressBudget, IngressTopic};
 use crate::seen_cache::SeenCache;
 use crate::topics;
 use crate::traits::{BlockProvider, TxProvider};
@@ -185,7 +185,10 @@ pub async fn start_network(
             }
         } else {
             let kp = libp2p::identity::Keypair::generate_ed25519();
-            save_p2p_keypair(&kp, &key_path, config.chain_meta.as_ref());
+            // K3-11: fail-closed — a persistence failure aborts startup
+            // instead of silently continuing with an unsaved (or plaintext)
+            // identity.
+            save_p2p_keypair(&kp, &key_path, config.chain_meta.as_ref())?;
             kp
         }
     } else {
@@ -346,50 +349,79 @@ pub async fn start_network(
     })
 }
 
-/// Save a P2P keypair to disk, optionally encrypted with Noble envelope.
+/// Save a P2P keypair to disk, encrypted with the Noble envelope when a
+/// persistent encryption context (`chain_meta`) exists.
+///
+/// Fail-closed (K3-11): when `chain_meta` is `Some`, an encryption or write
+/// failure is a hard error — plaintext key material is NEVER silently
+/// substituted for the expected encrypted representation. Only the explicit
+/// no-chain-meta mode (ephemeral/test) writes plaintext, and logs that it is
+/// doing so. The write is atomic: a temp file in the same directory (created
+/// 0o600 on unix BEFORE any content is written) is renamed over the final
+/// path, so a crash can never leave a partially written identity.
 fn save_p2p_keypair(
     kp: &libp2p::identity::Keypair,
     key_path: &std::path::Path,
     chain_meta: Option<&[u8; 32]>,
-) {
-    match kp.to_protobuf_encoding() {
-        Ok(encoded) => {
-            let file_data = if let Some(cm) = chain_meta {
-                noble_crypto::file_encrypt::encrypt_file_data(&encoded, cm)
-                    .unwrap_or_else(|_| encoded.clone())
-            } else {
-                encoded
-            };
-            if let Err(e) = std::fs::write(key_path, &file_data) {
-                tracing::warn!(
-                    task = "network_startup",
-                    "Failed to save P2P keypair ({}), continuing with ephemeral identity",
-                    e
-                );
-            } else {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        key_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
-                }
-                tracing::info!(
-                    task = "network_startup",
-                    "Generated and saved P2P keypair to {}",
-                    key_path.display()
-                );
-            }
+) -> Result<(), NetworkError> {
+    let encoded = kp.to_protobuf_encoding().map_err(|e| {
+        NetworkError::Transport(format!("Failed to encode P2P keypair for persistence: {e}"))
+    })?;
+    let file_data = match chain_meta {
+        Some(cm) => {
+            noble_crypto::file_encrypt::encrypt_file_data(&encoded, cm).map_err(|e| {
+                NetworkError::Transport(format!(
+                    "Failed to encrypt P2P keypair: {e}. Refusing to write plaintext \
+                     key material — fix the encryption context (chain_meta/keystore) \
+                     and restart."
+                ))
+            })?
         }
-        Err(e) => {
+        None => {
             tracing::warn!(
                 task = "network_startup",
-                "Failed to encode P2P keypair for persistence ({}), continuing",
-                e
+                "No persistent encryption context — writing PLAINTEXT P2P keypair \
+                 (explicit ephemeral/test mode)"
             );
+            encoded
         }
+    };
+
+    // Atomic install: temp file (restrictive perms before content) + rename.
+    let tmp_path = key_path.with_extension("key.tmp");
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path).map_err(|e| {
+            NetworkError::Transport(format!(
+                "Failed to create temp file for P2P keypair at {}: {e}",
+                tmp_path.display()
+            ))
+        })?;
+        f.write_all(&file_data).and_then(|()| f.sync_all()).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            NetworkError::Transport(format!("Failed to write P2P keypair: {e}"))
+        })?;
     }
+    std::fs::rename(&tmp_path, key_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        NetworkError::Transport(format!(
+            "Failed to atomically install P2P keypair at {}: {e}",
+            key_path.display()
+        ))
+    })?;
+    tracing::info!(
+        task = "network_startup",
+        "Generated and saved P2P keypair to {}",
+        key_path.display()
+    );
+    Ok(())
 }
 
 /// Internal event loop.
@@ -421,9 +453,40 @@ async fn run_event_loop(
     let mut seen_txs = SeenCache::new(Duration::from_secs(120), 50_000);
     let mut seen_votes = SeenCache::new(Duration::from_secs(60), 10_000);
 
-    // Per-peer tx relay rate limiter.
-    let mut tx_rate_limiter =
-        TxRateLimiter::new(config.tx_relay_burst, config.tx_relay_rate_per_sec);
+    // K3-01: recently rejected relayed txs (any non-Accepted/AlreadyKnown/Busy
+    // admission outcome). Suppresses immediate re-fetch churn for txs we just
+    // rejected, without poisoning seen_txs (which now means "admitted or
+    // already known" only). Bounded 300s / 10k.
+    let mut rejected_txs = SeenCache::new(Duration::from_secs(300), 10_000);
+
+    // K3-07: unverified peer-exchange candidates. Exchanged addresses are
+    // held here (bounded: 2048 global / 64 per source, 30-min TTL) and only
+    // promoted into the Kademlia address book AFTER a successful
+    // authenticated connection to that PeerId. Value: (addr, inserted_at,
+    // source_peer). One candidate addr per peer (last write wins).
+    let mut pex_candidates: HashMap<PeerId, (Multiaddr, Instant, PeerId)> = HashMap::new();
+    const PEX_CANDIDATE_TTL: Duration = Duration::from_secs(30 * 60);
+
+    // K3-05: weighted per-peer + global ingress budget (reserved consensus
+    // pool). Per-peer units reuse the tx_relay knobs (cost 1 = one tx
+    // announce, so historical tx limits are preserved exactly).
+    let mut ingress_budget = IngressBudget::new(
+        config.tx_relay_burst,
+        config.tx_relay_rate_per_sec,
+        config.ingress_consensus_burst,
+        config.ingress_consensus_rate,
+        config.ingress_general_burst,
+        config.ingress_general_rate,
+    );
+
+    // K3-06: per-peer weighted budget for SERVING requests (storage reads,
+    // range construction, serialization). GetStatus is exempt (reserved
+    // liveness capacity — throttling must never make a healthy peer look
+    // dead). Sized so honest initial sync never trips it.
+    let mut serving_budget = crate::rate_limiter::TxRateLimiter::new(
+        config.serving_burst,
+        config.serving_rate,
+    );
 
     // Pending TxRequest ↔ expected tx_id binding (audit follow-up).
     // When we send a TxRequest, we record the libp2p OutboundRequestId →
@@ -450,8 +513,9 @@ async fn run_event_loop(
     // fetching" so a re-announce from another peer doesn't kick off a parallel
     // fetch. Cleared on body receipt OR after IN_FLIGHT_TTL elapses (so a
     // peer that announces and ghosts doesn't permanently block honest re-
-    // announces). The seen_* caches are populated AFTER successful admission,
-    // not on announce — fixes the trust-before-verify suppression vector.
+    // announces). seen_txs is populated ONLY by the node's typed
+    // TxAdmissionResult feedback (Accepted/AlreadyKnown — K3-01), never on
+    // announce or mere delivery; seen_blocks finalizes on channel delivery.
     const IN_FLIGHT_TTL: Duration = Duration::from_secs(5);
     let mut in_flight_blocks: HashMap<[u8; 32], Instant> = HashMap::new();
     let mut in_flight_txs:    HashMap<[u8; 32], Instant> = HashMap::new();
@@ -500,7 +564,10 @@ async fn run_event_loop(
                     &mut seen_blocks,
                     &mut seen_txs,
                     &mut seen_votes,
-                    &mut tx_rate_limiter,
+                    &rejected_txs,
+                    &mut ingress_budget,
+                    &mut serving_budget,
+                    &mut pex_candidates,
                     &mut pending_dials,
                     &mut pending_proposals,
                     &mut mismatch_cooldown,
@@ -520,10 +587,56 @@ async fn run_event_loop(
             Some(cmd) = command_rx.recv() => {
                 // ClearGossipCaches is handled here (not in handle_command)
                 // because seen caches are local to the event loop scope.
+                // K3-13: mark locally published txs as seen BEFORE the announce
+                // goes out, so our own announcement relayed back by peers never
+                // triggers a redundant TxRequest fetch of a tx we already hold.
+                // Safe pre-publish: the node only publishes txs already admitted
+                // to its local mempool (a failed publish must not erase local
+                // knowledge of an admitted tx).
+                if let NetworkCommand::PublishTransaction(ref tx) = cmd {
+                    if let Ok(id) = tx.compute_tx_id(config.chain_id) {
+                        seen_txs.insert_if_new(*id.as_bytes());
+                    }
+                }
+                // K3-01: admission outcome feedback from the node. Handled here
+                // (not in handle_command) because the seen/rejected/in-flight
+                // caches are event-loop locals. This is where a relayed tx's
+                // lifecycle actually finalizes — enqueue success was never
+                // admission success.
+                if let NetworkCommand::TxAdmissionResult { ref peer_id, tx_id, ref outcome } = cmd {
+                    use noble_mempool::AdmissionOutcome as AO;
+                    in_flight_txs.remove(&tx_id);
+                    match outcome {
+                        AO::Accepted | AO::AlreadyKnown => {
+                            seen_txs.insert_if_new(tx_id);
+                        }
+                        AO::ObjectivelyInvalid { reason } => {
+                            rejected_txs.insert_if_new(tx_id);
+                            // Attributable: this peer SERVED the invalid body.
+                            if let Ok(pid) = PeerId::from_bytes(peer_id) {
+                                let reason = format!("served objectively invalid tx: {reason}");
+                                let outcome = peer_manager.record_misbehavior(
+                                    &pid,
+                                    BanReason::new(BanCategory::InvalidTransaction, reason.clone()),
+                                );
+                                emit_misbehavior_event(&outcome, &pid, &reason, &event_tx);
+                            }
+                        }
+                        AO::PolicyRejected { .. } | AO::LocalViewRejected { .. } => {
+                            // Never a peer fault — just suppress re-fetch churn.
+                            rejected_txs.insert_if_new(tx_id);
+                        }
+                        AO::Busy => {
+                            // Retryable: in-flight cleared, no caches touched.
+                        }
+                    }
+                    continue;
+                }
                 if matches!(cmd, NetworkCommand::ClearGossipCaches) {
                     seen_txs.clear();
                     seen_blocks.clear();
                     seen_votes.clear();
+                    rejected_txs.clear();
                     tracing::info!(task = "network", "gossip dedup caches cleared (chain reset)");
                 } else if handle_command(cmd, &mut swarm, &mut peer_manager, &mut config, &mut pending_dials, &mut pending_proposals, &mut mismatch_cooldown, &mut disconnect_reasons, &event_tx, &mut ancestor_finder, &mut manifest_peer, &mut pending_block_requests).await {
                     tracing::info!(task = "network_shutdown", "network service shutting down");
@@ -541,6 +654,21 @@ async fn run_event_loop(
                 seen_blocks.evict_expired();
                 seen_txs.evict_expired();
                 seen_votes.evict_expired();
+                rejected_txs.evict_expired();
+                // K3-07: expire stale PeX candidates; dial a few of the
+                // oldest so they can verify (promote) via a real handshake.
+                pex_candidates.retain(|_, (_, at, _)| at.elapsed() < PEX_CANDIDATE_TTL);
+                let mut by_age: Vec<(PeerId, Multiaddr, Instant)> = pex_candidates
+                    .iter()
+                    .map(|(pid, (addr, at, _))| (*pid, addr.clone(), *at))
+                    .collect();
+                by_age.sort_by_key(|(_, _, at)| *at);
+                for (pid, addr, _) in by_age.into_iter().take(4) {
+                    if swarm.is_connected(&pid) {
+                        continue;
+                    }
+                    let _ = swarm.dial(addr);
+                }
                 // Audit follow-up: prune stale in-flight tracker entries
                 // older than 2× TTL. Entries beyond the TTL aren't blocking
                 // re-fetches anymore (the announce handler ignores expired
@@ -552,7 +680,14 @@ async fn run_event_loop(
                     in_flight_txs.retain(|_, started| started.elapsed() < cutoff);
                 }
                 // Cleanup stale rate limiter buckets.
-                tx_rate_limiter.cleanup(Duration::from_secs(300));
+                ingress_budget.cleanup(Duration::from_secs(300));
+                if ingress_budget.total_dropped() > 0 {
+                    tracing::debug!(
+                        task = "network",
+                        dropped = ?ingress_budget.dropped,
+                        "ingress budget drops [tx, block, vote, evidence, announce, pex]"
+                    );
+                }
                 // Evict pending proposals older than one cycle (16 min).
                 {
                     let now_secs = std::time::SystemTime::now()
@@ -661,7 +796,10 @@ async fn handle_swarm_event(
     seen_blocks: &mut SeenCache,
     seen_txs: &mut SeenCache,
     seen_votes: &mut SeenCache,
-    tx_rate_limiter: &mut TxRateLimiter,
+    rejected_txs: &SeenCache,
+    ingress_budget: &mut IngressBudget,
+    serving_budget: &mut crate::rate_limiter::TxRateLimiter,
+    pex_candidates: &mut HashMap<PeerId, (Multiaddr, Instant, PeerId)>,
     pending_dials: &mut HashMap<Multiaddr, tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_proposals: &mut HashMap<[u8; 32], (noble_core::Block, u64)>,
     mismatch_cooldown: &mut HashMap<PeerId, Instant>,
@@ -691,6 +829,13 @@ async fn handle_swarm_event(
                 Direction::Inbound
             };
             let remote_addr = endpoint.get_remote_address().to_string();
+
+            // K3-07: successful authenticated connection — promote this
+            // peer's held PeX candidate address into Kademlia (the handshake
+            // is the verification the exchange message could not provide).
+            if let Some((cand_addr, _, _)) = pex_candidates.remove(&peer_id) {
+                swarm.behaviour_mut().kad.add_address(&peer_id, cand_addr);
+            }
 
             // Mismatch cooldown guard: if this peer was recently disconnected for
             // chain_id or protocol mismatch, suppress immediately to prevent the
@@ -884,7 +1029,7 @@ async fn handle_swarm_event(
             // one socket must not poison the node's view of the network.
             if num_established == 0 {
                 let was_tracked = peer_manager.on_disconnected(&peer_id);
-                tx_rate_limiter.remove_peer(&peer_id);
+                ingress_budget.remove_peer(&peer_id);
                 // Resolve disconnect reason: explicit reason (chain mismatch, ban)
                 // takes priority over the libp2p cause.
                 let explicit_reason = disconnect_reasons.remove(&peer_id);
@@ -948,6 +1093,39 @@ async fn handle_swarm_event(
                 "received message on topic: {}",
                 topic_str
             );
+            // K3-05: weighted ingress budget check BEFORE decode + signature
+            // verification. Consensus topics draw from a reserved pool, so a
+            // flood on any other topic cannot starve votes/blocks/evidence.
+            let ingress_topic = match topic_str {
+                t if t == topics::TOPIC_TX_ANNOUNCE => Some(IngressTopic::TxAnnounce),
+                t if t == topics::TOPIC_BLOCK_ANNOUNCE => Some(IngressTopic::BlockAnnounce),
+                t if t == topics::TOPIC_POR_VOTE => Some(IngressTopic::Vote),
+                t if t == topics::TOPIC_EVIDENCE => Some(IngressTopic::Evidence),
+                t if t == topics::TOPIC_NODE_ANNOUNCE => Some(IngressTopic::NodeAnnounce),
+                t if t == topics::TOPIC_PEER_EXCHANGE => Some(IngressTopic::PeerExchange),
+                _ => None, // unknown topic → existing mismatch handling below
+            };
+            if let Some(t) = ingress_topic {
+                if !ingress_budget.try_consume(&propagation_source, t) {
+                    // Over budget: drop pre-decode. TxAnnounce keeps its
+                    // historical TxFlood escalation; other topics drop
+                    // WITHOUT penalty (rate is not evidence of malice).
+                    if t == IngressTopic::TxAnnounce {
+                        let reason = "tx relay rate limit exceeded".to_string();
+                        let outcome = peer_manager.record_misbehavior(
+                            &propagation_source,
+                            BanReason::new(BanCategory::TxFlood, reason.clone()),
+                        );
+                        emit_misbehavior_event(&outcome, &propagation_source, &reason, event_tx);
+                    }
+                    let _ = swarm.behaviour_mut().gossip.report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        libp2p::gossipsub::MessageAcceptance::Ignore,
+                    );
+                    return;
+                }
+            }
             match codec::decode_gossip(&message.data) {
                 Ok(gossip_msg) => {
                     use libp2p::gossipsub::MessageAcceptance;
@@ -1027,11 +1205,9 @@ async fn handle_swarm_event(
                                 &propagation_source,
                                 peer_bytes,
                                 seen_txs,
+                                rejected_txs,
                                 in_flight_txs,
                                 in_flight_ttl,
-                                tx_rate_limiter,
-                                peer_manager,
-                                &event_tx,
                                 swarm,
                                 pending_tx_requests,
                             );
@@ -1062,7 +1238,7 @@ async fn handle_swarm_event(
                             (evt, acc)
                         }
                         GossipMessage::PeerExchange { addrs } => {
-                            handle_peer_exchange(&addrs, config, swarm);
+                            handle_peer_exchange(&addrs, config, &propagation_source, pex_candidates);
                             (None, MessageAcceptance::Accept)
                         }
                         GossipMessage::NodeAnnounce {
@@ -1263,13 +1439,26 @@ async fn handle_swarm_event(
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::SyncRpc(request_response::Event::Message {
-            peer: _,
+            peer,
             message:
                 request_response::Message::Request {
                     request, channel, ..
                 },
             ..
         })) => {
+            // K3-06: charge the SERVING budget by request class + range
+            // BEFORE any storage traversal. GetStatus is free (liveness).
+            // Over budget → cheapest valid empty response (peer sees a miss
+            // and retries later; no storage/serialization work done).
+            let cost = serving_cost(&request);
+            if cost > 0.0 && !serving_budget.try_consume_weighted(&peer, cost) {
+                tracing::debug!(task = "network", peer = %peer, "sync request over serving budget — deferred");
+                let deferred = empty_sync_response(&request);
+                if swarm.behaviour_mut().sync_rpc.send_response(channel, deferred).is_err() {
+                    tracing::debug!(task = "network", "sync RPC send_response failed (channel closed)");
+                }
+                return;
+            }
             let response = handle_sync_request(&request, block_provider, config, pending_proposals);
             if swarm
                 .behaviour_mut()
@@ -1577,12 +1766,22 @@ async fn handle_swarm_event(
         }
 
         SwarmEvent::Behaviour(NobleBehaviourEvent::TxRpc(request_response::Event::Message {
+            peer,
             message:
                 request_response::Message::Request {
                     request, channel, ..
                 },
             ..
         })) => {
+            // K3-06: flat charge per tx lookup.
+            if !serving_budget.try_consume_weighted(&peer, 1.0) {
+                tracing::debug!(task = "network", peer = %peer, "tx request over serving budget — deferred");
+                let _ = swarm
+                    .behaviour_mut()
+                    .tx_rpc
+                    .send_response(channel, crate::messages::TxResponse { transaction: None });
+                return;
+            }
             handle_tx_rpc_request(tx_provider, request, channel, swarm);
         }
 
@@ -1646,24 +1845,25 @@ async fn handle_swarm_event(
                         }
                         _ => {} // id matches — proceed
                     }
-                    // Audit follow-up: order swap. Mark globally-seen +
-                    // clear in_flight ONLY after the event channel has
-                    // accepted the body. Channel-full → drop body, leave
-                    // the cache untouched so the next announce can retry
-                    // (otherwise seen_txs would suppress re-fetches for
-                    // 120s on transient overload).
+                    // K3-01: enqueue success is NOT admission success. On a
+                    // successful send the body is merely queued to the node —
+                    // seen_txs is finalized ONLY when the TxAdmissionResult
+                    // command arrives with the real outcome. in_flight stays
+                    // set meanwhile (its TTL is the lost-feedback backstop).
+                    // Channel-full → drop body AND free the in-flight slot so
+                    // the next announce can retry immediately.
                     match event_tx.try_send(NetworkEvent::TransactionReceived {
                         peer_id: peer.to_bytes().to_vec(),
                         transaction: tx,
                     }) {
                         Ok(()) => {
-                            seen_txs.insert_if_new(actual_id);
-                            in_flight_txs.remove(&actual_id);
+                            // Awaiting admission outcome — nothing finalized.
                         }
                         Err(_) => {
+                            in_flight_txs.remove(&actual_id);
                             tracing::debug!(
                                 task = "network",
-                                "event channel full: TransactionReceived dropped — cache left untouched for retry"
+                                "event channel full: TransactionReceived dropped — in-flight freed for retry"
                             );
                         }
                     }
@@ -1966,27 +2166,23 @@ fn handle_tx_announce(
     source: &PeerId,
     peer_bytes: Vec<u8>,
     seen_txs: &SeenCache,
+    rejected_txs: &SeenCache,
     in_flight_txs: &mut HashMap<[u8; 32], Instant>,
     in_flight_ttl: Duration,
-    tx_rate_limiter: &mut TxRateLimiter,
-    peer_manager: &mut PeerManager,
-    event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
     swarm: &mut Swarm<NobleBehaviour>,
     pending_tx_requests: &mut std::collections::VecDeque<(
         libp2p::request_response::OutboundRequestId,
         [u8; 32],
     )>,
 ) -> Option<NetworkEvent> {
-    if !tx_rate_limiter.try_consume(source) {
-        let reason = "tx relay rate limit exceeded".to_string();
-        let outcome = peer_manager.record_misbehavior(
-            source,
-            BanReason::new(BanCategory::TxFlood, reason.clone()),
-        );
-        emit_misbehavior_event(&outcome, source, &reason, event_tx);
+    // (K3-05: the per-peer tx-relay rate check now runs at the pre-decode
+    // ingress gate; this handler no longer re-charges it.)
+    if seen_txs.contains(&tx_id) {
         return None;
     }
-    if seen_txs.contains(&tx_id) {
+    // K3-01: recently rejected — suppress re-fetch churn (no penalty; the
+    // rejection cache TTL bounds how long a tx stays suppressed).
+    if rejected_txs.contains(&tx_id) {
         return None;
     }
     if let Some(started) = in_flight_txs.get(&tx_id) {
@@ -2113,40 +2309,64 @@ fn handle_por_vote(
 fn handle_peer_exchange(
     addrs: &[String],
     config: &NetworkConfig,
-    swarm: &mut Swarm<NobleBehaviour>,
+    source: &PeerId,
+    pex_candidates: &mut HashMap<PeerId, (Multiaddr, Instant, PeerId)>,
 ) {
-    // Cap inbound at 2× the outbound exchange size (default 1000 → 2000 inbound)
-    // so peers sending exactly the configured maximum are never partially
-    // rejected, while pathological floods that try to pollute the Kademlia
-    // table are bounded. Config-derived so it auto-scales if operators tune
-    // max_addrs_per_exchange up or down.
-    let inbound_cap = config.max_addrs_per_exchange.saturating_mul(2);
+    // K3-07: hard protocol cap (256) under the configured exchange size —
+    // the previous 2× allowance amplified poisoning attempts.
+    let inbound_cap = config.max_addrs_per_exchange.min(256);
     let capped = &addrs[..addrs.len().min(inbound_cap)];
     if addrs.len() > inbound_cap {
         tracing::debug!(
             task = "peer_exchange",
-            "inbound PeX list capped: {} → {} (cap = 2× outbound max)",
+            "inbound PeX list capped: {} → {}",
             addrs.len(),
             inbound_cap
         );
     }
-    if config.enable_kademlia {
-        for addr_str in capped {
-            if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
-                let pid = maddr.iter().find_map(|p| {
-                    if let libp2p::multiaddr::Protocol::P2p(id) = p {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(pid) = pid {
-                    swarm.behaviour_mut().kad.add_address(&pid, maddr.clone());
-                    for variant in generate_port_variants(&maddr) {
-                        swarm.behaviour_mut().kad.add_address(&pid, variant);
-                    }
-                }
+    if !config.enable_kademlia {
+        return;
+    }
+    let now = Instant::now();
+    let mut from_source = pex_candidates
+        .values()
+        .filter(|(_, _, src)| src == source)
+        .count();
+    for addr_str in capped {
+        // Bounds first (cheap): global + per-source quotas.
+        if pex_candidates.len() >= 2048 || from_source >= 64 {
+            break;
+        }
+        // Structural validation: parseable, bounded length, TCP transport,
+        // embedded PeerId. Scope note (R-12): private/RFC1918/Tailscale
+        // addresses are deliberately ACCEPTED — private-network discovery
+        // is a supported deployment; the quarantine (not an address-class
+        // filter) is the safety mechanism.
+        if addr_str.len() > 256 {
+            continue;
+        }
+        let Ok(maddr) = addr_str.parse::<Multiaddr>() else { continue };
+        let has_tcp = maddr
+            .iter()
+            .any(|p| matches!(p, libp2p::multiaddr::Protocol::Tcp(_)));
+        let pid = maddr.iter().find_map(|p| {
+            if let libp2p::multiaddr::Protocol::P2p(id) = p {
+                Some(id)
+            } else {
+                None
             }
+        });
+        if !has_tcp {
+            continue;
+        }
+        let Some(pid) = pid else { continue };
+        // Unverified candidate — NOT inserted into Kademlia. Promotion
+        // happens on a successful authenticated connection (and no port-
+        // variant synthesis for exchanged addrs — that amplified entries).
+        let fresh = !pex_candidates.contains_key(&pid);
+        pex_candidates.insert(pid, (maddr, now, *source));
+        if fresh {
+            from_source += 1;
         }
     }
 }
@@ -2412,6 +2632,31 @@ fn handle_kad_event(event: &kad::Event) {
 }
 
 /// Handle an incoming sync request by serving data from the block provider.
+/// K3-06: weighted serving cost per request class. GetStatus = 0.0 (reserved
+/// liveness capacity — never throttled).
+fn serving_cost(request: &SyncRequest) -> f64 {
+    match request {
+        SyncRequest::GetStatus => 0.0,
+        SyncRequest::GetHeaders { max_count, .. } => 1.0 + (*max_count as f64) / 250.0,
+        SyncRequest::GetBlocks { hashes } => 1.0 + (hashes.len() as f64) / 8.0,
+        SyncRequest::GetBlockByHeight { .. } => 2.0,
+        SyncRequest::GetBlockHashBatch { heights } => 1.0 + (heights.len() as f64) / 32.0,
+    }
+}
+
+/// K3-06: cheapest protocol-valid response for a deferred (over-budget)
+/// request — no storage traversal, no serialization amplification.
+fn empty_sync_response(request: &SyncRequest) -> SyncResponse {
+    match request {
+        SyncRequest::GetHeaders { .. } => SyncResponse::Headers(Vec::new()),
+        SyncRequest::GetBlocks { .. } => SyncResponse::Blocks(Vec::new()),
+        SyncRequest::GetBlockByHeight { .. } => SyncResponse::Block { block: None, vote_data: None },
+        SyncRequest::GetBlockHashBatch { .. } => SyncResponse::BlockHashBatch(Vec::new()),
+        // unreachable (cost 0) — but stay total:
+        SyncRequest::GetStatus => SyncResponse::Headers(Vec::new()),
+    }
+}
+
 fn handle_sync_request(
     request: &SyncRequest,
     block_provider: &Arc<dyn BlockProvider>,
@@ -2545,6 +2790,10 @@ async fn handle_command(
     )>,
 ) -> bool {
     match cmd {
+        NetworkCommand::TxAdmissionResult { .. } => {
+            // Handled in the event loop (needs the loop-local seen/rejected/
+            // in-flight caches) — this arm is unreachable by construction.
+        }
         NetworkCommand::PublishBlock(block) => {
             let block_hash = block
                 .header

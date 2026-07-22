@@ -158,6 +158,20 @@ pub struct Node<S: StorageEngine + Send + Sync + 'static> {
     /// shutdown hook (Fix #2) and the reconcileStorage RPC (Fix #5).
     /// Avoids racing the wallet keystore at every catalog rewrite.
     pub node_pubkey_hex: String,
+    /// K3-02: bounded queue into the serial relayed-tx admission worker.
+    /// `None` until `run()` spawns the worker (unit tests admit inline).
+    admission_tx: Option<std::sync::mpsc::SyncSender<AdmissionJob>>,
+    /// K3-04: state of an ADVERTISED-only proposal suppression episode:
+    /// `(since_epoch_secs, sync_progress_snapshot)`. If unverified claims
+    /// keep us suppressed for > 2 cycles with zero sync progress, the gate
+    /// stops honoring them (verified heights suppress indefinitely).
+    advertised_suppress: Option<(u64, u64)>,
+}
+
+/// One relayed transaction awaiting admission on the worker (K3-02).
+struct AdmissionJob {
+    peer_id: Vec<u8>,
+    transaction: noble_core::Transaction,
 }
 
 impl Node<MemoryStorage> {
@@ -770,6 +784,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             // the same data instead of racing the wallet keystore.
             node_pubkey_hex,
             extras,
+            admission_tx: None,
+            advertised_suppress: None,
         })
     }
 
@@ -1066,8 +1082,14 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         };
 
-        // 1. Seed peers from config
-        for addr_str in &self.seed_addrs {
+        // 1. Seed peers from config — shuffled per sweep (K3-16) so retries
+        // don't always hammer the same seed first.
+        let mut seeds: Vec<&String> = self.seed_addrs.iter().collect();
+        {
+            use rand::seq::SliceRandom;
+            seeds.shuffle(&mut rand::thread_rng());
+        }
+        for addr_str in seeds {
             for maddr_str in expand_addr(addr_str) {
                 try_dial(&maddr_str, cmd);
             }
@@ -1228,6 +1250,37 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             }
         }
 
+        // --- K3-09: validate every network endpoint BEFORE any listener ---
+        // Typed parse (field-attributed errors, IPv6-safe) + port-collision
+        // detection by effective bind scope. Conflicting or invalid explicit
+        // configuration fails startup here, not as a partial-startup surprise.
+        {
+            let mut endpoints: Vec<(&str, std::net::SocketAddr)> = vec![
+                ("api.rpc_addr", crate::net_config::parse_socket_addr("api.rpc_addr", &config.api.rpc_addr).map_err(NodeError::Config)?),
+                ("api.ws_addr", crate::net_config::parse_socket_addr("api.ws_addr", &config.api.ws_addr).map_err(NodeError::Config)?),
+                ("api.gui_addr", crate::net_config::parse_socket_addr("api.gui_addr", &config.api.gui_addr).map_err(NodeError::Config)?),
+            ];
+            if config.metrics.enabled {
+                endpoints.push((
+                    "metrics.prometheus_addr",
+                    crate::net_config::parse_socket_addr("metrics.prometheus_addr", &config.metrics.prometheus_addr)
+                        .map_err(NodeError::Config)?,
+                ));
+            }
+            let extra_ports: Vec<(&str, u16)> = vec![("p2p (identity)", node_identity.p2p_port)];
+            crate::net_config::validate_endpoints(&endpoints, &extra_ports)
+                .map_err(NodeError::Config)?;
+            tracing::info!(
+                task = "node_startup",
+                "effective listeners validated: {}",
+                endpoints
+                    .iter()
+                    .map(|(n, a)| format!("{n}={a}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
         // --- Re-wire engine flags from canonical identity.json ---
         // init_with_storage() wired proposals_enabled/voting_enabled from the TOML
         // config, but identity.json (written by the setup wizard or setNodeIdentity
@@ -1351,13 +1404,48 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         let tx_provider = Arc::new(StorageTxProvider::new(self.storage.clone(), self.mempool.clone()));
 
         let mut net_config = noble_network::NetworkConfig::default();
-        // Use identity's preferred port when identity.json exists; otherwise use config default.
+        // K3-10: identity.json owns the authoritative P2P PORT, but the
+        // configured listen multiaddr's host/protocol components are the
+        // operator's explicit choice and must survive. When identity exists,
+        // rebuild the configured multiaddr replacing ONLY the /tcp/<port>
+        // component (typed walk — no string surgery, IPv6/dns-safe). Falls
+        // back to the historical /ip4/0.0.0.0 form only if the configured
+        // value does not parse.
         net_config.listen_addr = if identity_path.exists() {
-            format!("/ip4/0.0.0.0/tcp/{}", node_identity.p2p_port)
+            match noble_network::multiaddr_with_tcp_port(
+                &config.network.listen_addr,
+                node_identity.p2p_port,
+            ) {
+                Ok(rebuilt) => {
+                    tracing::info!(
+                        task = "network_startup",
+                        "effective P2P listener {} (host from noble.toml, port from identity.json)",
+                        rebuilt
+                    );
+                    rebuilt
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = "network_startup",
+                        "configured network.listen_addr is invalid ({e}) — \
+                         falling back to /ip4/0.0.0.0/tcp/{}",
+                        node_identity.p2p_port
+                    );
+                    format!("/ip4/0.0.0.0/tcp/{}", node_identity.p2p_port)
+                }
+            }
         } else {
             config.network.listen_addr.clone()
         };
-        net_config.bootstrap_peers = config.network.seeds.clone();
+        // K3-16: randomize seed dial order so no single default seed is
+        // structurally "first" — spreads bootstrap load and removes implicit
+        // priority among independently operated seeds.
+        net_config.bootstrap_peers = {
+            let mut seeds = config.network.seeds.clone();
+            use rand::seq::SliceRandom;
+            seeds.shuffle(&mut rand::thread_rng());
+            seeds
+        };
         net_config.max_outbound = (config.network.max_peers as usize / 5).max(4);
         net_config.max_inbound =
             (config.network.max_peers as usize).saturating_sub(net_config.max_outbound);
@@ -1369,13 +1457,31 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Persist the P2P identity keypair so PeerId stays stable across restarts.
         net_config.data_dir = Some(config.storage.data_dir.clone());
         net_config.chain_meta = Some(self.chain_meta);
-        // Auto-detect external IP for Identify protocol advertisement.
-        // Peers need our real IP (not 0.0.0.0) to connect back.
-        net_config.external_ip = if_addrs::get_if_addrs()
-            .unwrap_or_default()
-            .iter()
-            .find(|iface| !iface.ip().is_loopback() && iface.ip().is_ipv4())
-            .map(|iface| iface.ip().to_string());
+        // K3-14: explicit configured advertised address takes precedence;
+        // interface auto-detection (first non-loopback IPv4 — unreliable on
+        // multi-homed/VPN/container hosts) is only the fallback. The source
+        // of the effective value is logged so diagnostics can tell them apart.
+        net_config.external_ip = if !config.network.advertised_addr.is_empty() {
+            tracing::info!(
+                task = "network_startup",
+                "advertised address {} (source: noble.toml [network].advertised_addr)",
+                config.network.advertised_addr
+            );
+            Some(config.network.advertised_addr.clone())
+        } else {
+            let auto = if_addrs::get_if_addrs()
+                .unwrap_or_default()
+                .iter()
+                .find(|iface| !iface.ip().is_loopback() && iface.ip().is_ipv4())
+                .map(|iface| iface.ip().to_string());
+            if let Some(ref ip) = auto {
+                tracing::info!(
+                    task = "network_startup",
+                    "advertised address {ip} (source: auto-detected interface)"
+                );
+            }
+            auto
+        };
 
         // Try to load P2P identity from unified keystore (migrated in Node::new)
         {
@@ -1574,7 +1680,29 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // Setup mode when the wizard has not been completed (explicit flag).
         let setup_mode = !node_identity.setup_complete;
 
-        let ip_filter = if setup_mode {
+        // K3-12: an ESTABLISHED node (chain data / keystore artifacts on
+        // disk) whose identity.json is missing or unreadable is in RECOVERY,
+        // not fresh setup. A stale `remote_setup = true` (or an allowlist)
+        // must NOT re-open the wizard to the network in that state — only
+        // the local/manual recovery path is exposed. Precise file probes
+        // (RocksDB CURRENT marker, keystore.noble) so harmless empty
+        // directories never lock a genuinely fresh node out.
+        let recovery_required = setup_mode && {
+            let dd = &config.storage.data_dir;
+            dd.join("CURRENT").exists() || dd.join("keystore.noble").exists()
+        };
+        if recovery_required {
+            tracing::error!(
+                task = "node_startup",
+                "RECOVERY REQUIRED: chain/keystore artifacts exist in {} but identity.json is                  missing or unreadable. The setup wizard is restricted to localhost — restore                  identity.json from backup, or complete recovery locally at http(s)://127.0.0.1:8785.                  Remote setup is disabled in this state regardless of noble.toml.",
+                config.storage.data_dir.display()
+            );
+        }
+
+        let ip_filter = if recovery_required {
+            // Local-only recovery: ignore stale remote_setup AND allowlists.
+            None // server stays bound to 127.0.0.1
+        } else if setup_mode {
             let gui_scheme = if config.api.tls_enabled { "https" } else { "http" };
             // Allowlist takes precedence over remote_setup. If the operator
             // configured allowed_ips, honour it during setup mode — defense in
@@ -2049,6 +2177,8 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             tls_plaintext_mode,
             peer_id: peer_id_str,
             validator_pubkey: TrackedRwLock::new(LockOrder::ValidatorPubkey, validator_pubkey_str),
+            ws_tickets: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            ws_legacy_token: config.api.ws_legacy_token,
             validator_scheme: parking_lot::RwLock::new(validator_scheme_str),
             validator_key_path: parking_lot::RwLock::new(validator_key_path_str),
             data_dir: Some(config.storage.data_dir.clone()),
@@ -2120,12 +2250,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
             min_fee_rate: self.min_fee_rate.clone(),
         });
 
-        // --- Determine bind addresses ---
-        // When remote access is enabled, bind to 0.0.0.0 instead of 127.0.0.1.
+        // --- Determine bind addresses (K3-09: typed, IPv6-safe) ---
+        // When remote access is enabled, rebind loopback to the unspecified
+        // address of the SAME family. The old string replace("127.0.0.1", ...)
+        // silently left IPv6 loopback binds local when remote was requested.
+        let rpc_sock = crate::net_config::parse_socket_addr("api.rpc_addr", &config.api.rpc_addr)
+            .map_err(NodeError::Config)?;
         let rpc_bind_addr = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
-            config.api.rpc_addr.replace("127.0.0.1", "0.0.0.0")
+            crate::net_config::rebind_for_remote(rpc_sock).to_string()
         } else {
-            config.api.rpc_addr.clone()
+            rpc_sock.to_string()
         };
         // WebSocket port is localhost-only: it serves the local GUI via the
         // dashboard proxy (/ws → 8784).  Never bind to 0.0.0.0 — remote clients
@@ -2174,14 +2308,16 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         };
 
         if let Some(gui_path) = gui_dir {
-            let gui_addr_str = if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
-                config.api.gui_addr.replace("127.0.0.1", "0.0.0.0")
-            } else {
-                config.api.gui_addr.clone()
-            };
-            let gui_addr: std::net::SocketAddr = gui_addr_str
-                .parse()
-                .unwrap_or_else(|_| "127.0.0.1:8785".parse().unwrap());
+            // K3-09: typed parse — an explicitly configured invalid value is
+            // an ERROR, never silently swapped for a default.
+            let gui_sock = crate::net_config::parse_socket_addr("api.gui_addr", &config.api.gui_addr)
+                .map_err(NodeError::Config)?;
+            let gui_addr: std::net::SocketAddr =
+                if ip_filter.as_ref().is_some_and(|f| f.has_remote_access()) {
+                    crate::net_config::rebind_for_remote(gui_sock)
+                } else {
+                    gui_sock
+                };
             let gui_filter = ip_filter.clone();
             let gui_tls = tls_config.clone();
             let gui_rpc_origins = rpc_origins.clone();
@@ -2407,7 +2543,9 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
         // faucet read chain_meta + passphrase + admin token via local-FS
         // bootstrap; no secret crosses the loopback RPC port.
         {
-            let rpc_port = config.api.rpc_addr.split(':').last().unwrap_or("8783");
+            let rpc_port_num = crate::net_config::port_of(&config.api.rpc_addr).unwrap_or(8783);
+            let rpc_port = rpc_port_num.to_string();
+            let rpc_port = rpc_port.as_str();
             let spawn_cfg = crate::faucet_supervisor::FaucetSpawnConfig {
                 server_port: self.faucet_config.server_port,
                 rpc_url: format!("https://127.0.0.1:{rpc_port}"),
@@ -2429,6 +2567,44 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 faucet_listening.clone(),
                 spawn_cfg,
                 cycle_phase_tx.clone(),
+            );
+        }
+
+        // --- K3-02: bounded serial admission worker for relayed txs ---
+        // A dedicated OS thread (deterministic FIFO order — conflicting txs
+        // resolve by arrival, no TOCTOU) draining a bounded queue. The event
+        // loop only enqueues; overflow yields a typed Busy outcome.
+        {
+            let cap = config.network.tx_admission_queue.max(1);
+            let (adm_tx, adm_rx) = std::sync::mpsc::sync_channel::<AdmissionJob>(cap);
+            let w_storage = self.storage.clone();
+            let w_consensus = self.consensus.clone();
+            let w_mempool = self.mempool.clone();
+            let w_chain_id = self.chain_id.clone();
+            let w_network_cmd = network_cmd.clone();
+            let w_new_tx_tx = new_tx_tx.clone();
+            std::thread::Builder::new()
+                .name("tx-admission".into())
+                .spawn(move || {
+                    // Exits when the queue sender (Node) is dropped.
+                    while let Ok(job) = adm_rx.recv() {
+                        Self::admit_relayed_transaction(
+                            &w_storage,
+                            &w_consensus,
+                            &w_mempool,
+                            w_chain_id.load(std::sync::atomic::Ordering::Relaxed),
+                            &w_network_cmd,
+                            &w_new_tx_tx,
+                            job,
+                        );
+                    }
+                    tracing::info!(task = "tx_relay", "admission worker stopped");
+                })
+                .map_err(|e| NodeError::Config(format!("failed to spawn admission worker: {e}")))?;
+            self.admission_tx = Some(adm_tx);
+            tracing::info!(
+                task = "node_startup",
+                "relayed-tx admission worker started (queue capacity {cap})"
             );
         }
 
@@ -2763,6 +2939,106 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
 
     /// Handle a single network event: route to consensus, update stats, etc.
     #[allow(clippy::too_many_arguments)]
+    /// Full admission of ONE relayed transaction + typed outcome feedback
+    /// (K3-01/K3-02). Runs on the bounded serial admission worker in
+    /// production; unit tests (no worker) call it inline.
+    ///
+    /// Lock contract: storage(2) → consensus(4) → mempool(5), strictly
+    /// ascending (Tracked); ALL guards drop before any channel send.
+    fn admit_relayed_transaction(
+        storage: &Arc<TrackedRwLock<S>>,
+        consensus: &Arc<TrackedRwLock<CycleEngine>>,
+        mempool: &Arc<TrackedMutex<Mempool>>,
+        chain_id: u32,
+        network_cmd: &mpsc::Sender<NetworkCommand>,
+        new_tx_tx: &broadcast::Sender<serde_json::Value>,
+        job: AdmissionJob,
+    ) {
+        let AdmissionJob { peer_id, transaction } = job;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let tx_id_bytes: [u8; 32] = transaction
+            .compute_tx_id(chain_id)
+            .map(|h| *h.as_bytes())
+            .unwrap_or([0; 32]);
+
+        // Admission + metadata snapshot under the locks; guards drop at the
+        // end of this block, BEFORE the outcome/WS sends.
+        let (result, meta) = {
+            let storage = storage.read();
+            let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
+            let utxo_lookup = StorageUtxoLookupAdapter { storage: &*storage };
+            let tip_h = consensus.read().chain_tip().0;
+            let mut mempool = mempool.lock();
+            let result =
+                mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None);
+            let meta = result.as_ref().ok().and_then(|tx_id| {
+                mempool.get(tx_id).map(|e| {
+                    let signer_wire = e.tx.issuer_sig.to_noble_public_key().ok()
+                        .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
+                    let tv: u64 = match &signer_wire {
+                        Some(sw) if !e.tx.is_coinbase() => {
+                            e.tx.outputs.iter()
+                                .filter(|o| o.address.to_wire_bytes() != *sw)
+                                .map(|o| o.value)
+                                .sum()
+                        }
+                        _ => e.tx.total_output_value(),
+                    };
+                    (e.fee, e.fee_rate, e.size_bytes, e.tx.tx_type, e.tx.total_output_value(), tv)
+                })
+            });
+            (result, meta)
+        };
+
+        // K3-01: typed outcome back to the network service — the ONLY place
+        // seen/rejected caches finalize and (for ObjectivelyInvalid) the
+        // body-serving peer is penalized.
+        let outcome = noble_mempool::AdmissionOutcome::from_result(&result);
+        if let Err(e) = network_cmd.try_send(NetworkCommand::TxAdmissionResult {
+            peer_id: peer_id.clone(),
+            tx_id: tx_id_bytes,
+            outcome,
+        }) {
+            // Lost feedback is recovered by the service's in-flight TTL.
+            tracing::debug!(task = "tx_relay", "admission feedback dropped: {e}");
+        }
+
+        match result {
+            Ok(tx_id) => {
+                let (fee, fee_rate, size_bytes, tx_type, total_output, transfer_value) =
+                    meta.unwrap_or((0, 0, 0, 0, 0, 0));
+                tracing::debug!(
+                    task = "tx_relay",
+                    "admitted relayed tx from peer {}",
+                    hex::encode(&peer_id),
+                );
+                // Enriched WS event for mempool live stream
+                if let Err(e) = new_tx_tx.send(serde_json::json!({
+                    "tx_id": hex::encode(tx_id.as_bytes()),
+                    "tx_type": tx_type,
+                    "total_output": total_output,
+                    "transfer_value": transfer_value,
+                    "fee": fee,
+                    "fee_rate": fee_rate,
+                    "size_bytes": size_bytes,
+                    "received_at": now,
+                })) {
+                    tracing::debug!(task = "broadcast", "new_tx event dropped: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::trace!(
+                    task = "tx_relay",
+                    "rejected relayed tx from peer {}: {e}",
+                    hex::encode(&peer_id),
+                );
+            }
+        }
+    }
+
     fn handle_network_event(
         &mut self,
         event: &NetworkEvent,
@@ -2841,6 +3117,7 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                             misbehavior_categories: Vec::new(),
                             chain_tip_height: cth,
                             chain_tip_hash: cthash,
+                            verified_height: None,
                             proposed_height: None,
                             identity_key: None, // set when NodeAnnounce received
                             node_name: None, // set when NodeAnnounce received
@@ -3110,62 +3387,48 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 // not here — TxAnnounce only has the tx_id, no metadata.
             }
             NetworkEvent::TransactionReceived { peer_id, transaction } => {
-                // Admit the relayed transaction to our local mempool.
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let storage = self.storage.read();
-                let chain_lookup = StorageChainLookupAdapter { storage: &*storage };
-                let utxo_lookup = StorageUtxoLookupAdapter { storage: &*storage };
-                let tip_h = self.consensus.read().chain_tip().0;
-                let mut mempool = self.mempool.lock();
-                match mempool.admit_with_size(&transaction, now, &chain_lookup, &utxo_lookup, tip_h, None) {
-                    Ok(tx_id) => {
-                        // Read entry metadata while lock is held
-                        let (fee, fee_rate, size_bytes, tx_type, total_output, transfer_value) = mempool.get(&tx_id)
-                            .map(|e| {
-                                let signer_wire = e.tx.issuer_sig.to_noble_public_key().ok()
-                                    .map(|pk| noble_core::NobleAddress::Noble(pk).to_wire_bytes());
-                                let tv = match &signer_wire {
-                                    Some(sw) if !e.tx.is_coinbase() => {
-                                        e.tx.outputs.iter()
-                                            .filter(|o| o.address.to_wire_bytes() != *sw)
-                                            .map(|o| o.value)
-                                            .sum()
-                                    }
-                                    _ => e.tx.total_output_value(),
-                                };
-                                (e.fee, e.fee_rate, e.size_bytes, e.tx.tx_type, e.tx.total_output_value(), tv)
-                            })
-                            .unwrap_or((0, 0, 0, 0, 0, 0));
-                        drop(mempool);
-                        tracing::debug!(
-                            task = "tx_relay",
-                            "admitted relayed tx from peer {}",
-                            hex::encode(&peer_id),
-                        );
-                        // Enriched WS event for mempool live stream
-                        if let Err(e) = new_tx_tx.send(serde_json::json!({
-                            "tx_id": hex::encode(tx_id.as_bytes()),
-                            "tx_type": tx_type,
-                            "total_output": total_output,
-                            "transfer_value": transfer_value,
-                            "fee": fee,
-                            "fee_rate": fee_rate,
-                            "size_bytes": size_bytes,
-                            "received_at": now,
-                        })) {
-                            tracing::debug!(task = "broadcast", "new_tx event dropped: {e}");
+                // K3-02: cheap enqueue only — full validation runs on the
+                // bounded SERIAL admission worker so a tx flood can never
+                // stall block/vote/peer processing in this event loop.
+                // Queue-full → typed Busy outcome (retryable, no penalty).
+                let job = AdmissionJob {
+                    peer_id: peer_id.clone(),
+                    transaction: transaction.clone(),
+                };
+                match &self.admission_tx {
+                    Some(queue) => match queue.try_send(job) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(job)) => {
+                            let tx_id = job.transaction
+                                .compute_tx_id(self.get_chain_id())
+                                .map(|h| *h.as_bytes())
+                                .unwrap_or([0; 32]);
+                            if let Err(e) = network_cmd.try_send(NetworkCommand::TxAdmissionResult {
+                                peer_id: job.peer_id,
+                                tx_id,
+                                outcome: noble_mempool::AdmissionOutcome::Busy,
+                            }) {
+                                tracing::debug!(task = "tx_relay", "busy feedback dropped: {e}");
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::trace!(
-                            task = "tx_relay",
-                            "rejected relayed tx from peer {}: {e}",
-                            hex::encode(&peer_id),
-                        );
-                    }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            tracing::error!(
+                                task = "tx_relay",
+                                "admission worker unavailable — relayed tx dropped"
+                            );
+                        }
+                    },
+                    // Unit tests run without the worker: admit inline via the
+                    // same shared function (no behavior fork).
+                    None => Self::admit_relayed_transaction(
+                        &self.storage,
+                        &self.consensus,
+                        &self.mempool,
+                        self.get_chain_id(),
+                        network_cmd,
+                        new_tx_tx,
+                        job,
+                    ),
                 }
             }
             NetworkEvent::NodeAnnounceReceived { peer_id, announce } => {
@@ -3609,6 +3872,21 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                         .unwrap_or_default()
                         .as_secs();
                     let result = self.healing.try_sync_import(&block, vote_data.as_deref());
+                    // K3-04: a validated + committed block from this peer is
+                    // PROOF of chain material at this height — promote its
+                    // verified_height and clear any tip-failure quarantine.
+                    if matches!(result, crate::healing::SyncImportResult::Accepted { .. }) {
+                        let hex_pid = hex::encode(peer_id);
+                        {
+                            let mut info = self.peer_info.write();
+                            if let Some(entry) = info.get_mut(&hex_pid) {
+                                let h = block.header.height;
+                                entry.verified_height =
+                                    Some(entry.verified_height.map_or(h, |v| v.max(h)));
+                            }
+                        }
+                        self.healing.clear_tip_failures(peer_id);
+                    }
                     self.healing.advance_after_import(block.header.height, &result, now);
                     // S55-equivalent for sync-imported commits: re-publish NodeAnnounce so
                     // peers refresh our chain_tip_height. Gated on burst-tail (!is_syncing)
@@ -4162,14 +4440,19 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                 CycleIo::RequestMempoolTransactions { max_count } => {
                     // P0.3: Read mempool transactions and feed them back to consensus.
                     let node_min_fee_rate = self.min_fee_rate.load(std::sync::atomic::Ordering::Relaxed);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
                     let txs: Vec<noble_core::Transaction> = {
                         let mempool = self.mempool.lock();
                         // Package-aware fee filtering happens inside the
                         // mempool: excluding a below-floor parent excludes its
                         // descendants too (an orphaned child would only waste
                         // a proposal slot — the builder skips missing inputs).
+                        // `now` also excludes protocol-expired txs (K3-03).
                         mempool
-                            .iter_for_block_proposal(node_min_fee_rate)
+                            .iter_for_block_proposal(node_min_fee_rate, now)
                             .into_iter()
                             .take(max_count)
                             .map(|entry| entry.tx.clone())
@@ -4214,37 +4497,105 @@ impl<S: StorageEngine + Send + Sync + 'static> Node<S> {
                     let peer_count = info.len();
                     // S55: Use the higher of committed chain_tip and gossip-implied
                     // proposed parent (proposed_height - 1) for each peer.
-                    let known_heights: Vec<u64> = info
-                        .values()
-                        .filter_map(|e| {
-                            let committed = e.chain_tip_height;
-                            let implied = e.proposed_height.map(|h| h.saturating_sub(1));
-                            match (committed, implied) {
-                                (Some(c), Some(i)) => Some(std::cmp::max(c, i)),
-                                (Some(c), None) => Some(c),
-                                (None, Some(i)) => Some(i),
-                                (None, None) => None,
-                            }
-                        })
-                        .collect();
+                    // K3-04: split VERIFIED heights (peers that actually served
+                    // us valid blocks) from ADVERTISED claims (status/gossip),
+                    // and drop advertised claims from tip-quarantined peers.
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut max_verified: u64 = 0;
+                    let mut max_advertised: u64 = 0;
+                    for e in info.values() {
+                        if let Some(v) = e.verified_height {
+                            max_verified = max_verified.max(v);
+                        }
+                        if self.healing.is_tip_quarantined(&e.peer_id, now_secs) {
+                            continue; // advertised claims from this peer are ignored
+                        }
+                        let committed = e.chain_tip_height;
+                        let implied = e.proposed_height.map(|h| h.saturating_sub(1));
+                        if let Some(h) = match (committed, implied) {
+                            (Some(c), Some(i)) => Some(std::cmp::max(c, i)),
+                            (Some(c), None) => Some(c),
+                            (None, Some(i)) => Some(i),
+                            (None, None) => None,
+                        } {
+                            max_advertised = max_advertised.max(h);
+                        }
+                    }
                     drop(info);
 
-                    let max_known = known_heights.iter().copied().max().unwrap_or(0);
-
-                    // Suppress while syncing — any peer ahead means we should
-                    // import blocks, not propose new ones.  Applies at ALL heights
-                    // (including mid-sync after block 1 is imported).
-                    if max_known > tip_h {
+                    // Verified chain ahead of us: suppress unconditionally —
+                    // we hold PROOF that a longer chain exists.
+                    if max_verified > tip_h {
+                        self.advertised_suppress = None;
                         tracing::debug!(
                             task = "sync",
-                            "Block proposal suppressed — syncing from peers at height {} (tip={})",
-                            max_known, tip_h
+                            "Block proposal suppressed — syncing from verified peers at height {} (tip={})",
+                            max_verified, tip_h
                         );
                         let _ = cycle_phase_tx.send(serde_json::json!({
                             "event": "warning",
-                            "message": format!("Block proposal suppressed — syncing (peers at height {}, tip={})", max_known, tip_h),
+                            "message": format!("Block proposal suppressed — syncing (verified height {}, tip={})", max_verified, tip_h),
                         }));
                         continue;
+                    }
+
+                    // Advertised-only claims ahead: suppress with a DEADLINE.
+                    // A claim that produces zero sync progress for 2 full
+                    // cycles stops gating proposals (K3-04: one false-tip peer
+                    // must not silence us forever). Any sync progress resets
+                    // the deadline; a verified height re-enables full gating.
+                    if max_advertised > tip_h {
+                        const ADVERTISED_SUPPRESS_MAX_SECS: u64 =
+                            2 * noble_core::CYCLE_DURATION_SECS;
+                        let progress_now = self
+                            .healing
+                            .sync_progress_current()
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let expired = match self.advertised_suppress {
+                            Some((since, progress_at_start)) => {
+                                if progress_now != progress_at_start {
+                                    // Progress — restart the clock at the new mark.
+                                    self.advertised_suppress = Some((now_secs, progress_now));
+                                    false
+                                } else {
+                                    now_secs.saturating_sub(since) > ADVERTISED_SUPPRESS_MAX_SECS
+                                }
+                            }
+                            None => {
+                                self.advertised_suppress = Some((now_secs, progress_now));
+                                false
+                            }
+                        };
+                        if !expired {
+                            tracing::debug!(
+                                task = "sync",
+                                "Block proposal suppressed — syncing from peers at height {} (tip={})",
+                                max_advertised, tip_h
+                            );
+                            let _ = cycle_phase_tx.send(serde_json::json!({
+                                "event": "warning",
+                                "message": format!("Block proposal suppressed — syncing (peers at height {}, tip={})", max_advertised, tip_h),
+                            }));
+                            continue;
+                        }
+                        tracing::warn!(
+                            task = "sync",
+                            "Unverified peer height {} produced no sync progress for {}s — proposal suppression lifted (tip={})",
+                            max_advertised, ADVERTISED_SUPPRESS_MAX_SECS, tip_h
+                        );
+                        let _ = cycle_phase_tx.send(serde_json::json!({
+                            "event": "warning",
+                            "message": format!(
+                                "Unverified peer height {} unsubstantiated for {}s — resuming proposals",
+                                max_advertised, ADVERTISED_SUPPRESS_MAX_SECS
+                            ),
+                        }));
+                        // fall through: proposals allowed
+                    } else {
+                        self.advertised_suppress = None;
                     }
 
                     // Bootstrap: additional gates when no chain exists yet.
@@ -5184,7 +5535,8 @@ fn resolve_gateway_key(
 
 /// Parse port number from a "host:port" address string.
 fn parse_port(addr: &str) -> Option<u16> {
-    addr.rsplit(':').next()?.parse().ok()
+    // K3-09: full SocketAddr parse — rsplit(':') mis-parsed bracketed IPv6.
+    crate::net_config::port_of(addr)
 }
 
 /// Result of TOTP validator initialization.

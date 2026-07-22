@@ -153,6 +153,8 @@ fn make_test_state() -> (Arc<ApiState<MemoryStorage>>, tempfile::TempDir) {
         tls_plaintext_mode: false,
         peer_id: "12D3KooWTestPeerIdPlaceholder".to_string(),
         validator_pubkey: TrackedRwLock::new(LockOrder::ValidatorPubkey, None),
+        ws_tickets: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+        ws_legacy_token: true,
         validator_scheme: parking_lot::RwLock::new(None),
         validator_key_path: parking_lot::RwLock::new(None),
         data_dir: None,

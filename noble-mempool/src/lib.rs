@@ -7,9 +7,9 @@ pub mod error;
 pub mod pool;
 pub mod sigcache;
 
-pub use error::MempoolError;
+pub use error::{AdmissionOutcome, MempoolError};
 pub use pool::{
-    ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoChainLookup,
+    tx_is_expired, ChainLookup, Mempool, MempoolConfig, MempoolEntry, NoChainLookup,
     NoUtxoLookup, PendingTxSummary, UtxoLookup,
 };
 pub use sigcache::SigCache;

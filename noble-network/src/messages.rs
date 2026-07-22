@@ -228,6 +228,16 @@ pub enum NetworkCommand {
     /// Send GetStatus to peers whose chain_tip hasn't been updated within `threshold_secs`.
     /// Gossip-driven fallback for peers that don't send NodeAnnounce.
     RequestStaleSync { threshold_secs: u64 },
+    /// K3-01: typed admission outcome for a relayed transaction, reported by
+    /// the node AFTER mempool admission completes. The network service uses it
+    /// to finalize seen/rejected caches, clear in-flight state, and apply an
+    /// attributable penalty ONLY for `ObjectivelyInvalid` against the peer
+    /// that served the body. Enqueue success is NOT admission success.
+    TxAdmissionResult {
+        peer_id: Vec<u8>,
+        tx_id: [u8; 32],
+        outcome: noble_mempool::AdmissionOutcome,
+    },
     /// Ban a peer by their serialized PeerId bytes with a category code and reason.
     BanPeer {
         peer_id: Vec<u8>,

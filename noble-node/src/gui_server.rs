@@ -254,6 +254,8 @@ async fn ws_proxy_handler(
     axum::extract::State(state): axum::extract::State<WsProxyState>,
 ) -> axum::response::Response {
     let auth_token = params.get("token").cloned();
+    // K3-08: forward the one-use WS ticket (preferred over the legacy token).
+    let ws_ticket = params.get("ticket").cloned();
     // GUI admin-lock bridge: the session gate (which already validated this
     // upgrade) sets the per-boot proxy secret; forward it to the backend WS so it
     // is accepted under any totp_scope. Browser-supplied values are stripped by
@@ -262,7 +264,7 @@ async fn ws_proxy_handler(
         .get(GUI_PROXY_AUTH_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state, auth_token, gui_proxy_auth))
+    ws.on_upgrade(move |browser_ws| ws_proxy_bridge(browser_ws, state, auth_token, ws_ticket, gui_proxy_auth))
 }
 
 #[derive(Clone)]
@@ -275,14 +277,17 @@ async fn ws_proxy_bridge(
     browser_ws: WebSocket,
     state: WsProxyState,
     auth_token: Option<String>,
+    ws_ticket: Option<String>,
     gui_proxy_auth: Option<String>,
 ) {
     use tokio_tungstenite::tungstenite::Message as TungMsg;
 
-    let url = if state.tls_connector.is_some() {
-        format!("wss://127.0.0.1:{}", state.ws_port)
-    } else {
-        format!("ws://127.0.0.1:{}", state.ws_port)
+    let scheme = if state.tls_connector.is_some() { "wss" } else { "ws" };
+    // K3-08: the ticket travels as a query param so the backend middleware
+    // consumes it exactly as a direct client's would be.
+    let url = match &ws_ticket {
+        Some(t) => format!("{scheme}://127.0.0.1:{}/?ticket={t}", state.ws_port),
+        None => format!("{scheme}://127.0.0.1:{}", state.ws_port),
     };
 
     // Timeout on backend connect — don't hang forever if WS server is slow/dead.
