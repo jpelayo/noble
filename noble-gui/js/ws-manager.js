@@ -80,14 +80,14 @@ export class WsManager {
     this.#authToken = hash;
   }
 
-  async connect() {
+  connect() {
     this.#shouldConnect = true;
     this.#doConnect();
     this.#startVisibilityWatcher();
     this.#startHealthCheck();
   }
 
-  #doConnect() {
+  async #doConnect() {
     if (!this.#shouldConnect) return;
 
     // Clean up any existing connection first.
