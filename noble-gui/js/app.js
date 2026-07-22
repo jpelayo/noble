@@ -84,8 +84,10 @@ if (!rpcUrl) {
   throw new Error('Dashboard requires a Noble node server — file:// access is not supported.');
 }
 
-const { RpcClient } = await import('./rpc-client.js');
-const { WsManager } = await import('./ws-manager.js');
+// Cache-bust these too — they were the only two modules bypassing _m(),
+// which let browsers pin stale (even broken) copies across upgrades.
+const { RpcClient } = await import(_m('./rpc-client.js'));
+const { WsManager } = await import(_m('./ws-manager.js'));
 const rpc = new RpcClient(rpcUrl);
 
 if (!wsUrl) {
