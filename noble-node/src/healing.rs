@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
+use noble_api::lock_order::{TrackedMutex, TrackedRwLock};
 use noble_api::state::PeerInfoEntry;
 use noble_api::types::DiscoveredBlockchainInfo;
 use noble_consensus::{ConsensusStateMachine, CycleEngine};
@@ -3060,6 +3060,7 @@ fn decide_alignment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_api::lock_order::LockOrder;
     use noble_storage::MemoryStorage;
 
     // ── decide_alignment: the previously-untested state tree ──
