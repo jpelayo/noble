@@ -411,6 +411,7 @@ export function init(root, ctx) {
           const p = parseInt(portSel.value, 10);
           if (Number.isInteger(p) && p >= 1 && p <= 65535) {
             state.p2pPort = p;
+            portSel.setCustomValidity(''); // clear any earlier sticky error
           } else if (portSel.value.trim() !== '') {
             portSel.setCustomValidity('Port must be 1-65535');
             portSel.reportValidity();
