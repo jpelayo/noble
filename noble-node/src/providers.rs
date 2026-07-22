@@ -16,7 +16,7 @@ use noble_mempool::Mempool;
 use noble_network::{BlockProvider, TxProvider};
 use noble_storage::StorageEngine;
 
-use noble_api::lock_order::{LockOrder, TrackedMutex, TrackedRwLock};
+use noble_api::lock_order::{TrackedMutex, TrackedRwLock};
 
 /// Implements [`BlockProvider`] using an `Arc<RwLock<S>>` storage backend.
 pub struct StorageBlockProvider<S: StorageEngine> {
@@ -154,6 +154,7 @@ impl<S: StorageEngine + Send + Sync> TxProvider for StorageTxProvider<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noble_api::lock_order::LockOrder;
     use noble_mempool::MempoolConfig;
     use noble_storage::MemoryStorage;
 
